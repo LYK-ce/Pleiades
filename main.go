@@ -52,6 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Setup_MDNS error: %v", err)
 	}
+	go Check_Connection(my_host) // 定期检查连接的 goroutine
 
 	//退出routine控制
 	go Handle_Signal(cancel) // 信号 goroutine
@@ -77,5 +78,5 @@ func main() {
 	<-ctx.Done() // 主 goroutine 阻塞直到 cancel 被调用
 	//退出阶段，清理工作空间
 	Cleanup_WorkSpace()
-	fmt.Println("bye")
+	fmt.Println("Pleiades Exited.")
 }

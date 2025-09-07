@@ -38,7 +38,10 @@ var task_list = list.New()
 var log_file *os.File
 var log_mutex sync.Mutex
 
-var seen = map[peer.ID]struct{}{}
+var (
+	seen   = make(map[peer.ID]struct{})
+	seenMu sync.RWMutex
+)
 
 // 一个简单的 Notifee，发现节点时回调
 type notifee struct{ h host.Host }

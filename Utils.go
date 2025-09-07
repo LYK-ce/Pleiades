@@ -80,3 +80,13 @@ func Close_Log_File() error {
 	}
 	return nil
 }
+
+// 打印当前的网络节点列表
+func Print_Peers() {
+	seenMu.RLock()
+	defer seenMu.RUnlock()
+	fmt.Printf("当前网络节点数：%d\n", len(seen)+1)
+	for id := range seen {
+		fmt.Println("节点 :", id)
+	}
+}
