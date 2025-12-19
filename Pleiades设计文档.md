@@ -26,20 +26,27 @@ torch 2.9.1+cu128
 位于Src/ 目录下
 
 通信层（Network.py）是边缘设备群的网络通信功能，主要负责以下功能：
-1. 通过mDNS实现局域网内设备的发现
-2. 维护路由表，加入新的设备或者定期清理离线设备，使每台设备保有局域网内所有其他设备的信息
-3. 命令，文件传输，使得每台设备可以向其他设备发送命令或者将模型权重文件、输入等传输给目标设备
+1. 定义通信层的总抽线Network
+2. 定义服务发现抽象Listener
+3. 定义传输服务抽线Transport
+4. 定义路由表抽象Routing_Table
+5. 通过mDNS实现局域网内设备的发现
+6. 维护路由表，加入新的设备或者定期清理离线设备，使每台设备保有局域网内所有其他设备的信息
+7. 命令，文件传输，使得每台设备可以向其他设备发送命令或者将模型权重文件、输入等传输给目标设备
 
-class 名称 Network
+
+#### class Network
 
 外部依赖 zeroconf 用于mDNS服务发现
 
-#### 属性 
-mDNS  指向zeroconf实例的一个属性，
-routing_Table   路由表，当mDNS发现有新的设备加入或者有设备离开后，更新路由表。这里存储全局加入局域网的所有节点信息。
+##### 属性  
+- zeroconf            指向zeroconf实例的一个属性
+- service_info        zeroconf 服务信息
+- listener            服务发现，用于监听其他节点
+- routing_Table       路由表，当mDNS发现有新的设备加入或者有设备离开后，更新路由表。这里存储全局加入局域网的所有节点信息。
 
 
-#### 方法
+##### 方法
 Start_Network
 输入
 
@@ -51,8 +58,66 @@ Stop_Network
 输出    bool
 关闭Network的所有网络服务，全部成功关闭返回true，否则返回false
 
+#### class Listener
+继承自zeroconf ServiceListener类
+用于监听局域网中其他节点的加入或退出
+
+##### 属性  
+- routing_Table       路由表，当mDNS发现有新的设备加入或者有设备离开后，更新路由表。这里存储全局加入局域网的所有节点信息。
 
 
+##### 方法
+init
+输入
+  - routing_Table   路由表
+此函数传入路由表，并初始化Listener实例
+
+add_service
+
+
+
+#### class Transport
+继承自zeroconf ServiceListener类
+用于监听局域网中其他节点的加入或退出
+
+##### 属性  
+- routing_Table       路由表，当mDNS发现有新的设备加入或者有设备离开后，更新路由表。这里存储全局加入局域网的所有节点信息。
+
+
+##### 方法
+init
+输入
+  - routing_Table   路由表
+此函数传入路由表，并初始化Listener实例
+
+add_service
+
+
+
+
+#### class Routing_Table
+路由表类  管理局域网内所有节点的信息
+负责
+1. 存储节点信息 (ID,IP,端口，设备性能快照)
+2. 提供增删改查接口
+
+##### 属性  
+- table       路由表
+
+
+##### 方法
+init
+初始化一个空路由表
+
+Add_Node
+输入
+  - node_id
+  - ip
+  - port
+  - property
+输出
+  bool
+将node id的节点添加到路由表当中。
 
 ### 运行时层
 文件名称 Runtime.py
@@ -133,6 +198,7 @@ Log
 - RUNTIME_LOAD      0x2
 - RUNTIME_EXECUTE   0x4
 - RUNTIME           0xF
+  
 - NETWORK_STATUS    0x10    通信层启动或关闭记录
 - NETWORK_INFO      0x20    通信层发送命令、文件记录
 - NETWORK_ROUTING   0x40    路由表更新时进行记录
