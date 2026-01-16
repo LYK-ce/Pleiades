@@ -1,47 +1,61 @@
 # Workbook
 
-## Task1: 实现运行时层
-开始: 2025-12-16T19:15:00+08:00
-结束: 2025-12-16T19:15:52+08:00
-状态: 完成
-依赖: 无
-实现: Src/Runtime.py
-内容: Runtime类,含model属性,Get_System_Snapshot/Load_Model/Execute方法
-技术: torch,psutil,支持GPU,包含系统资源监控(CPU/内存/温度/网络/GPU)
+## T1: Rust_Libp2p.md
+- Start: 2026-01-14T11:59+08
+- End: 2026-01-14T12:00+08
+- Status: DONE
+- Output: docs/Rust_Libp2p.md
+- 功能覆盖: mdns/kad/noise/yamux/request-response
+- 需求映射: 发现→mdns+kad | DHT→kad | 连接→tcp+quic+noise+yamux | 命令→req-resp | 文件→req-resp分块
 
-## Task2: 完成Test目录下的所有测试相关任务(含简化修正)
-开始: 2025-12-16T19:26:38+08:00
-结束: 2025-12-16T19:44:06+08:00
-状态: 完成
-依赖: Task1
-实现文件:
-- Test/Model/CNN_Model.py: CNN模型(3层conv+bn+pool,fc分类头,参数1.1M,使用torch.jit.trace保存)
-- Test/Model/ViT_Model.py: ViT模型(patch_embed+6层transformer+分类头,参数2.7M,使用torch.jit.trace保存)
-- Test/Runtime_Test.py: 简化版,3个测试函数,使用assert验证,无unicode问题,Test_Get_System_Snapshot包含网络信息输出
-- Test/Test.py: 统一测试入口,支持命令行参数(runtime/models/all/list)
-- Src/Runtime.py: 更新Load_Model支持torch.jit模型加载
-修正: 使用torch.jit.trace避免类定义依赖,修复unicode输出问题,所有测试通过,增加网络接口数量/发送接收字节输出
-技术: torch.nn,torch.jit,argparse,简单assert测试
+## T2: Rust_Candle.md
+- Start: 2026-01-14T13:02+08
+- End: 2026-01-14T13:03+08
+- Status: DONE
+- Output: docs/Rust_Candle.md
+- 功能覆盖: candle-core/candle-nn/candle-transformers/safetensors
+- 需求映射: 加载→VarBuilder+SafeTensors | 推理→forward | 格式→SafeTensors | 切分→层范围加载 | P2P→Runtime_Command/Response
 
-## Task3: 增强网络信息并添加测试文档
-开始: 2025-12-16T19:46:39+08:00
-结束: 2025-12-16T19:48:29+08:00
-状态: 完成
-依赖: Task2
-实现内容:
-- Src/Runtime.py: Get_System_Snapshot增加带宽计算(bytes_sent_per_sec/bytes_recv_per_sec/bandwidth_mbps),网络延迟测量(network_latency_ms)
-- Test/Runtime_Test.py: Test_Get_System_Snapshot增加带宽和延迟输出
-- Test/test.md: 完整的Test目录说明文档(目录结构/使用方法/测试内容/模型说明/故障排除)
-技术细节: 双次采样计算实时带宽,socket测试延迟,完善文档
-测试结果: 所有测试通过,带宽延迟正常显示
+## T3: Rust_Onnx.md
+- Start: 2026-01-14T13:54+08
+- End: 2026-01-14T13:56+08
+- Status: DONE
+- Output: docs/Rust_Onnx.md
+- 功能覆盖: ort/Session/ExecutionProvider/extract_model
+- 需求映射: 格式→ONNX单文件 | 加载→Session | 推理→run() | 切分→extract_model | GPU→自动回退 | P2P→Runtime_Command/Response | 打包→static
 
-## Task4: 完成配置组件、日志组件并更新Runtime组件
-开始: 2025-12-18T13:33:32+08:00
-结束: 2025-12-18T13:35:14+08:00
-状态: 完成
-依赖: Task3
-实现文件:
-- Src/Config.py: 配置组件,定义日志标识符常量(RUNTIME_SNAPSHOT=0b001, RUNTIME_LOAD=0b010, RUNTIME_EXECUTE=0b100, RUNTIME=0b111),使用typing.Final确保常量不可变
-- Src/Logger.py: 日志组件,Logger类包含log_flag属性(二进制标志位控制),log_file属性,init方法创建Log目录和日志文件(pleiades_YYYYMMDD.log格式),Set_Log_Flag方法更新标志位,Log方法通过按位与操作判断是否记录日志,全局logger变量初始为None
-- Src/Runtime.py: 更新三个方法集成Logger,Get_System_Snapshot在开始和结束时记录日志(flag=RUNTIME_SNAPSHOT),Load_Model在准备加载/加载成功/加载失败时记录日志(flag=RUNTIME_LOAD),Execute在检查模型/开始执行/执行成功/执行失败时记录日志(flag=RUNTIME_EXECUTE),所有日志操作都先判断logger是否为None
-技术细节: 使用按位与(&)操作判断日志记录条件,日志格式为"时间戳: 消息内容",支持UTF-8编码,日志目录自动创建,文件名包含日期便于管理
+## T4: Rust_Manager.md
+- Start: 2026-01-14T14:10+08
+- End: 2026-01-14T14:11+08
+- Status: DONE
+- Output: docs/Rust_Manager.md
+- 功能覆盖: 命令定义/事件循环/节点选择/状态管理
+- 需求映射: 被动→tokio::select!监听 | 主动→UserInput处理 | 命令→ManagerCommand枚举 | 节点选择→贪心算法
+- 外部库: 无需新增，复用tokio/serde/libp2p
+
+## T5: Rust_log.md
+- Start: 2026-01-14T14:14+08
+- End: 2026-01-14T14:15+08
+- Status: DONE
+- Output: docs/Rust_log.md
+- 推荐库: tracing + tracing-subscriber
+- 原因: 异步追踪/libp2p兼容/结构化日志
+- 功能: EnvFilter级别控制 | #[instrument]异步span | JSON/pretty输出
+
+## Petals相关工作整理
+- Start: 2026-01-15T16:29+08
+- End: 2026-01-15T16:31+08
+- Status: DONE
+- Output: 相关工作/RelatedWork.md (Petals条目)
+- 源文件: Petals.pdf(EMNLP2023) + Distributed Inference.pdf(NeurIPS2023)
+- 核心内容: Client-Server架构|双缓存容错|D*Lite路由|DHT负载均衡|8-bit量化|PEFT支持
+- 性能关键: BLOOM-176B 1.7steps/s@3xA100|比Offloading快10x
+
+## exo相关工作整理
+- Start: 2026-01-15T16:32+08
+- End: 2026-01-15T16:38+08
+- Status: DONE
+- Output: 相关工作/RelatedWork.md (exo条目)
+- 源: https://github.com/exo-explore/exo (40k stars)
+- 核心: 家庭设备AI集群|RDMA/TB5延迟99%↓|Tensor+Pipeline并行|MLX推理|自动设备发现
+- 限制: Apple Silicon为主|无微调|Linux仅CPU

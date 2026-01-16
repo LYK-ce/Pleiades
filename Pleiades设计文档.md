@@ -12,10 +12,58 @@
 ##
 
 ## 环境
-python 3.13.5
-torch 2.9.1+cu128
+Rust
+candle
 
 ## 整体架构设计
+Pleiades/
+├── Cargo.toml                 # 项目配置、依赖
+├── Cargo.lock                 # 依赖锁定 (自动生成)
+├── README.md                  # 项目说明
+│
+├── src/                       # 源代码
+│   ├── main.rs                # 程序入口
+│   ├── lib.rs                 # 库导出，将子模块导出，便于单元测试
+│   ├── config.rs              # 常量、配置结构
+│   ├── state.rs               # 全局状态定义 全局共享数据
+│   ├── error.rs               # 错误类型定义
+│   │
+│   ├── Network/                   # P2P 网络模块
+│   │   ├── mod.rs             # 模块入口
+│   │   ├── node.rs            # 节点管理
+│   │   ├── protocol.rs        # 消息协议定义
+│   │   ├── handler.rs         # 消息处理逻辑
+
+│   │
+│   ├── Runtime/               # 推理运行时模块
+│   │   ├── mod.rs             # 模块入口
+│   │   ├── model.rs           # 模型加载
+│   │   ├── inference.rs       # 前向计算
+│   │   ├── cache.rs           # KV Cache
+│   │   └── tensor.rs          # 张量序列化
+│   │
+│   └── Control/               # 控制层模块
+│       ├── mod.rs             # 模块入口
+│       ├── scheduler.rs       # 调度器
+│       ├── router.rs          # 路径选择
+│       └── heartbeat.rs       # 心跳管理
+│
+├── tests/                     # 集成测试
+│   └── integration_test.rs
+│
+├── benches/                   # 性能测试
+│   └── inference_bench.rs
+│
+├── examples/                  # 示例代码
+│   └── simple_node.rs
+│
+├── docs/                      # 文档 (非Rust)
+│   ├── P2PLLM设计探究.md
+│   └── ...
+│
+└── models/                    # 模型文件 (非Rust)
+    └── .gitkeep
+
 
 ### 应用层
 
@@ -185,8 +233,8 @@ Log
 -   logger 初始值为None，在全局系统启动时再初始化
 
 ### 配置组件
-文件名称 Config.py
-位于 Src/ 目录下
+文件名称 config.rs
+位于 src/ 目录下
 
 
 #### 全局常量
