@@ -164,8 +164,15 @@ Add_Node
   - port
   - property
 输出
-  bool
-将node id的节点添加到路由表当中。
+  - bool
+将node id的节点以及对应信息添加到路由表当中。
+
+Remove_Node
+输入
+  - node_id 要删除的节点id号
+输出
+  - bool 
+
 
 ### 运行时层
 文件名称 Runtime.py
