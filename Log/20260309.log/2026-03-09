@@ -1,0 +1,4 @@
+2026-03-09T07:57:56.213785Z  INFO Pleiades: Pleiades 系统启动
+2026-03-09T07:57:56.213910Z  INFO Pleiades: 临时工作目录: ".pleiades_tmp_workspace"
+2026-03-09T07:57:56.213926Z  INFO Pleiades: 长期工作目录: "Pleiades_Workspace"
+2026-03-09T07:57:56.214135Z  INFO Pleiades: Pleiades 系统退出

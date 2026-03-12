@@ -1,6 +1,20 @@
+#Presented by KeJi
+#Date: 2026-03-09
+
 [package]
 name = "Pleiades"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+# 配置文件解析
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+# 日志系统
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# 日期时间
+chrono = "0.4"

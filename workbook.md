@@ -59,3 +59,23 @@
 - 源: https://github.com/exo-explore/exo (40k stars)
 - 核心: 家庭设备AI集群|RDMA/TB5延迟99%↓|Tensor+Pipeline并行|MLX推理|自动设备发现
 - 限制: Apple Silicon为主|无微调|Linux仅CPU
+
+## T6: 设计文档日志组件更新
+- Start: 2026-03-09T15:19+08
+- End: 2026-03-09T15:20+08
+- Status: DONE
+- Output: docs/Pleiades设计文档.md (日志组件section, Line 207-280)
+- 更新内容: Logger.py→logging.rs | 自定义flag→EnvFilter | Log()→tracing宏 | 新增依赖配置/结构化日志/级别规范
+
+## T7: 配置组件config.toml
+- Start: 2026-03-09T15:44+08
+- End: 2026-03-09T15:45+08
+- Status: DONE
+- Output: src/Config/config.toml
+- 内容: [Log]section | level字段 | log_file_path字段
+
+## T8: main.rs代码补全
+- Start: 2026-03-09T15:54+08
+- Status: IN_PROGRESS
+- 任务: 根据main.rs注释补全代码+Cargo.toml依赖
+- 配置: level=info | log_file_path=Log/

@@ -1,0 +1,19 @@
+#Presented by KeJi
+#Date: 2026-03-09
+
+# Pleiades 配置文件
+
+[Log]
+# 日志级别: trace, debug, info, warn, error
+level = "info"
+
+# 日志文件路径 (留空则输出到控制台)
+log_file_path = "Log/"
+
+
+[Network]
+
+LAN = true
+WAN = false
+
+Transport_Protocol = "TCP" # TCP/QUIC
