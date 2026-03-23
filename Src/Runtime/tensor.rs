@@ -33,7 +33,7 @@ impl DataType {
     }
 
     /// 获取数据类型对应的字节大小
-    pub fn element_size(&self) -> usize {
+    pub fn Element_Size(&self) -> usize {
         match self {
             DataType::Float32 => 4,
             DataType::Float16 => 2,
@@ -79,14 +79,14 @@ impl TensorPacket {
     }
 
     /// 计算数据大小（字节）
-    pub fn data_size(&self) -> usize {
-        self.len() * self.dtype.element_size()
+    pub fn Data_Size(&self) -> usize {
+        self.len() * self.dtype.Element_Size()
     }
 
     /// 序列化为字节流
     /// 
     /// 格式：[版本(1B)] + [名称长度(4B)] + [名称(NB)] + [数据类型(1B)] + [维度数(4B)] + [形状(8B*ndim)] + [数据长度(8B)] + [数据(NB)]
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn Serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
         // 版本号 (1字节)
@@ -116,7 +116,7 @@ impl TensorPacket {
     }
 
     /// 从字节流反序列化
-    pub fn deserialize(bytes: &[u8]) -> Result<Self, TensorPacketError> {
+    pub fn Deserialize(bytes: &[u8]) -> Result<Self, TensorPacketError> {
         if bytes.is_empty() {
             return Err(TensorPacketError::InvalidData("空数据".to_string()));
         }
@@ -191,7 +191,7 @@ impl TensorPacket {
         let data = bytes[offset..offset + data_len].to_vec();
 
         // 验证数据大小
-        let expected_size: usize = shape.iter().product::<usize>() * dtype.element_size();
+        let expected_size: usize = shape.iter().product::<usize>() * dtype.Element_Size();
         if data.len() != expected_size {
             return Err(TensorPacketError::InvalidData(format!(
                 "数据大小不匹配: 期望 {} 字节, 实际 {} 字节",
@@ -208,7 +208,7 @@ impl TensorPacket {
     }
 
     /// 从 f32 切片创建
-    pub fn from_f32_slice(name: String, shape: Vec<usize>, data: &[f32]) -> Result<Self, TensorPacketError> {
+    pub fn From_F32_Slice(name: String, shape: Vec<usize>, data: &[f32]) -> Result<Self, TensorPacketError> {
         let expected_len: usize = shape.iter().product();
         if data.len() != expected_len {
             return Err(TensorPacketError::InvalidData(format!(
@@ -225,7 +225,7 @@ impl TensorPacket {
     }
 
     /// 提取为 f32 向量
-    pub fn to_f32_vec(&self) -> Result<Vec<f32>, TensorPacketError> {
+    pub fn To_F32_Vec(&self) -> Result<Vec<f32>, TensorPacketError> {
         if self.dtype != DataType::Float32 {
             return Err(TensorPacketError::InvalidData(format!(
                 "数据类型不匹配: 期望 Float32, 实际 {:?}",
@@ -291,17 +291,17 @@ impl TensorPacketSet {
         }
     }
 
-    pub fn insert(&mut self, packet: TensorPacket) {
+    pub fn Insert(&mut self, packet: TensorPacket) {
         self.tensors.insert(packet.name.clone(), packet);
     }
 
-    pub fn get(&self, name: &str) -> Option<&TensorPacket> {
+    pub fn Get(&self, name: &str) -> Option<&TensorPacket> {
         self.tensors.get(name)
     }
 
     /// 序列化整个集合
     /// 格式: [张量数量(4B)] + [每个张量的序列化数据]
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn Serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
 
         // 张量数量
@@ -309,7 +309,7 @@ impl TensorPacketSet {
 
         // 每个张量的序列化数据
         for packet in self.tensors.values() {
-            let serialized = packet.serialize();
+            let serialized = packet.Serialize();
             result.extend_from_slice(&(serialized.len() as u64).to_le_bytes());
             result.extend_from_slice(&serialized);
         }
@@ -318,7 +318,7 @@ impl TensorPacketSet {
     }
 
     /// 反序列化整个集合
-    pub fn deserialize(bytes: &[u8]) -> Result<Self, TensorPacketError> {
+    pub fn Deserialize(bytes: &[u8]) -> Result<Self, TensorPacketError> {
         if bytes.len() < 4 {
             return Err(TensorPacketError::InvalidData("数据不足".to_string()));
         }
@@ -342,7 +342,7 @@ impl TensorPacketSet {
                 return Err(TensorPacketError::InvalidData("数据不足: 张量数据".to_string()));
             }
 
-            let packet = TensorPacket::deserialize(&bytes[offset..offset + packet_len])?;
+            let packet = TensorPacket::Deserialize(&bytes[offset..offset + packet_len])?;
             tensors.insert(packet.name.clone(), packet);
             offset += packet_len;
         }
@@ -363,14 +363,14 @@ mod tests {
 
     #[test]
     fn test_tensor_packet_serialize_deserialize() {
-        let packet = TensorPacket::from_f32_slice(
+        let packet = TensorPacket::From_F32_Slice(
             "input".to_string(),
             vec![1, 3, 224, 224],
             &vec![1.0f32; 3 * 224 * 224],
         ).unwrap();
 
-        let serialized = packet.serialize();
-        let deserialized = TensorPacket::deserialize(&serialized).unwrap();
+        let serialized = packet.Serialize();
+        let deserialized = TensorPacket::Deserialize(&serialized).unwrap();
 
         assert_eq!(packet.name, deserialized.name);
         assert_eq!(packet.dtype, deserialized.dtype);
@@ -381,13 +381,13 @@ mod tests {
     #[test]
     fn test_tensor_packet_f32_conversion() {
         let original_data = vec![1.0f32, 2.0, 3.0, 4.0];
-        let packet = TensorPacket::from_f32_slice(
+        let packet = TensorPacket::From_F32_Slice(
             "test".to_string(),
             vec![2, 2],
             &original_data,
         ).unwrap();
 
-        let recovered = packet.to_f32_vec().unwrap();
+        let recovered = packet.To_F32_Vec().unwrap();
         assert_eq!(original_data, recovered);
     }
 
@@ -395,26 +395,26 @@ mod tests {
     fn test_tensor_packet_set() {
         let mut set = TensorPacketSet::new();
 
-        let packet1 = TensorPacket::from_f32_slice(
+        let packet1 = TensorPacket::From_F32_Slice(
             "input1".to_string(),
             vec![1, 3],
             &vec![1.0f32, 2.0, 3.0],
         ).unwrap();
 
-        let packet2 = TensorPacket::from_f32_slice(
+        let packet2 = TensorPacket::From_F32_Slice(
             "input2".to_string(),
             vec![2, 2],
             &vec![4.0f32, 5.0, 6.0, 7.0],
         ).unwrap();
 
-        set.insert(packet1);
-        set.insert(packet2);
+        set.Insert(packet1);
+        set.Insert(packet2);
 
-        let serialized = set.serialize();
-        let deserialized = TensorPacketSet::deserialize(&serialized).unwrap();
+        let serialized = set.Serialize();
+        let deserialized = TensorPacketSet::Deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized.tensors.len(), 2);
-        assert!(deserialized.get("input1").is_some());
-        assert!(deserialized.get("input2").is_some());
+        assert!(deserialized.Get("input1").is_some());
+        assert!(deserialized.Get("input2").is_some());
     }
 }

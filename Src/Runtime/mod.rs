@@ -11,4 +11,4 @@ pub mod runtime;
 
 pub use error::RuntimeError;
 pub use tensor::{TensorPacket, TensorPacketSet, DataType, TensorPacketError};
-pub use runtime::{Runtime, RuntimeConfig, ModelInfo};
+pub use runtime::{Runtime, RuntimeConfig, ModelInfo, Init_ONNX, RuntimeInitConfig};
