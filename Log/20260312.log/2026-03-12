@@ -1,0 +1,17 @@
+2026-03-12T02:18:06.280855Z  INFO Pleiades: Pleiades 系统启动
+2026-03-12T02:18:06.281012Z  INFO Pleiades: 临时工作目录: ".pleiades_tmp_workspace"
+2026-03-12T02:18:06.281033Z  INFO Pleiades: 长期工作目录: "Pleiades_Workspace"
+2026-03-12T02:18:06.281042Z  INFO Pleiades: 网络配置: LAN=true, WAN=false, Protocol=TCP
+2026-03-12T02:18:06.281096Z  INFO Pleiades::network::node: 初始化网络节点...
+2026-03-12T02:18:06.281463Z  INFO Pleiades::network::node: 本地节点ID: 12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.284469Z  INFO libp2p_swarm: local_peer_id=12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.285476Z  INFO Pleiades::network::node: 网络节点初始化完成
+2026-03-12T02:18:06.285497Z  INFO Pleiades: 网络节点初始化成功, PeerId: 12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.287263Z  INFO Pleiades::network::node: 开始监听网络连接
+2026-03-12T02:18:06.287285Z  INFO Pleiades::network::node: 进入网络事件循环
+2026-03-12T02:18:06.290607Z  INFO libp2p_mdns::behaviour::iface: creating instance on iface address address=172.28.64.1
+2026-03-12T02:18:06.291125Z  INFO libp2p_mdns::behaviour::iface: creating instance on iface address address=10.100.70.45
+2026-03-12T02:18:06.293025Z  INFO Pleiades::network::node: 监听地址: /ip4/172.28.64.1/tcp/54756/p2p/12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.293139Z  INFO Pleiades::network::node: 监听地址: /ip4/10.100.70.45/tcp/54756/p2p/12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.293171Z  INFO Pleiades::network::node: 监听地址: /ip4/127.0.0.1/tcp/54756/p2p/12D3KooWJocSYCHdoBhivFnxSyxgtbrzsAKSTZuXSzjWow9vSMBM
+2026-03-12T02:18:06.805053Z  WARN libp2p_kad::behaviour: Failed to trigger bootstrap: No known peers.

@@ -221,33 +221,127 @@ pub const TENSOR_PROTOCOL: &str = "/pleiades/tensor/1.0.0";
 
 
 ### 运行时层
-文件名称 Runtime.py
-位于 Src/ 目录下
+基于Onnx runtime，为模型运行提供环境。
+位于 Src/Runtime 目录下
 
-运行时层（Runtime.py）是边缘设备的核心执行引擎，主要负责三大功能：一是通过 Get_System_Snapshot() 方法作为资源探针，实时监测设备的CPU、内存、温度、网络状态等系统资源信息并以字典形式返回；二是通过 Load_Model() 方法加载并管理PyTorch深度学习模型；三是通过 Execute() 方法执行模型推理任务，接收模型输入数据并返回推理结果。运行时层为上层调度层提供了设备资源感知能力和模型执行能力，使得每个边缘设备能够根据自身资源状况动态参与分布式推理任务。
+包含以下内容
+#### mod.rs
+模块入口，负责声明子模块并导出公共类型：
+- `Runtime` - 运行时主结构
+- `RuntimeConfig` - 运行时配置
+- `ExecutionBackend` - 执行后端枚举
+- `RuntimeError` - 错误类型
+- `IntermediateState` - 中间状态（用于分布式推理）
+- `ModelInfo` - 模型信息
 
-class 名称 Runtime
-依赖 Logger.py
+#### runtime.rs
+运行时层具体实现
 
-#### 属性
-model   这个属性用于指明当前要运行的模型，这里是指torch模型
+##### 数据类型
+| Rust类型 | 说明 |
+|----------|------|
+| `RuntimeConfig` | 运行时配置结构 |
+| `ExecutionBackend` | 执行后端枚举（Cpu/Cuda/Metal） |
+| `RuntimeError` | 错误类型枚举 |
+| `Runtime` | 运行时主结构，封装ONNX Session |
+| `ModelInfo` | 模型元信息（输入输出名称、形状） |
+| `IntermediateState` | 分布式推理中间状态 |
 
-#### 方法
+##### 方法
+Init(config)
+初始化方法，初始化Onnx runtime环境，读取config配置文件，确定后端采用什么，cpu或者gpu。并且检查是否有对应环境，没有对应环境的话就回退到cpu
 
-Get_System_Snapshot
-输入    无
-输出    字典
-此函数是资源探针方法，它将获取当前设备的cpu状况，内存，温度，网络状态等等信息，先判断是否存在logger，如果存在调用logger的Log方法，flag为snapshotflag，输入为设备信息。然后通过字典的方式返回。
+Load_Model(path)
+从对应路径加载模型，返回 `ModelInfo` 包含输入输出名称信息
 
-Load_Model
-输入    模型路径
-输出    bool
-此函数将先先判断是否存在logger，如果存在调用logger的Log方法，flag为Load，输入为prepare loading通过torch加载，将目标路径下的模型加载并赋值给model，然后再次调用Log方法，输入为Loading Success/False，根据Load结果确定，返回是否成功加载
+Execute(input_name, input, output_name)
+给定输入名称和数据，指定输出名称，运行模型并返回结果
 
-Execute
-输入    模型输入
-输出    模型输出
-此函数先判断model是否已经有模型了，调用logger进行Log，输入为是否存在模型，然后将模型输入送给model进行执行，再次调用logger进行Log，输入为Execution是否成功，如果不成功把错误信息进行输入，并将执行结果返回给调用者。
+Get_Model_Info()
+获取已加载模型的元信息
+
+Unload_Model()
+卸载当前模型，释放资源
+
+##### 张量数据类型支持
+**当前限制**：仅支持 `f32` (float32) 类型
+
+| 数据类型 | Rust 类型 | 支持状态 | 用途 |
+|----------|-----------|----------|------|
+| float32 | `f32` | ✅ 已支持 | 标准推理 |
+| float16 | `half::f16` | ❌ 待扩展 | GPU 加速，省内存 |
+| bfloat16 | `half::bf16` | ❌ 待扩展 | LLM 训练常用 |
+| float64 | `f64` | ❌ 待扩展 | 高精度计算 |
+| int8 | `i8` | ❌ 待扩展 | 量化模型 |
+| uint8 | `u8` | ❌ 待扩展 | 量化模型 |
+| int32 | `i32` | ❌ 待扩展 | token IDs |
+| int64 | `i64` | ❌ 待扩展 | token IDs |
+| bool | `bool` | ❌ 待扩展 | attention mask |
+
+**选择 f32 作为初版的原因**：
+1. 最通用 - 大多数预训练模型导出为 f32
+2. 简单 - 不需要处理类型转换
+3. 够用 - 对于 MVP 阶段目标足够
+
+**扩展方案**（如需支持多类型）：
+```rust
+pub enum TensorData {
+    F32(ArrayD<f32>),
+    F16(ArrayD<f16>),
+    I64(ArrayD<i64>),
+    // ...
+}
+```
+
+##### 执行后端
+| 后端 | ExecutionProvider | 平台 | 检测方式 |
+|------|-------------------|------|----------|
+| CPU | `CPUExecutionProvider` | 全平台 | 默认可用 |
+| CUDA | `CUDAExecutionProvider` | Windows/Linux | 检查 nvcuda.dll / libcuda.so |
+| Metal | `CoreMLExecutionProvider` | macOS | 系统原生支持 |
+
+后端选择逻辑：优先使用配置指定的后端，若不可用则自动回退到 CPU
+
+##### 后续尝试方案：TensorBuffer原始字节输入（待验证）
+为兼容多输入、多数据类型与P2P直传，后续可尝试在运行时层增加“原始字节张量通道”，核心目标是减少中间转换与复制开销。
+
+**设计目标**：
+1. 保持统一 `Execute` 入口，不为模型类型分裂接口
+2. 输入支持 `bytes + dtype + shape + name` 描述
+3. 支持多输入/多输出（如 `input_ids/attention_mask/token_type_ids`）
+4. 与现有 `ArrayD<f32>` 路径并存，逐步迁移
+
+**建议结构（草案）**：
+```rust
+pub enum TensorDtype {
+    F16,
+    F32,
+    I64,
+    I32,
+    Bool,
+}
+
+pub struct TensorBuffer {
+    pub name: String,
+    pub shape: Vec<usize>,
+    pub dtype: TensorDtype,
+    pub bytes: Vec<u8>,
+}
+```
+
+**执行流程（草案）**：
+1. 接收多个 `TensorBuffer`
+2. 校验 `shape` 与 `bytes` 长度是否匹配（`元素数 × dtype字节宽度`）
+3. 在运行时边界将缓冲解释为对应类型张量
+4. 调用一次 `Session::run` 完成多输入推理
+5. 输出按同样方式可返回为结构化张量或原始字节
+
+**风险与注意事项**：
+- 需严格处理字节序与对齐
+- 需保证推理期间底层缓冲生命周期有效
+- 错误输入会导致运行时错误，需要强校验与清晰报错
+- 该方案先作为实验路径，不影响当前MVP默认f32方案
+
 
 
 ### 日志组件
@@ -337,6 +431,51 @@ RUST_LOG=pleiades=debug,libp2p_kad=warn,ort=error cargo run
 #### Log
 level
 log_file_path
+
+
+### 测试组件
+主入口
+test.rs
+其他文件
+network_test.rs
+runtime_test.rs
+scheduler_test.rs
+目前只需要实现test.rs，network_test.rs和runtime_test.rs文件
+
+测试组件位于/test目录下
+
+#### 文件
+test.rs
+测试的总入口，可以通过命令行的方式选择进行某一项测试
+- all 测试所有
+- network 测试网络
+- runtime 测试运行时
+- scheduler 测试调度器
+
+##### 网络层测试
+network_test.rs
+网络层测试，根据配置文件进行选择，如果是LAN那么就进行局域网测试，如果是WAN就进行广域网测试。（目前我们主要把精力集中在局域网上面）
+我们当前仅做部分的测试内容，具体测试方案如下：
+1. 现在Pleiades_Workspace当中创建一个自己的工作目录，名称为“本机ID+Workspace”，接下来涉及文件的操作都在此进行
+2. 启动监听网络后，等待另一台测试机接入网络。
+3. 接入网络后，输出对方测试机的id
+4. 在工作目录中创建一个名为"本机id+hello.txt"的文件，内容为"本机ID+hello",发送给对方。
+5. 接收对方发送过来的文件。
+
+我们将会先使用单机多实例方案进行测试，然后进行局域网内多台计算机的测试。
+
+##### 运行时层测试
+我们将会使用python来生成测试使用的onnx模型
+
+包含以下文件
+tests/test_models/generate_test_onnx_model.py
+tests/test_models/input_and_output.npz
+
+此脚本执行以下事项：
+1. 生成以下模型并且随机初始化：3层MLP，ResNet-18，Deit-Tiny模型，并将其保存成MLP.onnx,ResNet-18.onnx和Deit-Tiny.onnx于tests/test_models/目录下
+2. 随机初始化输入，分别在此三个模型上运行，得到输出结果，将输入，输出结果存储到input_and_output.npz
+3. 将ResNet-18和Deit-Tiny从中间切分，分别保存成ResNet-18_part1.onnx,ResNet-18_part2.onnx,Deit-Tint_part1.onnx和Deit-Tint_part2.onnx，注意，为了测试我们运行时层截断连接，你应该在把残差连接也一起截断。
+4. 随机初始化输入，分别在part1模型上运行，得到中间结果，并将中间结果放到part2上运行，得到最终输出，然后将输入，中间结果，最终输出保存到input_and_output.npz
 
 
 version 0.5
