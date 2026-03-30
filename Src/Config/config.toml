@@ -17,3 +17,17 @@ LAN = true
 WAN = false
 
 Transport_Protocol = "TCP" # TCP/QUIC
+
+
+[Runtime]
+# 运行时环境相关的配置
+device = "cpu"
+model_path = 'C:\workspace\Workspace\Workspace\Pleiades\tests\test_models\qwen3_gguf\Qwen3-0.6B-Q8_0.gguf'
+
+
+# 推理相关的配置
+max_token  = 128
+temperature = 0.8
+seed = 299792458
+
+
