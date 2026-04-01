@@ -17,7 +17,6 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_core::quantized::gguf_file;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::models::with_tracing::QMatMul;
 use std::path::{Path, PathBuf};
@@ -85,20 +84,34 @@ pub struct GGUF_Model {
 // 核心公开函数
 // ============================================================
 
-/// GGUF_Load_Model(model_path, device)
+/// GGUF_Load_Model(start, end, model_path, device)
 ///
-/// 从 GGUF 模型文件路径读取模型，解析模型信息，根据其信息调用具体的模型部件进行组装
+/// 从 GGUF 模型文件路径读取模型，解析模型信息，根据其信息调用具体的模型部件,
+/// 选择 start 层到 end 层的权重加载然后进行组装
 /// 并放置在对应设备上，然后返回一个可供推理的模型。
+///
+/// 层编号规则（与 GGUF_Load_Layer 一致）：
+///   0           = 输入层 (embedding, token_embd.weight)
+///   1..=N       = 中间层 (transformer block, blk.0 ~ blk.N-1)
+///   N+1         = 输出层 (output_norm.weight + output.weight)
 ///
 /// # 步骤
 /// 1. 调用 GGUF_Analyze 解析模型文件，获取模型架构信息
 /// 2. 根据模型架构信息匹配模型架构（目前仅支持 Qwen3）
-/// 3. 构建 RotaryEmbedding
-/// 4. 如果包含 tokenizer，加载 tokenizer 到 GGUF_Model 当中
-/// 5. 逐层加载模型的每一层权重，并组装到对应位置
-/// 6. 将组装好的模型放置在对应设备上
-/// 7. 返回组装好的模型（含默认 Inference_Config）
-pub fn GGUF_Load_Model(model_path: &Path, device: &Device) -> Result<GGUF_Model> {
+/// 3. 如果是 split 文件（pgguf），判断 start 和 end 是否超出当前文件包含的层范围；
+///    如果是完整 gguf 文件，判断 start 和 end 是否在 [0, N+1] 范围内
+/// 4. 构建 RotaryEmbedding
+/// 5. 如果 start==0，表示包含输入层，加载 embedding 和 tokenizer
+/// 6. 根据 start 和 end，调用 GGUF_Load_Layer 逐层加载 transformer block 权重并组装
+/// 7. 如果 end==N+1，表示包含输出层，加载 output_norm 和 lm_head
+/// 8. 将组装好的模型放置在对应设备上
+/// 9. 返回组装好的模型（含默认 Inference_Config）
+pub fn GGUF_Load_Model(
+    start: usize,
+    end: usize,
+    model_path: &Path,
+    device: &Device,
+) -> Result<GGUF_Model> {
     // 1. 调用 GGUF_Analyze 解析模型文件，获取模型架构信息
     let arch_info = GGUF_Analyze(model_path)?;
 
@@ -112,36 +125,42 @@ pub fn GGUF_Load_Model(model_path: &Path, device: &Device) -> Result<GGUF_Model>
         ),
     }
 
-    // 3. 打开 GGUF 文件，读取 Content（用于加载非层 tensor）
-    let mut file = std::fs::File::open(model_path)?;
-    let content = gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {:?}", e))?;
+    // 3. 范围校验
+    let max_layer_index = arch_info.num_layers + 1; // N+1 = output 层
 
-    // 4. 检测输入头并加载 embedding + tokenizer
-    let has_input_head = content.tensor_infos.contains_key("token_embd.weight");
-    let mut tokenizer: Option<shimmytok::Tokenizer> = None;
-
-    // 如果 GGUF 文件包含 tokenizer 数据，则加载
-    if let Ok(tok) = shimmytok::Tokenizer::from_gguf_file(model_path) {
-        tokenizer = Some(tok);
+    if start > end {
+        anyhow::bail!(
+            "Invalid layer range: start ({}) > end ({})",
+            start,
+            end
+        );
     }
 
-    let embed_tokens = if has_input_head {
-        let embed_qtensor = content
-            .tensor(&mut file, "token_embd.weight", device)
-            .map_err(|e| anyhow::anyhow!("Failed to load token_embd.weight: {}", e))?;
-        let embed_tensor = embed_qtensor
-            .dequantize(device)
-            .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {}", e))?;
-        candle_nn::Embedding::new(embed_tensor, arch_info.embedding_length)
+    if arch_info.is_split {
+        // 对于 split 文件，判断 [start, end] 是否在 [split_start, split_end] 范围内
+        if start < arch_info.split_start || end > arch_info.split_end {
+            anyhow::bail!(
+                "Layer range [{}, {}] exceeds split model range [{}, {}]",
+                start,
+                end,
+                arch_info.split_start,
+                arch_info.split_end
+            );
+        }
     } else {
-        anyhow::bail!(
-            "Model does not contain input head (token_embd.weight). \
-             Partial models without embedding are not yet supported."
-        );
-    };
+        // 对于完整 gguf 文件，判断 [start, end] 是否在 [0, N+1] 范围内
+        if end > max_layer_index {
+            anyhow::bail!(
+                "Layer range [{}, {}] exceeds model max layer index ({}, total {} transformer blocks)",
+                start,
+                end,
+                max_layer_index,
+                arch_info.num_layers
+            );
+        }
+    }
 
-    // 5. 构建 RotaryEmbedding
+    // 4. 构建 RotaryEmbedding
     let rotary = Arc::new(
         Rotary_Embedding::New(
             DType::F32,
@@ -153,12 +172,50 @@ pub fn GGUF_Load_Model(model_path: &Path, device: &Device) -> Result<GGUF_Model>
         .map_err(|e| anyhow::anyhow!("Failed to build RotaryEmbedding: {}", e))?,
     );
 
-    // 6. 逐层加载模型权重并组装
-    let layer_indices: Vec<usize> = (0..arch_info.num_layers).collect();
-    let layer_weights_list = GGUF_Load_Layer(model_path, &layer_indices, device)?;
+    // 5. 如果 start==0，表示包含输入层，加载 embedding 和 tokenizer；否则为 None
+    let has_input_head = start == 0;
 
-    let mut layers = Vec::with_capacity(arch_info.num_layers);
-    for mut lw in layer_weights_list {
+    let (embed_tokens, tokenizer): (Option<candle_nn::Embedding>, Option<shimmytok::Tokenizer>) =
+        if has_input_head {
+            // 通过 GGUF_Load_Layer 加载第 0 层（embedding）
+            let mut lw = GGUF_Load_Layer(model_path, 0, device)?;
+            let embed_qtensor = lw
+                .tensors
+                .remove("token_embd.weight")
+                .ok_or_else(|| anyhow::anyhow!("Layer 0 does not contain token_embd.weight"))?;
+            let embed_tensor = embed_qtensor
+                .dequantize(device)
+                .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {}", e))?;
+
+            // 尝试加载 tokenizer（如原 GGUF 文件包含，则加载；split 文件通常不含 tokenizer）
+            let tok = shimmytok::Tokenizer::from_gguf_file(model_path).ok();
+
+            (
+                Some(candle_nn::Embedding::new(
+                    embed_tensor,
+                    arch_info.embedding_length,
+                )),
+                tok,
+            )
+        } else {
+            (None, None)
+        };
+
+    // 6. 根据 start 和 end，调用 GGUF_Load_Layer 逐层加载 transformer block 层
+    //    transformer block 层编号: 1..=N, 映射到 blk.0 ~ blk.(N-1)
+    let block_start = std::cmp::max(start, 1); // 至少从层 1 开始（跳过 embedding）
+    let block_end = std::cmp::min(end, arch_info.num_layers); // 至多到层 N（不包括 output）
+    let block_count = if block_start <= block_end {
+        block_end - block_start + 1
+    } else {
+        0
+    };
+
+    let mut layers = Vec::with_capacity(block_count);
+    for i in block_start..=block_end {
+        let mut lw = GGUF_Load_Layer(model_path, i, device)?;
+        // blk index = layer_index - 1（层 1 -> blk.0, 层 2 -> blk.1, ...）
+        let blk_idx = i - 1;
         let layer = Layer_Weights::From_Extracted(
             &mut lw.tensors,
             arch_info.head_count,
@@ -166,40 +223,49 @@ pub fn GGUF_Load_Model(model_path: &Path, device: &Device) -> Result<GGUF_Model>
             arch_info.head_dim,
             arch_info.rms_norm_eps,
             rotary.clone(),
-            lw.layer_index,
+            blk_idx,
         )
-        .map_err(|e| anyhow::anyhow!("Layer {} assembly failed: {}", lw.layer_index, e))?;
+        .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
         layers.push(layer);
     }
 
-    // 7. 加载 output_norm + lm_head
-    let has_output_head = content.tensor_infos.contains_key("output_norm.weight");
+    // 7. 如果 end==N+1，表示包含输出层，加载 output_norm 和 lm_head
+    let has_output_head = end == max_layer_index;
 
-    let (norm, lm_head) = if has_output_head {
-        let norm_qtensor = content
-            .tensor(&mut file, "output_norm.weight", device)
-            .map_err(|e| anyhow::anyhow!("Failed to load output_norm.weight: {}", e))?;
+    let (norm, lm_head): (Option<RmsNorm>, Option<QMatMul>) = if has_output_head {
+        // 通过 GGUF_Load_Layer 加载第 N+1 层（output）
+        let mut lw = GGUF_Load_Layer(model_path, max_layer_index, device)?;
+
+        let norm_qtensor = lw
+            .tensors
+            .remove("output_norm.weight")
+            .ok_or_else(|| anyhow::anyhow!("Output layer does not contain output_norm.weight"))?;
         let norm = RmsNorm::from_qtensor(norm_qtensor, arch_info.rms_norm_eps)
             .map_err(|e| anyhow::anyhow!("Failed to build output RmsNorm: {}", e))?;
 
-        let lm_head_qtensor = match content.tensor(&mut file, "output.weight", device) {
-            Ok(t) => t,
-            Err(_) => content
-                .tensor(&mut file, "token_embd.weight", device)
-                .map_err(|e| anyhow::anyhow!("Failed to load lm_head (fallback): {}", e))?,
+        // 尝试加载 output.weight，如果不存在则 fallback 到 token_embd.weight（weight tying）
+        let lm_head_qtensor = if let Some(qt) = lw.tensors.remove("output.weight") {
+            qt
+        } else {
+            // Weight tying: 使用 embedding 权重作为 lm_head
+            let mut embed_lw = GGUF_Load_Layer(model_path, 0, device)
+                .map_err(|e| anyhow::anyhow!("Failed to load embedding for lm_head fallback: {}", e))?;
+            embed_lw
+                .tensors
+                .remove("token_embd.weight")
+                .ok_or_else(|| anyhow::anyhow!(
+                    "output.weight not found and token_embd.weight fallback also failed"
+                ))?
         };
         let lm_head = QMatMul::from_weights(lm_head_qtensor.into())
             .map_err(|e| anyhow::anyhow!("Failed to build lm_head QMatMul: {}", e))?;
 
-        (norm, lm_head)
+        (Some(norm), Some(lm_head))
     } else {
-        anyhow::bail!(
-            "Model does not contain output head (output_norm.weight). \
-             Partial models without output head are not yet supported."
-        );
+        (None, None)
     };
 
-    // 8. 组装完整模型并放置在对应设备上
+    // 8. 组装模型并放置在对应设备上
     let model = Model_Weights::From_Dynamic(
         embed_tokens,
         layers,

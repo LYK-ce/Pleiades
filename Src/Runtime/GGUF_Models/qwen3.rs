@@ -460,10 +460,13 @@ impl Layer_Weights {
 
 #[derive(Debug, Clone)]
 pub struct Model_Weights {
-    pub embed_tokens: Embedding,
+    /// 输入 embedding（如果是部分模型不含输入头，则为 None）
+    pub embed_tokens: Option<Embedding>,
     pub layers: Vec<Layer_Weights>,
-    pub norm: RmsNorm,
-    pub lm_head: QMatMul,
+    /// Output RmsNorm（如果是部分模型不含输出头，则为 None）
+    pub norm: Option<RmsNorm>,
+    /// LM Head（如果是部分模型不含输出头，则为 None）
+    pub lm_head: Option<QMatMul>,
     pub device: Device,
     pub dtype: DType,
     span: tracing::Span,
@@ -534,10 +537,10 @@ impl Model_Weights {
         let span = tracing::span!(tracing::Level::TRACE, "model");
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
         Ok(Self {
-            embed_tokens,
+            embed_tokens: Some(embed_tokens),
             layers,
-            norm,
-            lm_head,
+            norm: Some(norm),
+            lm_head: Some(lm_head),
             device: device.clone(),
             dtype,
             span,
@@ -573,10 +576,25 @@ impl Model_Weights {
             .to_dtype(self.dtype)
     }
 
+    /// Forward pass，支持完整模型和部分模型：
+    /// - 如果包含 embed_tokens：input 为 token IDs [batch, seq_len]，自动执行 embedding
+    /// - 如果不含 embed_tokens：input 为已嵌入的 hidden state [batch, seq_len, hidden_dim]
+    /// - 如果包含 norm + lm_head：返回 logits [batch, vocab_size]
+    /// - 如果不含 norm + lm_head：返回最后的 hidden state [batch, seq_len, hidden_dim]
     pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
         let _enter = self.span.enter();
-        let (b, l) = input.dims2()?;
-        let mut h = self.embed_tokens.forward(input)?;
+
+        // 如果有 embedding，将 token IDs 转为 hidden state；否则直接使用输入的 hidden state
+        let mut h = if let Some(ref embed) = self.embed_tokens {
+            embed.forward(input)?
+        } else {
+            input.clone()
+        };
+
+        // 获取 batch size 和 sequence length（从 hidden state 的前两维）
+        let b = h.dim(0)?;
+        let l = h.dim(1)?;
+
         let causal_mask = if l == 1 {
             None
         } else {
@@ -585,10 +603,16 @@ impl Model_Weights {
         for layer in &mut self.layers {
             h = layer.Forward(&h, causal_mask.as_ref(), offset)?;
         }
-        let h = self.norm.forward(&h)?;
-        let _enter = self.span_output.enter();
-        let last_hidden = h.narrow(1, l - 1, 1)?;
-        self.lm_head.forward(&last_hidden)?.squeeze(1)
+
+        // 如果有输出头，执行 norm → lm_head 返回 logits；否则返回 hidden state
+        if let (Some(ref norm), Some(ref lm_head)) = (&self.norm, &self.lm_head) {
+            let h = norm.forward(&h)?;
+            let _enter = self.span_output.enter();
+            let last_hidden = h.narrow(1, l - 1, 1)?;
+            lm_head.forward(&last_hidden)?.squeeze(1)
+        } else {
+            Ok(h)
+        }
     }
 
     pub fn Clear_Kv_Cache(&mut self) {
@@ -597,12 +621,15 @@ impl Model_Weights {
         }
     }
 
-    /// 动态组装: 从预构建的组件创建完整模型
+    /// 动态组装: 从预构建的组件创建模型（支持完整模型和部分模型）
+    ///
+    /// - embed_tokens: 输入 embedding（部分模型可为 None）
+    /// - norm / lm_head: 输出头（部分模型可为 None）
     pub fn From_Dynamic(
-        embed_tokens: Embedding,
+        embed_tokens: Option<Embedding>,
         layers: Vec<Layer_Weights>,
-        norm: RmsNorm,
-        lm_head: QMatMul,
+        norm: Option<RmsNorm>,
+        lm_head: Option<QMatMul>,
         device: Device,
         dtype: DType,
     ) -> Self {

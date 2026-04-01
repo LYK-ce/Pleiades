@@ -40,6 +40,12 @@ pub struct Model_Arch_Info {
     pub layers: Vec<Layer_Info>,
     pub non_layer_tensors: Vec<Tensor_Detail>,
     pub metadata_raw: HashMap<String, String>,
+    /// 此模型是否是切分过的模型
+    pub is_split: bool,
+    /// 切分的开始层（仅当 is_split 为 true 时有效）
+    pub split_start: usize,
+    /// 切分的结束层（仅当 is_split 为 true 时有效）
+    pub split_end: usize,
 }
 
 /// 每层的信息
@@ -261,9 +267,19 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         non_layer_tensors.push(detail);
     }
 
+    // 检查当前模型是否是切分模型，如果是，填充切分模型相关的字段
+    let split_start_val = Get_Metadata_Usize(&content.metadata, "pleiades.split.start");
+    let split_end_val = Get_Metadata_Usize(&content.metadata, "pleiades.split.end");
+    let is_split = split_start_val.is_some() && split_end_val.is_some();
+    let split_start = split_start_val.unwrap_or(0);
+    let split_end = split_end_val.unwrap_or(0);
+
     // 5. 构建有序的层列表
+    //    始终从 blk.0 到 blk.(num_layers-1) 遍历。
+    //    对于切分模型，不包含的层自然为空（0 个 tensor，0 bytes）。
     let mut layers: Vec<Layer_Info> = Vec::with_capacity(num_layers);
-    for layer_idx in 0..num_layers {
+    for i in 0..num_layers {
+        let layer_idx = i;
         let mut tensors = layer_tensors_map.remove(&layer_idx).unwrap_or_default();
         tensors.sort_by(|a, b| a.name.cmp(&b.name));
         let total_size_bytes = tensors.iter().map(|t| t.size_bytes).sum();
@@ -300,36 +316,86 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         layers,
         non_layer_tensors,
         metadata_raw,
+        is_split,
+        split_start,
+        split_end,
     })
 }
 
-// GGUF_Load_Layer(gguf_file_path, layer_index:Array<usize>, device)
-// 输入：gguf文件路径，层索引列表，设备信息
-// 输出：Layer_Weights_List，包含指定层的权重列表
+// GGUF_Load_Layer(gguf_file_path, layer_index, device)
+// 输入：gguf文件路径，层索引（单个），设备信息
+// 输出：GGUF_Layer_Weights，包含指定层的权重
+// 层的定义：
+//   第0层表示输入层（embedding），即 token_embd.weight
+//   第1层到第N层表示中间层（transformer block），即 blk.0.* ~ blk.(N-1).*
+//   第N+1层表示输出层，即 output_norm.weight + output.weight
 // 按照如下的顺序执行：
 // 1. 打开gguf文件，读取文件头信息，确认文件格式正确
-// 2. 找到属于目标层的tensor。
-// 3. 读取tensor数据，按照gguf文件中存储的格式进行解析
-// 4. 将解析后的数据转换为LayerWeights对象，并存储在Layer_Weights_List中
-// 5. 返回Layer_Weights_List对象
+// 2. 读取架构信息，获取总层数 N，确定层索引映射关系
+// 3. 根据层索引映射找到属于目标层的 tensor
+// 4. 读取tensor数据，按照gguf文件中存储的格式进行解析
+// 5. 将解析后的数据转换为 GGUF_Layer_Weights 对象
+// 6. 返回 GGUF_Layer_Weights 对象
 pub fn GGUF_Load_Layer(
     gguf_file_path: &Path,
-    layer_index: &[usize],
+    layer_index: usize,
     device: &Device,
-) -> Result<Vec<GGUF_Layer_Weights>> {
+) -> Result<GGUF_Layer_Weights> {
     // 1. 打开文件并解析 GGUF Content
     let mut file = std::fs::File::open(gguf_file_path)?;
     let content = gguf_file::Content::read(&mut file)
         .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {}", e))?;
 
-    let mut layer_weights_list: Vec<GGUF_Layer_Weights> = Vec::with_capacity(layer_index.len());
+    // 2. 读取架构信息，获取总层数 N
+    let architecture = Get_Metadata_String(&content.metadata, "general.architecture")
+        .unwrap_or_else(|| "unknown".to_string());
+    let num_layers = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.block_count", architecture),
+    )
+    .unwrap_or(0);
 
-    for &idx in layer_index {
-        // 2. 找到属于目标层的所有 tensor
-        let prefix = format!("blk.{}.", idx);
-        let mut tensors: HashMap<String, QTensor> = HashMap::new();
+    // 层编号规则:
+    //   0           = embedding 层 (token_embd.weight)
+    //   1..=N       = transformer block 层 (blk.0.* ~ blk.(N-1).*)
+    //   N+1         = output 层 (output_norm.weight + output.weight)
+    let max_layer_index = num_layers + 1;
 
-        // 3. 读取 tensor 数据，按照 gguf 文件中存储的格式进行解析
+    if layer_index > max_layer_index {
+        anyhow::bail!(
+            "Invalid layer_index: {} exceeds max layer index ({}, total {} transformer blocks)",
+            layer_index,
+            max_layer_index,
+            num_layers
+        );
+    }
+
+    let mut tensors: HashMap<String, QTensor> = HashMap::new();
+
+    // 3. 根据层索引映射找到属于目标层的 tensor，并加载
+    if layer_index == 0 {
+        // 第0层：输入层（embedding）
+        let tensor_name = "token_embd.weight";
+        if content.tensor_infos.contains_key(tensor_name) {
+            let qtensor = content
+                .tensor(&mut file, tensor_name, device)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e)
+                })?;
+            tensors.insert(tensor_name.to_string(), qtensor);
+        } else {
+            anyhow::bail!(
+                "No tensors found for layer 0 (embedding): '{}' not found in GGUF file",
+                tensor_name
+            );
+        }
+    } else if layer_index <= num_layers {
+        // 第1层到第N层：transformer block 层
+        // layer_index 映射到 blk.(layer_index - 1)
+        let blk_idx = layer_index - 1;
+        let prefix = format!("blk.{}.", blk_idx);
+
+        // 4. 读取 tensor 数据，按照 gguf 文件中存储的格式进行解析
         for tensor_name in content.tensor_infos.keys() {
             if tensor_name.starts_with(&prefix) {
                 let qtensor = content
@@ -343,21 +409,39 @@ pub fn GGUF_Load_Layer(
 
         if tensors.is_empty() {
             anyhow::bail!(
-                "No tensors found for layer {} (prefix '{}')",
-                idx,
+                "No tensors found for layer {} (blk.{}, prefix '{}')",
+                layer_index,
+                blk_idx,
                 prefix
             );
         }
+    } else {
+        // 第N+1层：输出层（output_norm + output.weight）
+        for tensor_name in &["output_norm.weight", "output.weight"] {
+            if content.tensor_infos.contains_key(*tensor_name) {
+                let qtensor = content
+                    .tensor(&mut file, *tensor_name, device)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e)
+                    })?;
+                tensors.insert(tensor_name.to_string(), qtensor);
+            }
+        }
 
-        // 4. 将解析后的数据转换为 GGUF_Layer_Weights 对象并存储
-        layer_weights_list.push(GGUF_Layer_Weights {
-            layer_index: idx,
-            tensors,
-        });
+        if tensors.is_empty() {
+            anyhow::bail!(
+                "No tensors found for layer {} (output layer): output_norm.weight / output.weight not found",
+                layer_index
+            );
+        }
     }
 
-    // 5. 返回 Layer_Weights_List 对象
-    Ok(layer_weights_list)
+    // 5. 将解析后的数据转换为 GGUF_Layer_Weights 对象
+    // 6. 返回 GGUF_Layer_Weights 对象
+    Ok(GGUF_Layer_Weights {
+        layer_index,
+        tensors,
+    })
 }
 
 // GGUF_Split_Model(gguf_file_path, split_start, split_end， output_gguf_file_path)
@@ -449,6 +533,16 @@ pub fn GGUF_Split_Model(
                     selected_tensor_names.push(name.to_string());
                 }
             }
+            // Weight tying: 如果 output.weight 不存在，说明模型使用了权重共享，
+            // lm_head 复用 token_embd.weight。此时即使切分范围不包含输入层（layer 0），
+            // 也需要将 token_embd.weight 包含在切分文件中，以确保输出层能正常工作。
+            if !content.tensor_infos.contains_key("output.weight") {
+                if content.tensor_infos.contains_key("token_embd.weight")
+                    && !selected_tensor_names.contains(&"token_embd.weight".to_string())
+                {
+                    selected_tensor_names.push("token_embd.weight".to_string());
+                }
+            }
         }
     }
 
@@ -476,6 +570,8 @@ pub fn GGUF_Split_Model(
 
     // 3~6. 构建修改后的 metadata
     //   - 复制原始 metadata（跳过 tokenizer 和 chat_template 相关的 key）
+    //   - 保留原始 block_count（不修改），使切分模型保留完整的层信息，
+    //     不包含的层在 GGUF_Analyze / GGUF_Load_Layer 中自然为空
     //   - 追加 pleiades.split.start 和 pleiades.split.end 字段
     let mut metadata_pairs: Vec<(String, gguf_file::Value)> = Vec::new();
 
@@ -489,6 +585,7 @@ pub fn GGUF_Split_Model(
         if should_skip {
             continue;
         }
+        // 保留所有其他 metadata（包括 block_count）原样复制
         metadata_pairs.push((key.clone(), value.clone()));
     }
 

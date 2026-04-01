@@ -8,6 +8,10 @@
 //! - Node: 内部网络节点，运行事件循环
 //! - NodeHandle: 对外暴露的API句柄，可Clone可Send
 //! - NodeCommand: 外部命令枚举，通过通道发送给Node执行
+//! 
+//! 注意：
+//! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
+//! 广域网放到未来支持。
 
 use libp2p::{
     identity::Keypair,

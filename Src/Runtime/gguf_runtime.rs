@@ -90,8 +90,11 @@ impl GGUF_Runtime {
             );
         }
 
-        // 3. 调用 GGUF_Load_Model 加载模型（内部已调用 GGUF_Analyze 分析模型结构）
-        let mut gguf_model = GGUF_Load_Model(model_path, &device)?;
+        // 3. 调用 GGUF_Load_Model 加载完整模型（start=0, end=N+1）
+        //    内部已调用 GGUF_Analyze 分析模型结构，首先需要获取 num_layers 来计算 end
+        let arch_info = crate::runtime::gguf_model_manager::GGUF_Analyze(model_path)?;
+        let max_layer_index = arch_info.num_layers + 1; // N+1 = output 层
+        let mut gguf_model = GGUF_Load_Model(0, max_layer_index, model_path, &device)?;
 
         // 4. 根据 Runtime_Config 配置 Inference_Config
         let default_config = Inference_Config::default();
