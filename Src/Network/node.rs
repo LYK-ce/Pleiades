@@ -1,14 +1,14 @@
 //Presented by KeJi
-//Date: 2026-03-12
+//Date ： 2026-04-01
 
 //! 网络节点核心模块
-//! 负责Swarm管理、连接管理、事件处理以及提供对外接口
+//! 负责Swarm管理、连接管理、事件处理
 //!
 //! 架构设计：
 //! - Node: 内部网络节点，运行事件循环
-//! - NodeHandle: 对外暴露的API句柄，可Clone可Send
-//! - NodeCommand: 外部命令枚举，通过通道发送给Node执行
-//! 
+//! - NodeHandle: 对外暴露的API句柄（定义在 node_handle.rs）
+//! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
+//!
 //! 注意：
 //! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
 //! 广域网放到未来支持。
@@ -22,18 +22,22 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use libp2p_stream as stream;
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
-use super::protocol::{
-    CommandRequest, FileRequest, PleiadesCodec, PleiadesRequest,
-    PleiadesResponse, TensorRequest, COMMAND_PROTOCOL,
+use super::data_protocol::{
+    DataType, DataRequest, DataResponse, PleiadesCodec, DATA_PROTOCOL,
 };
+use super::stream_protocol::{
+    FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream,
+};
+use super::node_handle::{NodeCommand, NodeHandle};
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -71,6 +75,8 @@ pub struct PleiadesNetworkBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     /// 请求响应协议
     pub request_response: request_response::Behaviour<PleiadesCodec>,
+    /// 流式传输协议
+    pub stream: stream::Behaviour,
 }
 
 /// 节点信息
@@ -97,137 +103,27 @@ pub enum NetworkEvent {
     ConnectionEstablished(PeerId),
     /// 连接断开
     ConnectionClosed(PeerId),
-    /// 收到命令请求
-    CommandReceived {
+    /// 收到数据请求（统一事件）
+    DataReceived {
         peer: PeerId,
-        request: CommandRequest,
-        channel: ResponseChannel<PleiadesResponse>,
+        data_type: DataType,
+        payload: Vec<u8>,
+        channel: ResponseChannel<DataResponse>,
     },
-    /// 收到文件请求
-    FileReceived {
+    /// 收到流式文件传输
+    FileStreamReceived {
         peer: PeerId,
-        request: FileRequest,
-        channel: ResponseChannel<PleiadesResponse>,
+        file_path: PathBuf,
     },
-    /// 收到张量请求
-    TensorReceived {
+    /// 流式文件发送失败
+    FileStreamError {
         peer: PeerId,
-        request: TensorRequest,
-        channel: ResponseChannel<PleiadesResponse>,
+        error: String,
     },
     /// DHT记录查询结果
     RecordFound { key: Vec<u8>, value: Vec<u8> },
     /// DHT记录未找到
     RecordNotFound { key: Vec<u8> },
-}
-
-/// 节点命令（外部通过NodeHandle发送给Node执行）
-#[derive(Debug)]
-pub enum NodeCommand {
-    /// 发送命令
-    SendCommand { peer: PeerId, cmd: CommandRequest },
-    /// 发送文件
-    SendFile { peer: PeerId, path: PathBuf },
-    /// 发送张量
-    SendTensor { peer: PeerId, tensor: TensorRequest },
-    /// DHT写入
-    PutRecord { key: Vec<u8>, value: Vec<u8> },
-    /// DHT读取
-    GetRecord { key: Vec<u8> },
-    /// 主动连接
-    Dial { addr: Multiaddr },
-    /// 断开连接
-    Disconnect { peer: PeerId },
-    /// 发送响应
-    SendResponse { 
-        channel: ResponseChannel<PleiadesResponse>, 
-        response: PleiadesResponse 
-    },
-    /// 停止节点
-    Stop,
-}
-
-/// 节点句柄（对外API，可Clone可Send）
-#[derive(Clone)]
-pub struct NodeHandle {
-    /// 命令发送器
-    cmd_tx: mpsc::Sender<NodeCommand>,
-    /// 本地节点ID
-    local_peer_id: PeerId,
-}
-
-impl NodeHandle {
-    /// 获取本地节点ID
-    pub fn Get_Local_Peer_Id(&self) -> PeerId {
-        self.local_peer_id
-    }
-
-    /// 发送命令给指定节点
-    pub async fn Send_Command(&self, peer: &PeerId, cmd: CommandRequest) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendCommand {
-            peer: *peer,
-            cmd,
-        }).await?;
-        Ok(())
-    }
-
-    /// 发送文件给指定节点
-    pub async fn Send_File(&self, peer: &PeerId, path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendFile {
-            peer: *peer,
-            path: path.to_path_buf(),
-        }).await?;
-        Ok(())
-    }
-
-    /// 发送张量给指定节点
-    pub async fn Send_Tensor(&self, peer: &PeerId, tensor: TensorRequest) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendTensor {
-            peer: *peer,
-            tensor,
-        }).await?;
-        Ok(())
-    }
-
-    /// DHT写入
-    pub async fn Put_Record(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::PutRecord { key, value }).await?;
-        Ok(())
-    }
-
-    /// DHT读取
-    pub async fn Get_Record(&self, key: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::GetRecord { key }).await?;
-        Ok(())
-    }
-
-    /// 主动连接到指定地址
-    pub async fn Dial(&self, addr: Multiaddr) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::Dial { addr }).await?;
-        Ok(())
-    }
-
-    /// 断开与指定节点的连接
-    pub async fn Disconnect(&self, peer: &PeerId) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::Disconnect { peer: *peer }).await?;
-        Ok(())
-    }
-
-    /// 发送响应
-    pub async fn Send_Response(
-        &self,
-        channel: ResponseChannel<PleiadesResponse>,
-        response: PleiadesResponse,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendResponse { channel, response }).await?;
-        Ok(())
-    }
-
-    /// 停止节点
-    pub async fn Stop(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::Stop).await?;
-        Ok(())
-    }
 }
 
 /// 网络节点（内部实现）
@@ -242,8 +138,12 @@ pub struct Node {
     event_sender: mpsc::Sender<NetworkEvent>,
     /// 命令接收器（接收外部命令）
     cmd_rx: mpsc::Receiver<NodeCommand>,
+    /// 流式传输控制句柄
+    stream_control: stream::Control,
     /// 配置
     config: NetworkConfig,
+    /// 文件保存目录
+    save_dir: PathBuf,
 }
 
 impl Node {
@@ -266,11 +166,11 @@ impl Node {
         let local_peer_id = PeerId::from(keypair.public());
         info!("本地节点ID: {}", local_peer_id);
 
-        // 2. 创建命令通道
+        // 2. 创建命令通道，一个是发送，一个是接收
         let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(100);
 
         // 3. 创建Swarm
-        let swarm = SwarmBuilder::with_existing_identity(keypair)
+        let node_swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
@@ -287,13 +187,13 @@ impl Node {
                 // 创建Kademlia行为
                 let store = MemoryStore::new(key.public().to_peer_id());
                 let mut kademlia = kad::Behaviour::new(key.public().to_peer_id(), store);
-                
+
                 // 设置为服务器模式（可被发现）
                 kademlia.set_mode(Some(Mode::Server));
 
-                // 创建请求响应行为
+                // 创建请求响应行为 — 统一 DATA_PROTOCOL
                 let protocols = [(
-                    StreamProtocol::new(COMMAND_PROTOCOL),
+                    StreamProtocol::new(DATA_PROTOCOL),
                     ProtocolSupport::Full,
                 )];
                 let cfg = request_response::Config::default()
@@ -301,23 +201,35 @@ impl Node {
                 let request_response =
                     request_response::Behaviour::<PleiadesCodec>::new(protocols, cfg);
 
+                // 创建流式传输行为
+                let stream = stream::Behaviour::new();
+
                 Ok(PleiadesNetworkBehaviour {
                     mdns,
                     kademlia,
                     request_response,
+                    stream,
                 })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        // 4. 创建Node实例
+        // 4. 获取流式传输控制句柄
+        let stream_control = node_swarm.behaviour().stream.new_control();
+
+        // 5. 创建文件保存目录
+        let save_dir = PathBuf::from("Pleiades_Workspace");
+
+        // 6. 创建Node实例
         let mut node = Self {
-            swarm,
+            swarm: node_swarm,
             local_peer_id,
             connected_peers: HashMap::new(),
             event_sender,
             cmd_rx,
+            stream_control,
             config,
+            save_dir,
         };
 
         // 添加引导节点
@@ -332,10 +244,7 @@ impl Node {
         }
 
         // 5. 创建NodeHandle
-        let handle = NodeHandle {
-            cmd_tx,
-            local_peer_id,
-        };
+        let handle = NodeHandle::New(cmd_tx, local_peer_id);
 
         info!("网络节点初始化完成");
         Ok((node, handle))
@@ -343,7 +252,7 @@ impl Node {
 
     /// 启动网络服务
     ///
-    /// 使用tokio::select!同时监听Swarm事件和外部命令
+    /// 使用tokio::select!同时监听Swarm事件、外部命令和流式传输入站流
     pub async fn Start(&mut self) -> Result<(), Box<dyn Error>> {
         // 1. 启动监听
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", self.config.listen_port).parse()?;
@@ -357,7 +266,13 @@ impl Node {
             }
         }
 
-        // 3. 进入事件循环（使用select!同时监听网络事件和命令）
+        // 3. 注册流式传输协议，接受入站流
+        let mut incoming_streams = self
+            .stream_control
+            .accept(StreamProtocol::new(FILE_STREAM_PROTOCOL))
+            .expect("流式传输协议注册失败");
+
+        // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
         info!("进入网络事件循环");
         loop {
             tokio::select! {
@@ -373,9 +288,38 @@ impl Node {
                         break;
                     }
                 }
+                // 处理入站流式传输
+                Some((peer_id, mut stream)) = incoming_streams.next() => {
+                    info!("收到流式传输连接 from {}", peer_id);
+                    let event_sender = self.event_sender.clone();
+                    let save_dir = self.save_dir.clone();
+                    // 在独立任务中处理流式接收，避免阻塞事件循环
+                    tokio::spawn(async move {
+                        match Receive_File_Stream(&mut stream, &save_dir).await {
+                            Ok(file_path) => {
+                                info!("流式文件接收完成: {} from {}", file_path.display(), peer_id);
+                                let _ = event_sender
+                                    .send(NetworkEvent::FileStreamReceived {
+                                        peer: peer_id,
+                                        file_path,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                error!("流式文件接收失败 from {}: {}", peer_id, e);
+                                let _ = event_sender
+                                    .send(NetworkEvent::FileStreamError {
+                                        peer: peer_id,
+                                        error: e.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    });
+                }
             }
         }
-        
+
         info!("网络事件循环结束");
         Ok(())
     }
@@ -446,47 +390,49 @@ impl Node {
     /// 返回false表示应该退出循环
     async fn Handle_Command(&mut self, cmd: NodeCommand) -> bool {
         match cmd {
-            NodeCommand::SendCommand { peer, cmd } => {
-                info!("发送命令到 {}: {:?}", peer, cmd);
-                let request = PleiadesRequest::Command(cmd);
+            NodeCommand::SendData { peer, data_type, payload } => {
+                info!("发送数据到 {} | type={:?} | size={} bytes", peer, data_type, payload.len());
+                let request = DataRequest { data_type, payload };
                 self.swarm
                     .behaviour_mut()
                     .request_response
                     .send_request(&peer, request);
             }
-            NodeCommand::SendFile { peer, path } => {
-                // 读取文件内容
-                match std::fs::read(&path) {
-                    Ok(data) => {
-                        // 获取文件名
-                        let filename = path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        
-                        info!("发送文件 {} ({} bytes) to {}", filename, data.len(), peer);
-                        
-                        // 使用SendFile变体发送完整文件
-                        let request = PleiadesRequest::File(FileRequest::SendFile {
-                            filename,
-                            data,
-                        });
-                        self.swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_request(&peer, request);
+            NodeCommand::SendFileStream { peer, file_path } => {
+                info!("流式发送文件到 {} | path={}", peer, file_path.display());
+                let mut control = self.stream_control.clone();
+                let event_sender = self.event_sender.clone();
+                let protocol = StreamProtocol::new(FILE_STREAM_PROTOCOL);
+                // 在独立任务中处理流式发送，避免阻塞事件循环
+                tokio::spawn(async move {
+                    match control.open_stream(peer, protocol).await {
+                        Ok(mut stream) => {
+                            match Send_File_Stream(&mut stream, &file_path).await {
+                                Ok(()) => {
+                                    info!("流式文件发送完成: {} -> {}", file_path.display(), peer);
+                                }
+                                Err(e) => {
+                                    error!("流式文件发送失败: {} -> {}: {}", file_path.display(), peer, e);
+                                    let _ = event_sender
+                                        .send(NetworkEvent::FileStreamError {
+                                            peer,
+                                            error: e.to_string(),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("打开流式传输连接失败 -> {}: {}", peer, e);
+                            let _ = event_sender
+                                .send(NetworkEvent::FileStreamError {
+                                    peer,
+                                    error: e.to_string(),
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
-                        error!("读取文件失败 {}: {:?}", path.display(), e);
-                    }
-                }
-            }
-            NodeCommand::SendTensor { peer, tensor } => {
-                info!("发送张量 {} to {}", tensor.request_id, peer);
-                let request = PleiadesRequest::Tensor(tensor);
-                self.swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_request(&peer, request);
+                });
             }
             NodeCommand::PutRecord { key, value } => {
                 let record_key = kad::RecordKey::new(&key);
@@ -521,7 +467,8 @@ impl Node {
                 let _ = self.swarm.disconnect_peer_id(peer);
                 self.connected_peers.remove(&peer);
             }
-            NodeCommand::SendResponse { channel, response } => {
+            NodeCommand::SendResponse { channel, data_type, payload } => {
+                let response = DataResponse { data_type, payload };
                 if let Err(e) = self.swarm
                     .behaviour_mut()
                     .request_response
@@ -626,49 +573,28 @@ impl Node {
     /// 处理请求响应事件
     async fn Handle_Request_Response_Event(
         &mut self,
-        event: request_response::Event<PleiadesRequest, PleiadesResponse>,
+        event: request_response::Event<DataRequest, DataResponse>,
     ) {
         match event {
-            request_response::Event::Message { peer, message } => match message {
+            request_response::Event::Message { peer, message, .. } => match message {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    info!("收到请求 from {}", peer);
-                    match request {
-                        PleiadesRequest::Command(cmd) => {
-                            let _ = self
-                                .event_sender
-                                .send(NetworkEvent::CommandReceived {
-                                    peer,
-                                    request: cmd,
-                                    channel,
-                                })
-                                .await;
-                        }
-                        PleiadesRequest::File(file_req) => {
-                            let _ = self
-                                .event_sender
-                                .send(NetworkEvent::FileReceived {
-                                    peer,
-                                    request: file_req,
-                                    channel,
-                                })
-                                .await;
-                        }
-                        PleiadesRequest::Tensor(tensor_req) => {
-                            let _ = self
-                                .event_sender
-                                .send(NetworkEvent::TensorReceived {
-                                    peer,
-                                    request: tensor_req,
-                                    channel,
-                                })
-                                .await;
-                        }
-                    }
+                    info!("收到数据请求 from {} | type={:?} | size={} bytes",
+                          peer, request.data_type, request.payload.len());
+                    let _ = self
+                        .event_sender
+                        .send(NetworkEvent::DataReceived {
+                            peer,
+                            data_type: request.data_type,
+                            payload: request.payload,
+                            channel,
+                        })
+                        .await;
                 }
                 request_response::Message::Response { response, .. } => {
-                    debug!("收到响应 from {}: {:?}", peer, response);
+                    debug!("收到响应 from {} | type={:?} | size={} bytes",
+                           peer, response.data_type, response.payload.len());
                 }
             },
             request_response::Event::OutboundFailure {

@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date : 2026-03-30
+//Date ： 2026-04-01
 
 #![allow(non_snake_case)]
 
@@ -23,9 +23,11 @@ pub mod runtime;
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config};
 
-// 重新导出常用类型，便于测试使用
+// Network模块类型导出
 pub use network::{NetworkConfig, NetworkEvent, Node, NodeCommand, NodeHandle, PeerInfo};
-pub use network::protocol;
+pub use network::{DataType, DataRequest, DataResponse};
+pub use network::data_protocol;
+pub use network::stream_protocol;
 
 // Runtime模块类型导出
 pub use runtime::{RuntimeError};
