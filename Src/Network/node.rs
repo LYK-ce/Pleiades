@@ -229,7 +229,7 @@ impl Node {
                     stream,
                 })
             })?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(86400)))
             .build();
 
         // 5. 获取流式传输控制句柄

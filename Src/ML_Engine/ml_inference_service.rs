@@ -102,9 +102,9 @@ enum Service_Command {
     Unload_Model {
         reply: oneshot::Sender<Result<bool>>,
     },
-    /// 单步前向推理
+    /// 单步前向推理（统一字节接口）
     Inference {
-        token_ids: Vec<u32>,
+        input_bytes: Vec<u8>,
         offset: usize,
         reply: oneshot::Sender<Result<Tensor>>,
     },
@@ -245,25 +245,29 @@ impl ML_Service_Handle {
             .map_err(|_| anyhow::anyhow!("ML Service worker 回复通道已关闭"))?
     }
 
-    /// Inference(token_ids, offset)
+    /// Inference(input_bytes, offset)
     ///
     /// 执行单步前向推理（一次 forward pass）。
     /// 不进行自回归循环，自回归生成由调用方（Control 层）管理。
     ///
+    /// 统一字节接口：模型根据自身结构决定如何解释输入：
+    /// - 有 embedding 层: 字节解释为 token_ids（每 4 字节一个 u32 LE）
+    /// - 无 embedding 层: 字节解释为序列化的 tensor（GGUF_Tensor_Packet 格式）
+    ///
     /// # 参数
-    /// - `token_ids`: 输入 token IDs
-    ///   - Prefill 阶段：完整 prompt 的 token IDs
-    ///   - 生成阶段：单个 token `[next_token]`
+    /// - `input_bytes`: 输入原始字节
+    ///   - 有 embedding: token_ids 序列化为字节（每个 u32 → 4 bytes LE）
+    ///   - 无 embedding: GGUF_Tensor_Serialize 序列化的 tensor 字节
     /// - `offset`: 位置偏移量（用于 KV cache 和位置编码，自回归生成时递增）
     ///
     /// # 返回
-    /// logits Tensor，shape 为 `[batch_size, vocab_size]`
-    pub async fn Inference(&self, token_ids: Vec<u32>, offset: usize) -> Result<Tensor> {
+    /// 输出 Tensor（logits 或 hidden_state，取决于模型是否有输出头）
+    pub async fn Inference(&self, input_bytes: Vec<u8>, offset: usize) -> Result<Tensor> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.cmd_tx
             .send(Service_Command::Inference {
-                token_ids,
+                input_bytes,
                 offset,
                 reply: reply_tx,
             })
@@ -457,16 +461,16 @@ fn Worker_Loop(mut cmd_rx: mpsc::Receiver<Service_Command>) {
             }
 
             Service_Command::Inference {
-                token_ids,
+                input_bytes,
                 offset,
                 reply,
             } => {
                 debug!(
-                    "Worker: 收到 Inference 命令 (tokens: {}, offset: {})",
-                    token_ids.len(),
+                    "Worker: 收到 Inference 命令 (input_bytes: {}, offset: {})",
+                    input_bytes.len(),
                     offset
                 );
-                let result = Handle_Inference(&mut backend, &token_ids, offset);
+                let result = Handle_Inference(&mut backend, &input_bytes, offset);
                 let _ = reply.send(result);
             }
 
@@ -599,16 +603,17 @@ fn Handle_Unload_Model(backend: &mut Option<Inference_Backend>) -> Result<bool> 
 
 /// 处理 Inference 命令
 ///
-/// 执行单步前向推理，返回 logits Tensor。
+/// 执行单步前向推理，返回输出 Tensor。
 /// 根据当前后端类型分派到对应的推理实现。
+/// 输入为原始字节，模型内部根据是否有 embedding 层决定解释方式。
 fn Handle_Inference(
     backend: &mut Option<Inference_Backend>,
-    token_ids: &[u32],
+    input_bytes: &[u8],
     offset: usize,
 ) -> Result<Tensor> {
     match backend {
         Some(Inference_Backend::GGUF(ref mut model)) => {
-            GGUF_Model_Inference(model, token_ids, offset)
+            GGUF_Model_Inference(model, input_bytes, offset)
         }
         // 未来扩展其他后端的推理逻辑：
         // Some(Inference_Backend::ONNX(ref mut model)) => { ... }

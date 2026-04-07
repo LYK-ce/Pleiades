@@ -317,20 +317,44 @@ pub fn GGUF_Unload_Model(model: GGUF_Model) -> bool {
 ///
 /// # 返回
 /// logits Tensor，shape 为 [batch_size, vocab_size]
+///
+/// 统一接口：接受 `Vec<u8>` 原始字节，模型根据自身结构决定如何解释输入：
+/// - 有 embedding 层 (has_input_head): 字节解释为 token_ids（每 4 字节一个 u32 LE）
+///   → 经过 embedding → transformer blocks → 输出
+/// - 无 embedding 层: 字节解释为序列化的 tensor（GGUF_Tensor_Packet 格式）
+///   → 直接输入 transformer blocks → 输出
 pub fn GGUF_Model_Inference(
     model: &mut GGUF_Model,
-    token_ids: &[u32],
+    input_bytes: &[u8],
     offset: usize,
 ) -> Result<Tensor> {
-    let input_tensor =
-        Tensor::new(token_ids, &model.device)?.unsqueeze(0)?;
+    let input_tensor = if model.has_input_head {
+        // 有 embedding 层：将字节解释为 token_ids (u32 LE)
+        let token_ids: Vec<u32> = input_bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        Tensor::new(&token_ids[..], &model.device)?.unsqueeze(0)?
+    } else {
+        // 无 embedding 层：将字节解释为序列化的 Tensor
+        let packet = super::gguf_tensor::GGUF_Tensor_Deserialize(input_bytes)
+            .map_err(|e| anyhow::anyhow!("Tensor 反序列化失败: {}", e))?;
+        // 从 packet 重建 Tensor (f32 数据)
+        let f32_data: Vec<f32> = packet
+            .data
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        Tensor::new(&f32_data[..], &model.device)?
+            .reshape(&*packet.shape)?
+    };
 
-    let logits = model
+    let result = model
         .model
         .Forward(&input_tensor, offset)
         .map_err(|e| anyhow::anyhow!("Forward pass failed: {}", e))?;
 
-    Ok(logits)
+    Ok(result)
 }
 
 // ============================================================
@@ -397,4 +421,15 @@ pub fn GGUF_Decode(model: &GGUF_Model, token_ids: &[u32]) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Decoding error: {}", e))?;
 
     Ok(output_text)
+}
+
+// ============================================================
+// 工具函数
+// ============================================================
+
+/// 将 token IDs 序列化为字节流（用于统一的 Inference 接口）
+///
+/// 每个 u32 转为 4 字节小端序
+pub fn Token_Ids_To_Bytes(token_ids: &[u32]) -> Vec<u8> {
+    token_ids.iter().flat_map(|id| id.to_le_bytes()).collect()
 }

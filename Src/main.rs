@@ -103,6 +103,14 @@ async fn main() {
     let ml_service = ML_Service_Handle::Init();
     info!("ML Service 已初始化");
 
+    // 读取设备配置
+    let device = config
+        .Runtime
+        .as_ref()
+        .and_then(|r| r.device.clone())
+        .unwrap_or_else(|| "cpu".to_string());
+    info!("推理设备: {}", device);
+
     // ============================================================
     // 6. 启动 CLI（独立阻塞线程）
     // ============================================================
@@ -117,7 +125,7 @@ async fn main() {
     // ============================================================
     // 7. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
-    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle).await;
+    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device).await;
 
     info!("Pleiades 已退出");
 }

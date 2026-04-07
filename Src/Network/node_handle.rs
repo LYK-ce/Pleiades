@@ -263,12 +263,12 @@ impl NodeHandle {
             completion_tx: Some(tx),
         }).await?;
 
-        // 等待传输完成（60 秒超时）
+        // 等待传输完成（600 秒超时）
         let result = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_secs(600),
             rx,
         ).await
-            .map_err(|_| "File stream transfer timeout (60s)")?
+            .map_err(|_| "File stream transfer timeout (600s)")?
             .map_err(|_| "File stream completion channel closed")?
             .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
 

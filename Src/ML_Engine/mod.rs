@@ -30,6 +30,6 @@ pub use gguf_models::{
 };
 pub use gguf_model::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
-    GGUF_Encode, GGUF_Decode, Inference_Config,
+    GGUF_Encode, GGUF_Decode, Inference_Config, Token_Ids_To_Bytes,
 };
 pub use ml_inference_service::{ML_Service_Handle, Model_Load_Info};
