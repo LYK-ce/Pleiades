@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-01
+//Date ： 2026-04-03
 
 //! 网络节点核心模块
 //! 负责Swarm管理、连接管理、事件处理
@@ -8,6 +8,12 @@
 //! - Node: 内部网络节点，运行事件循环
 //! - NodeHandle: 对外暴露的API句柄（定义在 node_handle.rs）
 //! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
+//!
+//! 事件分流：
+//! - Response → 通过 oneshot 路由回 Send_Bytes 调用方
+//! - 入站 Request → 通过 inbound_tx 转发给 Control 层
+//! - 连接/发现事件 → 通过 event_sender 上报
+//! - 文件传输事件 → 通过 event_sender 上报
 //!
 //! 注意：
 //! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
@@ -18,7 +24,7 @@ use libp2p::{
     kad::{self, store::MemoryStore, Mode},
     mdns,
     noise,
-    request_response::{self, ProtocolSupport, ResponseChannel},
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
@@ -27,17 +33,17 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
 use super::data_protocol::{
-    DataType, DataRequest, DataResponse, PleiadesCodec, DATA_PROTOCOL,
+    DataRequest, DataResponse, PleiadesCodec, DATA_PROTOCOL,
 };
 use super::stream_protocol::{
     FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream,
 };
-use super::node_handle::{NodeCommand, NodeHandle};
+use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -93,6 +99,9 @@ pub struct PeerInfo {
 }
 
 /// 网络事件（发送给上层）
+///
+/// 注意：DataReceived 不再通过此通道发送，改走 inbound_tx。
+/// Response 在内部通过 oneshot 路由回 Send_Bytes 调用方。
 #[derive(Debug)]
 pub enum NetworkEvent {
     /// 发现新节点
@@ -103,13 +112,6 @@ pub enum NetworkEvent {
     ConnectionEstablished(PeerId),
     /// 连接断开
     ConnectionClosed(PeerId),
-    /// 收到数据请求（统一事件）
-    DataReceived {
-        peer: PeerId,
-        data_type: DataType,
-        payload: Vec<u8>,
-        channel: ResponseChannel<DataResponse>,
-    },
     /// 收到流式文件传输
     FileStreamReceived {
         peer: PeerId,
@@ -134,7 +136,7 @@ pub struct Node {
     local_peer_id: PeerId,
     /// 已连接的节点信息
     connected_peers: HashMap<PeerId, PeerInfo>,
-    /// 事件发送器（发送给上层）
+    /// 事件发送器（发送给上层，用于连接/文件/DHT等事件）
     event_sender: mpsc::Sender<NetworkEvent>,
     /// 命令接收器（接收外部命令）
     cmd_rx: mpsc::Receiver<NodeCommand>,
@@ -144,6 +146,19 @@ pub struct Node {
     config: NetworkConfig,
     /// 文件保存目录
     save_dir: PathBuf,
+
+    // ===== 新增：Response 路由与入站请求管理 =====
+
+    /// 出站 Response 路由：OutboundRequestId → oneshot Sender
+    /// 当 Send_Bytes 发出请求后，Response 到达时通过此映射回传
+    pending_responses: HashMap<OutboundRequestId, oneshot::Sender<Result<DataResponse, String>>>,
+    /// 入站 ResponseChannel 存储：request_id → ResponseChannel
+    /// 当 Control 层调用 Send_Reply(request_id) 时，从此映射取出 channel
+    pending_replies: HashMap<u64, ResponseChannel<DataResponse>>,
+    /// 入站请求发送器（转发给 Control 层）
+    inbound_tx: mpsc::Sender<InboundRequest>,
+    /// 入站请求 ID 自增计数器
+    next_inbound_id: u64,
 }
 
 impl Node {
@@ -151,14 +166,14 @@ impl Node {
     ///
     /// # Arguments
     /// * `config` - 网络配置
-    /// * `event_sender` - 事件发送通道
+    /// * `event_sender` - 事件发送通道（连接/文件/DHT 事件）
     ///
     /// # Returns
-    /// (Node实例, NodeHandle句柄)
+    /// (Node实例, NodeHandle句柄, inbound_rx 入站请求接收端)
     pub async fn Init(
         config: NetworkConfig,
         event_sender: mpsc::Sender<NetworkEvent>,
-    ) -> Result<(Self, NodeHandle), Box<dyn Error>> {
+    ) -> Result<(Self, NodeHandle, mpsc::Receiver<InboundRequest>), Box<dyn Error>> {
         info!("初始化网络节点...");
 
         // 1. 生成节点身份（临时生成）
@@ -166,10 +181,13 @@ impl Node {
         let local_peer_id = PeerId::from(keypair.public());
         info!("本地节点ID: {}", local_peer_id);
 
-        // 2. 创建命令通道，一个是发送，一个是接收
+        // 2. 创建命令通道
         let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(100);
 
-        // 3. 创建Swarm
+        // 3. 创建入站请求通道
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundRequest>(100);
+
+        // 4. 创建Swarm
         let node_swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -214,13 +232,13 @@ impl Node {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        // 4. 获取流式传输控制句柄
+        // 5. 获取流式传输控制句柄
         let stream_control = node_swarm.behaviour().stream.new_control();
 
-        // 5. 创建文件保存目录
+        // 6. 创建文件保存目录
         let save_dir = PathBuf::from("Pleiades_Workspace");
 
-        // 6. 创建Node实例
+        // 7. 创建Node实例
         let mut node = Self {
             swarm: node_swarm,
             local_peer_id,
@@ -230,6 +248,11 @@ impl Node {
             stream_control,
             config,
             save_dir,
+            // 新增字段
+            pending_responses: HashMap::new(),
+            pending_replies: HashMap::new(),
+            inbound_tx,
+            next_inbound_id: 1,
         };
 
         // 添加引导节点
@@ -243,11 +266,11 @@ impl Node {
             }
         }
 
-        // 5. 创建NodeHandle
+        // 8. 创建NodeHandle
         let handle = NodeHandle::New(cmd_tx, local_peer_id);
 
         info!("网络节点初始化完成");
-        Ok((node, handle))
+        Ok((node, handle, inbound_rx))
     }
 
     /// 启动网络服务
@@ -390,26 +413,32 @@ impl Node {
     /// 返回false表示应该退出循环
     async fn Handle_Command(&mut self, cmd: NodeCommand) -> bool {
         match cmd {
-            NodeCommand::SendData { peer, data_type, payload } => {
+            NodeCommand::SendData { peer, data_type, payload, response_tx } => {
                 info!("发送数据到 {} | type={:?} | size={} bytes", peer, data_type, payload.len());
                 let request = DataRequest { data_type, payload };
-                self.swarm
+                let outbound_id = self.swarm
                     .behaviour_mut()
                     .request_response
                     .send_request(&peer, request);
+
+                // 如果调用方需要等待 Response，存入 pending_responses
+                if let Some(tx) = response_tx {
+                    self.pending_responses.insert(outbound_id, tx);
+                }
             }
-            NodeCommand::SendFileStream { peer, file_path } => {
+            NodeCommand::SendFileStream { peer, file_path, completion_tx } => {
                 info!("流式发送文件到 {} | path={}", peer, file_path.display());
                 let mut control = self.stream_control.clone();
                 let event_sender = self.event_sender.clone();
                 let protocol = StreamProtocol::new(FILE_STREAM_PROTOCOL);
                 // 在独立任务中处理流式发送，避免阻塞事件循环
                 tokio::spawn(async move {
-                    match control.open_stream(peer, protocol).await {
+                    let result = match control.open_stream(peer, protocol).await {
                         Ok(mut stream) => {
                             match Send_File_Stream(&mut stream, &file_path).await {
                                 Ok(()) => {
                                     info!("流式文件发送完成: {} -> {}", file_path.display(), peer);
+                                    Ok(())
                                 }
                                 Err(e) => {
                                     error!("流式文件发送失败: {} -> {}: {}", file_path.display(), peer, e);
@@ -419,6 +448,7 @@ impl Node {
                                             error: e.to_string(),
                                         })
                                         .await;
+                                    Err(e.to_string())
                                 }
                             }
                         }
@@ -430,7 +460,12 @@ impl Node {
                                     error: e.to_string(),
                                 })
                                 .await;
+                            Err(e.to_string())
                         }
+                    };
+                    // 通知调用方传输完成
+                    if let Some(tx) = completion_tx {
+                        let _ = tx.send(result);
                     }
                 });
             }
@@ -476,6 +511,32 @@ impl Node {
                     error!("发送响应失败: {:?}", e);
                 }
             }
+            NodeCommand::SendReply { request_id, data_type, payload } => {
+                // 从 pending_replies 取出 ResponseChannel
+                if let Some(channel) = self.pending_replies.remove(&request_id) {
+                    let response = DataResponse { data_type, payload };
+                    if let Err(e) = self.swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, response) {
+                        error!("发送回复失败 (request_id={}): {:?}", request_id, e);
+                    } else {
+                        debug!("回复已发送 (request_id={})", request_id);
+                    }
+                } else {
+                    warn!("未找到入站请求 request_id={}", request_id);
+                }
+            }
+            NodeCommand::GetPeers { reply } => {
+                let peers = self.Get_Peers();
+                debug!("查询已连接节点列表: {} 个", peers.len());
+                let _ = reply.send(peers);
+            }
+            NodeCommand::GetPeerInfo { peer, reply } => {
+                let info = self.Get_Peer_Info(&peer).cloned();
+                debug!("查询节点信息: {} -> {:?}", peer, info.is_some());
+                let _ = reply.send(info);
+            }
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
                 // 关闭所有连接
@@ -483,6 +544,10 @@ impl Node {
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                 }
                 self.connected_peers.clear();
+                // 清理 pending_responses（通知等待方）
+                for (_, tx) in self.pending_responses.drain() {
+                    let _ = tx.send(Err("Node stopped".to_string()));
+                }
                 return false;
             }
         }
@@ -571,38 +636,65 @@ impl Node {
     }
 
     /// 处理请求响应事件
+    ///
+    /// - Request（入站）：存储 ResponseChannel，通过 inbound_tx 转发给 Control 层
+    /// - Response（出站回复）：通过 oneshot 路由回 Send_Bytes 调用方
+    /// - OutboundFailure：通知等待方发送失败
     async fn Handle_Request_Response_Event(
         &mut self,
         event: request_response::Event<DataRequest, DataResponse>,
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
+                // ===== 入站请求：转发给 Control 层 =====
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
                     info!("收到数据请求 from {} | type={:?} | size={} bytes",
                           peer, request.data_type, request.payload.len());
-                    let _ = self
-                        .event_sender
-                        .send(NetworkEvent::DataReceived {
-                            peer,
-                            data_type: request.data_type,
-                            payload: request.payload,
-                            channel,
-                        })
-                        .await;
+
+                    // 分配 request_id，存储 ResponseChannel
+                    let request_id = self.next_inbound_id;
+                    self.next_inbound_id += 1;
+                    self.pending_replies.insert(request_id, channel);
+
+                    // 转发给 Control 层（不含 libp2p 内部类型）
+                    let inbound = InboundRequest {
+                        request_id,
+                        peer,
+                        data_type: request.data_type,
+                        payload: request.payload,
+                    };
+                    if let Err(e) = self.inbound_tx.send(inbound).await {
+                        error!("转发入站请求失败: {}", e);
+                        // 如果发送失败，清理 pending_replies
+                        self.pending_replies.remove(&request_id);
+                    }
                 }
-                request_response::Message::Response { response, .. } => {
+                // ===== 出站响应：路由回 Send_Bytes 调用方 =====
+                request_response::Message::Response { request_id, response, .. } => {
                     debug!("收到响应 from {} | type={:?} | size={} bytes",
                            peer, response.data_type, response.payload.len());
+
+                    // 用 OutboundRequestId 匹配 pending_responses
+                    if let Some(tx) = self.pending_responses.remove(&request_id) {
+                        let _ = tx.send(Ok(response));
+                    } else {
+                        debug!("收到未追踪的响应 (request_id={:?})", request_id);
+                    }
                 }
             },
             request_response::Event::OutboundFailure {
                 peer,
+                request_id,
                 error,
                 ..
             } => {
                 error!("发送失败 to {}: {:?}", peer, error);
+                // 通知等待方发送失败
+                if let Some(tx) = self.pending_responses.remove(&request_id) {
+                    let _ = tx.send(Err(format!("Outbound failure: {:?}", error)));
+                }
             }
             request_response::Event::InboundFailure {
                 peer,

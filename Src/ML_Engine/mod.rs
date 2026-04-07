@@ -1,13 +1,13 @@
 //Presented by KeJi
 //Date : 2026-03-30
 
-//! Runtime模块 - 推理运行时
+//! ML_Engine模块 - ML推理引擎
 //!
 //! 提供 GGUF 模型解析、加载、Qwen3 推理等功能
 
 pub mod error;
 pub mod gguf_tensor;
-pub mod gguf_runtime;
+pub mod ml_inference_service;
 pub mod gguf_model_manager;
 pub mod gguf_model;
 
@@ -32,4 +32,4 @@ pub use gguf_model::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
-pub use gguf_runtime::GGUF_Runtime;
+pub use ml_inference_service::{ML_Service_Handle, Model_Load_Info};
