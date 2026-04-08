@@ -1,35 +1,33 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-08
 
 #![allow(non_snake_case, non_camel_case_types)]
 
-use std::path::Path;
 use tokio::sync::mpsc;
 use tracing::info;
-use tracing_subscriber;
 
 use pleiades::{
-    Read_Config, NetworkConfig, Node, ML_Service_Handle,
-    Control_Loop,
+    Ensure_Config, NetworkConfig, Node, ML_Service_Handle,
+    Control_Loop, Ui_Message, TUI_Loop,
 };
-use pleiades::control::cli::{CLI_Command, CLI_Loop};
+use pleiades::control::cli::CLI_Command;
 
 #[tokio::main]
 async fn main() {
     // ============================================================
-    // 1. 读取配置文件
+    // 1. 确保配置文件存在并读取
     // ============================================================
-    let config_path = Path::new("config.toml");
-    let config = match Read_Config(config_path) {
-        Ok(c) => c,
+    let (config, config_path) = match Ensure_Config() {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("[Error] 配置文件读取失败: {}", e);
             std::process::exit(1);
         }
     };
+    eprintln!("[Info] 配置文件路径: {}", config_path.display());
 
     // ============================================================
-    // 2. 初始化日志系统
+    // 2. 初始化日志系统（写入文件，不输出到终端，避免干扰 TUI）
     // ============================================================
     let log_level = config
         .Log
@@ -37,12 +35,23 @@ async fn main() {
         .and_then(|l| l.level.as_deref())
         .unwrap_or("info");
 
+    let log_dir = config
+        .Log
+        .as_ref()
+        .and_then(|l| l.log_file_path.as_deref())
+        .unwrap_or("Log/");
+
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+
+    let file_appender = tracing_appender::rolling::daily(log_dir, "pleiades.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_writer(non_blocking)
+        .with_ansi(false)
         .init();
 
     info!("Pleiades 启动中...");
@@ -85,10 +94,6 @@ async fn main() {
         "网络节点已初始化, PeerId: {}",
         node_handle.Get_Local_Peer_Id()
     );
-    println!(
-        "[Pleiades] 节点启动, PeerId: {}",
-        node_handle.Get_Local_Peer_Id()
-    );
 
     // 启动 Node 事件循环（后台任务）
     tokio::spawn(async move {
@@ -112,21 +117,22 @@ async fn main() {
     info!("推理设备: {}", device);
 
     // ============================================================
-    // 6. 启动 CLI（独立阻塞线程）
+    // 6. 创建通信通道并启动 TUI
     // ============================================================
     let (cli_tx, cli_rx) = mpsc::channel::<CLI_Command>(32);
+    let (ui_tx, ui_rx) = mpsc::channel::<Ui_Message>(256);
 
+    // 启动 TUI（独立阻塞线程，替代原 CLI_Loop）
     tokio::task::spawn_blocking(move || {
-        CLI_Loop(cli_tx);
+        TUI_Loop(ui_rx, cli_tx);
     });
 
-    info!("CLI 已启动");
+    info!("TUI 已启动");
 
     // ============================================================
     // 7. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
-    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device).await;
+    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device, ui_tx).await;
 
     info!("Pleiades 已退出");
 }
-

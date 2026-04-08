@@ -23,8 +23,11 @@ pub mod ml_engine;
 #[path = "Control/mod.rs"]
 pub mod control;
 
+#[path = "TUI/mod.rs"]
+pub mod tui;
+
 // Config模块类型导出
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config};
 
 // Network模块类型导出
 pub use network::{NetworkConfig, NetworkEvent, Node, NodeCommand, NodeHandle, PeerInfo};
@@ -52,3 +55,7 @@ pub use ml_engine::{ML_Service_Handle, Model_Load_Info};
 // Control模块类型导出
 pub use control::{CLI_Command, Control_Loop, Node_State};
 pub use control::{Control_Command, Serialize_Command, Deserialize_Command};
+pub use control::Ui_Message;
+
+// TUI模块类型导出
+pub use tui::TUI_Loop;

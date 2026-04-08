@@ -14,7 +14,9 @@
 pub mod cli;
 pub mod command;
 pub mod control;
+pub mod ui_message;
 
 pub use cli::CLI_Command;
 pub use command::{Control_Command, Serialize_Command, Deserialize_Command};
 pub use control::{Control_Loop, Node_State};
+pub use ui_message::Ui_Message;
