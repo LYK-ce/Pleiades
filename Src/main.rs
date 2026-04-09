@@ -1,8 +1,9 @@
 //Presented by KeJi
-//Date ： 2026-04-08
+//Date ： 2026-04-09
 
 #![allow(non_snake_case, non_camel_case_types)]
 
+use candle_core;
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -108,12 +109,29 @@ async fn main() {
     let ml_service = ML_Service_Handle::Init();
     info!("ML Service 已初始化");
 
-    // 读取设备配置
-    let device = config
+    // 读取设备配置，并进行 CUDA fallback 检查
+    let config_device = config
         .Runtime
         .as_ref()
         .and_then(|r| r.device.clone())
         .unwrap_or_else(|| "cpu".to_string());
+
+    let device = if config_device.to_lowercase() == "cuda" {
+        // 检测 CUDA 是否可用
+        match candle_core::Device::new_cuda(0) {
+            Ok(_) => {
+                info!("CUDA 设备可用，使用 cuda");
+                "cuda".to_string()
+            }
+            Err(e) => {
+                eprintln!("[Warn] CUDA 不可用 ({}), 回退到 CPU", e);
+                info!("CUDA 不可用 ({}), 回退到 CPU", e);
+                "cpu".to_string()
+            }
+        }
+    } else {
+        config_device.to_lowercase()
+    };
     info!("推理设备: {}", device);
 
     // ============================================================
@@ -132,7 +150,7 @@ async fn main() {
     // ============================================================
     // 7. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
-    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device, ui_tx).await;
+    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device, config_path, ui_tx).await;
 
     info!("Pleiades 已退出");
 }

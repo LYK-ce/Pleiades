@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-09
 
 //! UI 消息协议模块
 //!
@@ -76,4 +76,7 @@ pub enum Ui_Message {
 
     /// 错误信息
     Error(String),
+
+    /// 设备变更通知（Control → TUI，通知当前使用的设备）
+    Device_Change(String),
 }

@@ -38,7 +38,7 @@ use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
 use super::data_protocol::{
-    DataRequest, DataResponse, PleiadesCodec, DATA_PROTOCOL,
+    Network_Data, PleiadesCodec, DATA_PROTOCOL,
 };
 use super::stream_protocol::{
     FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream,
@@ -117,6 +117,14 @@ pub enum NetworkEvent {
         peer: PeerId,
         file_path: PathBuf,
     },
+    /// 流式文件传输进度（每 10MB 上报一次）
+    FileStreamProgress {
+        peer: PeerId,
+        file_name: String,
+        direction: String,
+        sent: u64,
+        total: u64,
+    },
     /// 流式文件发送失败
     FileStreamError {
         peer: PeerId,
@@ -151,10 +159,10 @@ pub struct Node {
 
     /// 出站 Response 路由：OutboundRequestId → oneshot Sender
     /// 当 Send_Bytes 发出请求后，Response 到达时通过此映射回传
-    pending_responses: HashMap<OutboundRequestId, oneshot::Sender<Result<DataResponse, String>>>,
+    pending_responses: HashMap<OutboundRequestId, oneshot::Sender<Result<Network_Data, String>>>,
     /// 入站 ResponseChannel 存储：request_id → ResponseChannel
     /// 当 Control 层调用 Send_Reply(request_id) 时，从此映射取出 channel
-    pending_replies: HashMap<u64, ResponseChannel<DataResponse>>,
+    pending_replies: HashMap<u64, ResponseChannel<Network_Data>>,
     /// 入站请求发送器（转发给 Control 层）
     inbound_tx: mpsc::Sender<InboundRequest>,
     /// 入站请求 ID 自增计数器
@@ -318,7 +326,7 @@ impl Node {
                     let save_dir = self.save_dir.clone();
                     // 在独立任务中处理流式接收，避免阻塞事件循环
                     tokio::spawn(async move {
-                        match Receive_File_Stream(&mut stream, &save_dir).await {
+                        match Receive_File_Stream(&mut stream, &save_dir, event_sender.clone(), peer_id).await {
                             Ok(file_path) => {
                                 info!("流式文件接收完成: {} from {}", file_path.display(), peer_id);
                                 let _ = event_sender
@@ -415,7 +423,7 @@ impl Node {
         match cmd {
             NodeCommand::SendData { peer, data_type, payload, response_tx } => {
                 info!("发送数据到 {} | type={:?} | size={} bytes", peer, data_type, payload.len());
-                let request = DataRequest { data_type, payload };
+                let request = Network_Data { data_type, payload };
                 let outbound_id = self.swarm
                     .behaviour_mut()
                     .request_response
@@ -435,7 +443,7 @@ impl Node {
                 tokio::spawn(async move {
                     let result = match control.open_stream(peer, protocol).await {
                         Ok(mut stream) => {
-                            match Send_File_Stream(&mut stream, &file_path).await {
+                            match Send_File_Stream(&mut stream, &file_path, event_sender.clone(), peer).await {
                                 Ok(()) => {
                                     info!("流式文件发送完成: {} -> {}", file_path.display(), peer);
                                     Ok(())
@@ -503,7 +511,7 @@ impl Node {
                 self.connected_peers.remove(&peer);
             }
             NodeCommand::SendResponse { channel, data_type, payload } => {
-                let response = DataResponse { data_type, payload };
+                let response = Network_Data { data_type, payload };
                 if let Err(e) = self.swarm
                     .behaviour_mut()
                     .request_response
@@ -514,7 +522,7 @@ impl Node {
             NodeCommand::SendReply { request_id, data_type, payload } => {
                 // 从 pending_replies 取出 ResponseChannel
                 if let Some(channel) = self.pending_replies.remove(&request_id) {
-                    let response = DataResponse { data_type, payload };
+                    let response = Network_Data { data_type, payload };
                     if let Err(e) = self.swarm
                         .behaviour_mut()
                         .request_response
@@ -642,7 +650,7 @@ impl Node {
     /// - OutboundFailure：通知等待方发送失败
     async fn Handle_Request_Response_Event(
         &mut self,
-        event: request_response::Event<DataRequest, DataResponse>,
+        event: request_response::Event<Network_Data, Network_Data>,
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {

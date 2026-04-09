@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-09
 
 //! TUI 模块 - 终端图形界面
 //!
@@ -210,6 +210,10 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
         Ui_Message::Error(text) => {
             app.Add_Log(format!("[错误] {}", text));
         }
+        Ui_Message::Device_Change(device) => {
+            app.Add_Log(format!("设备已切换: {}", device.to_uppercase()));
+            app.device = device;
+        }
     }
 }
 
@@ -320,6 +324,45 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
         return;
     }
 
+    if trimmed.starts_with("set-device ") {
+        let device_str = trimmed.strip_prefix("set-device ").unwrap_or("").trim().to_lowercase();
+        if device_str == "cpu" || device_str == "cuda" {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let cmd = CLI_Command::SetDevice {
+                device: device_str.clone(),
+                reply: reply_tx,
+            };
+
+            app.Add_Log(format!("执行命令: set-device {}", device_str));
+
+            if cli_tx.blocking_send(cmd).is_err() {
+                app.Add_Log("[错误] Control 层已关闭".to_string());
+                app.should_quit = true;
+                return;
+            }
+
+            // 同步等待 Control 层的回复
+            match reply_rx.blocking_recv() {
+                Ok(Ok(msg)) => {
+                    app.command_output.output_text = msg;
+                    app.command_output.completed = true;
+                }
+                Ok(Err(e)) => {
+                    app.command_output.output_text = format!("错误: {}", e);
+                    app.command_output.completed = true;
+                }
+                Err(_) => {
+                    app.command_output.output_text = "Control 层未响应".to_string();
+                    app.command_output.completed = true;
+                }
+            }
+        } else {
+            app.command_output.output_text = format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
+            app.command_output.completed = true;
+        }
+        return;
+    }
+
     if trimmed.starts_with("run ") {
         // 解析 run 命令: run <model_path> <prompt>
         let rest = trimmed.strip_prefix("run ").unwrap_or("").trim();
@@ -365,7 +408,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
 
     // 未知命令
     app.command_output.output_text = format!(
-        "未知命令: '{}'\n\n可用命令:\n  run <model_path> <prompt>  运行推理\n  ls                        列出工作区文件\n  clear                     清空日志\n  quit                      退出",
+        "未知命令: '{}'\n\n可用命令:\n  run <model_path> <prompt>  运行推理\n  set-device cpu/cuda       切换计算设备\n  ls                        列出工作区文件\n  clear                     清空日志\n  quit                      退出",
         trimmed
     );
     app.command_output.completed = true;

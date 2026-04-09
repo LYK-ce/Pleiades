@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-use super::data_protocol::{DataType, DataResponse};
+use super::data_protocol::{DataType, Network_Data};
 
 // ===== 入站请求结构 =====
 
@@ -54,7 +54,7 @@ pub enum NodeCommand {
         payload: Vec<u8>,
         /// 可选：用于回传 Response 的 oneshot 发送端
         /// None = fire-and-forget，Some = 等待 Response
-        response_tx: Option<oneshot::Sender<Result<DataResponse, String>>>,
+        response_tx: Option<oneshot::Sender<Result<Network_Data, String>>>,
     },
     /// 流式文件发送（默认已确认对方接受，直接建立流式传输）
     SendFileStream {
@@ -73,7 +73,7 @@ pub enum NodeCommand {
     Disconnect { peer: PeerId },
     /// 发送响应（直接使用 ResponseChannel，仅内部使用）
     SendResponse {
-        channel: ResponseChannel<DataResponse>,
+        channel: ResponseChannel<Network_Data>,
         data_type: DataType,
         payload: Vec<u8>,
     },
@@ -128,13 +128,13 @@ impl NodeHandle {
     /// * `payload` - 已序列化的字节流（由上层负责序列化）
     ///
     /// # Returns
-    /// 对方的 DataResponse
+    /// 对方的 Network_Data
     pub async fn Send_Bytes(
         &self,
         peer: &PeerId,
         data_type: DataType,
         payload: Vec<u8>,
-    ) -> Result<DataResponse, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Network_Data, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(NodeCommand::SendData {
             peer: *peer,
@@ -302,7 +302,7 @@ impl NodeHandle {
     /// 发送响应（直接使用 ResponseChannel，仅内部使用）
     pub async fn Send_Response(
         &self,
-        channel: ResponseChannel<DataResponse>,
+        channel: ResponseChannel<Network_Data>,
         data_type: DataType,
         payload: Vec<u8>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {

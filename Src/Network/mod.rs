@@ -31,5 +31,5 @@ pub mod stream_protocol;
 // 重新导出常用类型
 pub use node::{NetworkConfig, NetworkEvent, Node, PeerInfo};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
-pub use data_protocol::{DataType, DataRequest, DataResponse, PleiadesCodec, DATA_PROTOCOL};
+pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
 pub use stream_protocol::{FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream, CHUNK_SIZE};

@@ -1,11 +1,12 @@
 //Presented by KeJi
-//Date : 2026-04-08
+//Date : 2026-04-09
 
 #![allow(non_snake_case, non_camel_case_types, dead_code)]
 
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use toml_edit::DocumentMut;
 
 /// 编译时嵌入的默认配置文件内容
 const DEFAULT_CONFIG: &str = include_str!("config.toml");
@@ -84,4 +85,34 @@ pub fn Ensure_Config() -> Result<(Pleiades_Config, PathBuf), Box<dyn std::error:
 
     let config = Read_Config(&config_path)?;
     Ok((config, config_path))
+}
+
+/// 通用配置修改函数
+///
+/// 修改 config.toml 中指定 section 下 key 的值（字符串类型）。
+/// 使用 `toml_edit` 解析为可编辑 AST，修改后保留注释和格式写回。
+///
+/// # 参数
+/// - `config_path`: 配置文件路径
+/// - `section`: TOML 段名（如 "Runtime", "Network", "Log"）
+/// - `key`: 字段名（如 "device", "level"）
+/// - `value`: 新值（字符串）
+///
+/// # 示例
+/// ```rust
+/// Update_Config(path, "Runtime", "device", "cuda");
+/// Update_Config(path, "Network", "Transport_Protocol", "QUIC");
+/// Update_Config(path, "Log", "level", "debug");
+/// ```
+pub fn Update_Config(
+    config_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(config_path)?;
+    let mut doc = content.parse::<DocumentMut>()?;
+    doc[section][key] = toml_edit::value(value);
+    fs::write(config_path, doc.to_string())?;
+    Ok(())
 }

@@ -8,4 +8,4 @@
 
 pub mod config;
 
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config};

@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-08
+//Date ： 2026-04-09
 
 //! Control 核心模块 - 调度核心事件循环
 //!
@@ -14,7 +14,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
@@ -23,6 +23,7 @@ use candle_transformers::generation::{LogitsProcessor, Sampling};
 use super::cli::CLI_Command;
 use super::command::{Control_Command, Serialize_Command, Deserialize_Command};
 use super::ui_message::Ui_Message;
+use crate::config::Update_Config;
 use crate::ml_engine::gguf_model::Token_Ids_To_Bytes;
 use crate::ml_engine::ml_inference_service::ML_Service_Handle;
 use crate::ml_engine::gguf_tensor::{
@@ -72,13 +73,16 @@ pub async fn Control_Loop(
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     ml_service: ML_Service_Handle,
     node_handle: NodeHandle,
-    device: String,
+    mut device: String,
+    config_path: PathBuf,
     ui_tx: mpsc::Sender<Ui_Message>,
 ) {
     let mut state = Node_State::Idle;
     let mut next_peer: Option<PeerId> = None;
 
     info!("Control 层事件循环已启动, 节点状态: {:?}, 设备: {}", state, device);
+    // 启动时通知 TUI 当前设备
+    Send_Ui(&ui_tx, Ui_Message::Device_Change(device.clone())).await;
     Send_Ui(&ui_tx, Ui_Message::Log(format!(
         "节点启动, PeerId: {}", node_handle.Get_Local_Peer_Id()
     ))).await;
@@ -100,6 +104,7 @@ pub async fn Control_Loop(
                             &model_path,
                             &prompt,
                             &mut inbound_rx,
+                            &mut event_rx,
                             &ui_tx,
                         ).await;
                         // 任务完成后恢复 Idle 状态
@@ -111,6 +116,16 @@ pub async fn Control_Loop(
                         if let Err(ref e) = result {
                             Send_Ui(&ui_tx, Ui_Message::Error(e.clone())).await;
                         }
+                        let _ = reply.send(result);
+                    }
+                    Some(CLI_Command::SetDevice { device: new_device, reply }) => {
+                        info!("Control: 收到 set-device 命令: {}", new_device);
+                        let result = Handle_Set_Device(
+                            &mut device,
+                            &config_path,
+                            &new_device,
+                            &ui_tx,
+                        ).await;
                         let _ = reply.send(result);
                     }
                     Some(CLI_Command::Quit) => {
@@ -191,6 +206,7 @@ async fn Handle_Run(
     model_path: &Path,
     prompt: &str,
     inbound_rx: &mut mpsc::Receiver<InboundRequest>,
+    event_rx: &mut mpsc::Receiver<NetworkEvent>,
     ui_tx: &mpsc::Sender<Ui_Message>,
 ) -> Result<String, String> {
     let mut output = String::new();
@@ -294,8 +310,7 @@ async fn Handle_Run(
             let split_file_path = output_dir.join(&split_file_name);
 
             Send_Ui(ui_tx, Ui_Message::Log(format!("发送 {} → 节点 {}", split_file_name, peer))).await;
-            node_handle
-                .Send_File(peer, split_file_path)
+            Send_File_With_Events(node_handle, peer, split_file_path, event_rx, ui_tx)
                 .await
                 .map_err(|e| format!("文件发送失败 (节点 {}): {}", peer, e))?;
             Send_Ui(ui_tx, Ui_Message::Log(format!("  ✓ 已发送 → {}", peer))).await;
@@ -557,6 +572,34 @@ async fn Handle_Run(
 // ============================================================
 // 辅助函数
 // ============================================================
+
+/// 发送文件，同时转发网络事件到 TUI（避免 select! 循环被阻塞导致进度条不更新）
+///
+/// 使用 `tokio::pin!` 固定 Send_File future，在 select! 循环中同时
+/// poll 文件发送和事件接收，确保 FileStreamProgress 等事件实时传递给 TUI。
+async fn Send_File_With_Events(
+    node_handle: &NodeHandle,
+    peer: &PeerId,
+    file_path: PathBuf,
+    event_rx: &mut mpsc::Receiver<NetworkEvent>,
+    ui_tx: &mpsc::Sender<Ui_Message>,
+) -> Result<(), String> {
+    let send_fut = node_handle.Send_File(peer, file_path);
+    tokio::pin!(send_fut);
+
+    loop {
+        tokio::select! {
+            result = &mut send_fut => {
+                return result.map_err(|e| format!("{}", e));
+            }
+            evt = event_rx.recv() => {
+                if let Some(event) = evt {
+                    Handle_Event(event, ui_tx).await;
+                }
+            }
+        }
+    }
+}
 
 /// 将推理输出 Tensor 序列化为 GGUF_Tensor_Packet 字节流
 fn Serialize_Tensor_Output(tensor: &candle_core::Tensor) -> Result<Vec<u8>, String> {
@@ -820,6 +863,48 @@ async fn Handle_Control_Command(
 }
 
 // ============================================================
+// Handle_Set_Device — 设备切换处理
+// ============================================================
+
+/// 处理 set-device 命令
+///
+/// 1. 修改 Control 层持有的 device 变量
+/// 2. 将修改写回 config.toml 文件（持久化，下次启动使用新设置）
+/// 3. 通知 TUI 更新设备显示
+async fn Handle_Set_Device(
+    device: &mut String,
+    config_path: &Path,
+    new_device: &str,
+    ui_tx: &mpsc::Sender<Ui_Message>,
+) -> Result<String, String> {
+    let old_device = device.clone();
+
+    // 更新 Control 层持有的 device
+    *device = new_device.to_string();
+    info!("设备已切换: {} → {}", old_device, new_device);
+
+    // 写回 config.toml
+    if let Err(e) = Update_Config(config_path, "Runtime", "device", new_device) {
+        warn!("配置文件写入失败: {} (设备已切换但未持久化)", e);
+        Send_Ui(ui_tx, Ui_Message::Log(format!(
+            "⚠ 配置文件写入失败: {} (设备已切换但未持久化)", e
+        ))).await;
+    } else {
+        info!("配置文件已更新: device = {}", new_device);
+    }
+
+    // 通知 TUI 更新设备显示
+    Send_Ui(ui_tx, Ui_Message::Device_Change(new_device.to_string())).await;
+
+    Ok(format!(
+        "设备已切换: {} → {}\n配置已保存，下次启动将默认使用 {}",
+        old_device.to_uppercase(),
+        new_device.to_uppercase(),
+        new_device.to_uppercase()
+    ))
+}
+
+// ============================================================
 // 网络事件处理
 // ============================================================
 
@@ -841,6 +926,17 @@ async fn Handle_Event(event: NetworkEvent, ui_tx: &mpsc::Sender<Ui_Message>) {
             Send_Ui(ui_tx, Ui_Message::Log(format!(
                 "收到文件: {} (来自 {})", file_path.display(), peer
             ))).await;
+            // 文件传输完成，恢复 Job 为空闲
+            Send_Ui(ui_tx, Ui_Message::Job_Idle).await;
+        }
+        NetworkEvent::FileStreamProgress { peer, file_name, direction, sent, total } => {
+            Send_Ui(ui_tx, Ui_Message::File_Progress {
+                file_name,
+                direction,
+                peer: peer.to_string(),
+                sent,
+                total,
+            }).await;
         }
         NetworkEvent::FileStreamError { peer, error } => {
             Send_Ui(ui_tx, Ui_Message::Error(format!(

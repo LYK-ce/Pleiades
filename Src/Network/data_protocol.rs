@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-01
+//Date ： 2026-04-08
 
 //! 网络协议定义模块
 //!
@@ -53,24 +53,67 @@ impl DataType {
     }
 }
 
-// ===== 统一请求/响应结构 =====
+// ===== 统一网络数据结构 =====
 
-/// 统一数据请求（网络层只看字节流）
+/// 统一网络数据帧（同时用作 Request 和 Response）
+///
+/// 网络层只看字节流，不关心上层语义。
+/// Request 和 Response 的线上格式完全相同，因此合并为一个结构体。
 #[derive(Debug, Clone)]
-pub struct DataRequest {
+pub struct Network_Data {
     /// 数据类型标记
     pub data_type: DataType,
     /// 原始载荷字节流（上层负责序列化）
     pub payload: Vec<u8>,
 }
 
-/// 统一数据响应（网络层只看字节流）
-#[derive(Debug, Clone)]
-pub struct DataResponse {
-    /// 数据类型标记
-    pub data_type: DataType,
-    /// 原始载荷字节流（上层负责序列化）
-    pub payload: Vec<u8>,
+// ===== 帧读写辅助函数 =====
+
+/// 从异步读取流中读取一个 TLV 帧
+///
+/// 格式: [1 byte type] [8 bytes length BE u64] [payload bytes]
+async fn Read_Frame<T: AsyncRead + Unpin + Send>(io: &mut T) -> io::Result<Network_Data> {
+    // 1. 读取 1 字节 type
+    let mut type_byte = [0u8; 1];
+    io.read_exact(&mut type_byte).await?;
+    let data_type = DataType::From_U8(type_byte[0])?;
+
+    // 2. 读取 8 字节 length (big-endian u64)
+    let mut len_bytes = [0u8; 8];
+    io.read_exact(&mut len_bytes).await?;
+    let len = u64::from_be_bytes(len_bytes);
+
+    // 3. 检查大小限制 (2GB)
+    if len > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame too large: {} bytes (max {})", len, MAX_FRAME_SIZE),
+        ));
+    }
+
+    // 4. 读取 payload
+    let mut payload = vec![0u8; len as usize];
+    io.read_exact(&mut payload).await?;
+
+    Ok(Network_Data { data_type, payload })
+}
+
+/// 向异步写入流中写入一个 TLV 帧
+///
+/// 格式: [1 byte type] [8 bytes length BE u64] [payload bytes]
+async fn Write_Frame<T: AsyncWrite + Unpin + Send>(io: &mut T, data: Network_Data) -> io::Result<()> {
+    // 1. 写入 1 字节 type
+    io.write_all(&[data.data_type as u8]).await?;
+
+    // 2. 写入 8 字节 length (big-endian u64)
+    let len = data.payload.len() as u64;
+    io.write_all(&len.to_be_bytes()).await?;
+
+    // 3. 写入 payload
+    io.write_all(&data.payload).await?;
+    io.flush().await?;
+
+    Ok(())
 }
 
 // ===== Codec 编解码器 =====
@@ -79,6 +122,9 @@ pub struct DataResponse {
 ///
 /// 读写格式: [1 byte type] [8 bytes length BE u64] [payload bytes]
 /// 不做任何业务序列化，只做字节搬运
+///
+/// Request 和 Response 使用相同的 Network_Data 类型，
+/// 线上格式完全一致，通过 Read_Frame/Write_Frame 统一处理。
 #[derive(Debug, Clone)]
 pub struct PleiadesCodec {
     _phantom: PhantomData<()>,
@@ -94,8 +140,8 @@ impl Default for PleiadesCodec {
 
 impl Codec for PleiadesCodec {
     type Protocol = StreamProtocol;
-    type Request = DataRequest;
-    type Response = DataResponse;
+    type Request = Network_Data;
+    type Response = Network_Data;
 
     fn read_request<'life0, 'life1, 'life2, 'async_trait, T>(
         &'life0 mut self,
@@ -109,31 +155,7 @@ impl Codec for PleiadesCodec {
         'life2: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move {
-            // 1. 读取 1 字节 type
-            let mut type_byte = [0u8; 1];
-            io.read_exact(&mut type_byte).await?;
-            let data_type = DataType::From_U8(type_byte[0])?;
-
-            // 2. 读取 8 字节 length (big-endian u64)
-            let mut len_bytes = [0u8; 8];
-            io.read_exact(&mut len_bytes).await?;
-            let len = u64::from_be_bytes(len_bytes);
-
-            // 3. 检查大小限制 (2GB)
-            if len > MAX_FRAME_SIZE {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame too large: {} bytes (max {})", len, MAX_FRAME_SIZE),
-                ));
-            }
-
-            // 4. 读取 payload
-            let mut payload = vec![0u8; len as usize];
-            io.read_exact(&mut payload).await?;
-
-            Ok(DataRequest { data_type, payload })
-        })
+        Box::pin(Read_Frame(io))
     }
 
     fn read_response<'life0, 'life1, 'life2, 'async_trait, T>(
@@ -148,31 +170,7 @@ impl Codec for PleiadesCodec {
         'life2: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move {
-            // 1. 读取 1 字节 type
-            let mut type_byte = [0u8; 1];
-            io.read_exact(&mut type_byte).await?;
-            let data_type = DataType::From_U8(type_byte[0])?;
-
-            // 2. 读取 8 字节 length (big-endian u64)
-            let mut len_bytes = [0u8; 8];
-            io.read_exact(&mut len_bytes).await?;
-            let len = u64::from_be_bytes(len_bytes);
-
-            // 3. 检查大小限制 (2GB)
-            if len > MAX_FRAME_SIZE {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame too large: {} bytes (max {})", len, MAX_FRAME_SIZE),
-                ));
-            }
-
-            // 4. 读取 payload
-            let mut payload = vec![0u8; len as usize];
-            io.read_exact(&mut payload).await?;
-
-            Ok(DataResponse { data_type, payload })
-        })
+        Box::pin(Read_Frame(io))
     }
 
     fn write_request<'life0, 'life1, 'life2, 'async_trait, T>(
@@ -188,20 +186,7 @@ impl Codec for PleiadesCodec {
         'life2: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move {
-            // 1. 写入 1 字节 type
-            io.write_all(&[req.data_type as u8]).await?;
-
-            // 2. 写入 8 字节 length (big-endian u64)
-            let len = req.payload.len() as u64;
-            io.write_all(&len.to_be_bytes()).await?;
-
-            // 3. 写入 payload
-            io.write_all(&req.payload).await?;
-            io.flush().await?;
-
-            Ok(())
-        })
+        Box::pin(Write_Frame(io, req))
     }
 
     fn write_response<'life0, 'life1, 'life2, 'async_trait, T>(
@@ -217,19 +202,6 @@ impl Codec for PleiadesCodec {
         'life2: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move {
-            // 1. 写入 1 字节 type
-            io.write_all(&[res.data_type as u8]).await?;
-
-            // 2. 写入 8 字节 length (big-endian u64)
-            let len = res.payload.len() as u64;
-            io.write_all(&len.to_be_bytes()).await?;
-
-            // 3. 写入 payload
-            io.write_all(&res.payload).await?;
-            io.flush().await?;
-
-            Ok(())
-        })
+        Box::pin(Write_Frame(io, res))
     }
 }

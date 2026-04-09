@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-09
 
 //! TUI 应用状态管理模块
 //!
@@ -117,6 +117,10 @@ pub struct App {
     /// 当前视图模式
     pub view_mode: View_Mode,
 
+    // ===== 全局状态 =====
+    /// 当前使用的设备 ("cpu" 或 "cuda")
+    pub device: String,
+
     // ===== Log 面板数据 =====
     /// 日志列表（带时间戳的字符串）
     pub logs: Vec<String>,
@@ -151,6 +155,7 @@ impl App {
     pub fn New() -> Self {
         Self {
             view_mode: View_Mode::Idle,
+            device: "cpu".to_string(),
             logs: Vec::new(),
             log_scroll: 0,
             peers: Vec::new(),

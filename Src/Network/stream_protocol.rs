@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-01
+//Date ： 2026-04-08
 
 //! 流式传输协议模块
 //!
@@ -19,11 +19,17 @@
 //!
 //! 发送方打开流 → 写入 header（文件名+文件大小）→ 分块写入文件数据
 //! 接收方读取 header → 边收边写磁盘
+//!
+//! 进度上报：每传输 10MB 通过 event_sender 向 Control 层报告一次进度。
 
 use futures::prelude::*;
+use libp2p::PeerId;
 use std::io;
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 use tracing::{debug, info};
+
+use super::node::NetworkEvent;
 
 // ===== 协议标识符 =====
 pub const FILE_STREAM_PROTOCOL: &str = "/pleiades/file-stream/1.0.0";
@@ -31,19 +37,27 @@ pub const FILE_STREAM_PROTOCOL: &str = "/pleiades/file-stream/1.0.0";
 // ===== 分块大小 (64KB) =====
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
+// ===== 进度上报间隔 (10MB) =====
+const PROGRESS_INTERVAL: u64 = 10 * 1024 * 1024;
+
 /// 流式发送文件
 ///
 /// 通过已打开的 libp2p::Stream 发送文件，采用分块传输方式。
+/// 每传输 10MB 通过 event_sender 向 Control 层报告一次进度。
 ///
 /// # Arguments
 /// * `stream` - 已打开的双向流
 /// * `file_path` - 待发送文件的路径
+/// * `event_sender` - 网络事件发送器（用于上报传输进度）
+/// * `peer` - 对方节点 ID
 ///
 /// # 帧格式
 /// [4B name_len][name_bytes][8B file_size][raw data chunks...]
 pub async fn Send_File_Stream(
     stream: &mut libp2p::Stream,
     file_path: &Path,
+    event_sender: mpsc::Sender<NetworkEvent>,
+    peer: PeerId,
 ) -> io::Result<()> {
     // 1. 获取文件名
     let file_name = file_path
@@ -73,6 +87,7 @@ pub async fn Send_File_Stream(
     let mut file = tokio::fs::File::open(file_path).await?;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut sent: u64 = 0;
+    let mut last_reported: u64 = 0;
 
     loop {
         let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await?;
@@ -82,6 +97,18 @@ pub async fn Send_File_Stream(
         stream.write_all(&buf[..n]).await?;
         sent += n as u64;
         debug!("已发送: {}/{} bytes", sent, file_size);
+
+        // 每 10MB 上报一次进度（非阻塞，channel 满则丢弃）
+        if sent - last_reported >= PROGRESS_INTERVAL || sent == file_size {
+            last_reported = sent;
+            let _ = event_sender.try_send(NetworkEvent::FileStreamProgress {
+                peer,
+                file_name: file_name.to_string(),
+                direction: "send".to_string(),
+                sent,
+                total: file_size,
+            });
+        }
     }
 
     stream.flush().await?;
@@ -97,16 +124,21 @@ pub async fn Send_File_Stream(
 /// 流式接收文件
 ///
 /// 从 libp2p::Stream 中接收文件，边收边写入磁盘。
+/// 每接收 10MB 通过 event_sender 向 Control 层报告一次进度。
 ///
 /// # Arguments
 /// * `stream` - 已打开的双向流
 /// * `save_dir` - 文件保存目录
+/// * `event_sender` - 网络事件发送器（用于上报传输进度）
+/// * `peer` - 对方节点 ID
 ///
 /// # Returns
 /// 保存的文件路径
 pub async fn Receive_File_Stream(
     stream: &mut libp2p::Stream,
     save_dir: &Path,
+    event_sender: mpsc::Sender<NetworkEvent>,
+    peer: PeerId,
 ) -> io::Result<PathBuf> {
     // 1. 读取文件名长度 (4 bytes, u32 BE)
     let mut name_len_bytes = [0u8; 4];
@@ -148,6 +180,7 @@ pub async fn Receive_File_Stream(
     // 6. 分块接收并写入磁盘
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut remaining = file_size;
+    let mut last_reported: u64 = 0;
 
     while remaining > 0 {
         let to_read = std::cmp::min(remaining as usize, buf.len());
@@ -164,7 +197,20 @@ pub async fn Receive_File_Stream(
         }
         tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
         remaining -= n as u64;
-        debug!("已接收: {}/{} bytes", file_size - remaining, file_size);
+        let received = file_size - remaining;
+        debug!("已接收: {}/{} bytes", received, file_size);
+
+        // 每 10MB 上报一次进度（非阻塞，channel 满则丢弃）
+        if received - last_reported >= PROGRESS_INTERVAL || remaining == 0 {
+            last_reported = received;
+            let _ = event_sender.try_send(NetworkEvent::FileStreamProgress {
+                peer,
+                file_name: file_name.clone(),
+                direction: "receive".to_string(),
+                sent: received,
+                total: file_size,
+            });
+        }
     }
 
     tokio::io::AsyncWriteExt::flush(&mut file).await?;

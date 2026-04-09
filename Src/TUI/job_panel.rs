@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-09
 
 //! Job 显示区
 //!
@@ -15,6 +15,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph},
 };
 
@@ -31,7 +32,7 @@ use super::app::{App, Job_State, Transfer_Direction};
 pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
     match &app.job {
         Job_State::Idle => {
-            Render_Idle(frame, area);
+            Render_Idle(frame, area, &app.device);
         }
         Job_State::File_Transfer {
             direction,
@@ -48,22 +49,25 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
             layer_range,
             phase,
         } => {
-            Render_Inference(frame, area, model_name, *device_count, layer_range, phase);
+            Render_Inference(frame, area, model_name, *device_count, layer_range, phase, &app.device);
         }
     }
 }
 
-/// 渲染空闲状态
-fn Render_Idle(frame: &mut Frame, area: Rect) {
+/// 渲染空闲状态（显示设备信息）
+fn Render_Idle(frame: &mut Frame, area: Rect, device: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" ⚙️ Job ")
         .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let text = Paragraph::new("  状态: 空闲")
-        .block(block)
-        .style(Style::default().fg(Color::DarkGray));
+    let device_color = if device == "cuda" { Color::Green } else { Color::Cyan };
+    let text = Paragraph::new(Line::from(vec![
+        Span::styled("  状态: 空闲 │ 设备: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(device.to_uppercase(), Style::default().fg(device_color).add_modifier(Modifier::BOLD)),
+    ]))
+        .block(block);
 
     frame.render_widget(text, area);
 }
@@ -120,7 +124,7 @@ fn Render_File_Transfer(
     frame.render_widget(gauge, area);
 }
 
-/// 渲染推理状态（纯文本，无进度条）
+/// 渲染推理状态（纯文本，无进度条，显示设备信息）
 fn Render_Inference(
     frame: &mut Frame,
     area: Rect,
@@ -128,6 +132,7 @@ fn Render_Inference(
     device_count: usize,
     layer_range: &str,
     phase: &str,
+    device: &str,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -135,15 +140,16 @@ fn Render_Inference(
         .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(Color::DarkGray));
 
+    let device_upper = device.to_uppercase();
     let info = if device_count > 1 {
         format!(
-            "  {} │ {}台设备 │ {} │ 阶段: {}",
-            model_name, device_count, layer_range, phase
+            "  {} │ {}台设备 │ {} │ {} │ 阶段: {}",
+            model_name, device_count, layer_range, device_upper, phase
         )
     } else {
         format!(
-            "  {} │ {} │ 阶段: {}",
-            model_name, layer_range, phase
+            "  {} │ {} │ {} │ 阶段: {}",
+            model_name, layer_range, device_upper, phase
         )
     };
 

@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-09
 
 //! CLI 模块 - 用户命令行交互
 //!
@@ -30,6 +30,13 @@ pub enum CLI_Command {
         model_path: PathBuf,
         /// 推理 prompt
         prompt: String,
+        /// 结果回传通道
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// 设置设备 (cpu/cuda)
+    SetDevice {
+        /// 设备名称 ("cpu" 或 "cuda")
+        device: String,
         /// 结果回传通道
         reply: oneshot::Sender<Result<String, String>>,
     },
