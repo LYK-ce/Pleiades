@@ -335,7 +335,7 @@ async fn Handle_Run(
         for peer in &peers {
             let cmd_bytes = Serialize_Command(&Control_Command::Work);
             node_handle
-                .Send_Bytes(peer, DataType::Command, cmd_bytes)
+                .Send_Data(peer, DataType::Command, cmd_bytes)
                 .await
                 .map_err(|e| format!("发送 WORK 失败 ({}): {}", peer, e))?;
         }
@@ -354,7 +354,7 @@ async fn Handle_Run(
                 end,
             });
             node_handle
-                .Send_Bytes(peer, DataType::Command, cmd_bytes)
+                .Send_Data(peer, DataType::Command, cmd_bytes)
                 .await
                 .map_err(|e| format!("发送 LOAD 失败 ({}): {}", peer, e))?;
             Send_Ui(ui_tx, Ui_Message::Log(format!("  ✓ 节点 {} 已加载模型", peer))).await;
@@ -376,7 +376,7 @@ async fn Handle_Run(
                 next_peer: target,
             });
             node_handle
-                .Send_Bytes(peer, DataType::Command, cmd_bytes)
+                .Send_Data(peer, DataType::Command, cmd_bytes)
                 .await
                 .map_err(|e| format!("发送 PIPELINE_FLOW 失败 ({}): {}", peer, e))?;
             Send_Ui(ui_tx, Ui_Message::Log(format!("  节点 {} → next: {}", peer, target))).await;
@@ -463,7 +463,7 @@ async fn Handle_Run(
         payload.extend_from_slice(&tensor_bytes);
 
         node_handle
-            .Send_Bytes(next_peer.as_ref().unwrap(), DataType::Data, payload)
+            .Send_Data(next_peer.as_ref().unwrap(), DataType::Data, payload)
             .await
             .map_err(|e| format!("Prefill 发送失败: {}", e))?;
 
@@ -516,7 +516,7 @@ async fn Handle_Run(
             payload.extend_from_slice(&tensor_bytes);
 
             node_handle
-                .Send_Bytes(next_peer.as_ref().unwrap(), DataType::Data, payload)
+                .Send_Data(next_peer.as_ref().unwrap(), DataType::Data, payload)
                 .await
                 .map_err(|e| format!("第 {} 轮发送失败: {}", round, e))?;
 
@@ -633,7 +633,7 @@ async fn Wait_For_Pipeline_Result(
 
         if req.data_type == DataType::Data && req.peer == last_peer {
             if let Err(e) = node_handle
-                .Send_Reply(req.request_id, DataType::Data, b"ACK".to_vec())
+                .Send_Response(req.request_id, DataType::Data, b"ACK".to_vec())
                 .await
             {
                 error!("ACK 失败: {}", e);
@@ -660,11 +660,11 @@ async fn Wait_For_Pipeline_Result(
 
         if req.data_type == DataType::File {
             let _ = node_handle
-                .Send_Reply(req.request_id, DataType::Command, b"ACCEPT".to_vec())
+                .Send_Response(req.request_id, DataType::Command, b"ACCEPT".to_vec())
                 .await;
         } else {
             let _ = node_handle
-                .Send_Reply(req.request_id, DataType::Command, b"OK".to_vec())
+                .Send_Response(req.request_id, DataType::Command, b"OK".to_vec())
                 .await;
         }
         debug!(
@@ -700,7 +700,7 @@ async fn Handle_Inbound(
                 "收到文件传输请求 (来自 {}), 自动接受", req.peer
             ))).await;
             if let Err(e) = node_handle
-                .Send_Reply(req.request_id, DataType::Command, b"ACCEPT".to_vec())
+                .Send_Response(req.request_id, DataType::Command, b"ACCEPT".to_vec())
                 .await
             {
                 error!("发送文件接受回复失败: {}", e);
@@ -719,7 +719,7 @@ async fn Handle_Inbound(
                 Err(e) => {
                     warn!("命令解析失败: {}", e);
                     if let Err(e) = node_handle
-                        .Send_Reply(req.request_id, DataType::Command, b"OK".to_vec())
+                        .Send_Response(req.request_id, DataType::Command, b"OK".to_vec())
                         .await
                     {
                         error!("发送回复失败: {}", e);
@@ -733,13 +733,13 @@ async fn Handle_Inbound(
             if *state != Node_State::Busy {
                 warn!("收到 Data 但当前不在 Busy 状态, 忽略");
                 let _ = node_handle
-                    .Send_Reply(req.request_id, DataType::Data, b"NOT_BUSY".to_vec())
+                    .Send_Response(req.request_id, DataType::Data, b"NOT_BUSY".to_vec())
                     .await;
                 return;
             }
 
             if let Err(e) = node_handle
-                .Send_Reply(req.request_id, DataType::Data, b"ACK".to_vec())
+                .Send_Response(req.request_id, DataType::Data, b"ACK".to_vec())
                 .await
             {
                 error!("发送 ACK 失败: {}", e);
@@ -780,7 +780,7 @@ async fn Handle_Inbound(
                 Some(target) => {
                     debug!("Busy: 转发到 {} ({} bytes)", target, data_payload.len());
                     if let Err(e) = node_handle
-                        .Send_Bytes(target, DataType::Data, data_payload)
+                        .Send_Data(target, DataType::Data, data_payload)
                         .await
                     {
                         error!("转发失败: {}", e);
@@ -796,7 +796,7 @@ async fn Handle_Inbound(
         DataType::Info => {
             debug!("收到 Info 消息 (来自 {}), 暂未处理", req.peer);
             let _ = node_handle
-                .Send_Reply(req.request_id, DataType::Info, b"OK".to_vec())
+                .Send_Response(req.request_id, DataType::Info, b"OK".to_vec())
                 .await;
         }
     }
@@ -820,7 +820,7 @@ async fn Handle_Control_Command(
             Send_Ui(ui_tx, Ui_Message::Log(format!("WORK (来自 {}): 状态 → Busy", peer))).await;
             Send_Ui(ui_tx, Ui_Message::State_Change("Busy".to_string())).await;
             let _ = node_handle
-                .Send_Reply(request_id, DataType::Command, b"OK".to_vec())
+                .Send_Response(request_id, DataType::Command, b"OK".to_vec())
                 .await;
         }
 
@@ -841,14 +841,14 @@ async fn Handle_Control_Command(
                         info.architecture, info.has_input_head, info.has_output_head
                     ))).await;
                     let _ = node_handle
-                        .Send_Reply(request_id, DataType::Command, b"OK".to_vec())
+                        .Send_Response(request_id, DataType::Command, b"OK".to_vec())
                         .await;
                 }
                 Err(e) => {
                     error!("模型加载失败: {}", e);
                     Send_Ui(ui_tx, Ui_Message::Error(format!("模型加载失败: {}", e))).await;
                     let _ = node_handle
-                        .Send_Reply(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
+                        .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
                         .await;
                 }
             }
@@ -864,7 +864,7 @@ async fn Handle_Control_Command(
                 phase: "就绪，等待推理数据".to_string(),
             }).await;
             let _ = node_handle
-                .Send_Reply(request_id, DataType::Command, b"OK".to_vec())
+                .Send_Response(request_id, DataType::Command, b"OK".to_vec())
                 .await;
         }
     }

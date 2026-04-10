@@ -4,7 +4,7 @@
 //! 出站响应路由管理器
 //!
 //! 从 inbound_request_manager.rs 中拆分出的独立组件，负责：
-//! **出站 Response 路由**：将 Send_Bytes 的 Response 通过 oneshot 路由回调用方
+//! **出站 Response 路由**：将 Send_Data 的 Response 通过 oneshot 路由回调用方
 //!
 //! Network_Service 通过持有 `Outbound_Manager` 实例来使用这些功能。
 
@@ -25,7 +25,7 @@ use super::data_protocol::Network_Data;
 /// 出站响应路由管理器
 ///
 /// 管理出站请求的 Response 回传映射：
-/// - `pending_responses`: OutboundRequestId → oneshot，用于将 Response 路由回 Send_Bytes 调用方
+/// - `pending_responses`: OutboundRequestId → oneshot，用于将 Response 路由回 Send_Data 调用方
 pub struct Outbound_Manager {
     /// 出站 Response 路由：OutboundRequestId → oneshot Sender
     pending_responses: HashMap<OutboundRequestId, oneshot::Sender<Result<Network_Data, String>>>,

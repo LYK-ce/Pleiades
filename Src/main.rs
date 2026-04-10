@@ -6,9 +6,10 @@
 use candle_core;
 use tokio::sync::mpsc;
 use tracing::info;
+use libp2p;
 
 use pleiades::{
-    Ensure_Config, NetworkConfig, Network_Service, ML_Service_Handle,
+    Ensure_Config, Ensure_Identity, NetworkConfig, Network_Service, ML_Service_Handle,
     Control_Loop, Ui_Message, TUI_Loop,
 };
 use pleiades::control::cli::CLI_Command;
@@ -82,8 +83,19 @@ async fn main() {
         }
     };
 
+    // 加载或生成节点身份密钥对
+    let config_dir = config_path.parent().unwrap_or(std::path::Path::new(".config"));
+    let keypair = match Ensure_Identity(config_dir) {
+        Ok(kp) => kp,
+        Err(e) => {
+            eprintln!("[Error] 节点身份初始化失败: {}", e);
+            std::process::exit(1);
+        }
+    };
+    info!("节点 PeerId: {}", libp2p::PeerId::from(keypair.public()));
+
     let (event_tx, event_rx) = mpsc::channel(100);
-    let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, event_tx).await {
+    let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, keypair, event_tx).await {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[Error] 网络初始化失败: {}", e);

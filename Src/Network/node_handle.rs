@@ -7,14 +7,12 @@
 //! NodeCommand（外部命令枚举，通过通道发送给 Network_Service 执行）。
 //!
 //! ## 主要 API
-//! - `Send_Data`: 原始数据发送（fire-and-forget）
-//! - `Send_Bytes`: 发送数据并等待 Response（同步语义）
-//! - `Send_Reply`: 回复入站请求（通过 request_id）
+//! - `Send_Data`: 发送数据并等待 Response（同步语义）
+//! - `Send_Response`: 回复入站请求（通过 request_id）
 //! - `Send_File`: 文件传输（元数据协商 + 流式传输）
 //! - `Send_File_Stream`: 直接流式发送文件（无协商）
 
 use libp2p::{
-    request_response::ResponseChannel,
     Multiaddr, PeerId,
 };
 use std::error::Error;
@@ -71,14 +69,8 @@ pub enum NodeCommand {
     Dial { addr: Multiaddr },
     /// 断开连接
     Disconnect { peer: PeerId },
-    /// 发送响应（直接使用 ResponseChannel，仅内部使用）
-    SendResponse {
-        channel: ResponseChannel<Network_Data>,
-        data_type: DataType,
-        payload: Vec<u8>,
-    },
     /// 回复入站请求（通过 request_id，供 Control 层使用）
-    SendReply {
+    SendResponse {
         request_id: u64,
         data_type: DataType,
         payload: Vec<u8>,
@@ -129,7 +121,7 @@ impl NodeHandle {
     ///
     /// # Returns
     /// 对方的 Network_Data
-    pub async fn Send_Bytes(
+    pub async fn Send_Data(
         &self,
         peer: &PeerId,
         data_type: DataType,
@@ -164,13 +156,13 @@ impl NodeHandle {
     /// * `request_id` - 入站请求的编号（来自 InboundRequest.request_id）
     /// * `data_type` - 响应数据类型
     /// * `payload` - 响应载荷
-    pub async fn Send_Reply(
+    pub async fn Send_Response(
         &self,
         request_id: u64,
         data_type: DataType,
         payload: Vec<u8>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendReply {
+        self.cmd_tx.send(NodeCommand::SendResponse {
             request_id,
             data_type,
             payload,
@@ -206,7 +198,7 @@ impl NodeHandle {
         metadata.extend_from_slice(&file_size.to_be_bytes());
 
         // 2. 发送元数据通知并等待确认
-        let response = self.Send_Bytes(peer, DataType::File, metadata).await?;
+        let response = self.Send_Data(peer, DataType::File, metadata).await?;
 
         // 3. 检查对方是否接受
         if response.payload != b"ACCEPT" {
@@ -219,29 +211,6 @@ impl NodeHandle {
     }
 
     // ===== 底层 API =====
-
-    /// 原始数据发送（fire-and-forget）
-    ///
-    /// 不等待 Response，仅保证命令进入发送队列。
-    ///
-    /// # Arguments
-    /// * `peer` - 目标节点 ID
-    /// * `data_type` - 数据类型标记（Command / Data / File）
-    /// * `payload` - 已序列化的字节流（由上层负责序列化）
-    pub async fn Send_Data(
-        &self,
-        peer: &PeerId,
-        data_type: DataType,
-        payload: Vec<u8>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendData {
-            peer: *peer,
-            data_type,
-            payload,
-            response_tx: None,
-        }).await?;
-        Ok(())
-    }
 
     /// 流式文件发送（直接传输，无协商）
     ///
@@ -296,21 +265,6 @@ impl NodeHandle {
     /// 断开与指定节点的连接
     pub async fn Disconnect(&self, peer: &PeerId) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.cmd_tx.send(NodeCommand::Disconnect { peer: *peer }).await?;
-        Ok(())
-    }
-
-    /// 发送响应（直接使用 ResponseChannel，仅内部使用）
-    pub async fn Send_Response(
-        &self,
-        channel: ResponseChannel<Network_Data>,
-        data_type: DataType,
-        payload: Vec<u8>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx.send(NodeCommand::SendResponse {
-            channel,
-            data_type,
-            payload,
-        }).await?;
         Ok(())
     }
 

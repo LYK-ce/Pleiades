@@ -3,7 +3,7 @@
 
 //! 节点间命令协议模块
 //!
-//! 定义节点之间通过 `Send_Bytes(DataType::Command)` 传输的命令格式。
+//! 定义节点之间通过 `Send_Data(DataType::Command)` 传输的命令格式。
 //! 使用简单的文本协议（`|` 分隔），便于 MVP 阶段调试。
 //!
 //! ## 命令列表
@@ -22,7 +22,7 @@ use libp2p::PeerId;
 
 /// 节点间命令
 ///
-/// 通过 `NodeHandle::Send_Bytes(peer, DataType::Command, payload)` 发送，
+/// 通过 `NodeHandle::Send_Data(peer, DataType::Command, payload)` 发送，
 /// 接收方在 `Handle_Inbound` 中解析并执行。
 #[derive(Debug, Clone)]
 pub enum Control_Command {
@@ -47,7 +47,7 @@ pub enum Control_Command {
     /// 配置流水线转发目标
     ///
     /// 协调者在加载完成后发送，参与者收到后记住 next_peer，
-    /// 推理完成后将结果 tensor 通过 Send_Bytes 发给 next_peer。
+    /// 推理完成后将结果 tensor 通过 Send_Data 发给 next_peer。
     ///
     /// - `next_peer`: 推理完成后结果发送的目标节点 PeerId
     Pipeline_Flow {
@@ -70,7 +70,7 @@ pub enum Control_Command {
 /// - `cmd`: 要序列化的命令
 ///
 /// # 返回
-/// 序列化后的字节流，用于 Send_Bytes 的 payload
+/// 序列化后的字节流，用于 Send_Data 的 payload
 pub fn Serialize_Command(cmd: &Control_Command) -> Vec<u8> {
     let text = match cmd {
         Control_Command::Work => "WORK".to_string(),

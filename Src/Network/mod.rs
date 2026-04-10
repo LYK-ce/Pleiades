@@ -13,8 +13,8 @@
 //! ## 对 Control 层暴露的接口
 //!
 //! ### 主动操作（通过 NodeHandle）
-//! - `Send_Bytes`: 发送数据并等待确认（同步语义）
-//! - `Send_Reply`: 回复入站请求（通过 request_id）
+//! - `Send_Data`: 发送数据并等待确认（同步语义）
+//! - `Send_Response`: 回复入站请求（通过 request_id）
 //! - `Send_File`: 文件传输（元数据协商 + 流式传输）
 //!
 //! ### 被动接收（通过 inbound_rx）

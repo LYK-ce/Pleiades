@@ -27,7 +27,7 @@ pub mod control;
 pub mod tui;
 
 // Config模块类型导出
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
 // Network模块类型导出
 pub use network::{NetworkConfig, NetworkEvent, Network_Service, NodeCommand, NodeHandle, PeerInfo};

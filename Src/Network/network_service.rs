@@ -12,7 +12,7 @@
 //! - File_Transfer_Manager: 文件传输管理器（定义在 file_transfer_manager.rs）
 //!
 //! 事件分流：
-//! - Response → 通过 oneshot 路由回 Send_Bytes 调用方
+//! - Response → 通过 oneshot 路由回 Send_Data 调用方
 //! - 入站 Request → 通过 inbound_tx 转发给 Control 层
 //! - 连接/发现事件 → 通过 event_sender 上报
 //! - 文件传输事件 → 通过 event_sender 上报
@@ -103,7 +103,7 @@ pub struct PeerInfo {
 /// 网络事件（发送给上层）
 ///
 /// 注意：DataReceived 不再通过此通道发送，改走 inbound_tx。
-/// Response 在内部通过 oneshot 路由回 Send_Bytes 调用方。
+/// Response 在内部通过 oneshot 路由回 Send_Data 调用方。
 #[derive(Debug)]
 pub enum NetworkEvent {
     /// 发现新节点
@@ -174,12 +174,12 @@ impl Network_Service {
     /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端)
     pub async fn Init(
         config: NetworkConfig,
+        keypair: Keypair,
         event_sender: mpsc::Sender<NetworkEvent>,
     ) -> Result<(Self, NodeHandle, mpsc::Receiver<InboundRequest>), Box<dyn Error>> {
-        info!("初始化网络节点...");
+        info!("初始化网络服务...");
 
-        // 1. 生成节点身份（临时生成）
-        let keypair = Keypair::generate_ed25519();
+        // 1. 使用传入的持久化密钥对
         let local_peer_id = PeerId::from(keypair.public());
         info!("本地节点ID: {}", local_peer_id);
 
@@ -446,16 +446,7 @@ impl Network_Service {
                 let _ = self.swarm.disconnect_peer_id(peer);
                 self.connected_peers.remove(&peer);
             }
-            NodeCommand::SendResponse { channel, data_type, payload } => {
-                let response = Network_Data { data_type, payload };
-                if let Err(e) = self.swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, response) {
-                    error!("发送响应失败: {:?}", e);
-                }
-            }
-            NodeCommand::SendReply { request_id, data_type, payload } => {
+            NodeCommand::SendResponse { request_id, data_type, payload } => {
                 // 从 inbound_manager 取出 ResponseChannel
                 if let Some(channel) = self.inbound_manager.Take_Reply_Channel(request_id) {
                     let response = Network_Data { data_type, payload };
@@ -579,7 +570,7 @@ impl Network_Service {
     /// 处理请求响应事件
     ///
     /// - Request（入站）：存储 ResponseChannel，通过 inbound_tx 转发给 Control 层
-    /// - Response（出站回复）：通过 oneshot 路由回 Send_Bytes 调用方
+    /// - Response（出站回复）：通过 oneshot 路由回 Send_Data 调用方
     /// - OutboundFailure：通知等待方发送失败
     async fn Handle_Request_Response_Event(
         &mut self,
@@ -596,7 +587,7 @@ impl Network_Service {
 
                     self.inbound_manager.Register_Inbound(peer, request, channel).await;
                 }
-                // ===== 出站响应：通过 outbound_manager 路由回 Send_Bytes 调用方 =====
+                // ===== 出站响应：通过 outbound_manager 路由回 Send_Data 调用方 =====
                 request_response::Message::Response { request_id, response, .. } => {
                     debug!("收到响应 from {} | type={:?} | size={} bytes",
                            peer, response.data_type, response.payload.len());

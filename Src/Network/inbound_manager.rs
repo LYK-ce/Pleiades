@@ -30,7 +30,7 @@ use super::node_handle::InboundRequest;
 /// 入站请求管理器
 ///
 /// 管理入站请求的分发和回复：
-/// - `pending_replies`: request_id → ResponseChannel，用于 Control 层调用 Send_Reply 时取出 channel
+/// - `pending_replies`: request_id → ResponseChannel，用于 Control 层调用 Send_Response 时取出 channel
 /// - `inbound_tx`: 入站请求转发通道，发送给 Control 层
 pub struct Inbound_Manager {
     /// 入站 ResponseChannel 存储：request_id → ResponseChannel
@@ -93,7 +93,7 @@ impl Inbound_Manager {
 
     /// 发送回复（根据 request_id 取出 ResponseChannel）
     ///
-    /// Control 层调用 Send_Reply 时，通过此方法取出之前存储的 channel 并发送回复。
+    /// Control 层调用 Send_Response 时，通过此方法取出之前存储的 channel 并发送回复。
     ///
     /// # 参数
     /// - `request_id`: 入站请求 ID
