@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use super::node::NetworkEvent;
+use super::network_service::NetworkEvent;
 
 // ===== 协议标识符 =====
 pub const FILE_STREAM_PROTOCOL: &str = "/pleiades/file-stream/1.0.0";

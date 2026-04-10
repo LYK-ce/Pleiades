@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use pleiades::{
-    Ensure_Config, NetworkConfig, Node, ML_Service_Handle,
+    Ensure_Config, NetworkConfig, Network_Service, ML_Service_Handle,
     Control_Loop, Ui_Message, TUI_Loop,
 };
 use pleiades::control::cli::CLI_Command;
@@ -83,7 +83,7 @@ async fn main() {
     };
 
     let (event_tx, event_rx) = mpsc::channel(100);
-    let (mut node, node_handle, inbound_rx) = match Node::Init(network_cfg, event_tx).await {
+    let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, event_tx).await {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[Error] 网络初始化失败: {}", e);
@@ -96,10 +96,10 @@ async fn main() {
         node_handle.Get_Local_Peer_Id()
     );
 
-    // 启动 Node 事件循环（后台任务）
+    // 启动 Network_Service 事件循环（后台任务）
     tokio::spawn(async move {
-        if let Err(e) = node.Start().await {
-            eprintln!("[Error] 网络节点运行错误: {}", e);
+        if let Err(e) = network_service.Start().await {
+            eprintln!("[Error] 网络服务运行错误: {}", e);
         }
     });
 

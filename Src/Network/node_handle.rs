@@ -4,7 +4,7 @@
 //! 网络节点对外 API 句柄模块
 //!
 //! 包含 NodeHandle（对外暴露的 API，可 Clone 可 Send）和
-//! NodeCommand（外部命令枚举，通过通道发送给 Node 执行）。
+//! NodeCommand（外部命令枚举，通过通道发送给 Network_Service 执行）。
 //!
 //! ## 主要 API
 //! - `Send_Data`: 原始数据发送（fire-and-forget）
@@ -26,13 +26,13 @@ use super::data_protocol::{DataType, Network_Data};
 
 // ===== 入站请求结构 =====
 
-/// 入站请求（由 Node 转发给 Control 层）
+/// 入站请求（由 Network_Service 转发给 Control 层）
 ///
 /// 不包含 libp2p 内部类型（ResponseChannel），
 /// Control 层通过 `request_id` 引用并回复。
 #[derive(Debug)]
 pub struct InboundRequest {
-    /// NetworkService/Node 内部分配的请求编号
+    /// Network_Service 内部分配的请求编号
     pub request_id: u64,
     /// 发送方节点 ID
     pub peer: PeerId,
@@ -90,7 +90,7 @@ pub enum NodeCommand {
     /// 获取指定节点的详细信息
     GetPeerInfo {
         peer: PeerId,
-        reply: oneshot::Sender<Option<super::node::PeerInfo>>,
+        reply: oneshot::Sender<Option<super::network_service::PeerInfo>>,
     },
     /// 停止节点
     Stop,
@@ -106,7 +106,7 @@ pub struct NodeHandle {
 }
 
 impl NodeHandle {
-    /// 创建新的 NodeHandle（仅供 Node::Init 内部使用）
+    /// 创建新的 NodeHandle（仅供 Network_Service::Init 内部使用）
     pub(crate) fn New(cmd_tx: mpsc::Sender<NodeCommand>, local_peer_id: PeerId) -> Self {
         Self { cmd_tx, local_peer_id }
     }
@@ -158,7 +158,7 @@ impl NodeHandle {
     /// 回复入站请求（通过 request_id）
     ///
     /// Control 层收到 InboundRequest 后，通过此方法回复。
-    /// Node 内部会用 request_id 找到对应的 ResponseChannel 发送。
+    /// Network_Service 内部会用 request_id 找到对应的 ResponseChannel 发送。
     ///
     /// # Arguments
     /// * `request_id` - 入站请求的编号（来自 InboundRequest.request_id）
@@ -335,7 +335,7 @@ impl NodeHandle {
     pub async fn Get_Peer_Info(
         &self,
         peer: &PeerId,
-    ) -> Result<Option<super::node::PeerInfo>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<super::network_service::PeerInfo>, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(NodeCommand::GetPeerInfo { peer: *peer, reply: tx }).await?;
         let info = rx.await.map_err(|_| "GetPeerInfo reply channel closed")?;

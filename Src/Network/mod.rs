@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-03
+//Date ： 2026-04-10
 
 //! 网络层模块
 //!
@@ -20,16 +20,23 @@
 //! ### 被动接收（通过 inbound_rx）
 //! - `InboundRequest`: 其他节点发来的数据请求
 //!
+//! ## 内部组件
+//! - `inbound_request_manager`: 入站请求与响应路由管理
+//! - `file_transfer_manager`: 文件传输管理（流式传输控制、文件保存）
+//!
 //! 网络层只负责发送和接收字节流，不负责序列化/反序列化。
 
-pub mod node;
+pub mod network_service;
 pub mod node_handle;
 pub mod data_protocol;
 pub mod stream_protocol;
+pub mod inbound_manager;
+pub mod outbound_manager;
+pub mod file_transfer_manager;
 
 
 // 重新导出常用类型
-pub use node::{NetworkConfig, NetworkEvent, Node, PeerInfo};
+pub use network_service::{NetworkConfig, NetworkEvent, Network_Service, PeerInfo};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
 pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
 pub use stream_protocol::{FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream, CHUNK_SIZE};

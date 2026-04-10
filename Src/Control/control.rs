@@ -30,7 +30,7 @@ use crate::ml_engine::gguf_tensor::{
     GGUF_Tensor_Packet, GGUF_Tensor_Serialize, GGUF_Tensor_Deserialize, GGUF_Dtype,
 };
 use crate::network::data_protocol::DataType;
-use crate::network::node::NetworkEvent;
+use crate::network::network_service::NetworkEvent;
 use crate::network::node_handle::{InboundRequest, NodeHandle};
 
 /// 自回归生成最大轮数
@@ -790,6 +790,14 @@ async fn Handle_Inbound(
                     error!("Busy: next_peer 未设置");
                 }
             }
+        }
+
+        // ===== Info 消息：暂未处理，回复 OK =====
+        DataType::Info => {
+            debug!("收到 Info 消息 (来自 {}), 暂未处理", req.peer);
+            let _ = node_handle
+                .Send_Reply(req.request_id, DataType::Info, b"OK".to_vec())
+                .await;
         }
     }
 }

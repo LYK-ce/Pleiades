@@ -1,13 +1,15 @@
 //Presented by KeJi
-//Date ： 2026-04-03
+//Date ： 2026-04-10
 
-//! 网络节点核心模块
+//! 网络服务核心模块
 //! 负责Swarm管理、连接管理、事件处理
 //!
 //! 架构设计：
-//! - Node: 内部网络节点，运行事件循环
+//! - Network_Service: 网络服务实例，运行事件循环
 //! - NodeHandle: 对外暴露的API句柄（定义在 node_handle.rs）
 //! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
+//! - Inbound_Request_Manager: 入站请求与响应路由管理器（定义在 inbound_request_manager.rs）
+//! - File_Transfer_Manager: 文件传输管理器（定义在 file_transfer_manager.rs）
 //!
 //! 事件分流：
 //! - Response → 通过 oneshot 路由回 Send_Bytes 调用方
@@ -24,7 +26,7 @@ use libp2p::{
     kad::{self, store::MemoryStore, Mode},
     mdns,
     noise,
-    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
+    request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
@@ -33,16 +35,16 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
 use super::data_protocol::{
     Network_Data, PleiadesCodec, DATA_PROTOCOL,
 };
-use super::stream_protocol::{
-    FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream,
-};
+use super::inbound_manager::Inbound_Manager;
+use super::outbound_manager::Outbound_Manager;
+use super::file_transfer_manager::File_Transfer_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 
 /// 网络配置
@@ -136,8 +138,8 @@ pub enum NetworkEvent {
     RecordNotFound { key: Vec<u8> },
 }
 
-/// 网络节点（内部实现）
-pub struct Node {
+/// 网络服务（内部实现）
+pub struct Network_Service {
     /// Swarm实例
     swarm: Swarm<PleiadesNetworkBehaviour>,
     /// 本地节点ID
@@ -148,36 +150,28 @@ pub struct Node {
     event_sender: mpsc::Sender<NetworkEvent>,
     /// 命令接收器（接收外部命令）
     cmd_rx: mpsc::Receiver<NodeCommand>,
-    /// 流式传输控制句柄
-    stream_control: stream::Control,
     /// 配置
     config: NetworkConfig,
-    /// 文件保存目录
-    save_dir: PathBuf,
 
-    // ===== 新增：Response 路由与入站请求管理 =====
+    // ===== 组件化管理器 =====
 
-    /// 出站 Response 路由：OutboundRequestId → oneshot Sender
-    /// 当 Send_Bytes 发出请求后，Response 到达时通过此映射回传
-    pending_responses: HashMap<OutboundRequestId, oneshot::Sender<Result<Network_Data, String>>>,
-    /// 入站 ResponseChannel 存储：request_id → ResponseChannel
-    /// 当 Control 层调用 Send_Reply(request_id) 时，从此映射取出 channel
-    pending_replies: HashMap<u64, ResponseChannel<Network_Data>>,
-    /// 入站请求发送器（转发给 Control 层）
-    inbound_tx: mpsc::Sender<InboundRequest>,
-    /// 入站请求 ID 自增计数器
-    next_inbound_id: u64,
+    /// 入站请求管理器（负责入站请求分发、回复管理）
+    inbound_manager: Inbound_Manager,
+    /// 出站响应路由管理器（负责出站 Response 路由回调用方）
+    outbound_manager: Outbound_Manager,
+    /// 文件传输管理器（负责流式传输控制、文件保存目录、发送/接收任务）
+    file_transfer_manager: File_Transfer_Manager,
 }
 
-impl Node {
-    /// 初始化网络节点
+impl Network_Service {
+    /// 初始化网络服务
     ///
     /// # Arguments
     /// * `config` - 网络配置
     /// * `event_sender` - 事件发送通道（连接/文件/DHT 事件）
     ///
     /// # Returns
-    /// (Node实例, NodeHandle句柄, inbound_rx 入站请求接收端)
+    /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端)
     pub async fn Init(
         config: NetworkConfig,
         event_sender: mpsc::Sender<NetworkEvent>,
@@ -240,11 +234,14 @@ impl Node {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(86400)))
             .build();
 
-        // 5. 获取流式传输控制句柄
+        // 5. 获取流式传输控制句柄并创建文件传输管理器
         let stream_control = node_swarm.behaviour().stream.new_control();
-
-        // 6. 创建文件保存目录
         let save_dir = PathBuf::from("Pleiades_Workspace");
+        let file_transfer_manager = File_Transfer_Manager::New(stream_control, save_dir);
+
+        // 6. 创建入站请求管理器和出站响应路由管理器
+        let inbound_manager = Inbound_Manager::New(inbound_tx);
+        let outbound_manager = Outbound_Manager::New();
 
         // 7. 创建Node实例
         let mut node = Self {
@@ -253,14 +250,10 @@ impl Node {
             connected_peers: HashMap::new(),
             event_sender,
             cmd_rx,
-            stream_control,
             config,
-            save_dir,
-            // 新增字段
-            pending_responses: HashMap::new(),
-            pending_replies: HashMap::new(),
-            inbound_tx,
-            next_inbound_id: 1,
+            inbound_manager,
+            outbound_manager,
+            file_transfer_manager,
         };
 
         // 添加引导节点
@@ -298,10 +291,7 @@ impl Node {
         }
 
         // 3. 注册流式传输协议，接受入站流
-        let mut incoming_streams = self
-            .stream_control
-            .accept(StreamProtocol::new(FILE_STREAM_PROTOCOL))
-            .expect("流式传输协议注册失败");
+        let mut incoming_streams = self.file_transfer_manager.Accept_Incoming();
 
         // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
         info!("进入网络事件循环");
@@ -320,33 +310,13 @@ impl Node {
                     }
                 }
                 // 处理入站流式传输
-                Some((peer_id, mut stream)) = incoming_streams.next() => {
+                Some((peer_id, stream)) = incoming_streams.next() => {
                     info!("收到流式传输连接 from {}", peer_id);
-                    let event_sender = self.event_sender.clone();
-                    let save_dir = self.save_dir.clone();
-                    // 在独立任务中处理流式接收，避免阻塞事件循环
-                    tokio::spawn(async move {
-                        match Receive_File_Stream(&mut stream, &save_dir, event_sender.clone(), peer_id).await {
-                            Ok(file_path) => {
-                                info!("流式文件接收完成: {} from {}", file_path.display(), peer_id);
-                                let _ = event_sender
-                                    .send(NetworkEvent::FileStreamReceived {
-                                        peer: peer_id,
-                                        file_path,
-                                    })
-                                    .await;
-                            }
-                            Err(e) => {
-                                error!("流式文件接收失败 from {}: {}", peer_id, e);
-                                let _ = event_sender
-                                    .send(NetworkEvent::FileStreamError {
-                                        peer: peer_id,
-                                        error: e.to_string(),
-                                    })
-                                    .await;
-                            }
-                        }
-                    });
+                    self.file_transfer_manager.Spawn_Receive(
+                        peer_id,
+                        stream,
+                        self.event_sender.clone(),
+                    );
                 }
             }
         }
@@ -429,53 +399,19 @@ impl Node {
                     .request_response
                     .send_request(&peer, request);
 
-                // 如果调用方需要等待 Response，存入 pending_responses
+                // 如果调用方需要等待 Response，注册到 outbound_manager
                 if let Some(tx) = response_tx {
-                    self.pending_responses.insert(outbound_id, tx);
+                    self.outbound_manager.Register_Outbound(outbound_id, tx);
                 }
             }
             NodeCommand::SendFileStream { peer, file_path, completion_tx } => {
                 info!("流式发送文件到 {} | path={}", peer, file_path.display());
-                let mut control = self.stream_control.clone();
-                let event_sender = self.event_sender.clone();
-                let protocol = StreamProtocol::new(FILE_STREAM_PROTOCOL);
-                // 在独立任务中处理流式发送，避免阻塞事件循环
-                tokio::spawn(async move {
-                    let result = match control.open_stream(peer, protocol).await {
-                        Ok(mut stream) => {
-                            match Send_File_Stream(&mut stream, &file_path, event_sender.clone(), peer).await {
-                                Ok(()) => {
-                                    info!("流式文件发送完成: {} -> {}", file_path.display(), peer);
-                                    Ok(())
-                                }
-                                Err(e) => {
-                                    error!("流式文件发送失败: {} -> {}: {}", file_path.display(), peer, e);
-                                    let _ = event_sender
-                                        .send(NetworkEvent::FileStreamError {
-                                            peer,
-                                            error: e.to_string(),
-                                        })
-                                        .await;
-                                    Err(e.to_string())
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("打开流式传输连接失败 -> {}: {}", peer, e);
-                            let _ = event_sender
-                                .send(NetworkEvent::FileStreamError {
-                                    peer,
-                                    error: e.to_string(),
-                                })
-                                .await;
-                            Err(e.to_string())
-                        }
-                    };
-                    // 通知调用方传输完成
-                    if let Some(tx) = completion_tx {
-                        let _ = tx.send(result);
-                    }
-                });
+                self.file_transfer_manager.Spawn_Send(
+                    peer,
+                    file_path,
+                    completion_tx,
+                    self.event_sender.clone(),
+                );
             }
             NodeCommand::PutRecord { key, value } => {
                 let record_key = kad::RecordKey::new(&key);
@@ -520,8 +456,8 @@ impl Node {
                 }
             }
             NodeCommand::SendReply { request_id, data_type, payload } => {
-                // 从 pending_replies 取出 ResponseChannel
-                if let Some(channel) = self.pending_replies.remove(&request_id) {
+                // 从 inbound_manager 取出 ResponseChannel
+                if let Some(channel) = self.inbound_manager.Take_Reply_Channel(request_id) {
                     let response = Network_Data { data_type, payload };
                     if let Err(e) = self.swarm
                         .behaviour_mut()
@@ -531,8 +467,6 @@ impl Node {
                     } else {
                         debug!("回复已发送 (request_id={})", request_id);
                     }
-                } else {
-                    warn!("未找到入站请求 request_id={}", request_id);
                 }
             }
             NodeCommand::GetPeers { reply } => {
@@ -552,10 +486,9 @@ impl Node {
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                 }
                 self.connected_peers.clear();
-                // 清理 pending_responses（通知等待方）
-                for (_, tx) in self.pending_responses.drain() {
-                    let _ = tx.send(Err("Node stopped".to_string()));
-                }
+                // 清理所有 pending 状态
+                self.inbound_manager.Clear_All();
+                self.outbound_manager.Clear_All();
                 return false;
             }
         }
@@ -654,42 +587,21 @@ impl Node {
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
-                // ===== 入站请求：转发给 Control 层 =====
+                // ===== 入站请求：通过 inbound_manager 转发给 Control 层 =====
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
                     info!("收到数据请求 from {} | type={:?} | size={} bytes",
                           peer, request.data_type, request.payload.len());
 
-                    // 分配 request_id，存储 ResponseChannel
-                    let request_id = self.next_inbound_id;
-                    self.next_inbound_id += 1;
-                    self.pending_replies.insert(request_id, channel);
-
-                    // 转发给 Control 层（不含 libp2p 内部类型）
-                    let inbound = InboundRequest {
-                        request_id,
-                        peer,
-                        data_type: request.data_type,
-                        payload: request.payload,
-                    };
-                    if let Err(e) = self.inbound_tx.send(inbound).await {
-                        error!("转发入站请求失败: {}", e);
-                        // 如果发送失败，清理 pending_replies
-                        self.pending_replies.remove(&request_id);
-                    }
+                    self.inbound_manager.Register_Inbound(peer, request, channel).await;
                 }
-                // ===== 出站响应：路由回 Send_Bytes 调用方 =====
+                // ===== 出站响应：通过 outbound_manager 路由回 Send_Bytes 调用方 =====
                 request_response::Message::Response { request_id, response, .. } => {
                     debug!("收到响应 from {} | type={:?} | size={} bytes",
                            peer, response.data_type, response.payload.len());
 
-                    // 用 OutboundRequestId 匹配 pending_responses
-                    if let Some(tx) = self.pending_responses.remove(&request_id) {
-                        let _ = tx.send(Ok(response));
-                    } else {
-                        debug!("收到未追踪的响应 (request_id={:?})", request_id);
-                    }
+                    self.outbound_manager.Route_Response(request_id, response);
                 }
             },
             request_response::Event::OutboundFailure {
@@ -699,10 +611,7 @@ impl Node {
                 ..
             } => {
                 error!("发送失败 to {}: {:?}", peer, error);
-                // 通知等待方发送失败
-                if let Some(tx) = self.pending_responses.remove(&request_id) {
-                    let _ = tx.send(Err(format!("Outbound failure: {:?}", error)));
-                }
+                self.outbound_manager.Route_Failure(request_id, format!("Outbound failure: {:?}", error));
             }
             request_response::Event::InboundFailure {
                 peer,

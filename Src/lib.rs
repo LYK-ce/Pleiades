@@ -30,7 +30,7 @@ pub mod tui;
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config};
 
 // Network模块类型导出
-pub use network::{NetworkConfig, NetworkEvent, Node, NodeCommand, NodeHandle, PeerInfo};
+pub use network::{NetworkConfig, NetworkEvent, Network_Service, NodeCommand, NodeHandle, PeerInfo};
 pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
 pub use network::data_protocol;
