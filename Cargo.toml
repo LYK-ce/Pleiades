@@ -28,7 +28,7 @@ tracing-appender = "0.2"
 chrono = "0.4"
 
 # P2P网络
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.56", features = [
     "tokio",
     "tcp",
     "noise",
@@ -49,13 +49,34 @@ bincode = "1.3"
 # 异步trait支持
 async-trait = "0.1"
 
-# ONNX Runtime
-ort = { version = "2.0.0-rc.12", features = ["download-binaries", "cuda"] }
-ndarray = "0.16"
-ndarray-npy = "0.9"  # 读取npz测试数据
-half = "2.3"        # FP16 支持
+# Candle ML框架 (GGUF推理)
+candle-core = { version = "0.10.2", features = ["cuda"] }
+candle-nn = { version = "0.10.2", features = ["cuda"] }
+candle-transformers = { version = "0.10.2", features = ["cuda"] }
+anyhow = "1.0"
+
+# 系统工具
 num_cpus = "1.16"
 thiserror = "1.0"   # 可选，用于简化错误定义
 
+# TUI界面
+ratatui = "0.30"
+crossterm = "0.27"
+
+# 配置文件编辑
+toml_edit = "0.22"
+
+# 分词器
+shimmytok = "0.7"
+
+# P2P网络流
+libp2p-stream = "0.4.0-alpha"
+
 [dev-dependencies]
 tokio-test = "0.4"
+# 测试使用的数值计算库
+ndarray = "0.16"
+ndarray-npy = "0.9"  # 读取npz测试数据
+half = "2.3"        # FP16 支持
+# ONNX Runtime测试依赖
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "cuda"] }
