@@ -35,7 +35,6 @@ pub use gguf_model_manager::{
 pub use gguf_models::{
     Gguf, Rotary_Embedding, Mlp_Weights, Attention_Weights,
     Layer_Weights, Model_Weights, Qwen3_Config,
-    Model_First_Half, Model_Second_Half, Build_Causal_Mask,
 };
 pub use gguf_model::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
