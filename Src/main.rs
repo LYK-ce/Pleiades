@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-09
+//Date ： 2026-04-13
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -9,7 +9,7 @@ use tracing::info;
 use libp2p;
 
 use pleiades::{
-    Ensure_Config, Ensure_Identity, NetworkConfig, Network_Service, ML_Service_Handle,
+    Ensure_Config, Ensure_Identity, NetworkConfig, Network_Service,
     Control_Loop, Ui_Message, TUI_Loop,
 };
 use pleiades::control::cli::CLI_Command;
@@ -116,10 +116,8 @@ async fn main() {
     });
 
     // ============================================================
-    // 5. 初始化 ML Service
+    // 5. 读取设备配置，并进行 CUDA fallback 检查
     // ============================================================
-    let ml_service = ML_Service_Handle::Init();
-    info!("ML Service 已初始化");
 
     // 读取设备配置，并进行 CUDA fallback 检查
     let config_device = config
@@ -162,7 +160,7 @@ async fn main() {
     // ============================================================
     // 7. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
-    Control_Loop(cli_rx, inbound_rx, event_rx, ml_service, node_handle, device, config_path, ui_tx).await;
+    Control_Loop(cli_rx, inbound_rx, event_rx, node_handle, device, config_path, ui_tx).await;
 
     info!("Pleiades 已退出");
 }

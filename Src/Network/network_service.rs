@@ -10,12 +10,14 @@
 //! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
 //! - Inbound_Request_Manager: 入站请求与响应路由管理器（定义在 inbound_request_manager.rs）
 //! - File_Transfer_Manager: 文件传输管理器（定义在 file_transfer_manager.rs）
+//! - Tensor_Stream_Manager: 张量流传输管理器（定义在 tensor_stream_manager.rs）
 //!
 //! 事件分流：
 //! - Response → 通过 oneshot 路由回 Send_Data 调用方
 //! - 入站 Request → 通过 inbound_tx 转发给 Control 层
 //! - 连接/发现事件 → 通过 event_sender 上报
 //! - 文件传输事件 → 通过 event_sender 上报
+//! - 入站张量流 → 交给 Tensor_Stream_Manager 保存
 //!
 //! 注意：
 //! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
@@ -45,6 +47,7 @@ use super::data_protocol::{
 use super::inbound_manager::Inbound_Manager;
 use super::outbound_manager::Outbound_Manager;
 use super::file_transfer_manager::File_Transfer_Manager;
+use super::tensor_stream_manager::Tensor_Stream_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 
 /// 网络配置
@@ -161,6 +164,12 @@ pub struct Network_Service {
     outbound_manager: Outbound_Manager,
     /// 文件传输管理器（负责流式传输控制、文件保存目录、发送/接收任务）
     file_transfer_manager: File_Transfer_Manager,
+    /// 入站张量流管理器（接收端，持有 input_buffer）
+    inbound_tensor_manager: Option<Tensor_Stream_Manager>,
+    /// 出站张量流管理器（发送端，持有 output_buffer）
+    outbound_tensor_manager: Option<Tensor_Stream_Manager>,
+    /// 张量流控制句柄（用于创建 Tensor_Stream_Manager 实例）
+    tensor_stream_control: stream::Control,
 }
 
 impl Network_Service {
@@ -239,6 +248,9 @@ impl Network_Service {
         let save_dir = PathBuf::from("Pleiades_Workspace");
         let file_transfer_manager = File_Transfer_Manager::New(stream_control, save_dir);
 
+        // 5.1 获取第二个控制句柄（用于 tensor stream）
+        let tensor_stream_control = node_swarm.behaviour().stream.new_control();
+
         // 6. 创建入站请求管理器和出站响应路由管理器
         let inbound_manager = Inbound_Manager::New(inbound_tx);
         let outbound_manager = Outbound_Manager::New();
@@ -254,6 +266,9 @@ impl Network_Service {
             inbound_manager,
             outbound_manager,
             file_transfer_manager,
+            inbound_tensor_manager: None,
+            outbound_tensor_manager: None,
+            tensor_stream_control,
         };
 
         // 添加引导节点
@@ -291,7 +306,16 @@ impl Network_Service {
         }
 
         // 3. 注册流式传输协议，接受入站流
-        let mut incoming_streams = self.file_transfer_manager.Accept_Incoming();
+        let mut incoming_file_streams = self.file_transfer_manager.Accept_Incoming();
+
+        // 3.1 注册张量流协议，创建临时 manager 获取 incoming 迭代器
+        // 注意：tensor_stream_manager 是 Option，这里用临时 manager 来注册协议
+        let mut temp_tensor_control = self.tensor_stream_control.clone();
+        let mut incoming_tensor_streams = temp_tensor_control
+            .accept(libp2p::StreamProtocol::new(
+                super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL,
+            ))
+            .expect("张量流协议注册失败");
 
         // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
         info!("进入网络事件循环");
@@ -309,14 +333,23 @@ impl Network_Service {
                         break;
                     }
                 }
-                // 处理入站流式传输
-                Some((peer_id, stream)) = incoming_streams.next() => {
-                    info!("收到流式传输连接 from {}", peer_id);
+                // 处理入站文件流式传输
+                Some((peer_id, stream)) = incoming_file_streams.next() => {
+                    info!("收到文件流式传输连接 from {}", peer_id);
                     self.file_transfer_manager.Spawn_Receive(
                         peer_id,
                         stream,
                         self.event_sender.clone(),
                     );
+                }
+                // 处理入站张量流
+                Some((peer_id, stream)) = incoming_tensor_streams.next() => {
+                    info!("收到张量流连接 from {}", peer_id);
+                    if let Some(ref mut manager) = self.inbound_tensor_manager {
+                        manager.Set_Stream(peer_id, stream);
+                    } else {
+                        warn!("收到张量流但入站 Tensor_Stream_Manager 未创建, 忽略 (from {})", peer_id);
+                    }
                 }
             }
         }
@@ -470,8 +503,57 @@ impl Network_Service {
                 debug!("查询节点信息: {} -> {:?}", peer, info.is_some());
                 let _ = reply.send(info);
             }
+            // ===== Tensor Stream 命令 =====
+            NodeCommand::CreateTensorStream { reply } => {
+                info!("创建 Tensor_Stream_Manager (inbound + outbound)");
+                let inbound_control = self.tensor_stream_control.clone();
+                let outbound_control = self.tensor_stream_control.clone();
+                self.inbound_tensor_manager = Some(Tensor_Stream_Manager::New(inbound_control));
+                self.outbound_tensor_manager = Some(Tensor_Stream_Manager::New(outbound_control));
+                let _ = reply.send(Ok(()));
+            }
+            NodeCommand::OpenTensorStream { peer, reply } => {
+                info!("打开出站张量流 → {}", peer);
+                if let Some(ref mut manager) = self.outbound_tensor_manager {
+                    let result = manager.Open_Stream(peer).await;
+                    let _ = reply.send(result.map_err(|e| format!("{}", e)));
+                } else {
+                    let _ = reply.send(Err("出站 Tensor_Stream_Manager 未创建".to_string()));
+                }
+            }
+            NodeCommand::TakeTensorStreams { reply } => {
+                info!("移交张量流所有权");
+                // 先检查两边都就绪，再 Take（避免 Take 后另一边 None 导致 stream 丢失）
+                let inbound_ready = self.inbound_tensor_manager.as_ref()
+                    .map_or(false, |m| m.Has_Stream());
+                let outbound_ready = self.outbound_tensor_manager.as_ref()
+                    .map_or(false, |m| m.Has_Stream());
+
+                if inbound_ready && outbound_ready {
+                    let inbound = self.inbound_tensor_manager.as_mut()
+                        .unwrap().Take_Stream().unwrap();
+                    let outbound = self.outbound_tensor_manager.as_mut()
+                        .unwrap().Take_Stream().unwrap();
+                    let _ = reply.send(Ok((inbound, outbound)));
+                } else {
+                    let _ = reply.send(Err(format!(
+                        "张量流未就绪（inbound: {}, outbound: {}）",
+                        inbound_ready, outbound_ready
+                    )));
+                }
+            }
+            NodeCommand::CloseTensorStream { reply } => {
+                info!("关闭张量流 Manager");
+                // 清理 manager（如果 stream 已被 Take，manager 里为空；否则 drop stream）
+                self.outbound_tensor_manager = None;
+                self.inbound_tensor_manager = None;
+                let _ = reply.send(Ok(()));
+            }
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
+                // 清理张量流 manager
+                self.outbound_tensor_manager = None;
+                self.inbound_tensor_manager = None;
                 // 关闭所有连接
                 for peer_id in self.connected_peers.keys().cloned().collect::<Vec<_>>() {
                     let _ = self.swarm.disconnect_peer_id(peer_id);

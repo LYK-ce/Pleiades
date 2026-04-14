@@ -364,55 +364,46 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
     }
 
     if trimmed.starts_with("run ") {
-        // 解析 run 命令: run <model_path> <prompt>
-        let rest = trimmed.strip_prefix("run ").unwrap_or("").trim();
-        if let Some(space_idx) = rest.find(' ') {
-            let model_path_str = &rest[..space_idx];
-            let prompt = rest[space_idx + 1..].trim();
+        // 解析 run 命令: run <model_path>（不含 prompt）
+        let model_path_str = trimmed.strip_prefix("run ").unwrap_or("").trim();
 
-            // 去掉 prompt 两端引号
-            let prompt = if (prompt.starts_with('"') && prompt.ends_with('"'))
-                || (prompt.starts_with('\'') && prompt.ends_with('\''))
-            {
-                &prompt[1..prompt.len() - 1]
-            } else {
-                prompt
-            };
-
-            if prompt.is_empty() {
-                app.command_output.output_text = "错误: 缺少 prompt 参数\n用法: run <model_path> <prompt>".to_string();
-                app.command_output.completed = true;
-                return;
-            }
-
-            let (reply_tx, _reply_rx) = oneshot::channel();
-            let cmd = CLI_Command::Run {
-                model_path: PathBuf::from(model_path_str),
-                prompt: prompt.to_string(),
-                reply: reply_tx,
-            };
-
-            app.Add_Log(format!("执行命令: run {} {}", model_path_str, prompt));
-            app.command_output.output_text = "等待推理输出...".to_string();
-
-            if cli_tx.blocking_send(cmd).is_err() {
-                app.Add_Log("[错误] Control 层已关闭".to_string());
-                app.should_quit = true;
-            }
-        } else {
-            app.command_output.output_text = "用法: run <model_path> <prompt>".to_string();
+        if model_path_str.is_empty() {
+            app.command_output.output_text = "错误: 缺少 model_path 参数\n用法: run <model_path>".to_string();
             app.command_output.completed = true;
+            return;
+        }
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let cmd = CLI_Command::Run {
+            model_path: PathBuf::from(model_path_str),
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: run {}", model_path_str));
+        app.command_output.output_text = "建立推理会话中...".to_string();
+
+        if cli_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Control 层已关闭".to_string());
+            app.should_quit = true;
         }
         return;
     }
 
-    // 未知命令
-    app.command_output.output_text = format!(
-        "未知命令: '{}'\n\n可用命令:\n  run <model_path> <prompt>  运行推理\n  set-device cpu/cuda       切换计算设备\n  ls                        列出工作区文件\n  clear                     清空日志\n  quit                      退出",
-        trimmed
-    );
-    app.command_output.completed = true;
-    app.Add_Log(format!("未知命令: '{}'", trimmed));
+    // 非命令文本 → 视为 prompt 输入（发送给活跃的推理 Session）
+    let (reply_tx, _reply_rx) = oneshot::channel();
+    let cmd = CLI_Command::Input {
+        prompt: trimmed.to_string(),
+        reply: reply_tx,
+    };
+
+    app.Add_Log(format!("发送 prompt: {}", trimmed));
+    app.command_output = Command_Output::New();
+    app.command_output.output_text = String::new();
+
+    if cli_tx.blocking_send(cmd).is_err() {
+        app.Add_Log("[错误] Control 层已关闭".to_string());
+        app.should_quit = true;
+    }
 }
 
 // ============================================================

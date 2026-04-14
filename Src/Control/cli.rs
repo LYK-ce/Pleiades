@@ -1,10 +1,15 @@
 //Presented by KeJi
-//Date ： 2026-04-09
+//Date ： 2026-04-13
 
 //! CLI 模块 - 用户命令行交互
 //!
 //! 在独立的阻塞线程中运行，读取用户输入并通过 channel 发送给 Control 层。
-//! MVP 阶段只支持一个命令: `run <model_path> <prompt>`
+//!
+//! ## 支持的命令
+//! - `run <model_path>`: 建立推理会话（分析/切分/分发/加载模型/组建 Pipeline）
+//! - `<prompt text>`: 在会话活跃时，任意非命令文本视为 prompt 发送给 Engine
+//! - `set-device cpu/cuda`: 切换计算设备
+//! - `quit`: 退出程序
 //!
 //! ## 运行方式
 //! 使用 `tokio::task::spawn_blocking` 在独立线程中运行，
@@ -22,12 +27,23 @@ use tracing::info;
 // CLI 命令枚举
 // ============================================================
 
-/// CLI 命令（从 CLI 线程发送给 Control 层）
+/// CLI 命令（从 CLI/TUI 线程发送给 Control 层）
 pub enum CLI_Command {
-    /// 运行推理任务
+    /// 建立推理会话（不含 prompt）
+    ///
+    /// 触发模型分析、切分、分发、Session 创建、Pipeline 组建。
+    /// 完成后 Engine 执行 Input 指令阻塞等待 prompt。
     Run {
         /// 模型文件路径
         model_path: PathBuf,
+        /// 结果回传通道
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// 发送 prompt 到活跃的推理会话
+    ///
+    /// 仅在 Run 建立 Session 后有效。
+    /// Control 层通过 Session_Handle.Send_Input() 转发给 Engine。
+    Input {
         /// 推理 prompt
         prompt: String,
         /// 结果回传通道
@@ -45,7 +61,7 @@ pub enum CLI_Command {
 }
 
 // ============================================================
-// CLI 主循环
+// CLI 主循环（Legacy，TUI 模式下不使用）
 // ============================================================
 
 /// 启动 CLI 循环（在 spawn_blocking 中调用）
@@ -63,7 +79,7 @@ pub fn CLI_Loop(cli_tx: mpsc::Sender<CLI_Command>) {
     println!();
     println!("=========================================");
     println!("  Pleiades - 分布式推理运行时框架");
-    println!("  命令: run <model_path> <prompt>");
+    println!("  命令: run <model_path>");
     println!("  退出: quit");
     println!("=========================================");
     println!();
@@ -106,14 +122,13 @@ pub fn CLI_Loop(cli_tx: mpsc::Sender<CLI_Command>) {
 
         if input.starts_with("run ") {
             match Parse_Run_Command(input) {
-                Ok((model_path, prompt)) => {
+                Ok(model_path) => {
                     let (reply_tx, reply_rx) = oneshot::channel();
 
                     // 发送命令给 Control 层
                     if cli_tx
                         .blocking_send(CLI_Command::Run {
                             model_path,
-                            prompt: prompt.clone(),
                             reply: reply_tx,
                         })
                         .is_err()
@@ -137,13 +152,13 @@ pub fn CLI_Loop(cli_tx: mpsc::Sender<CLI_Command>) {
                 }
                 Err(e) => {
                     eprintln!("[错误] {}", e);
-                    eprintln!("用法: run <model_path> <prompt>");
+                    eprintln!("用法: run <model_path>");
                 }
             }
         } else {
             eprintln!("[错误] 未知命令: '{}'", input);
             eprintln!("可用命令:");
-            eprintln!("  run <model_path> <prompt>  - 运行分布式推理");
+            eprintln!("  run <model_path>           - 建立推理会话");
             eprintln!("  quit                       - 退出程序");
         }
     }
@@ -157,46 +172,19 @@ pub fn CLI_Loop(cli_tx: mpsc::Sender<CLI_Command>) {
 
 /// 解析 run 命令
 ///
-/// 格式: `run <model_path> <prompt>`
-///
-/// prompt 支持两种格式:
-/// - 带引号: `run model.gguf "你好世界"`
-/// - 不带引号: `run model.gguf 你好世界` (model_path 后的所有内容视为 prompt)
+/// 格式: `run <model_path>`
 ///
 /// # 返回
-/// (model_path, prompt)
-fn Parse_Run_Command(input: &str) -> Result<(PathBuf, String), String> {
+/// model_path (PathBuf)
+fn Parse_Run_Command(input: &str) -> Result<PathBuf, String> {
     // 去掉 "run " 前缀
     let rest = input.strip_prefix("run ").unwrap_or("").trim();
 
     if rest.is_empty() {
-        return Err("缺少参数: model_path 和 prompt".to_string());
+        return Err("缺少参数: model_path".to_string());
     }
 
-    // 查找 model_path 和 prompt 的分割点
-    // model_path 是第一个空格之前的部分
-    let (model_path_str, prompt_str) = if let Some(space_idx) = rest.find(' ') {
-        let path = &rest[..space_idx];
-        let prompt = rest[space_idx + 1..].trim();
-        (path, prompt)
-    } else {
-        return Err("缺少参数: prompt".to_string());
-    };
+    let model_path = PathBuf::from(rest);
 
-    if prompt_str.is_empty() {
-        return Err("缺少参数: prompt".to_string());
-    }
-
-    // 去掉 prompt 两端的引号（如果有）
-    let prompt = if (prompt_str.starts_with('"') && prompt_str.ends_with('"'))
-        || (prompt_str.starts_with('\'') && prompt_str.ends_with('\''))
-    {
-        prompt_str[1..prompt_str.len() - 1].to_string()
-    } else {
-        prompt_str.to_string()
-    };
-
-    let model_path = PathBuf::from(model_path_str);
-
-    Ok((model_path, prompt))
+    Ok(model_path)
 }

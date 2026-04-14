@@ -302,56 +302,34 @@ pub fn GGUF_Unload_Model(model: GGUF_Model) -> bool {
     true
 }
 
-/// GGUF_Model_Inference(model, token_ids, offset)
+/// GGUF_Model_Inference(model, input, offset)
 ///
-/// 对输入的 token IDs 进行单步前向推理（让模型所有层推理一次）。
-/// 此函数不进行自回归循环，只执行一次完整的模型前向传播：
-///   token_ids → embedding → 所有层 → output_norm → lm_head → logits
+/// 对输入 Tensor 进行单步前向推理（让模型所有层推理一次）。
+/// 此函数不进行自回归循环，只执行一次完整的模型前向传播。
 ///
 /// 自回归生成循环由调用方负责管理。
 ///
+/// 模型内部（Model_Weights::Forward）根据自身结构自动适配输入：
+/// - 有 embedding 层 (embed_tokens): input 为 token IDs 张量 [batch, seq_len]（u32）
+///   → 自动经过 embedding → transformer blocks → 输出
+/// - 无 embedding 层: input 为 hidden state 张量 [batch, seq_len, hidden_dim]（f32）
+///   → 直接输入 transformer blocks → 输出
+///
 /// # 参数
 /// - `model`: 组装好的 GGUF 模型（可变引用，因为 KV cache 会更新）
-/// - `token_ids`: 输入的 token IDs（prefill 阶段为完整 prompt，生成阶段为单个 token）
+/// - `input`: 输入 Tensor（由调用方根据场景构造）
 /// - `offset`: 位置偏移量，用于 KV cache 和位置编码（自回归生成时递增）
 ///
 /// # 返回
-/// logits Tensor，shape 为 [batch_size, vocab_size]
-///
-/// 统一接口：接受 `Vec<u8>` 原始字节，模型根据自身结构决定如何解释输入：
-/// - 有 embedding 层 (has_input_head): 字节解释为 token_ids（每 4 字节一个 u32 LE）
-///   → 经过 embedding → transformer blocks → 输出
-/// - 无 embedding 层: 字节解释为序列化的 tensor（GGUF_Tensor_Packet 格式）
-///   → 直接输入 transformer blocks → 输出
+/// 模型输出 Tensor（logits 或 hidden state，取决于模型是否包含输出头）
 pub fn GGUF_Model_Inference(
     model: &mut GGUF_Model,
-    input_bytes: &[u8],
+    input: &Tensor,
     offset: usize,
 ) -> Result<Tensor> {
-    let input_tensor = if model.has_input_head {
-        // 有 embedding 层：将字节解释为 token_ids (u32 LE)
-        let token_ids: Vec<u32> = input_bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect();
-        Tensor::new(&token_ids[..], &model.device)?.unsqueeze(0)?
-    } else {
-        // 无 embedding 层：将字节解释为序列化的 Tensor
-        let packet = super::gguf_tensor::GGUF_Tensor_Deserialize(input_bytes)
-            .map_err(|e| anyhow::anyhow!("Tensor 反序列化失败: {}", e))?;
-        // 从 packet 重建 Tensor (f32 数据)
-        let f32_data: Vec<f32> = packet
-            .data
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect();
-        Tensor::new(&f32_data[..], &model.device)?
-            .reshape(&*packet.shape)?
-    };
-
     let result = model
         .model
-        .Forward(&input_tensor, offset)
+        .Forward(input, offset)
         .map_err(|e| anyhow::anyhow!("Forward pass failed: {}", e))?;
 
     Ok(result)
@@ -423,13 +401,3 @@ pub fn GGUF_Decode(model: &GGUF_Model, token_ids: &[u32]) -> Result<String> {
     Ok(output_text)
 }
 
-// ============================================================
-// 工具函数
-// ============================================================
-
-/// 将 token IDs 序列化为字节流（用于统一的 Inference 接口）
-///
-/// 每个 u32 转为 4 字节小端序
-pub fn Token_Ids_To_Bytes(token_ids: &[u32]) -> Vec<u8> {
-    token_ids.iter().flat_map(|id| id.to_le_bytes()).collect()
-}

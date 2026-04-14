@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-09
+//Date ： 2026-04-13
 
 //! Control 核心模块 - 调度核心事件循环
 //!
@@ -10,28 +10,47 @@
 //!
 //! 所有面向用户的输出通过 ui_tx 发送 Ui_Message 给 TUI 渲染，
 //! 不再使用 println! 直接输出到终端。
+//!
+//! ## 指令驱动架构（Session-based）
+//! Control 层使用 ML Service 的 Session API：
+//! - `Create_Session()`: 创建推理会话（加载模型、返回 Session_Handle）
+//! - `Split_Model()`: 切分模型文件（独立同步方法）
+//! - `Analyze_Model()`: 分析模型结构（独立同步方法）
+//!
+//! ## run 命令流程
+//! 1. `run <model_path>` — 仅建立 Session（不含 prompt）
+//! 2. 分析/切分/分发模型 → 所有节点创建 Session、加入 Pipeline
+//! 3. 协调者编排推理 Program（以 Input 指令开头），提交到 Session 执行
+//! 4. Input 指令阻塞等待用户输入 prompt
+//! 5. 用户输入 prompt → 通过 Session_Handle.Send_Input() 转发 → 推理执行
+//! 6. 推理完成 → 清理 Session → 回到 Idle
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
-use candle_transformers::generation::{LogitsProcessor, Sampling};
 
 use super::cli::CLI_Command;
 use super::command::{Control_Command, Serialize_Command, Deserialize_Command};
 use super::ui_message::Ui_Message;
 use crate::config::Update_Config;
-use crate::ml_engine::gguf_model::Token_Ids_To_Bytes;
-use crate::ml_engine::ml_inference_service::ML_Service_Handle;
-use crate::ml_engine::gguf_tensor::{
-    GGUF_Tensor_Packet, GGUF_Tensor_Serialize, GGUF_Tensor_Deserialize, GGUF_Dtype,
+use crate::ml_engine::ml_inference_service::{Create_Session, Split_Model, Analyze_Model};
+use crate::ml_engine::ml_thread_engine_instruction::{
+    Instruction, Inference_Input, Set_Target, Pipeline_Params,
+    Engine_Input, Engine_Output,
+};
+use crate::ml_engine::ml_thread_register::{
+    TOKENID2, TOKENID3, TENSOR1, TENSOR2, META1, META2, META5,
 };
 use crate::network::data_protocol::DataType;
 use crate::network::network_service::NetworkEvent;
 use crate::network::node_handle::{InboundRequest, NodeHandle};
+use crate::network::tensor_stream_manager::Tensor_IO_Handle;
 
 /// 自回归生成最大轮数
 const MAX_GENERATION_ROUNDS: usize = 120;
@@ -54,7 +73,7 @@ pub enum Node_State {
 }
 
 // ============================================================
-// 辅助宏：发送 UI 消息（忽略发送失败）
+// 辅助函数：发送 UI 消息
 // ============================================================
 
 /// 发送 UI 消息的辅助函数（async 版本）
@@ -67,11 +86,13 @@ async fn Send_Ui(ui_tx: &mpsc::Sender<Ui_Message>, msg: Ui_Message) {
 // ============================================================
 
 /// Control 层主事件循环
+///
+/// 不再需要 `ML_Service_Handle` 参数，直接使用
+/// `Create_Session`/`Split_Model`/`Analyze_Model` 独立函数。
 pub async fn Control_Loop(
     mut cli_rx: mpsc::Receiver<CLI_Command>,
     mut inbound_rx: mpsc::Receiver<InboundRequest>,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
-    ml_service: ML_Service_Handle,
     node_handle: NodeHandle,
     mut device: String,
     config_path: PathBuf,
@@ -79,6 +100,8 @@ pub async fn Control_Loop(
 ) {
     let mut state = Node_State::Idle;
     let mut next_peer: Option<PeerId> = None;
+    // Worker 收到 Load 命令后暂存参数，等 Pipeline_Flow 时再创建 Session
+    let mut pending_load: Option<(String, usize, usize)> = None;
 
     info!("Control 层事件循环已启动, 节点状态: {:?}, 设备: {}", state, device);
     // 启动时通知 TUI 当前设备
@@ -92,17 +115,15 @@ pub async fn Control_Loop(
             // 1. CLI/TUI 命令
             cmd = cli_rx.recv() => {
                 match cmd {
-                    Some(CLI_Command::Run { model_path, prompt, reply }) => {
-                        info!("Control: 收到 run 命令 (model: {}, prompt: {})",
-                            model_path.display(), prompt);
+                    Some(CLI_Command::Run { model_path, reply }) => {
+                        info!("Control: 收到 run 命令 (model: {})", model_path.display());
                         let result = Handle_Run(
                             &mut state,
                             &mut next_peer,
-                            &ml_service,
                             &node_handle,
                             &device,
                             &model_path,
-                            &prompt,
+                            &mut cli_rx,
                             &mut inbound_rx,
                             &mut event_rx,
                             &ui_tx,
@@ -118,6 +139,10 @@ pub async fn Control_Loop(
                         }
                         let _ = reply.send(result);
                     }
+                    Some(CLI_Command::Input { prompt: _, reply }) => {
+                        // 在主循环中收到 Input → 没有活跃的 Session
+                        let _ = reply.send(Err("没有活跃的推理会话，请先执行 run 命令".to_string()));
+                    }
                     Some(CLI_Command::SetDevice { device: new_device, reply }) => {
                         info!("Control: 收到 set-device 命令: {}", new_device);
                         let result = Handle_Set_Device(
@@ -130,9 +155,6 @@ pub async fn Control_Loop(
                     }
                     Some(CLI_Command::Quit) => {
                         info!("Control: 收到退出命令，正在关闭...");
-                        if let Err(e) = ml_service.Shutdown().await {
-                            warn!("ML Service 关闭失败: {}", e);
-                        }
                         if let Err(e) = node_handle.Stop().await {
                             warn!("网络节点关闭失败: {}", e);
                         }
@@ -140,9 +162,6 @@ pub async fn Control_Loop(
                     }
                     None => {
                         info!("Control: CLI 通道关闭，退出");
-                        if let Err(e) = ml_service.Shutdown().await {
-                            warn!("ML Service 关闭失败: {}", e);
-                        }
                         if let Err(e) = node_handle.Stop().await {
                             warn!("网络节点关闭失败: {}", e);
                         }
@@ -158,7 +177,7 @@ pub async fn Control_Loop(
                         Handle_Inbound(
                             &mut state,
                             &mut next_peer,
-                            &ml_service,
+                            &mut pending_load,
                             &node_handle,
                             &device,
                             inbound_req,
@@ -189,23 +208,22 @@ pub async fn Control_Loop(
 }
 
 // ============================================================
-// Handle_Run — 完整的分布式推理流程
+// Handle_Run — 完整的分布式推理流程（Session-based）
 // ============================================================
 
 /// 处理 run 命令 — 完整的分布式推理流程
 ///
 /// Phase 1: 分析模型 → 切分 → 分发文件
-/// Phase 2: 发送 WORK → LOAD → PIPELINE_FLOW 命令 → 加载本机模型
-/// Phase 3: Encode → 自回归推理循环(120次) → Decode → 输出结果
+/// Phase 2: 发送 WORK → LOAD → PIPELINE_FLOW 命令 → 建立 Tensor Stream
+/// Phase 3: 创建 Session → 启动推理 Program → 等待用户输入 prompt → 推理执行
 async fn Handle_Run(
     state: &mut Node_State,
     next_peer: &mut Option<PeerId>,
-    ml_service: &ML_Service_Handle,
     node_handle: &NodeHandle,
     device: &str,
     model_path: &Path,
-    prompt: &str,
-    inbound_rx: &mut mpsc::Receiver<InboundRequest>,
+    cli_rx: &mut mpsc::Receiver<CLI_Command>,
+    _inbound_rx: &mut mpsc::Receiver<InboundRequest>,
     event_rx: &mut mpsc::Receiver<NetworkEvent>,
     ui_tx: &mpsc::Sender<Ui_Message>,
 ) -> Result<String, String> {
@@ -228,17 +246,20 @@ async fn Handle_Run(
         Send_Ui(ui_tx, Ui_Message::Log(format!("节点 {}: {}", i + 1, peer))).await;
     }
 
-    // Step 2: 分析模型
-    let arch_info = ml_service
-        .Analyze_Model(model_path)
-        .await
-        .map_err(|e| format!("模型分析失败: {}", e))?;
+    // Step 2: 分析模型 → Analyze_Model（spawn_blocking 包装同步调用）
+    let analyze_path = model_path.to_path_buf();
+    let model_info = tokio::task::spawn_blocking(move || {
+        Analyze_Model(&analyze_path)
+    })
+    .await
+    .map_err(|e| format!("分析任务执行失败: {}", e))?
+    .map_err(|e| format!("模型分析失败: {}", e))?;
 
-    let total_layers = arch_info.num_layers + 2;
-    let eos_token_id = arch_info.eos_token_id;
+    let total_layers = model_info.num_layers + 2;
+    let eos_token_id = model_info.eos_token_id;
     Send_Ui(ui_tx, Ui_Message::Log(format!(
         "模型: {}, 总层数: {}, EOS: {}",
-        arch_info.architecture, total_layers, eos_token_id
+        model_info.architecture, total_layers, eos_token_id
     ))).await;
 
     // Step 3: 计算均分方案
@@ -275,7 +296,7 @@ async fn Handle_Run(
         phase: "切分模型".to_string(),
     }).await;
 
-    // Step 4: 切分模型
+    // Step 4: 切分模型 → Split_Model（spawn_blocking）
     let output_dir = Path::new("Pleiades_Workspace");
     if !output_dir.exists() {
         std::fs::create_dir_all(output_dir)
@@ -287,10 +308,16 @@ async fn Handle_Run(
         Send_Ui(ui_tx, Ui_Message::Log("正在为其他节点切分模型...".to_string())).await;
         for (i, (start, end)) in assignments[1..].iter().enumerate() {
             Send_Ui(ui_tx, Ui_Message::Log(format!("  切分第 {} 段: 层 {}-{}", i + 1, start, end))).await;
-            ml_service
-                .Split_Model(model_path, *start, *end, output_dir)
-                .await
-                .map_err(|e| format!("模型切分失败 (层 {}-{}): {}", start, end, e))?;
+            let split_path = model_path.to_path_buf();
+            let split_output = output_dir.to_path_buf();
+            let split_start = *start;
+            let split_end = *end;
+            tokio::task::spawn_blocking(move || {
+                Split_Model(&split_path, split_start, split_end, &split_output)
+            })
+            .await
+            .map_err(|e| format!("切分任务执行失败: {}", e))?
+            .map_err(|e| format!("模型切分失败 (层 {}-{}): {}", start, end, e))?;
         }
         Send_Ui(ui_tx, Ui_Message::Log(format!("✓ 模型切分完成 ({} 个文件)", peers.len()))).await;
     }
@@ -319,7 +346,7 @@ async fn Handle_Run(
     }
 
     // ================================================================
-    // Phase 2: 发送 WORK → LOAD → PIPELINE_FLOW → 加载本机模型
+    // Phase 2: 发送 WORK → LOAD → PIPELINE_FLOW → 建立 Tensor Stream
     // ================================================================
 
     if !peers.is_empty() {
@@ -357,9 +384,14 @@ async fn Handle_Run(
                 .Send_Data(peer, DataType::Command, cmd_bytes)
                 .await
                 .map_err(|e| format!("发送 LOAD 失败 ({}): {}", peer, e))?;
-            Send_Ui(ui_tx, Ui_Message::Log(format!("  ✓ 节点 {} 已加载模型", peer))).await;
+            Send_Ui(ui_tx, Ui_Message::Log(format!("  ✓ 节点 {} 已收到 LOAD 命令", peer))).await;
         }
-        Send_Ui(ui_tx, Ui_Message::Log("✓ 所有节点模型已加载".to_string())).await;
+
+        // Step 7.5: 提前创建 Tensor Stream Manager
+        node_handle.Create_Tensor_Stream()
+            .await
+            .map_err(|e| format!("创建 Tensor Stream 失败: {}", e))?;
+        Send_Ui(ui_tx, Ui_Message::Log("✓ Tensor Stream Manager 已创建".to_string())).await;
 
         // Step 8: 发送 PIPELINE_FLOW 命令（建立链条）
         Send_Ui(ui_tx, Ui_Message::Log("配置流水线...".to_string())).await;
@@ -385,9 +417,18 @@ async fn Handle_Run(
         *next_peer = Some(peers[0]);
         Send_Ui(ui_tx, Ui_Message::Log(format!("  本机 → next: {}", peers[0]))).await;
         Send_Ui(ui_tx, Ui_Message::Log("✓ 流水线配置完成".to_string())).await;
+
+        // Step 8.5: 立刻打开出站 tensor stream
+        node_handle.Open_Tensor_Stream(&peers[0])
+            .await
+            .map_err(|e| format!("打开出站 Tensor Stream 失败: {}", e))?;
+        Send_Ui(ui_tx, Ui_Message::Log("✓ 出站 Tensor Stream 已建立".to_string())).await;
     }
 
-    // Step 9: 加载本机模型
+    // ================================================================
+    // Phase 3: 创建 Session → 启动 Program → 等待 prompt → 推理
+    // ================================================================
+
     let (my_start, my_end) = assignments[0];
 
     Send_Ui(ui_tx, Ui_Message::Job_Inference {
@@ -398,165 +439,201 @@ async fn Handle_Run(
     }).await;
     Send_Ui(ui_tx, Ui_Message::Log(format!("加载本机模型 (层 {}-{}, 从原始模型)...", my_start, my_end))).await;
 
-    let my_load_info = ml_service
-        .Load_Model(model_path, my_start, my_end, device)
-        .await
-        .map_err(|e| format!("本机模型加载失败: {}", e))?;
+    // 构建 tensor_io（多节点模式需要 tensor stream）
+    let tensor_io = if !peers.is_empty() {
+        let mut take_result = None;
+        for attempt in 0..20 {
+            match node_handle.Take_Tensor_Streams().await {
+                Ok(streams) => {
+                    take_result = Some(streams);
+                    break;
+                }
+                Err(_) => {
+                    if attempt < 19 {
+                        debug!("等待 Tensor Stream 就绪... (尝试 {}/20)", attempt + 1);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+
+        let (inbound_stream, outbound_stream) = take_result
+            .ok_or_else(|| "获取 Tensor Stream 超时（5秒），inbound 流未就绪".to_string())?;
+
+        let rt_handle = tokio::runtime::Handle::current();
+        Some(Tensor_IO_Handle::New(inbound_stream, outbound_stream, rt_handle))
+    } else {
+        None
+    };
+
+    // Step 9: 创建 Session（async — 内部 spawn OS 线程加载模型）
+    let (session_handle, mut output_data_rx, session_model_info) = Create_Session(
+        "coordinator".to_string(),
+        model_path,
+        my_start,
+        my_end,
+        device.to_string(),
+        tensor_io,
+    )
+    .await
+    .map_err(|e| format!("创建 Session 失败: {}", e))?;
+
     Send_Ui(ui_tx, Ui_Message::Log(format!(
         "✓ 本机模型已加载 (input_head: {}, output_head: {}, tokenizer: {})",
-        my_load_info.has_input_head, my_load_info.has_output_head, my_load_info.has_tokenizer
+        session_model_info.has_input_head, session_model_info.has_output_head, session_model_info.has_tokenizer
     ))).await;
 
     // 设置本机状态为 Busy
     *state = Node_State::Busy;
     Send_Ui(ui_tx, Ui_Message::State_Change("Busy".to_string())).await;
 
-    // ================================================================
-    // Phase 3: Encode → 自回归推理循环 → Decode
-    // ================================================================
+    // Step 10: 编排推理指令程序
+    let program = Build_Inference_Program(!peers.is_empty());
 
-    // Step 10: Encode prompt
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let params = Pipeline_Params {
+        max_tokens: MAX_GENERATION_ROUNDS,
+        temperature: TEMPERATURE,
+        seed: SEED,
+        eos_token_id: Some(eos_token_id),
+    };
+
+    // Step 11: 启动 Run_Program（async — Session 线程开始执行，Input 指令会阻塞等待用户输入）
+    let run_fut = session_handle.Run_Program(program, params, cancel_flag.clone());
+    tokio::pin!(run_fut);
+
     Send_Ui(ui_tx, Ui_Message::Job_Inference {
         model_name: model_stem.clone(),
         device_count: total_devices,
         layer_range: format!("层{}-{}", my_start, my_end),
-        phase: "Prefill".to_string(),
+        phase: "等待输入 prompt".to_string(),
     }).await;
-    Send_Ui(ui_tx, Ui_Message::Log(format!("编码 prompt: \"{}\"", prompt))).await;
+    Send_Ui(ui_tx, Ui_Message::Log("✓ Session 已就绪，请输入 prompt".to_string())).await;
 
-    let token_ids = ml_service
-        .Encode(prompt)
-        .await
-        .map_err(|e| format!("Encode 失败: {}", e))?;
-    Send_Ui(ui_tx, Ui_Message::Log(format!("Token IDs: {} 个", token_ids.len()))).await;
-
-    // Step 11: 自回归推理循环
-    Send_Ui(ui_tx, Ui_Message::Log(format!("开始推理 (最多 {} 轮)...", MAX_GENERATION_ROUNDS))).await;
+    let final_text;
+    let token_count: usize;
     let start_time = std::time::Instant::now();
 
-    let sampling = Sampling::All { temperature: TEMPERATURE };
-    let mut logits_processor = LogitsProcessor::from_sampling(SEED, sampling);
-    let mut all_generated_tokens: Vec<u32> = Vec::new();
+    // Step 12: select! 循环 — 同时监听：
+    //   - Run_Program 完成
+    //   - Engine 流式输出
+    //   - 用户输入 (CLI_Command::Input → 转发给 Session)
+    //   - 网络事件
+    loop {
+        tokio::select! {
+            // Run_Program 完成
+            result = &mut run_fut => {
+                match result {
+                    Ok(pipeline_result) => {
+                        final_text = pipeline_result.result_text.clone();
+                        token_count = pipeline_result.generated_tokens.len();
+                        info!("Control: 推理完成 ({} tokens)", token_count);
+                    }
+                    Err(e) => {
+                        error!("Control: 推理失败: {}", e);
+                        // 清理 Session
+                        let _ = session_handle.Shutdown().await;
+                        if !peers.is_empty() {
+                            let _ = node_handle.Close_Tensor_Stream().await;
+                        }
+                        return Err(format!("推理失败: {}", e));
+                    }
+                }
+                break;
+            }
 
-    let last_peer = if !peers.is_empty() {
-        Some(*peers.last().unwrap())
-    } else {
-        None
-    };
+            // Engine 流式输出
+            engine_msg = output_data_rx.recv() => {
+                match engine_msg {
+                    Some(Engine_Output::Text(text)) => {
+                        // 流式显示文本片段
+                        Send_Ui(ui_tx, Ui_Message::Inference_Token(text)).await;
+                    }
+                    Some(Engine_Output::Info(info)) => {
+                        Send_Ui(ui_tx, Ui_Message::Log(format!(
+                            "模型信息: {} (layers: {}, eos: {})",
+                            info.architecture, info.num_layers, info.eos_token_id
+                        ))).await;
+                    }
+                    Some(Engine_Output::End) => {
+                        debug!("Control: 收到 EndOutput 信号");
+                    }
+                    None => {
+                        // Engine 输出通道关闭，等 run_fut 结束
+                        debug!("Control: Engine 输出通道关闭");
+                    }
+                }
+            }
 
-    // ---- Prefill: 处理完整 prompt ----
-    let input_bytes = Token_Ids_To_Bytes(&token_ids);
-    let prefill_start = std::time::Instant::now();
+            // 用户输入（CLI_Command::Input → 转发 prompt 给 Session）
+            cmd = cli_rx.recv() => {
+                match cmd {
+                    Some(CLI_Command::Input { prompt, reply }) => {
+                        info!("Control: 收到用户 prompt ({} chars)", prompt.len());
+                        Send_Ui(ui_tx, Ui_Message::Job_Inference {
+                            model_name: model_stem.clone(),
+                            device_count: total_devices,
+                            layer_range: format!("层{}-{}", my_start, my_end),
+                            phase: "推理中".to_string(),
+                        }).await;
+                        match session_handle.Send_Input(Engine_Input::Prompt(prompt)).await {
+                            Ok(_) => {
+                                let _ = reply.send(Ok("prompt 已发送".to_string()));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(format!("发送 prompt 失败: {}", e)));
+                            }
+                        }
+                    }
+                    Some(CLI_Command::Quit) => {
+                        info!("Control: 推理期间收到退出命令");
+                        cancel_flag.store(true, Ordering::Relaxed);
+                        // 不 break，让 run_fut 检测到 cancel 后自行退出
+                    }
+                    Some(CLI_Command::Run { reply, .. }) => {
+                        let _ = reply.send(Err("当前已有推理会话在运行，请等待完成".to_string()));
+                    }
+                    Some(CLI_Command::SetDevice { reply, .. }) => {
+                        let _ = reply.send(Err("推理进行中，无法切换设备".to_string()));
+                    }
+                    None => {
+                        info!("Control: CLI 通道关闭");
+                        cancel_flag.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
 
-    let logits = if peers.is_empty() {
-        ml_service.Inference(input_bytes, 0).await
-            .map_err(|e| format!("Prefill 推理失败: {}", e))?
-    } else {
-        let local_result = ml_service.Inference(input_bytes, 0).await
-            .map_err(|e| format!("本机 Prefill 推理失败: {}", e))?;
-
-        let tensor_bytes = Serialize_Tensor_Output(&local_result)
-            .map_err(|e| format!("Tensor 序列化失败: {}", e))?;
-
-        let mut payload = Vec::with_capacity(8 + tensor_bytes.len());
-        payload.extend_from_slice(&(0u64).to_le_bytes());
-        payload.extend_from_slice(&tensor_bytes);
-
-        node_handle
-            .Send_Data(next_peer.as_ref().unwrap(), DataType::Data, payload)
-            .await
-            .map_err(|e| format!("Prefill 发送失败: {}", e))?;
-
-        Wait_For_Pipeline_Result(node_handle, inbound_rx, last_peer.unwrap()).await
-            .map_err(|e| format!("等待 Prefill 结果失败: {}", e))?
-    };
-
-    let prefill_time = prefill_start.elapsed();
-    Send_Ui(ui_tx, Ui_Message::Log(format!("Prefill 完成 ({:.3}s)", prefill_time.as_secs_f64()))).await;
-
-    // 更新 Job 为 Decode 阶段
-    Send_Ui(ui_tx, Ui_Message::Job_Inference {
-        model_name: model_stem.clone(),
-        device_count: total_devices,
-        layer_range: format!("层{}-{}", my_start, my_end),
-        phase: "Decode".to_string(),
-    }).await;
-
-    // 采样第一个 token
-    let logits = logits.squeeze(0)
-        .map_err(|e| format!("Squeeze 失败: {}", e))?;
-    let mut next_token = logits_processor.sample(&logits)
-        .map_err(|e| format!("采样失败: {}", e))?;
-    all_generated_tokens.push(next_token);
-
-    // ---- Auto-regressive 生成 ----
-    let decode_start = std::time::Instant::now();
-
-    for round in 0..MAX_GENERATION_ROUNDS {
-        if next_token == eos_token_id {
-            Send_Ui(ui_tx, Ui_Message::Log(format!("在第 {} 轮遇到 EOS，停止生成", round))).await;
-            break;
+            // 网络事件
+            evt = event_rx.recv() => {
+                if let Some(event) = evt {
+                    Handle_Event(event, ui_tx).await;
+                }
+            }
         }
-
-        let offset = token_ids.len() + round;
-        let step_bytes = Token_Ids_To_Bytes(&[next_token]);
-
-        let logits = if peers.is_empty() {
-            ml_service.Inference(step_bytes, offset).await
-                .map_err(|e| format!("第 {} 轮推理失败: {}", round, e))?
-        } else {
-            let local_result = ml_service.Inference(step_bytes, offset).await
-                .map_err(|e| format!("第 {} 轮本机推理失败: {}", round, e))?;
-
-            let tensor_bytes = Serialize_Tensor_Output(&local_result)
-                .map_err(|e| format!("Tensor 序列化失败: {}", e))?;
-
-            let mut payload = Vec::with_capacity(8 + tensor_bytes.len());
-            payload.extend_from_slice(&(offset as u64).to_le_bytes());
-            payload.extend_from_slice(&tensor_bytes);
-
-            node_handle
-                .Send_Data(next_peer.as_ref().unwrap(), DataType::Data, payload)
-                .await
-                .map_err(|e| format!("第 {} 轮发送失败: {}", round, e))?;
-
-            Wait_For_Pipeline_Result(node_handle, inbound_rx, last_peer.unwrap()).await
-                .map_err(|e| format!("第 {} 轮等待结果失败: {}", round, e))?
-        };
-
-        let logits = logits.squeeze(0)
-            .map_err(|e| format!("Squeeze 失败: {}", e))?;
-        next_token = logits_processor.sample(&logits)
-            .map_err(|e| format!("采样失败: {}", e))?;
-        all_generated_tokens.push(next_token);
     }
 
-    let decode_time = decode_start.elapsed();
+    // Step 13: 清理
+    let _ = session_handle.Shutdown().await;
+    if !peers.is_empty() {
+        let _ = node_handle.Close_Tensor_Stream().await;
+    }
+
     let total_time = start_time.elapsed();
-    let gen_count = all_generated_tokens.len();
-    let tok_per_sec = gen_count as f64 / decode_time.as_secs_f64();
+    let tok_per_sec = if total_time.as_secs_f64() > 0.0 {
+        token_count as f64 / total_time.as_secs_f64()
+    } else {
+        0.0
+    };
 
     Send_Ui(ui_tx, Ui_Message::Log(format!(
-        "生成完成: {} tokens, decode {:.3}s ({:.1} tok/s), total {:.3}s",
-        gen_count, decode_time.as_secs_f64(), tok_per_sec, total_time.as_secs_f64()
+        "生成完成: {} tokens, {:.3}s ({:.1} tok/s)",
+        token_count, total_time.as_secs_f64(), tok_per_sec
     ))).await;
-
-    // Step 12: Decode
-    let all_tokens: Vec<u32> = token_ids
-        .iter()
-        .chain(all_generated_tokens.iter())
-        .cloned()
-        .collect();
-
-    let result_text = ml_service
-        .Decode(&all_tokens)
-        .await
-        .map_err(|e| format!("Decode 失败: {}", e))?;
 
     // 发送推理完成消息
     Send_Ui(ui_tx, Ui_Message::Inference_Complete {
-        text: result_text.clone(),
-        tokens: gen_count,
+        text: final_text.clone(),
+        tokens: token_count,
         tok_per_sec,
         total_secs: total_time.as_secs_f64(),
     }).await;
@@ -564,19 +641,110 @@ async fn Handle_Run(
     Send_Ui(ui_tx, Ui_Message::State_Change("Idle".to_string())).await;
 
     output.push_str("[Pleiades] ✓ 推理完成\n");
-    output.push_str(&result_text);
+    output.push_str(&final_text);
 
     Ok(output)
+}
+
+// ============================================================
+// 推理程序编排
+// ============================================================
+
+/// 根据是否分布式模式，构建协调者推理指令程序
+///
+/// 程序以 `Input` 指令开头 — Session 线程执行到此处时会
+/// 阻塞在 `input_data_rx` 上等待用户输入 prompt。
+///
+/// ## 单机推理程序
+/// ```text
+/// Input → Encode → Set(META2, max_tokens) → Inference(TOKENID3) → Sample(TENSOR2) → Decode → Output
+/// → Loop [ BreakIf, Inference(TOKENID2), Sample(TENSOR2), Decode, Output ]
+/// → EndOutput
+/// ```
+///
+/// ## 协调者 Pipeline 推理程序
+/// ```text
+/// Input → Encode → Set(META2, max_tokens) → Inference(TOKENID3)
+/// → Send → Receive → Sample(TENSOR1) → Decode → Output
+/// → Loop [ BreakIf, Inference(TOKENID2), Send, Receive, Sample(TENSOR1), Decode, Output ]
+/// → SendEOF → EndOutput
+/// ```
+fn Build_Inference_Program(is_distributed: bool) -> Vec<Instruction> {
+    if !is_distributed {
+        // 单机推理程序
+        vec![
+            Instruction::Input,
+            Instruction::Encode,
+            Instruction::Set { target: Set_Target::Meta(META2, MAX_GENERATION_ROUNDS as f64) },
+            Instruction::Prefill { input: TOKENID3 },
+            Instruction::CopyMeta { src: META5, dst: META1 },
+            Instruction::Sample { tensor_reg: TENSOR2 },
+            Instruction::Decode,
+            Instruction::Output,
+            Instruction::Loop {
+                body: vec![
+                    Instruction::BreakIf,
+                    Instruction::Inference { input: Inference_Input::Tokens(TOKENID2) },
+                    Instruction::Sample { tensor_reg: TENSOR2 },
+                    Instruction::Decode,
+                    Instruction::Output,
+                ],
+            },
+            Instruction::EndOutput,
+        ]
+    } else {
+        // 协调者 Pipeline 推理程序
+        vec![
+            Instruction::Input,
+            Instruction::Encode,
+            Instruction::Set { target: Set_Target::Meta(META2, MAX_GENERATION_ROUNDS as f64) },
+            Instruction::Prefill { input: TOKENID3 },
+            Instruction::Send,
+            Instruction::Receive,
+            Instruction::CopyMeta { src: META5, dst: META1 },
+            Instruction::Sample { tensor_reg: TENSOR1 },
+            Instruction::Decode,
+            Instruction::Output,
+            Instruction::Loop {
+                body: vec![
+                    Instruction::BreakIf,
+                    Instruction::Inference { input: Inference_Input::Tokens(TOKENID2) },
+                    Instruction::Send,
+                    Instruction::Receive,
+                    Instruction::Sample { tensor_reg: TENSOR1 },
+                    Instruction::Decode,
+                    Instruction::Output,
+                ],
+            },
+            Instruction::SendEOF,
+            Instruction::EndOutput,
+        ]
+    }
+}
+
+/// 构建 Worker Relay 推理程序
+///
+/// ```text
+/// Loop [ Receive, BreakIf, Inference(TENSOR1), Send ]
+/// ```
+fn Build_Worker_Relay_Program() -> Vec<Instruction> {
+    vec![
+        Instruction::Loop {
+            body: vec![
+                Instruction::Receive,
+                Instruction::BreakIf,
+                Instruction::Inference { input: Inference_Input::Tensor(TENSOR1) },
+                Instruction::Send,
+            ],
+        },
+    ]
 }
 
 // ============================================================
 // 辅助函数
 // ============================================================
 
-/// 发送文件，同时转发网络事件到 TUI（避免 select! 循环被阻塞导致进度条不更新）
-///
-/// 使用 `tokio::pin!` 固定 Send_File future，在 select! 循环中同时
-/// poll 文件发送和事件接收，确保 FileStreamProgress 等事件实时传递给 TUI。
+/// 发送文件，同时转发网络事件到 TUI
 async fn Send_File_With_Events(
     node_handle: &NodeHandle,
     peer: &PeerId,
@@ -601,79 +769,6 @@ async fn Send_File_With_Events(
     }
 }
 
-/// 将推理输出 Tensor 序列化为 GGUF_Tensor_Packet 字节流
-fn Serialize_Tensor_Output(tensor: &candle_core::Tensor) -> Result<Vec<u8>, String> {
-    let shape = tensor.dims().to_vec();
-    let flat = tensor.flatten_all()
-        .map_err(|e| format!("Tensor flatten 失败: {}", e))?;
-    let f32_data: Vec<f32> = flat.to_vec1::<f32>()
-        .map_err(|e| format!("Tensor 转 f32 失败: {}", e))?;
-    let raw_bytes: Vec<u8> = f32_data.iter().flat_map(|f| f.to_le_bytes()).collect();
-
-    let packet = GGUF_Tensor_Packet {
-        name: "hidden_state".to_string(),
-        shape,
-        dtype: GGUF_Dtype::F32,
-        data: raw_bytes,
-    };
-
-    GGUF_Tensor_Serialize(&packet)
-        .map_err(|e| format!("Tensor 序列化失败: {}", e))
-}
-
-/// 等待流水线最后一个节点返回推理结果
-async fn Wait_For_Pipeline_Result(
-    node_handle: &NodeHandle,
-    inbound_rx: &mut mpsc::Receiver<InboundRequest>,
-    last_peer: PeerId,
-) -> Result<candle_core::Tensor, String> {
-    loop {
-        let req = inbound_rx.recv().await
-            .ok_or_else(|| "入站请求通道已关闭".to_string())?;
-
-        if req.data_type == DataType::Data && req.peer == last_peer {
-            if let Err(e) = node_handle
-                .Send_Response(req.request_id, DataType::Data, b"ACK".to_vec())
-                .await
-            {
-                error!("ACK 失败: {}", e);
-            }
-
-            if req.payload.len() < 8 {
-                return Err("Pipeline 结果 payload 过短".to_string());
-            }
-            let tensor_bytes = &req.payload[8..];
-
-            let packet = GGUF_Tensor_Deserialize(tensor_bytes)
-                .map_err(|e| format!("结果 Tensor 反序列化失败: {}", e))?;
-            let f32_data: Vec<f32> = packet.data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-            let tensor = candle_core::Tensor::new(&f32_data[..], &candle_core::Device::Cpu)
-                .map_err(|e| format!("Tensor 重建失败: {}", e))?
-                .reshape(&*packet.shape)
-                .map_err(|e| format!("Tensor reshape 失败: {}", e))?;
-
-            return Ok(tensor);
-        }
-
-        if req.data_type == DataType::File {
-            let _ = node_handle
-                .Send_Response(req.request_id, DataType::Command, b"ACCEPT".to_vec())
-                .await;
-        } else {
-            let _ = node_handle
-                .Send_Response(req.request_id, DataType::Command, b"OK".to_vec())
-                .await;
-        }
-        debug!(
-            "Wait_For_Pipeline_Result: 跳过非目标消息 (peer={}, type={:?})",
-            req.peer, req.data_type
-        );
-    }
-}
-
 // ============================================================
 // 入站请求处理（被动模式）
 // ============================================================
@@ -682,7 +777,7 @@ async fn Wait_For_Pipeline_Result(
 async fn Handle_Inbound(
     state: &mut Node_State,
     next_peer: &mut Option<PeerId>,
-    ml_service: &ML_Service_Handle,
+    pending_load: &mut Option<(String, usize, usize)>,
     node_handle: &NodeHandle,
     device: &str,
     req: InboundRequest,
@@ -712,7 +807,7 @@ async fn Handle_Inbound(
             match Deserialize_Command(&req.payload) {
                 Ok(cmd) => {
                     Handle_Control_Command(
-                        state, next_peer, ml_service, node_handle, device,
+                        state, next_peer, pending_load, node_handle, device,
                         req.request_id, req.peer, cmd, ui_tx,
                     ).await;
                 }
@@ -728,71 +823,15 @@ async fn Handle_Inbound(
             }
         }
 
-        // ===== 数据处理：Busy 状态下推理转发 =====
+        // ===== 数据处理 =====
         DataType::Data => {
-            if *state != Node_State::Busy {
-                warn!("收到 Data 但当前不在 Busy 状态, 忽略");
-                let _ = node_handle
-                    .Send_Response(req.request_id, DataType::Data, b"NOT_BUSY".to_vec())
-                    .await;
-                return;
-            }
-
-            if let Err(e) = node_handle
-                .Send_Response(req.request_id, DataType::Data, b"ACK".to_vec())
-                .await
-            {
-                error!("发送 ACK 失败: {}", e);
-                return;
-            }
-
-            if req.payload.len() < 8 {
-                error!("Data payload 过短");
-                return;
-            }
-            let offset_bytes: [u8; 8] = req.payload[0..8].try_into().unwrap();
-            let offset = u64::from_le_bytes(offset_bytes) as usize;
-            let tensor_bytes = &req.payload[8..];
-
-            debug!("Busy: 收到 tensor (offset={}, {} bytes)", offset, tensor_bytes.len());
-
-            let result_tensor = match ml_service.Inference(tensor_bytes.to_vec(), offset).await {
-                Ok(tensor) => tensor,
-                Err(e) => {
-                    error!("推理失败: {}", e);
-                    return;
-                }
-            };
-
-            let serialized = match Serialize_Tensor_Output(&result_tensor) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    error!("Tensor 序列化失败: {}", e);
-                    return;
-                }
-            };
-
-            let mut data_payload = Vec::with_capacity(8 + serialized.len());
-            data_payload.extend_from_slice(&(offset as u64).to_le_bytes());
-            data_payload.extend_from_slice(&serialized);
-
-            match next_peer {
-                Some(target) => {
-                    debug!("Busy: 转发到 {} ({} bytes)", target, data_payload.len());
-                    if let Err(e) = node_handle
-                        .Send_Data(target, DataType::Data, data_payload)
-                        .await
-                    {
-                        error!("转发失败: {}", e);
-                    }
-                }
-                None => {
-                    error!("Busy: next_peer 未设置");
-                }
-            }
+            debug!("收到 Data 消息 (来自 {}), 回复 OK", req.peer);
+            let _ = node_handle
+                .Send_Response(req.request_id, DataType::Data, b"OK".to_vec())
+                .await;
         }
 
-        // ===== Info 消息：暂未处理，回复 OK =====
+        // ===== Info 消息 =====
         DataType::Info => {
             debug!("收到 Info 消息 (来自 {}), 暂未处理", req.peer);
             let _ = node_handle
@@ -802,11 +841,11 @@ async fn Handle_Inbound(
     }
 }
 
-/// 处理 Control_Command
+/// 处理 Control_Command（Worker 被动模式）
 async fn Handle_Control_Command(
     state: &mut Node_State,
     next_peer: &mut Option<PeerId>,
-    ml_service: &ML_Service_Handle,
+    pending_load: &mut Option<(String, usize, usize)>,
     node_handle: &NodeHandle,
     device: &str,
     request_id: u64,
@@ -825,47 +864,165 @@ async fn Handle_Control_Command(
         }
 
         Control_Command::Load { model_path, start, end } => {
+            // 暂存 Load 参数，等 Pipeline_Flow 时再创建 Session
             Send_Ui(ui_tx, Ui_Message::Log(format!("LOAD (来自 {}): {} 层 {}-{}", peer, model_path, start, end))).await;
             Send_Ui(ui_tx, Ui_Message::Job_Inference {
                 model_name: model_path.clone(),
                 device_count: 1,
                 layer_range: format!("层{}-{}", start, end),
-                phase: "加载模型".to_string(),
+                phase: "等待 Pipeline 配置".to_string(),
             }).await;
 
-            let full_path = std::path::Path::new(&model_path);
-            match ml_service.Load_Model(full_path, start, end, device).await {
-                Ok(info) => {
-                    Send_Ui(ui_tx, Ui_Message::Log(format!(
-                        "✓ 模型加载完成 (arch: {}, input: {}, output: {})",
-                        info.architecture, info.has_input_head, info.has_output_head
-                    ))).await;
-                    let _ = node_handle
-                        .Send_Response(request_id, DataType::Command, b"OK".to_vec())
-                        .await;
-                }
-                Err(e) => {
-                    error!("模型加载失败: {}", e);
-                    Send_Ui(ui_tx, Ui_Message::Error(format!("模型加载失败: {}", e))).await;
-                    let _ = node_handle
-                        .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
-                        .await;
-                }
-            }
+            *pending_load = Some((model_path, start, end));
+
+            let _ = node_handle
+                .Send_Response(request_id, DataType::Command, b"OK".to_vec())
+                .await;
         }
 
         Control_Command::Pipeline_Flow { next_peer: target } => {
             *next_peer = Some(target);
             Send_Ui(ui_tx, Ui_Message::Log(format!("PIPELINE_FLOW (来自 {}): next → {}", peer, target))).await;
-            Send_Ui(ui_tx, Ui_Message::Job_Inference {
-                model_name: String::new(),
-                device_count: 1,
-                layer_range: String::new(),
-                phase: "就绪，等待推理数据".to_string(),
-            }).await;
+
+            // 取出 pending_load 参数
+            let load_params = match pending_load.take() {
+                Some(params) => params,
+                None => {
+                    error!("收到 PIPELINE_FLOW 但没有 pending_load 参数");
+                    let _ = node_handle
+                        .Send_Response(request_id, DataType::Command, b"ERROR: no pending load".to_vec())
+                        .await;
+                    return;
+                }
+            };
+            let (model_path_str, layer_start, layer_end) = load_params;
+
+            // 1. 创建 tensor stream manager
+            if let Err(e) = node_handle.Create_Tensor_Stream().await {
+                error!("创建 Tensor Stream 失败: {}", e);
+                let _ = node_handle
+                    .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
+                    .await;
+                return;
+            }
+            // 2. 打开到 next_peer 的出站流
+            if let Err(e) = node_handle.Open_Tensor_Stream(&target).await {
+                error!("打开出站 Tensor Stream 失败: {}", e);
+                let _ = node_handle
+                    .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
+                    .await;
+                return;
+            }
+
+            // 回复 OK（流设置完成，后续操作异步进行）
             let _ = node_handle
                 .Send_Response(request_id, DataType::Command, b"OK".to_vec())
                 .await;
+
+            Send_Ui(ui_tx, Ui_Message::Job_Inference {
+                model_name: model_path_str.clone(),
+                device_count: 1,
+                layer_range: format!("层{}-{}", layer_start, layer_end),
+                phase: "加载模型".to_string(),
+            }).await;
+
+            // 3. 等待 inbound stream 就绪（带重试）
+            let mut take_result = None;
+            for attempt in 0..20 {
+                match node_handle.Take_Tensor_Streams().await {
+                    Ok(streams) => {
+                        take_result = Some(streams);
+                        break;
+                    }
+                    Err(_) => {
+                        if attempt < 19 {
+                            debug!("Worker: 等待 Tensor Stream 就绪... (尝试 {}/20)", attempt + 1);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                        }
+                    }
+                }
+            }
+
+            match take_result {
+                Some((inbound_stream, outbound_stream)) => {
+                    let rt_handle = tokio::runtime::Handle::current();
+                    let tensor_io = Tensor_IO_Handle::New(inbound_stream, outbound_stream, rt_handle);
+
+                    // 4. 创建 Session 并启动 Relay（fire-and-forget）
+                    let device_clone = device.to_string();
+                    let ui_tx_clone = ui_tx.clone();
+                    let node_handle_clone = node_handle.clone();
+                    let model_path = PathBuf::from(&model_path_str);
+
+                    tokio::spawn(async move {
+                        // 创建 Session（加载模型 — 在 Session 的 OS 线程中阻塞）
+                        let session_result = Create_Session(
+                            "worker".to_string(),
+                            &model_path,
+                            layer_start,
+                            layer_end,
+                            device_clone,
+                            Some(tensor_io),
+                        ).await;
+
+                        match session_result {
+                            Ok((session_handle, _output_data_rx, model_info)) => {
+                                Send_Ui(&ui_tx_clone, Ui_Message::Log(format!(
+                                    "✓ Worker 模型加载完成 (arch: {}, input: {}, output: {})",
+                                    model_info.architecture, model_info.has_input_head, model_info.has_output_head
+                                ))).await;
+
+                                Send_Ui(&ui_tx_clone, Ui_Message::Job_Inference {
+                                    model_name: model_path_str.clone(),
+                                    device_count: 1,
+                                    layer_range: format!("层{}-{}", layer_start, layer_end),
+                                    phase: "就绪，等待推理数据".to_string(),
+                                }).await;
+
+                                // 启动 Relay 程序
+                                let relay_program = Build_Worker_Relay_Program();
+                                let cancel_flag = Arc::new(AtomicBool::new(false));
+
+                                info!("Worker: 启动 Relay 程序");
+                                let result = session_handle
+                                    .Run_Program(
+                                        relay_program,
+                                        Pipeline_Params::default(),
+                                        cancel_flag,
+                                    )
+                                    .await;
+
+                                match result {
+                                    Ok(_) => {
+                                        info!("Worker: Relay 程序完成");
+                                        Send_Ui(&ui_tx_clone, Ui_Message::Log("Relay 程序完成".to_string())).await;
+                                    }
+                                    Err(e) => {
+                                        error!("Worker: Relay 程序失败: {}", e);
+                                        Send_Ui(&ui_tx_clone, Ui_Message::Error(format!("Relay 失败: {}", e))).await;
+                                    }
+                                }
+
+                                // 清理
+                                let _ = session_handle.Shutdown().await;
+                            }
+                            Err(e) => {
+                                error!("Worker: Session 创建失败: {}", e);
+                                Send_Ui(&ui_tx_clone, Ui_Message::Error(format!("模型加载失败: {}", e))).await;
+                            }
+                        }
+
+                        // 清理 tensor stream
+                        let _ = node_handle_clone.Close_Tensor_Stream().await;
+                        Send_Ui(&ui_tx_clone, Ui_Message::Job_Idle).await;
+                        Send_Ui(&ui_tx_clone, Ui_Message::State_Change("Idle".to_string())).await;
+                    });
+                }
+                None => {
+                    error!("获取 Tensor Stream 超时（5秒），inbound 流未就绪");
+                    Send_Ui(ui_tx, Ui_Message::Error("获取 Tensor Stream 超时，inbound 流未就绪".to_string())).await;
+                }
+            }
         }
     }
 }

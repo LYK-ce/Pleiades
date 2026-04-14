@@ -84,6 +84,26 @@ pub enum NodeCommand {
         peer: PeerId,
         reply: oneshot::Sender<Option<super::network_service::PeerInfo>>,
     },
+
+    // ===== Tensor Stream 命令 =====
+
+    /// 创建 Tensor_Stream_Manager 对（inbound + outbound）
+    CreateTensorStream {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 打开到指定节点的出站张量流
+    OpenTensorStream {
+        peer: PeerId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 移交张量流所有权（从 Manager 取出 stream，用于构建 Tensor_IO_Handle）
+    TakeTensorStreams {
+        reply: oneshot::Sender<Result<(libp2p::Stream, libp2p::Stream), String>>,
+    },
+    /// 关闭张量流 Manager（清理）
+    CloseTensorStream {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// 停止节点
     Stop,
 }
@@ -294,6 +314,74 @@ impl NodeHandle {
         self.cmd_tx.send(NodeCommand::GetPeerInfo { peer: *peer, reply: tx }).await?;
         let info = rx.await.map_err(|_| "GetPeerInfo reply channel closed")?;
         Ok(info)
+    }
+
+    // ===== Tensor Stream API =====
+
+    /// 创建 Tensor_Stream_Manager 对（inbound + outbound）
+    ///
+    /// 在推理任务开始前调用。创建两个 Manager 负责流的建立。
+    pub async fn Create_Tensor_Stream(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::CreateTensorStream {
+            reply: tx,
+        }).await?;
+        rx.await
+            .map_err(|_| "CreateTensorStream reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
+    }
+
+    /// 打开到指定节点的出站张量流
+    ///
+    /// 在 PIPELINE_FLOW 处理时调用，建立到 next_peer 的持久化张量流。
+    ///
+    /// # Arguments
+    /// * `peer` - 目标节点 ID
+    pub async fn Open_Tensor_Stream(
+        &self,
+        peer: &PeerId,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::OpenTensorStream {
+            peer: *peer,
+            reply: tx,
+        }).await?;
+        rx.await
+            .map_err(|_| "OpenTensorStream reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
+    }
+
+    /// 移交张量流所有权，用于构建 Tensor_IO_Handle
+    ///
+    /// 从两个 Manager 中取出 inbound 和 outbound stream。
+    /// 调用后 Manager 不再持有 stream，流的读写由 Tensor_IO_Handle 接管。
+    ///
+    /// # Returns
+    /// (inbound_stream, outbound_stream) 元组
+    pub async fn Take_Tensor_Streams(
+        &self,
+    ) -> Result<(libp2p::Stream, libp2p::Stream), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::TakeTensorStreams {
+            reply: tx,
+        }).await?;
+        rx.await
+            .map_err(|_| "TakeTensorStreams reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
+    }
+
+    /// 关闭张量流 Manager
+    ///
+    /// 清理 Manager 资源。实际的 stream 关闭由 Tensor_IO_Handle drop 处理。
+    /// 推理结束时调用。
+    pub async fn Close_Tensor_Stream(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::CloseTensorStream {
+            reply: tx,
+        }).await?;
+        rx.await
+            .map_err(|_| "CloseTensorStream reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
     }
 
     /// 停止节点

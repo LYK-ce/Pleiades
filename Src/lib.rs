@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-13
 
 #![allow(non_snake_case)]
 
@@ -10,6 +10,7 @@
 //! - network: P2P网络通信模块
 //! - ml_engine: ML推理引擎模块
 //! - control: 控制层模块
+//! - tui: TUI 终端界面模块
 
 #[path = "Config/mod.rs"]
 pub mod config;
@@ -35,6 +36,12 @@ pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
 pub use network::data_protocol;
 pub use network::stream_protocol;
+pub use network::tensor_stream_protocol;
+pub use network::tensor_stream_manager;
+pub use network::{
+    TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
+    Tensor_Buffer, Tensor_Stream_Manager, Tensor_IO_Handle,
+};
 
 // ML_Engine模块类型导出
 pub use ml_engine::{RuntimeError};
@@ -48,9 +55,21 @@ pub use ml_engine::{
 };
 pub use ml_engine::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
-    GGUF_Encode, GGUF_Decode, Inference_Config, Token_Ids_To_Bytes,
+    GGUF_Encode, GGUF_Decode, Inference_Config,
 };
-pub use ml_engine::{ML_Service_Handle, Model_Load_Info};
+// ML Service 层（独立函数 API，不再有 ML_Service_Handle）
+pub use ml_engine::{Create_Session, Split_Model, Analyze_Model};
+// 指令集
+pub use ml_engine::{
+    Instruction, Inference_Input, Set_Target,
+    Pipeline_Params, Pipeline_Result, Model_Info,
+    Engine_Input, Engine_Output,
+};
+// Session/Thread 引擎
+pub use ml_engine::{
+    Inference_Backend, Session, Session_Handle, Session_Config,
+    Session_Command, Session_Thread, Execute,
+};
 
 // Control模块类型导出
 pub use control::{CLI_Command, Control_Loop, Node_State};
