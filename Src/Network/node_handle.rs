@@ -82,7 +82,7 @@ pub enum NodeCommand {
     /// 获取指定节点的详细信息
     GetPeerInfo {
         peer: PeerId,
-        reply: oneshot::Sender<Option<super::network_service::PeerInfo>>,
+        reply: oneshot::Sender<Option<crate::PeerInfo>>,
     },
 
     // ===== Tensor Stream 命令 =====
@@ -309,7 +309,7 @@ impl NodeHandle {
     pub async fn Get_Peer_Info(
         &self,
         peer: &PeerId,
-    ) -> Result<Option<super::network_service::PeerInfo>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<Option<crate::PeerInfo>, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(NodeCommand::GetPeerInfo { peer: *peer, reply: tx }).await?;
         let info = rx.await.map_err(|_| "GetPeerInfo reply channel closed")?;

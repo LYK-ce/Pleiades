@@ -46,8 +46,9 @@ pub mod file_transfer_manager;
 
 
 // 重新导出常用类型
-pub use network_service::{NetworkConfig, NetworkEvent, Network_Service, PeerInfo};
+pub use network_service::{NetworkConfig, NetworkEvent, Network_Service};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
+// PeerInfo 已经从 peer_management 模块重新导出，可以直接使用 crate::PeerInfo
 pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
 pub use stream_protocol::{FILE_STREAM_PROTOCOL, Send_File_Stream, Receive_File_Stream, CHUNK_SIZE};
 pub use tensor_stream_protocol::{

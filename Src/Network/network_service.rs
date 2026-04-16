@@ -22,7 +22,7 @@
 //! 注意：
 //! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
 //! 广域网放到未来支持。
-
+#[allow(nonstandard_style)]
 use libp2p::{
     identity::Keypair,
     kad::{self, store::MemoryStore, Mode},
@@ -33,10 +33,9 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use libp2p_stream as stream;
-use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
@@ -49,6 +48,9 @@ use super::outbound_manager::Outbound_Manager;
 use super::file_transfer_manager::File_Transfer_Manager;
 use super::tensor_stream_manager::Tensor_Stream_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
+
+// 导入 PeerManagement 模块
+use crate::peer_management::{PeerHandle, PeerInfo};
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -63,6 +65,10 @@ pub struct NetworkConfig {
     pub listen_port: u16,
     /// 引导节点地址列表
     pub bootstrap_peers: Vec<String>,
+    /// 清理间隔（秒）
+    pub cleanup_interval: u64,
+    /// 超时间隔（秒）
+    pub timeout_interval: u64,
 }
 
 impl Default for NetworkConfig {
@@ -73,6 +79,8 @@ impl Default for NetworkConfig {
             transport_protocol: "TCP".to_string(),
             listen_port: 0,
             bootstrap_peers: Vec::new(),
+            cleanup_interval: 300,    // 默认300秒
+            timeout_interval: 300,    // 默认300秒
         }
     }
 }
@@ -90,18 +98,6 @@ pub struct PleiadesNetworkBehaviour {
     pub stream: stream::Behaviour,
 }
 
-/// 节点信息
-#[derive(Debug, Clone)]
-pub struct PeerInfo {
-    /// 节点ID
-    pub peer_id: PeerId,
-    /// 地址列表
-    pub addresses: Vec<Multiaddr>,
-    /// 最后一次ping延迟(毫秒)
-    pub latency_ms: Option<u64>,
-    /// 连接时间
-    pub connected_at: Instant,
-}
 
 /// 网络事件（发送给上层）
 ///
@@ -142,13 +138,14 @@ pub enum NetworkEvent {
 }
 
 /// 网络服务（内部实现）
+#[allow(nonstandard_style)]
 pub struct Network_Service {
     /// Swarm实例
     swarm: Swarm<PleiadesNetworkBehaviour>,
     /// 本地节点ID
     local_peer_id: PeerId,
-    /// 已连接的节点信息
-    connected_peers: HashMap<PeerId, PeerInfo>,
+    /// peer manager handler 持有的peer manager handle，我们通过它来管理节点信息表
+    peer_handle: PeerHandle,
     /// 事件发送器（发送给上层，用于连接/文件/DHT等事件）
     event_sender: mpsc::Sender<NetworkEvent>,
     /// 命令接收器（接收外部命令）
@@ -177,7 +174,9 @@ impl Network_Service {
     ///
     /// # Arguments
     /// * `config` - 网络配置
+    /// * `keypair` - 密钥对
     /// * `event_sender` - 事件发送通道（连接/文件/DHT 事件）
+    /// * `peer_handle` - PeerManager 句柄，用于管理节点信息
     ///
     /// # Returns
     /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端)
@@ -185,6 +184,7 @@ impl Network_Service {
         config: NetworkConfig,
         keypair: Keypair,
         event_sender: mpsc::Sender<NetworkEvent>,
+        peer_handle: PeerHandle,
     ) -> Result<(Self, NodeHandle, mpsc::Receiver<InboundRequest>), Box<dyn Error>> {
         info!("初始化网络服务...");
 
@@ -259,7 +259,7 @@ impl Network_Service {
         let mut node = Self {
             swarm: node_swarm,
             local_peer_id,
-            connected_peers: HashMap::new(),
+            peer_handle,
             event_sender,
             cmd_rx,
             config,
@@ -384,13 +384,14 @@ impl Network_Service {
                 ..
             } => {
                 info!("连接建立: {} via {:?}", peer_id, endpoint);
-                let peer_info = PeerInfo {
+                let peer_info = PeerInfo::new(
                     peer_id,
-                    addresses: vec![endpoint.get_remote_address().clone()],
-                    latency_ms: None,
-                    connected_at: Instant::now(),
-                };
-                self.connected_peers.insert(peer_id, peer_info);
+                    vec![endpoint.get_remote_address().clone()]
+                );
+                // 使用 peer_handle 添加节点
+                if let Err(e) = self.peer_handle.add_peer(peer_info).await {
+                    warn!("添加节点到 PeerManager 失败: {}", e);
+                }
                 let _ = self
                     .event_sender
                     .send(NetworkEvent::ConnectionEstablished(peer_id))
@@ -400,7 +401,10 @@ impl Network_Service {
             // 连接断开
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 info!("连接断开: {} 原因: {:?}", peer_id, cause);
-                self.connected_peers.remove(&peer_id);
+                // 使用 peer_handle 移除节点
+                if let Err(e) = self.peer_handle.remove_peer(&peer_id).await {
+                    warn!("从 PeerManager 移除节点失败: {}", e);
+                }
                 let _ = self
                     .event_sender
                     .send(NetworkEvent::ConnectionClosed(peer_id))
@@ -477,7 +481,10 @@ impl Network_Service {
             NodeCommand::Disconnect { peer } => {
                 info!("断开连接: {}", peer);
                 let _ = self.swarm.disconnect_peer_id(peer);
-                self.connected_peers.remove(&peer);
+                // 使用 peer_handle 移除节点
+                if let Err(e) = self.peer_handle.remove_peer(&peer).await {
+                    warn!("从 PeerManager 移除节点失败: {}", e);
+                }
             }
             NodeCommand::SendResponse { request_id, data_type, payload } => {
                 // 从 inbound_manager 取出 ResponseChannel
@@ -494,12 +501,12 @@ impl Network_Service {
                 }
             }
             NodeCommand::GetPeers { reply } => {
-                let peers = self.Get_Peers();
+                let peers = self.Get_Peers().await;
                 debug!("查询已连接节点列表: {} 个", peers.len());
                 let _ = reply.send(peers);
             }
             NodeCommand::GetPeerInfo { peer, reply } => {
-                let info = self.Get_Peer_Info(&peer).cloned();
+                let info = self.Get_Peer_Info(&peer).await;
                 debug!("查询节点信息: {} -> {:?}", peer, info.is_some());
                 let _ = reply.send(info);
             }
@@ -555,10 +562,21 @@ impl Network_Service {
                 self.outbound_tensor_manager = None;
                 self.inbound_tensor_manager = None;
                 // 关闭所有连接
-                for peer_id in self.connected_peers.keys().cloned().collect::<Vec<_>>() {
-                    let _ = self.swarm.disconnect_peer_id(peer_id);
+                // 使用 peer_handle 获取所有节点
+                match self.peer_handle.list_peers().await {
+                    Ok(peer_infos) => {
+                        for peer_info in peer_infos {
+                            let _ = self.swarm.disconnect_peer_id(peer_info.peer_id);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("获取节点列表失败: {}", e);
+                    }
                 }
-                self.connected_peers.clear();
+                // 清空 peer_handle
+                if let Err(e) = self.peer_handle.clear().await {
+                    warn!("清空 PeerManager 失败: {}", e);
+                }
                 // 清理所有 pending 状态
                 self.inbound_manager.Clear_All();
                 self.outbound_manager.Clear_All();
@@ -700,13 +718,25 @@ impl Network_Service {
     }
 
     /// 获取当前已连接的所有节点列表
-    pub fn Get_Peers(&self) -> Vec<PeerId> {
-        self.connected_peers.keys().cloned().collect()
+    pub async fn Get_Peers(&mut self) -> Vec<PeerId> {
+        match self.peer_handle.list_peers().await {
+            Ok(peer_infos) => peer_infos.iter().map(|info| info.peer_id).collect(),
+            Err(e) => {
+                warn!("获取节点列表失败: {}", e);
+                Vec::new()
+            }
+        }
     }
 
     /// 获取特定节点的详细信息
-    pub fn Get_Peer_Info(&self, peer_id: &PeerId) -> Option<&PeerInfo> {
-        self.connected_peers.get(peer_id)
+    pub async fn Get_Peer_Info(&mut self, peer_id: &PeerId) -> Option<PeerInfo> {
+        match self.peer_handle.get_peer(peer_id).await {
+            Ok(peer_info) => Some(peer_info),
+            Err(e) => {
+                warn!("获取节点信息失败 ({}): {}", peer_id, e);
+                None
+            }
+        }
     }
 
     /// 获取本地节点ID

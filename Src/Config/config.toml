@@ -18,6 +18,10 @@ WAN = false
 
 Transport_Protocol = "TCP" # TCP/QUIC
 
+# 节点管理相关配置
+cleanup_interval = 300  # 清理间隔（秒），默认300秒
+timeout_interval = 300  # 超时间隔（秒），默认300秒
+
 
 [Runtime]
 # 运行时环境相关的配置

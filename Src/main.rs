@@ -13,6 +13,7 @@ use pleiades::{
     Control_Loop, Ui_Message, TUI_Loop,
 };
 use pleiades::control::cli::CLI_Command;
+use pleiades::peer_management;
 
 #[tokio::main]
 async fn main() {
@@ -80,6 +81,8 @@ async fn main() {
                 .unwrap_or_else(|| "TCP".to_string()),
             listen_port: 0,
             bootstrap_peers: Vec::new(),
+            cleanup_interval: net.and_then(|n| n.cleanup_interval).unwrap_or(300),
+            timeout_interval: net.and_then(|n| n.timeout_interval).unwrap_or(300),
         }
     };
 
@@ -95,7 +98,14 @@ async fn main() {
     info!("节点 PeerId: {}", libp2p::PeerId::from(keypair.public()));
 
     let (event_tx, event_rx) = mpsc::channel(100);
-    let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, keypair, event_tx).await {
+    
+    // ============================================================
+    // 5. 创建 PeerManager（任务4要求：集成到 NetworkService）
+    // ============================================================
+    let (_peer_manager, peer_handle) = peer_management::create_peer_management();
+    info!("PeerManager 已创建，准备集成到 NetworkService");
+
+    let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, keypair, event_tx, peer_handle).await {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[Error] 网络初始化失败: {}", e);
@@ -116,7 +126,7 @@ async fn main() {
     });
 
     // ============================================================
-    // 5. 读取设备配置，并进行 CUDA fallback 检查
+    // 6. 读取设备配置，并进行 CUDA fallback 检查
     // ============================================================
 
     // 读取设备配置，并进行 CUDA fallback 检查
@@ -145,7 +155,7 @@ async fn main() {
     info!("推理设备: {}", device);
 
     // ============================================================
-    // 6. 创建通信通道并启动 TUI
+    // 7. 创建通信通道并启动 TUI
     // ============================================================
     let (cli_tx, cli_rx) = mpsc::channel::<CLI_Command>(32);
     let (ui_tx, ui_rx) = mpsc::channel::<Ui_Message>(256);
@@ -158,7 +168,7 @@ async fn main() {
     info!("TUI 已启动");
 
     // ============================================================
-    // 7. 启动 Control 事件循环（阻塞主线程直到退出）
+    // 8. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
     Control_Loop(cli_rx, inbound_rx, event_rx, node_handle, device, config_path, ui_tx).await;
 

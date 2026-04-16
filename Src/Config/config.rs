@@ -38,6 +38,8 @@ pub struct Network_Config {
     pub LAN: Option<bool>,
     pub WAN: Option<bool>,
     pub Transport_Protocol: Option<String>,
+    pub cleanup_interval: Option<u64>,    // 清理间隔（秒），默认300
+    pub timeout_interval: Option<u64>,    // 超时间隔（秒），默认300
 }
 
 /// [Runtime] 段配置

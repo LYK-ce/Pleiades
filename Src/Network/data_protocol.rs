@@ -11,7 +11,7 @@
 //! |  Type    |   Length     |      Payload        |
 //! |  1 byte  |  8 bytes BE  |  Length bytes        |
 //! +----------+--------------+---------------------+
-
+#[allow(nonstandard_style)]
 use libp2p::request_response::Codec;
 use libp2p::StreamProtocol;
 use futures::prelude::*;
@@ -63,6 +63,7 @@ impl DataType {
 /// 网络层只看字节流，不关心上层语义。
 /// Request 和 Response 的线上格式完全相同，因此合并为一个结构体。
 #[derive(Debug, Clone)]
+#[allow(nonstandard_style)]
 pub struct Network_Data {
     /// 数据类型标记
     pub data_type: DataType,

@@ -2,6 +2,7 @@
 //Date ： 2026-04-13
 
 #![allow(non_snake_case)]
+#![allow(nonstandard_style)]
 
 //! Pleiades - 边缘设备分布式推理运行时框架
 //!
@@ -27,11 +28,14 @@ pub mod control;
 #[path = "TUI/mod.rs"]
 pub mod tui;
 
+#[path = "PeerManagement/mod.rs"]
+pub mod peer_management;
+
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
 // Network模块类型导出
-pub use network::{NetworkConfig, NetworkEvent, Network_Service, NodeCommand, NodeHandle, PeerInfo};
+pub use network::{NetworkConfig, NetworkEvent, Network_Service, NodeCommand, NodeHandle};
 pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
 pub use network::data_protocol;
@@ -78,3 +82,6 @@ pub use control::Ui_Message;
 
 // TUI模块类型导出
 pub use tui::TUI_Loop;
+
+// PeerManagement模块类型导出
+pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, PeerError, create_peer_management};
