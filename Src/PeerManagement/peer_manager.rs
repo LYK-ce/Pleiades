@@ -86,6 +86,17 @@ impl PeerManager {
         }
     }
 
+    /// 更新节点带宽信息
+    pub async fn update_bandwidth(&self, peer_id: &PeerId, bandwidth_mbps: Option<u64>) -> bool {
+        let mut peers = self.peers.write().await;
+        if let Some(peer_info) = peers.get_mut(peer_id) {
+            peer_info.update_bandwidth(bandwidth_mbps);
+            true
+        } else {
+            false
+        }
+    }
+
     /// 获取空闲节点列表（状态为Connected）
     pub async fn get_idle_peers(&self) -> Vec<PeerInfo> {
         let peers = self.peers.read().await;

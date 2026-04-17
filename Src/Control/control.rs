@@ -51,6 +51,7 @@ use crate::network::data_protocol::DataType;
 use crate::network::network_service::NetworkEvent;
 use crate::network::node_handle::{InboundRequest, NodeHandle};
 use crate::network::tensor_stream_manager::Tensor_IO_Handle;
+use crate::peer_management::PeerHandle;
 
 /// 自回归生成最大轮数
 const MAX_GENERATION_ROUNDS: usize = 120;
@@ -94,6 +95,7 @@ pub async fn Control_Loop(
     mut inbound_rx: mpsc::Receiver<InboundRequest>,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     node_handle: NodeHandle,
+    peer_handle: PeerHandle,
     mut device: String,
     config_path: PathBuf,
     ui_tx: mpsc::Sender<Ui_Message>,
@@ -121,6 +123,7 @@ pub async fn Control_Loop(
                             &mut state,
                             &mut next_peer,
                             &node_handle,
+                            &peer_handle,
                             &device,
                             &model_path,
                             &mut cli_rx,
@@ -159,6 +162,11 @@ pub async fn Control_Loop(
                             warn!("网络节点关闭失败: {}", e);
                         }
                         break;
+                    }
+                    Some(CLI_Command::DisplayPeer { reply }) => {
+                        info!("Control: 收到 display-peer 命令");
+                        let result = Handle_Display_Peer(&peer_handle, &ui_tx).await;
+                        let _ = reply.send(result);
                     }
                     None => {
                         info!("Control: CLI 通道关闭，退出");
@@ -220,6 +228,7 @@ async fn Handle_Run(
     state: &mut Node_State,
     next_peer: &mut Option<PeerId>,
     node_handle: &NodeHandle,
+    peer_handle: &PeerHandle,
     device: &str,
     model_path: &Path,
     cli_rx: &mut mpsc::Receiver<CLI_Command>,
@@ -387,13 +396,25 @@ async fn Handle_Run(
             Send_Ui(ui_tx, Ui_Message::Log(format!("  ✓ 节点 {} 已收到 LOAD 命令", peer))).await;
         }
 
-        // Step 7.5: 提前创建 Tensor Stream Manager
+        // Step 7.5: 所有节点创建 Tensor Stream Manager（准备接收入站张量流）
+        // 协调者自己先创建
         node_handle.Create_Tensor_Stream()
             .await
             .map_err(|e| format!("创建 Tensor Stream 失败: {}", e))?;
-        Send_Ui(ui_tx, Ui_Message::Log("✓ Tensor Stream Manager 已创建".to_string())).await;
+        Send_Ui(ui_tx, Ui_Message::Log("✓ 本机 Tensor Stream Manager 已创建".to_string())).await;
 
-        // Step 8: 发送 PIPELINE_FLOW 命令（建立链条）
+        // 通知所有 Worker 创建 Manager（确保所有节点都准备好接收入站流）
+        Send_Ui(ui_tx, Ui_Message::Log("发送 PREPARE_CONNECTION 命令给所有节点...".to_string())).await;
+        for peer in &peers {
+            let cmd_bytes = Serialize_Command(&Control_Command::Prepare_Connection);
+            node_handle
+                .Send_Data(peer, DataType::Command, cmd_bytes)
+                .await
+                .map_err(|e| format!("发送 PREPARE_CONNECTION 失败 ({}): {}", peer, e))?;
+        }
+        Send_Ui(ui_tx, Ui_Message::Log("✓ 所有节点 Tensor Stream Manager 已就绪".to_string())).await;
+
+        // Step 8: 发送 PIPELINE_FLOW 命令（建立链条、打开出站流）
         Send_Ui(ui_tx, Ui_Message::Log("配置流水线...".to_string())).await;
         let local_peer = node_handle.Get_Local_Peer_Id();
 
@@ -595,6 +616,11 @@ async fn Handle_Run(
                     }
                     Some(CLI_Command::SetDevice { reply, .. }) => {
                         let _ = reply.send(Err("推理进行中，无法切换设备".to_string()));
+                    }
+                    Some(CLI_Command::DisplayPeer { reply }) => {
+                        // 在推理期间也可以显示节点信息
+                        let result = Handle_Display_Peer(&peer_handle, ui_tx).await;
+                        let _ = reply.send(result);
                     }
                     None => {
                         info!("Control: CLI 通道关闭");
@@ -880,6 +906,23 @@ async fn Handle_Control_Command(
                 .await;
         }
 
+        Control_Command::Prepare_Connection => {
+            // 创建 Tensor Stream Manager（准备接收入站张量流）
+            // 必须在 Pipeline_Flow 之前完成，避免上游节点打开出站流时本节点尚未就绪
+            Send_Ui(ui_tx, Ui_Message::Log(format!("PREPARE_CONNECTION (来自 {}): 创建 Tensor Stream Manager", peer))).await;
+            if let Err(e) = node_handle.Create_Tensor_Stream().await {
+                error!("创建 Tensor Stream 失败: {}", e);
+                let _ = node_handle
+                    .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
+                    .await;
+                return;
+            }
+            Send_Ui(ui_tx, Ui_Message::Log("✓ Tensor Stream Manager 已创建".to_string())).await;
+            let _ = node_handle
+                .Send_Response(request_id, DataType::Command, b"OK".to_vec())
+                .await;
+        }
+
         Control_Command::Pipeline_Flow { next_peer: target } => {
             *next_peer = Some(target);
             Send_Ui(ui_tx, Ui_Message::Log(format!("PIPELINE_FLOW (来自 {}): next → {}", peer, target))).await;
@@ -897,15 +940,7 @@ async fn Handle_Control_Command(
             };
             let (model_path_str, layer_start, layer_end) = load_params;
 
-            // 1. 创建 tensor stream manager
-            if let Err(e) = node_handle.Create_Tensor_Stream().await {
-                error!("创建 Tensor Stream 失败: {}", e);
-                let _ = node_handle
-                    .Send_Response(request_id, DataType::Command, format!("ERROR: {}", e).into_bytes())
-                    .await;
-                return;
-            }
-            // 2. 打开到 next_peer 的出站流
+            // 1. 打开到 next_peer 的出站流（Manager 已在 Prepare_Connection 中创建）
             if let Err(e) = node_handle.Open_Tensor_Stream(&target).await {
                 error!("打开出站 Tensor Stream 失败: {}", e);
                 let _ = node_handle
@@ -1094,6 +1129,7 @@ async fn Handle_Event(event: NetworkEvent, ui_tx: &mpsc::Sender<Ui_Message>) {
             // 文件传输完成，恢复 Job 为空闲
             Send_Ui(ui_tx, Ui_Message::Job_Idle).await;
         }
+        
         NetworkEvent::FileStreamProgress { peer, file_name, direction, sent, total } => {
             Send_Ui(ui_tx, Ui_Message::File_Progress {
                 file_name,
@@ -1115,4 +1151,82 @@ async fn Handle_Event(event: NetworkEvent, ui_tx: &mpsc::Sender<Ui_Message>) {
             info!("DHT 记录未找到: key={} bytes", key.len());
         }
     }
+}
+
+// ============================================================
+// Display Peer 命令处理
+// ============================================================
+
+/// 处理 display-peer 命令，显示所有节点信息
+async fn Handle_Display_Peer(
+    peer_handle: &PeerHandle,
+    ui_tx: &mpsc::Sender<Ui_Message>,
+) -> Result<String, String> {
+    use crate::peer_management::PeerStatus;
+    
+    info!("正在获取节点信息...");
+    
+    // 获取所有节点
+    let peers = match peer_handle.list_peers().await {
+        Ok(peers) => peers,
+        Err(e) => {
+            let error_msg = format!("获取节点列表失败: {}", e);
+            warn!("{}", error_msg);
+            return Err(error_msg);
+        }
+    };
+    
+    if peers.is_empty() {
+        let msg = "当前没有连接的节点".to_string();
+        Send_Ui(ui_tx, Ui_Message::Log(msg.clone())).await;
+        return Ok(msg);
+    }
+    
+    // 构建显示信息
+    let mut output = String::new();
+    output.push_str("=== 节点信息 ===\n");
+    
+    for (i, peer_info) in peers.iter().enumerate() {
+        let status_str = match peer_info.query_status() {
+            PeerStatus::Connected => "已连接",
+            PeerStatus::Busy => "忙碌",
+            PeerStatus::Connecting => "连接中",
+            PeerStatus::Disconnected => "已断开",
+        };
+        
+        let (capability_opt, latency_opt, bandwidth_opt) = peer_info.query_profile();
+        let latency_ms = latency_opt.unwrap_or(0);
+        let bandwidth_mbps = bandwidth_opt.unwrap_or(0);
+        
+        // 处理能力信息
+        let (has_gpu, memory_mb, compute_score) = if let Some(capability) = capability_opt {
+            (
+                if capability.has_gpu { "有GPU" } else { "无GPU" },
+                capability.memory_mb,
+                capability.compute_score
+            )
+        } else {
+            ("未知", 0, 0.0)
+        };
+        
+        output.push_str(&format!(
+            "{}. 节点ID: {}\n   状态: {}\n   延迟: {}ms\n   带宽: {}Mbps\n   能力: {}, 内存: {}MB, 计算分: {}\n   最后活跃: {:?}\n",
+            i + 1,
+            peer_info.peer_id,
+            status_str,
+            latency_ms,
+            bandwidth_mbps,
+            has_gpu,
+            memory_mb,
+            compute_score,
+            peer_info.last_active
+        ));
+    }
+    
+    output.push_str(&format!("总计: {} 个节点", peers.len()));
+    
+    // 发送到UI显示
+    Send_Ui(ui_tx, Ui_Message::Log(output.clone())).await;
+    
+    Ok(output)
 }

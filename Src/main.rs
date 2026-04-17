@@ -83,6 +83,8 @@ async fn main() {
             bootstrap_peers: Vec::new(),
             cleanup_interval: net.and_then(|n| n.cleanup_interval).unwrap_or(300),
             timeout_interval: net.and_then(|n| n.timeout_interval).unwrap_or(300),
+            heartbeat_interval: net.and_then(|n| n.heartbeat_interval).unwrap_or(60),
+            heartbeat_timeout: net.and_then(|n| n.heartbeat_timeout).unwrap_or(10),
         }
     };
 
@@ -104,6 +106,9 @@ async fn main() {
     // ============================================================
     let (_peer_manager, peer_handle) = peer_management::create_peer_management();
     info!("PeerManager 已创建，准备集成到 NetworkService");
+
+    // 克隆 peer_handle 用于 Control_Loop
+    let peer_handle_for_control = peer_handle.clone();
 
     let (mut network_service, node_handle, inbound_rx) = match Network_Service::Init(network_cfg, keypair, event_tx, peer_handle).await {
         Ok(result) => result,
@@ -170,7 +175,7 @@ async fn main() {
     // ============================================================
     // 8. 启动 Control 事件循环（阻塞主线程直到退出）
     // ============================================================
-    Control_Loop(cli_rx, inbound_rx, event_rx, node_handle, device, config_path, ui_tx).await;
+    Control_Loop(cli_rx, inbound_rx, event_rx, node_handle, peer_handle_for_control, device, config_path, ui_tx).await;
 
     info!("Pleiades 已退出");
 }

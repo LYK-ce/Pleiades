@@ -28,6 +28,7 @@ use libp2p::{
     kad::{self, store::MemoryStore, Mode},
     mdns,
     noise,
+    ping,
     request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
@@ -50,7 +51,7 @@ use super::tensor_stream_manager::Tensor_Stream_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 
 // 导入 PeerManagement 模块
-use crate::peer_management::{PeerHandle, PeerInfo};
+use crate::peer_management::{PeerHandle, PeerInfo, PeerStatus};
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -69,6 +70,10 @@ pub struct NetworkConfig {
     pub cleanup_interval: u64,
     /// 超时间隔（秒）
     pub timeout_interval: u64,
+    /// 心跳间隔（秒）
+    pub heartbeat_interval: u64,
+    /// 心跳超时（秒）
+    pub heartbeat_timeout: u64,
 }
 
 impl Default for NetworkConfig {
@@ -81,6 +86,8 @@ impl Default for NetworkConfig {
             bootstrap_peers: Vec::new(),
             cleanup_interval: 300,    // 默认300秒
             timeout_interval: 300,    // 默认300秒
+            heartbeat_interval: 60,   // 默认60秒
+            heartbeat_timeout: 10,    // 默认10秒
         }
     }
 }
@@ -96,6 +103,8 @@ pub struct PleiadesNetworkBehaviour {
     pub request_response: request_response::Behaviour<PleiadesCodec>,
     /// 流式传输协议
     pub stream: stream::Behaviour,
+    /// Ping心跳协议
+    pub ping: ping::Behaviour,
 }
 
 
@@ -233,11 +242,18 @@ impl Network_Service {
                 // 创建流式传输行为
                 let stream = stream::Behaviour::new();
 
+                // 创建Ping心跳行为，使用配置的heartbeat_interval和heartbeat_timeout
+                let ping_config = ping::Config::new()
+                    .with_interval(Duration::from_secs(config.heartbeat_interval))
+                    .with_timeout(Duration::from_secs(config.heartbeat_timeout));
+                let ping_behaviour = ping::Behaviour::new(ping_config);
+
                 Ok(PleiadesNetworkBehaviour {
                     mdns,
                     kademlia,
                     request_response,
                     stream,
+                    ping: ping_behaviour,
                 })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(86400)))
@@ -414,6 +430,11 @@ impl Network_Service {
             // 新监听地址
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("监听地址: {}/p2p/{}", address, self.local_peer_id);
+            }
+
+            // Ping心跳事件
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Ping(ping_event)) => {
+                self.Handle_Ping_Event(ping_event).await;
             }
 
             // 其他事件
@@ -713,6 +734,46 @@ impl Network_Service {
             }
             request_response::Event::ResponseSent { peer, .. } => {
                 debug!("响应已发送 to {}", peer);
+            }
+        }
+    }
+
+    /// 处理Ping心跳事件
+    ///
+    /// 心跳事件完全在Network层内部处理，不向Control层发送事件。
+    /// - 成功收到Pong: 通过peer_handle更新延迟信息
+    /// - 超时: 通过peer_handle将节点状态设置为Disconnected
+    /// - 不支持/其他错误: 仅记录日志
+    async fn Handle_Ping_Event(&mut self, event: ping::Event) {
+        let peer_id = event.peer;
+
+        match event.result {
+            // 成功收到 Pong，包含 RTT
+            Ok(rtt) => {
+                let latency_ms = rtt.as_millis() as u64;
+                info!("Ping成功: {} | RTT: {}ms", peer_id, latency_ms);
+
+                // 使用 peer_handle 更新心跳延迟信息
+                if let Err(e) = self.peer_handle.update_heartbeat(&peer_id, Some(latency_ms)).await {
+                    info!("更新节点心跳失败 ({}): {}", peer_id, e);
+                }
+            }
+            // Ping 超时
+            Err(ping::Failure::Timeout) => {
+                info!("Ping超时: {}", peer_id);
+
+                // 将节点状态设置为 Disconnected
+                if let Err(e) = self.peer_handle.update_status(&peer_id, PeerStatus::Disconnected).await {
+                    info!("更新节点状态失败 ({}): {}", peer_id, e);
+                }
+            }
+            // 对方不支持 Ping 协议
+            Err(ping::Failure::Unsupported) => {
+                info!("节点不支持Ping协议: {}", peer_id);
+            }
+            // 其他错误
+            Err(ping::Failure::Other { error }) => {
+                info!("Ping错误 ({}): {}", peer_id, error);
             }
         }
     }

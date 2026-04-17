@@ -119,6 +119,15 @@ impl PeerHandle {
         }
     }
 
+    /// 更新节点带宽信息
+    pub async fn update_bandwidth(&self, peer_id: &PeerId, bandwidth_mbps: Option<u64>) -> Result<(), PeerError> {
+        if self.inner.update_bandwidth(peer_id, bandwidth_mbps).await {
+            Ok(())
+        } else {
+            Err(PeerError::PeerNotFound(*peer_id))
+        }
+    }
+
     /// 获取忙碌节点列表
     pub async fn get_busy_peers(&self) -> Result<Vec<PeerInfo>, PeerError> {
         Ok(self.inner.get_busy_peers().await)

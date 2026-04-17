@@ -54,6 +54,7 @@ pub struct PeerInfo {
     pub peer_id: PeerId,                 // 节点ID
     pub addresses: Vec<Multiaddr>,       // 地址列表
     pub latency_ms: Option<u64>,         // 最后一次ping延迟
+    pub bandwidth_mbps: Option<u64>,     // 带宽（Mbps），可选
     pub connected_at: Instant,           // 连接建立时间
     pub last_active: Instant,            // 最后活跃时间
     pub status: PeerStatus,              // 节点状态
@@ -68,6 +69,7 @@ impl PeerInfo {
             peer_id,
             addresses,
             latency_ms: None,
+            bandwidth_mbps: None,
             connected_at: now,
             last_active: now,
             status: PeerStatus::Connected,
@@ -95,14 +97,20 @@ impl PeerInfo {
         self.last_active = Instant::now();
     }
 
+    /// Update Bandwidth 更新节点带宽信息
+    pub fn update_bandwidth(&mut self, bandwidth_mbps: Option<u64>) {
+        self.bandwidth_mbps = bandwidth_mbps;
+        self.last_active = Instant::now();
+    }
+
     /// Query Status 查询节点状态，仅返回status
     pub fn query_status(&self) -> PeerStatus {
         self.status
     }
 
-    /// Query Profile 查询节点能力与延迟，返回能力描述和延迟信息，因为这两者作为节点分配依据，往往需要一起查询
-    pub fn query_profile(&self) -> (Option<&PeerCapability>, Option<u64>) {
-        (self.capability.as_ref(), self.latency_ms)
+    /// Query Profile 查询节点能力、延迟和带宽，返回能力描述、延迟信息和带宽信息，因为这三者作为节点分配依据，往往需要一起查询
+    pub fn query_profile(&self) -> (Option<&PeerCapability>, Option<u64>, Option<u64>) {
+        (self.capability.as_ref(), self.latency_ms, self.bandwidth_mbps)
     }
 
     /// Is_Timeout 检查节点是否超时，参数为超时时间（秒），返回布尔值

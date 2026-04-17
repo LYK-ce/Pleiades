@@ -58,6 +58,11 @@ pub enum CLI_Command {
     },
     /// 退出程序
     Quit,
+    /// 显示所有节点信息
+    DisplayPeer {
+        /// 结果回传通道
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 // ============================================================

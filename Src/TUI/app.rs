@@ -9,6 +9,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use ratatui::layout::Rect;
+
 // ============================================================
 // 视图模式
 // ============================================================
@@ -138,6 +140,8 @@ pub struct App {
     // ===== Command 面板数据 =====
     /// 命令输出（始终存在，Command 面板始终可见）
     pub command_output: Command_Output,
+    /// 命令输出滚动偏移
+    pub command_scroll: usize,
 
     // ===== 输入栏数据 =====
     /// 输入缓冲区
@@ -148,6 +152,12 @@ pub struct App {
     // ===== 控制标志 =====
     /// 是否应退出
     pub should_quit: bool,
+
+    // ===== 面板区域（用于鼠标滚轮命中检测） =====
+    /// Log 面板区域
+    pub log_area: Rect,
+    /// Command 面板区域
+    pub command_area: Rect,
 }
 
 impl App {
@@ -161,9 +171,12 @@ impl App {
             peers: Vec::new(),
             job: Job_State::Idle,
             command_output: Command_Output::New(),
+            command_scroll: 0,
             input_buffer: String::new(),
             cursor_position: 0,
             should_quit: false,
+            log_area: Rect::default(),
+            command_area: Rect::default(),
         }
     }
 
@@ -204,6 +217,20 @@ impl App {
         if self.log_scroll < self.logs.len().saturating_sub(1) {
             self.log_scroll += 1;
         }
+    }
+
+    /// 命令面板向上滚动
+    pub fn Scroll_Command_Up(&mut self) {
+        if self.command_scroll > 0 {
+            self.command_scroll -= 1;
+        }
+    }
+
+    /// 命令面板向下滚动
+    ///
+    /// 不在此处设置上界——由 command_panel::Render 根据视觉行数钳位。
+    pub fn Scroll_Command_Down(&mut self) {
+        self.command_scroll = self.command_scroll.saturating_add(1);
     }
 
     /// 输入字符

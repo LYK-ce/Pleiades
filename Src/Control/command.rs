@@ -9,7 +9,8 @@
 //! ## 命令列表
 //! - `Work`: 通知节点进入 Busy 状态
 //! - `Load`: 加载指定模型文件的指定层范围
-//! - `Pipeline_Flow`: 设置推理结果转发目标节点
+//! - `Prepare_Connection`: 通知节点创建 Tensor Stream Manager（准备接收入站张量流）
+//! - `Pipeline_Flow`: 设置推理结果转发目标节点并打开出站张量流
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -44,10 +45,19 @@ pub enum Control_Command {
         end: usize,
     },
 
-    /// 配置流水线转发目标
+    /// 准备连接（创建 Tensor Stream Manager）
     ///
-    /// 协调者在加载完成后发送，参与者收到后记住 next_peer，
-    /// 推理完成后将结果 tensor 通过 Send_Data 发给 next_peer。
+    /// 协调者在发送 Pipeline_Flow 之前发送，参与者收到后创建
+    /// Tensor_Stream_Manager（inbound + outbound），使节点准备好
+    /// 接收入站张量流。必须在所有节点都就绪后，再发送 Pipeline_Flow
+    /// 打开出站流，避免入站流到达时 Manager 未创建的竞争条件。
+    Prepare_Connection,
+
+    /// 配置流水线转发目标并打开出站张量流
+    ///
+    /// 协调者在所有节点完成 Prepare_Connection 后发送。
+    /// 参与者收到后打开到 next_peer 的出站张量流，
+    /// 然后获取 inbound + outbound stream 创建 Session 并启动 Relay。
     ///
     /// - `next_peer`: 推理完成后结果发送的目标节点 PeerId
     Pipeline_Flow {
@@ -64,6 +74,7 @@ pub enum Control_Command {
 /// 格式（文本，`|` 分隔）：
 /// - `"WORK"`
 /// - `"LOAD|<model_path>|<start>|<end>"`
+/// - `"PREPARE_CONNECTION"`
 /// - `"PIPELINE_FLOW|<next_peer_id>"`
 ///
 /// # 参数
@@ -74,6 +85,7 @@ pub enum Control_Command {
 pub fn Serialize_Command(cmd: &Control_Command) -> Vec<u8> {
     let text = match cmd {
         Control_Command::Work => "WORK".to_string(),
+        Control_Command::Prepare_Connection => "PREPARE_CONNECTION".to_string(),
         Control_Command::Load {
             model_path,
             start,
@@ -109,6 +121,8 @@ pub fn Deserialize_Command(payload: &[u8]) -> Result<Control_Command, String> {
 
     match parts[0] {
         "WORK" => Ok(Control_Command::Work),
+
+        "PREPARE_CONNECTION" => Ok(Control_Command::Prepare_Connection),
 
         "LOAD" => {
             if parts.len() < 4 {

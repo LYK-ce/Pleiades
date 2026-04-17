@@ -38,7 +38,7 @@ pub mod command_panel;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -73,13 +73,16 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
         terminal => terminal,
     };
 
+    // 启用鼠标捕获（滚轮等事件）
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture).ok();
+
     let mut app = App::New();
     app.Add_Log("Pleiades TUI 已启动".to_string());
 
     // 2. 事件循环
     loop {
-        // 2a. 渲染
-        if terminal.draw(|frame| Render(frame, &app)).is_err() {
+        // 2a. 渲染（&mut app 使 command_panel 能钳位 command_scroll）
+        if terminal.draw(|frame| Render(frame, &mut app)).is_err() {
             break;
         }
 
@@ -88,13 +91,16 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
             Handle_Ui_Message(&mut app, msg);
         }
 
-        // 2c. 处理键盘事件（50ms 超时，约 20fps）
+        // 2c. 处理输入事件（50ms 超时，约 20fps）
         if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                // 只处理按下事件（避免重复）
-                if key.kind == KeyEventKind::Press {
+            match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     Handle_Key_Event(&mut app, key.code, key.modifiers, &cli_tx);
                 }
+                Ok(Event::Mouse(mouse)) => {
+                    Handle_Mouse_Event(&mut app, mouse.kind, mouse.column, mouse.row);
+                }
+                _ => {}
             }
         }
 
@@ -106,6 +112,7 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
     }
 
     // 3. 恢复终端
+    crossterm::execute!(std::io::stdout(), DisableMouseCapture).ok();
     ratatui::restore();
 }
 
@@ -189,6 +196,9 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
             app.command_output.output_text.push_str(&token);
             app.command_output.token_count += 1;
             app.view_mode = View_Mode::Busy_Coordinator;
+            // 自动滚动到底部，跟随推理输出
+            let line_count = app.command_output.output_text.lines().count();
+            app.command_scroll = line_count.saturating_sub(1);
         }
         Ui_Message::Inference_Complete {
             text,
@@ -245,17 +255,78 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, c
         KeyCode::Backspace => {
             app.Delete_Char();
         }
-        // ↑: 日志向上滚动
+        // ↑: 根据修饰键决定滚动目标
         KeyCode::Up => {
-            app.Scroll_Up();
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl+Up: 命令面板向上滚动
+                app.Scroll_Command_Up();
+            } else {
+                // 普通 Up: 日志向上滚动
+                app.Scroll_Up();
+            }
         }
-        // ↓: 日志向下滚动
+        // ↓: 根据修饰键决定滚动目标
         KeyCode::Down => {
-            app.Scroll_Down();
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl+Down: 命令面板向下滚动
+                app.Scroll_Command_Down();
+            } else {
+                // 普通 Down: 日志向下滚动
+                app.Scroll_Down();
+            }
+        }
+        // PageUp: 命令面板向上滚动（快速）
+        KeyCode::PageUp => {
+            app.Scroll_Command_Up();
+            // 快速滚动：一次滚动5行
+            for _ in 0..4 {
+                app.Scroll_Command_Up();
+            }
+        }
+        // PageDown: 命令面板向下滚动（快速）
+        KeyCode::PageDown => {
+            app.Scroll_Command_Down();
+            // 快速滚动：一次滚动5行
+            for _ in 0..4 {
+                app.Scroll_Command_Down();
+            }
         }
         // 普通字符输入
         KeyCode::Char(c) => {
             app.Input_Char(c);
+        }
+        _ => {}
+    }
+}
+
+// ============================================================
+// 鼠标事件处理
+// ============================================================
+
+/// 处理鼠标事件
+///
+/// 根据鼠标位置判断光标所在面板，将滚轮事件路由到对应的滚动方法。
+/// - 光标在 Log 面板区域 → 日志滚动
+/// - 光标在 Command 面板区域 → 命令输出滚动
+fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u16) {
+    // 判断鼠标所在面板
+    let in_log = row >= app.log_area.y && row < app.log_area.y + app.log_area.height;
+    let in_command = row >= app.command_area.y && row < app.command_area.y + app.command_area.height;
+
+    match kind {
+        MouseEventKind::ScrollUp => {
+            if in_command {
+                app.Scroll_Command_Up();
+            } else if in_log {
+                app.Scroll_Up();
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if in_command {
+                app.Scroll_Command_Down();
+            } else if in_log {
+                app.Scroll_Down();
+            }
         }
         _ => {}
     }
@@ -276,8 +347,9 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
         return;
     }
 
-    // 每次新命令清空 Command 面板
+    // 每次新命令清空 Command 面板并重置滚动
     app.command_output = Command_Output::New();
+    app.command_scroll = 0;
 
     if trimmed == "ls" {
         // 列出 Pleiades_Workspace 下的文件
@@ -363,6 +435,38 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
         return;
     }
 
+    if trimmed == "display-peer" || trimmed == "dp" {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = CLI_Command::DisplayPeer {
+            reply: reply_tx,
+        };
+
+        app.Add_Log("执行命令: display-peer".to_string());
+
+        if cli_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Control 层已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        // 同步等待 Control 层的回复
+        match reply_rx.blocking_recv() {
+            Ok(Ok(msg)) => {
+                app.command_output.output_text = msg;
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Control 层未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
     if trimmed.starts_with("run ") {
         // 解析 run 命令: run <model_path>（不含 prompt）
         let model_path_str = trimmed.strip_prefix("run ").unwrap_or("").trim();
@@ -399,6 +503,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
     app.Add_Log(format!("发送 prompt: {}", trimmed));
     app.command_output = Command_Output::New();
     app.command_output.output_text = String::new();
+    app.command_scroll = 0;
 
     if cli_tx.blocking_send(cmd).is_err() {
         app.Add_Log("[错误] Control 层已关闭".to_string());
@@ -411,7 +516,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
 // ============================================================
 
 /// 总渲染函数 — 计算布局并分发给各 panel 渲染
-fn Render(frame: &mut Frame, app: &App) {
+fn Render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Command 面板始终可见
@@ -430,6 +535,11 @@ fn Render(frame: &mut Frame, app: &App) {
         Constraint::Percentage(30),
     ])
     .split(rows[0]);
+
+    // 记录面板区域，供鼠标滚轮事件命中检测
+    app.log_area = top[0];
+    app.command_area = rows[2];
+
     log_panel::Render(frame, top[0], app);
     network_panel::Render(frame, top[1], app);
 

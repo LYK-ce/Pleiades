@@ -40,6 +40,8 @@ pub struct Network_Config {
     pub Transport_Protocol: Option<String>,
     pub cleanup_interval: Option<u64>,    // 清理间隔（秒），默认300
     pub timeout_interval: Option<u64>,    // 超时间隔（秒），默认300
+    pub heartbeat_interval: Option<u64>,  // 心跳间隔（秒），默认60
+    pub heartbeat_timeout: Option<u64>,   // 心跳超时（秒），默认10
 }
 
 /// [Runtime] 段配置
