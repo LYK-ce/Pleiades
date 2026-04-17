@@ -577,6 +577,39 @@ impl Network_Service {
                 self.inbound_tensor_manager = None;
                 let _ = reply.send(Ok(()));
             }
+            NodeCommand::UpdateInfo { reply } => {
+                info!("开始批量带宽测试");
+                // 获取所有节点
+                let peers = match self.peer_handle.list_peers().await {
+                    Ok(peers) => peers,
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("获取节点列表失败: {}", e).into()));
+                        return true;
+                    }
+                };
+                
+                let total_count = peers.len();
+                let mut success_count = 0;
+                
+                // 串行逐个测试，避免并发干扰
+                for (index, peer_info) in peers.iter().enumerate() {
+                    let peer_id = peer_info.peer_id;
+                    info!("测试节点 {}/{}: {}", index + 1, total_count, peer_id);
+                    
+                    match self.Test_Bandwidth(&peer_id).await {
+                        Ok(bandwidth) => {
+                            info!("节点 {} 带宽测试成功: {} Mbps", peer_id, bandwidth);
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            info!("节点 {} 带宽测试失败: {}", peer_id, e);
+                        }
+                    }
+                }
+                
+                info!("批量带宽测试完成: 成功{}/{}", success_count, total_count);
+                let _ = reply.send(Ok((success_count, total_count)));
+            }
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
                 // 清理张量流 manager
@@ -798,6 +831,94 @@ impl Network_Service {
                 None
             }
         }
+    }
+
+    /// 测试指定节点的带宽
+    /// 发送1M、10M、50M数据包，取最大值作为带宽结果
+    pub async fn Test_Bandwidth(&mut self, peer_id: &PeerId) -> Result<u64, Box<dyn Error + Send + Sync>> {
+        let test_sizes = [1_000_000, 10_000_000, 50_000_000]; // 1M, 10M, 50M
+        let mut max_bandwidth = 0u64;
+        let mut has_success = false;
+        
+        for &size in &test_sizes {
+            match self.test_single_bandwidth(peer_id, size).await {
+                Ok(bandwidth) => {
+                    info!("带宽测试成功: peer={}, size={}B, bandwidth={}Mbps",
+                          peer_id, size, bandwidth);
+                    max_bandwidth = max_bandwidth.max(bandwidth);
+                    has_success = true;
+                }
+                Err(e) => {
+                    info!("带宽测试失败: peer={}, size={}B, error={}",
+                          peer_id, size, e);
+                }
+            }
+        }
+        
+        if has_success {
+            // 更新PeerManager中的带宽信息
+            if let Err(e) = self.peer_handle.update_bandwidth(peer_id, Some(max_bandwidth)).await {
+                info!("更新带宽信息失败: peer={}, error={}", peer_id, e);
+            }
+            Ok(max_bandwidth)
+        } else {
+            Err("所有带宽测试均失败".into())
+        }
+    }
+
+    /// 测试单个数据包大小的带宽
+    async fn test_single_bandwidth(&mut self, peer_id: &PeerId, size_bytes: u64) -> Result<u64, Box<dyn Error + Send + Sync>> {
+        use tokio::sync::oneshot;
+        use std::time::{Instant, Duration};
+        
+        // 1. 准备payload：size_bytes的小端字节序表示
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&size_bytes.to_le_bytes());
+        
+        // 2. 创建oneshot channel用于接收响应
+        let (response_tx, response_rx) = oneshot::channel();
+        
+        // 3. 发送请求
+        let request = super::data_protocol::Network_Data {
+            data_type: super::data_protocol::DataType::BandwidthTest,
+            payload,
+        };
+        
+        let start_time = Instant::now();
+        let outbound_id = self.swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(peer_id, request);
+        
+        // 4. 注册到outbound_manager等待响应
+        self.outbound_manager.Register_Outbound(outbound_id, response_tx);
+        
+        // 5. 等待响应，设置30秒超时
+        let response_result = match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+            Ok(Ok(response_result)) => response_result,
+            Ok(Err(_)) => return Err("响应通道已关闭".into()),
+            Err(_) => return Err("带宽测试超时".into()),
+        };
+        
+        let end_time = Instant::now();
+        
+        // 6. 检查响应结果
+        let response = match response_result {
+            Ok(network_data) => network_data,
+            Err(e) => return Err(format!("带宽测试失败: {}", e).into()),
+        };
+        
+        // 7. 验证响应大小
+        if response.payload.len() != size_bytes as usize {
+            return Err(format!("响应大小不匹配: 期望{}B, 实际{}B",
+                size_bytes, response.payload.len()).into());
+        }
+        
+        // 7. 计算带宽 (Mbps)
+        let duration_secs = end_time.duration_since(start_time).as_secs_f64();
+        let bandwidth_mbps = (size_bytes as f64 * 8.0) / (duration_secs * 1_000_000.0);
+        
+        Ok(bandwidth_mbps as u64)
     }
 
     /// 获取本地节点ID

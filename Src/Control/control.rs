@@ -35,8 +35,8 @@ use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 
-use super::cli::CLI_Command;
-use super::command::{Control_Command, Serialize_Command, Deserialize_Command};
+use super::cli_command::CLI_Command;
+use super::network_control_command::{Control_Command, Serialize_Command, Deserialize_Command};
 use super::ui_message::Ui_Message;
 use crate::config::Update_Config;
 use crate::ml_engine::ml_inference_service::{Create_Session, Split_Model, Analyze_Model};
@@ -863,6 +863,32 @@ async fn Handle_Inbound(
             let _ = node_handle
                 .Send_Response(req.request_id, DataType::Info, b"OK".to_vec())
                 .await;
+        }
+
+        // ===== 带宽测试消息 =====
+        DataType::BandwidthTest => {
+            debug!("收到带宽测试消息 (来自 {}), payload长度={}", req.peer, req.payload.len());
+            
+            // 带宽测试请求的payload包含数据包大小（小端字节序）
+            if req.payload.len() >= 8 {
+                // 读取数据包大小
+                let size_bytes = u64::from_le_bytes([
+                    req.payload[0], req.payload[1], req.payload[2], req.payload[3],
+                    req.payload[4], req.payload[5], req.payload[6], req.payload[7],
+                ]);
+                
+                // 创建指定大小的响应数据包（填充零）
+                let response_payload = vec![0u8; size_bytes as usize];
+                
+                let _ = node_handle
+                    .Send_Response(req.request_id, DataType::BandwidthTest, response_payload)
+                    .await;
+            } else {
+                warn!("带宽测试请求payload长度不足: {}", req.payload.len());
+                let _ = node_handle
+                    .Send_Response(req.request_id, DataType::BandwidthTest, vec![0u8; 8])
+                    .await;
+            }
         }
     }
 }

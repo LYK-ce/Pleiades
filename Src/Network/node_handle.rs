@@ -104,6 +104,10 @@ pub enum NodeCommand {
     CloseTensorStream {
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 更新所有节点的带宽信息
+    UpdateInfo {
+        reply: oneshot::Sender<Result<(usize, usize), Box<dyn Error + Send + Sync>>>,
+    },
     /// 停止节点
     Stop,
 }
@@ -381,6 +385,20 @@ impl NodeHandle {
         }).await?;
         rx.await
             .map_err(|_| "CloseTensorStream reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
+    }
+
+    /// 更新所有节点的带宽信息
+    ///
+    /// 对PeerManager中存储的所有peer进行带宽测试，逐个串行测试以避免网络干扰。
+    /// 返回成功测试的节点数量和总节点数量。
+    pub async fn Update_Info(&self) -> Result<(usize, usize), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::UpdateInfo {
+            reply: tx,
+        }).await?;
+        rx.await
+            .map_err(|_| "UpdateInfo reply channel closed")?
             .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
     }
 

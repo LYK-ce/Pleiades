@@ -12,7 +12,7 @@ use pleiades::{
     Ensure_Config, Ensure_Identity, NetworkConfig, Network_Service,
     Control_Loop, Ui_Message, TUI_Loop,
 };
-use pleiades::control::cli::CLI_Command;
+use pleiades::control::cli_command::CLI_Command;
 use pleiades::peer_management;
 
 #[tokio::main]

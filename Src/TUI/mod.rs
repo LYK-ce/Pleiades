@@ -53,7 +53,7 @@ use app::{App, View_Mode, Job_State, Command_Output, Transfer_Direction};
 // Ui_Message 定义在 Control 层（crate::control::ui_message），
 // 任何 UI 实现都通过引用此类型获取显示数据。
 use crate::control::ui_message::Ui_Message;
-use crate::control::cli::CLI_Command;
+use crate::control::cli_command::CLI_Command;
 
 // ============================================================
 // TUI 主循环
