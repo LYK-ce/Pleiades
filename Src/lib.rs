@@ -12,6 +12,7 @@
 //! - ml_engine: ML推理引擎模块
 //! - control: 控制层模块
 //! - tui: TUI 终端界面模块
+//! - llm_io: LLM 文本交互通道模块
 
 #[path = "Config/mod.rs"]
 pub mod config;
@@ -30,6 +31,15 @@ pub mod tui;
 
 #[path = "PeerManagement/mod.rs"]
 pub mod peer_management;
+
+#[path = "Orchestrator/mod.rs"]
+pub mod orchestrator;
+
+#[path = "Storage/mod.rs"]
+pub mod storage;
+
+#[path = "LLM_IO/mod.rs"]
+pub mod llm_io;
 
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
@@ -67,7 +77,6 @@ pub use ml_engine::{Create_Session, Split_Model, Analyze_Model};
 pub use ml_engine::{
     Instruction, Inference_Input, Set_Target,
     Pipeline_Params, Pipeline_Result, Model_Info,
-    Engine_Input, Engine_Output,
 };
 // Session/Thread 引擎
 pub use ml_engine::{
@@ -85,3 +94,6 @@ pub use tui::TUI_Loop;
 
 // PeerManagement模块类型导出
 pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, PeerError, create_peer_management};
+
+// LLM_IO模块类型导出
+pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoChannels, IoFrontend, IoHandle, LLM_IO_Broker};

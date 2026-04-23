@@ -38,7 +38,8 @@ use tracing::info;
 
 use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model};
 use super::ml_thread_engine::{Session_Config, Session_Handle, Session_Thread};
-use super::ml_thread_engine_instruction::{Engine_Output, Model_Info};
+use super::ml_thread_engine_instruction::Model_Info;
+use crate::llm_io::IoHandle;
 use crate::network::tensor_stream_manager::Tensor_IO_Handle;
 
 // ============================================================
@@ -49,11 +50,10 @@ use crate::network::tensor_stream_manager::Tensor_IO_Handle;
 ///
 /// async 方法。内部流程：
 /// 1. 创建命令通道 (cmd_tx/cmd_rx)
-/// 2. 创建数据通道 (input_data_tx/input_data_rx, output_data_tx/output_data_rx)
-/// 3. 创建就绪信号通道 (oneshot)
-/// 4. 启动 OS 线程，将 cmd_rx, input_data_rx, output_data_tx, tensor_io 及配置传入线程
-/// 5. 线程内部：阻塞加载模型 → 初始化寄存器 → 通过 oneshot 发送 Ok(Model_Info) 或 Err
-/// 6. await 就绪信号，加载成功返回 (Session_Handle, output_data_rx, Model_Info)，失败返回 Err
+/// 2. 创建就绪信号通道 (oneshot)
+/// 3. 启动 OS 线程，将 cmd_rx, io_handle, tensor_io 及配置传入线程
+/// 4. 线程内部：阻塞加载模型 → 初始化寄存器 → 通过 oneshot 发送 Ok(Model_Info) 或 Err
+/// 5. await 就绪信号，加载成功返回 (Session_Handle, Model_Info)，失败返回 Err
 ///
 /// # 参数
 /// - `session_id`: Session 的唯一标识
@@ -62,9 +62,10 @@ use crate::network::tensor_stream_manager::Tensor_IO_Handle;
 /// - `layer_end`: 到第几层结束
 /// - `device`: 使用的 device，"cpu" 或 "cuda"
 /// - `tensor_io`: 张量 IO 句柄 (Option)，包含入站和出站张量流。单机推理时为 None。
+/// - `io_handle`: LLM_IO 提供的 ML 侧文本通道端点
 ///
 /// # 返回
-/// - `Ok((Session_Handle, mpsc::Receiver<Engine_Output>, Model_Info))`
+/// - `Ok((Session_Handle, Model_Info))`
 /// - `Err` 如果模型加载失败
 pub async fn Create_Session(
     session_id: String,
@@ -73,7 +74,8 @@ pub async fn Create_Session(
     layer_end: usize,
     device: String,
     tensor_io: Option<Tensor_IO_Handle>,
-) -> Result<(Session_Handle, mpsc::Receiver<Engine_Output>, Model_Info)> {
+    io_handle: IoHandle,
+) -> Result<(Session_Handle, Model_Info)> {
     info!(
         "ML Service: 创建 Session [{}] (model: {}, layers: {}-{}, device: {})",
         session_id,
@@ -86,14 +88,10 @@ pub async fn Create_Session(
     // Step 1: 创建命令通道
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
-    // Step 2: 创建数据通道
-    let (input_data_tx, input_data_rx) = mpsc::channel(32);
-    let (output_data_tx, output_data_rx) = mpsc::channel(64);
-
-    // Step 3: 创建就绪信号通道
+    // Step 2: 创建就绪信号通道
     let (ready_tx, ready_rx) = oneshot::channel();
 
-    // Step 4: 构造 Session_Config
+    // Step 3: 构造 Session_Config
     let session_config = Session_Config {
         model_path: model_path.to_path_buf(),
         layer_start,
@@ -101,21 +99,20 @@ pub async fn Create_Session(
         device,
     };
 
-    // Step 5: 启动 OS 线程
+    // Step 4: 启动 OS 线程
     let thread_session_id = session_id.clone();
     thread::spawn(move || {
         Session_Thread(
             thread_session_id,
             session_config,
             cmd_rx,
-            input_data_rx,
-            output_data_tx,
+            io_handle,
             tensor_io,
             ready_tx,
         );
     });
 
-    // Step 6: await 就绪信号
+    // Step 5: await 就绪信号
     let model_info = ready_rx
         .await
         .map_err(|_| {
@@ -131,9 +128,9 @@ pub async fn Create_Session(
     );
 
     // 构造 Session_Handle
-    let session_handle = Session_Handle::New(session_id, cmd_tx, input_data_tx);
+    let session_handle = Session_Handle::New(session_id, cmd_tx);
 
-    Ok((session_handle, output_data_rx, model_info))
+    Ok((session_handle, model_info))
 }
 
 // ============================================================

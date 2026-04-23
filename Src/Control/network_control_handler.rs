@@ -23,6 +23,7 @@ use crate::network::node_handle::{InboundRequest, NodeHandle};
 use crate::network::tensor_stream_manager::Tensor_IO_Handle;
 use crate::ml_engine::ml_inference_service::Create_Session;
 use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Inference_Input, Pipeline_Params};
+use crate::llm_io::IoHandle;
 use crate::ml_engine::ml_thread_register::TENSOR1;
 use std::path::PathBuf;
 
@@ -256,6 +257,11 @@ impl NetworkCommandHandler {
                         let model_path = PathBuf::from(&model_path_str);
 
                         tokio::spawn(async move {
+                            // Worker 不需要前端文本通道，但 API 需要 IoHandle
+                            let (_worker_input_tx, worker_input_rx) = mpsc::channel::<String>(1);
+                            let (worker_output_tx, _worker_output_rx) = mpsc::channel::<String>(1);
+                            let worker_io_handle = IoHandle { input_rx: worker_input_rx, output_tx: worker_output_tx };
+
                             // 创建 Session（加载模型 — 在 Session 的 OS 线程中阻塞）
                             let session_result = Create_Session(
                                 "worker".to_string(),
@@ -264,10 +270,11 @@ impl NetworkCommandHandler {
                                 layer_end,
                                 device_clone,
                                 Some(tensor_io),
+                                worker_io_handle,
                             ).await;
 
                             match session_result {
-                                Ok((session_handle, _output_data_rx, model_info)) => {
+                                Ok((session_handle, model_info)) => {
                                     Self::Send_Ui(&ui_tx_clone, Ui_Message::Log(format!(
                                         "✓ Worker 模型加载完成 (arch: {}, input: {}, output: {})",
                                         model_info.architecture, model_info.has_input_head, model_info.has_output_head

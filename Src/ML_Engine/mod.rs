@@ -6,7 +6,9 @@
 //! 提供 GGUF 模型解析、加载、Qwen3 推理、Session 管理、指令驱动执行引擎等功能
 //!
 //! ## 架构
-//! - `ml_inference_service`: ML 服务层（Create_Session, Split_Model, Analyze_Model）
+//! - `capability`: ML_Engine_Capability trait（对外接口）
+//! - `service`: ML_Engine_Service 实现（持有 Storage + Session 注册表）
+//! - `ml_inference_service`: 旧服务层（向后兼容，待迁移后删除）
 //! - `ml_thread_engine`: Session/Thread 引擎核心（Session, Session_Handle, Execute）
 //! - `ml_thread_engine_instruction`: 指令集定义
 //! - `ml_thread_register`: 寄存器系统
@@ -19,6 +21,8 @@ pub mod gguf_model;
 pub mod ml_thread_engine_instruction;
 pub mod ml_thread_engine;
 pub mod ml_thread_register;
+pub mod capability;
+pub mod service;
 
 #[path = "GGUF_Models/mod.rs"]
 pub mod gguf_models;
@@ -41,14 +45,17 @@ pub use gguf_model::{
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
 
-// ML Service 层导出
+// ML Service 层导出（旧 API，向后兼容 Control 层）
 pub use ml_inference_service::{Create_Session, Split_Model, Analyze_Model};
+
+// Capability 层导出（新 API，供 Orchestrator 使用）
+pub use capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+pub use service::ML_Engine_Service;
 
 // 指令集导出
 pub use ml_thread_engine_instruction::{
     Instruction, Inference_Input, Set_Target,
     Pipeline_Params, Pipeline_Result, Model_Info,
-    Engine_Input, Engine_Output,
 };
 
 // Session/Thread 引擎导出

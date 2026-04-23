@@ -128,10 +128,10 @@ pub enum Set_Target {
 pub enum Instruction {
     // ===== 数据输入 =====
 
-    /// 从 Control 层接收输入
+    /// 从前端接收输入
     ///
-    /// 阻塞读取 `input_data_rx` 通道，收到 prompt 文本后写入 **TEXT1**。
-    /// 若通道关闭（Control drop 了发送端），视为取消执行。
+    /// 阻塞读取 `io_handle.input_rx` 通道，收到 prompt 文本（String）后写入 **TEXT1**。
+    /// 若通道关闭（前端 drop 了发送端），视为取消执行。
     ///
     /// ### 寄存器写入
     /// - **TEXT1** ← prompt 文本
@@ -261,19 +261,20 @@ pub enum Instruction {
 
     // ===== Control I/O =====
 
-    /// 向 Control 层发送当前文本片段
+    /// 向前端发送当前文本片段
     ///
-    /// 将 **TEXT2** 的内容通过 `output_data_tx` 通道发送给 Control/TUI。
-    /// 发送 `Engine_Output::Text(TEXT2)`。
+    /// 将 **TEXT2** 的内容通过 `io_handle.output_tx` 通道发送给前端。
+    /// 发送 String 类型文本片段。
     ///
     /// ### 寄存器读取
     /// - **TEXT2**（当前文本片段）
     Output,
 
-    /// 通知 Control 层流式输出结束
+    /// 标记流式输出结束
     ///
-    /// 通过 `output_data_tx` 发送 `Engine_Output::End` 信号。
-    /// 所有场景均需在程序末尾调用，通知 Control 层本次推理输出已完成。
+    /// 由 LLM_IO 通道生命周期管理，此处为 noop。
+    /// 通道关闭由 IoHandle 的 Drop 触发。
+    /// 所有场景均需在程序末尾调用。
     EndOutput,
 
     // ===== 网络 I/O =====
@@ -335,43 +336,6 @@ pub enum Instruction {
 }
 
 // ============================================================
-// Control ↔ Engine 通道消息类型
-// ============================================================
-
-/// Engine 输入消息（Control → Engine，数据平面）
-///
-/// Control 层通过 `input_data_tx` 发送给 Session 线程。
-/// `Input` 指令从 `input_data_rx` 接收此消息。
-#[derive(Debug, Clone)]
-pub enum Engine_Input {
-    /// 用户输入的 prompt 文本
-    ///
-    /// Input 指令收到后写入 **TEXT1**，供 Encode 指令使用。
-    Prompt(String),
-}
-
-/// Engine 输出消息（Engine → Control，数据平面）
-///
-/// Session 线程通过 `output_data_tx` 发送给 Control/TUI。
-#[derive(Debug, Clone)]
-pub enum Engine_Output {
-    /// 文本片段（流式输出）
-    ///
-    /// 由 `Output` 指令发送，包含 Decode 后的当前 step 文本片段。
-    Text(String),
-
-    /// 输出结束信号
-    ///
-    /// 由 `EndOutput` 指令发送，通知 Control 层本次推理输出已完成。
-    End,
-
-    /// 模型信息输出
-    ///
-    /// Session 创建时发送模型加载信息（由 Session_Thread 在初始化阶段发送）。
-    Info(Model_Info),
-}
-
-// ============================================================
 // Pipeline 参数（Control 层 → Engine）
 // ============================================================
 
@@ -428,7 +392,7 @@ impl Default for Pipeline_Params {
 /// 由 Engine 执行完成后填充，通过 oneshot 返回给 Control 层。
 /// 包含最终生成文本、token 序列和执行时间等统计信息。
 ///
-/// 注意：推理过程中的实时输出通过 `Output` 指令 + `Engine_Output::Text` 通道传递，
+/// 注意：推理过程中的实时输出通过 `Output` 指令 + `io_handle.output_tx` 通道传递，
 /// `Pipeline_Result` 仅在整个 program 执行结束后返回。
 ///
 /// 字段来源：
@@ -464,7 +428,6 @@ pub struct Pipeline_Result {
 /// 模型信息（从 Session 创建时获取）
 ///
 /// 由 `Create_Session` 在模型加载后构造，随 `Pipeline_Result` 透传。
-/// 也可通过 `Engine_Output::Info` 在 Session 创建时发送给 Control 层。
 #[derive(Debug, Clone)]
 pub struct Model_Info {
     /// 模型架构名称（如 "qwen3"）

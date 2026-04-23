@@ -39,8 +39,8 @@ use crate::ml_engine::ml_inference_service::{Create_Session, Split_Model, Analyz
 use crate::ml_engine::ml_thread_engine::Session_Handle;
 use crate::ml_engine::ml_thread_engine_instruction::{
     Instruction, Inference_Input, Set_Target, Pipeline_Params, Pipeline_Result,
-    Engine_Input, Engine_Output,
 };
+use crate::llm_io::IoHandle;
 use crate::ml_engine::ml_thread_register::{
     TOKENID2, TOKENID3, TENSOR1, TENSOR2, META1, META2, META5,
 };
@@ -76,10 +76,12 @@ pub enum Node_State {
 
 /// 推理上下文 — Setup_Inference 完成后返回，由主循环状态机消费
 pub struct Inference_Context {
-    /// Session 句柄（用于 Send_Input / Shutdown）
+    /// Session 句柄（用于 Shutdown）
     pub session_handle: Session_Handle,
-    /// Engine 流式输出接收端
-    pub output_data_rx: mpsc::Receiver<Engine_Output>,
+    /// 前端 → Session 文本输入发送端
+    pub input_tx: mpsc::Sender<String>,
+    /// Session → 前端 流式输出接收端
+    pub output_rx: mpsc::Receiver<String>,
     /// 取消标志
     pub cancel_flag: Arc<AtomicBool>,
     /// 推理指令程序
@@ -134,10 +136,11 @@ pub async fn Control_Loop(
     let mut run_fut: Pin<Box<dyn Future<Output = Result<Pipeline_Result, String>> + Send>>
         = Box::pin(std::future::pending());
     // Engine 输出接收端：使用 closed channel 作为初始值（recv 立刻返回 None）
-    let (_dummy_tx, dummy_rx) = mpsc::channel::<Engine_Output>(1);
+    let (_dummy_tx, dummy_rx) = mpsc::channel::<String>(1);
     drop(_dummy_tx);
-    let mut engine_output_rx: mpsc::Receiver<Engine_Output> = dummy_rx;
+    let mut engine_output_rx: mpsc::Receiver<String> = dummy_rx;
     let mut inference_session: Option<Session_Handle> = None;
+    let mut inference_input_tx: Option<mpsc::Sender<String>> = None;
     let mut inference_cancel: Option<Arc<AtomicBool>> = None;
     let mut inference_reply: Option<oneshot::Sender<Result<String, String>>> = None;
     let mut inference_peers: Vec<PeerId> = Vec::new();
@@ -181,7 +184,8 @@ pub async fn Control_Loop(
                                             .await
                                             .map_err(|e| format!("{}", e))
                                     });
-                                    engine_output_rx = ctx.output_data_rx;
+                                    engine_output_rx = ctx.output_rx;
+                                    inference_input_tx = Some(ctx.input_tx);
                                     inference_session = Some(ctx.session_handle);
                                     inference_cancel = Some(ctx.cancel_flag);
                                     inference_reply = Some(reply);
@@ -215,7 +219,7 @@ pub async fn Control_Loop(
                     // ── Input 命令：转发 prompt 给 Session ──
                     Some(CLI_Command::Input { prompt, reply }) => {
                         if is_inferring {
-                            if let Some(ref session) = inference_session {
+                            if let Some(ref input_tx) = inference_input_tx {
                                 info!("Control: 收到用户 prompt ({} chars)", prompt.len());
                                 Send_Ui(&ui_tx, Ui_Message::Job_Inference {
                                     model_name: inference_model_stem.clone(),
@@ -223,7 +227,7 @@ pub async fn Control_Loop(
                                     layer_range: format!("层{}-{}", inference_my_range.0, inference_my_range.1),
                                     phase: "推理中".to_string(),
                                 }).await;
-                                match session.Send_Input(Engine_Input::Prompt(prompt)).await {
+                                match input_tx.send(prompt).await {
                                     Ok(_) => { let _ = reply.send(Ok("prompt 已发送".to_string())); }
                                     Err(e) => { let _ = reply.send(Err(format!("发送 prompt 失败: {}", e))); }
                                 }
@@ -330,9 +334,10 @@ pub async fn Control_Loop(
                 is_inferring = false;
                 run_fut = Box::pin(std::future::pending());
                 // 重置 engine_output_rx 为 closed channel
-                let (_dt, dr) = mpsc::channel::<Engine_Output>(1);
+                let (_dt, dr) = mpsc::channel::<String>(1);
                 drop(_dt);
                 engine_output_rx = dr;
+                inference_input_tx = None;
 
                 let session = inference_session.take();
                 let reply = inference_reply.take();
@@ -406,17 +411,8 @@ pub async fn Control_Loop(
             // ══════════════════════════════════════════
             engine_msg = engine_output_rx.recv(), if is_inferring => {
                 match engine_msg {
-                    Some(Engine_Output::Text(text)) => {
+                    Some(text) => {
                         Send_Ui(&ui_tx, Ui_Message::Inference_Token(text)).await;
-                    }
-                    Some(Engine_Output::Info(info_msg)) => {
-                        Send_Ui(&ui_tx, Ui_Message::Log(format!(
-                            "模型信息: {} (layers: {}, eos: {})",
-                            info_msg.architecture, info_msg.num_layers, info_msg.eos_token_id
-                        ))).await;
-                    }
-                    Some(Engine_Output::End) => {
-                        debug!("Control: 收到 EndOutput 信号");
                     }
                     None => {
                         // Engine 输出通道关闭，等 run_fut 结束
@@ -699,14 +695,19 @@ async fn Setup_Inference(
         None
     };
 
-    // Step 9: 创建 Session
-    let (session_handle, output_data_rx, session_model_info) = Create_Session(
+    // Step 9: 创建 IO 通道和 Session
+    let (input_tx, input_rx) = mpsc::channel::<String>(32);
+    let (output_tx, output_rx) = mpsc::channel::<String>(64);
+    let io_handle = IoHandle { input_rx, output_tx };
+
+    let (session_handle, session_model_info) = Create_Session(
         "coordinator".to_string(),
         model_path,
         my_start,
         my_end,
         device.to_string(),
         tensor_io,
+        io_handle,
     )
     .await
     .map_err(|e| format!("创建 Session 失败: {}", e))?;
@@ -733,7 +734,8 @@ async fn Setup_Inference(
     // 返回推理上下文，由主循环状态机启动推理
     Ok(Inference_Context {
         session_handle,
-        output_data_rx,
+        input_tx,
+        output_rx,
         cancel_flag,
         program,
         params,
@@ -1075,6 +1077,11 @@ async fn Handle_Control_Command(
                     let model_path = PathBuf::from(&model_path_str);
 
                     tokio::spawn(async move {
+                        // Worker 不需要前端文本通道，但 API 需要 IoHandle
+                        let (_worker_input_tx, worker_input_rx) = mpsc::channel::<String>(1);
+                        let (worker_output_tx, _worker_output_rx) = mpsc::channel::<String>(1);
+                        let worker_io_handle = IoHandle { input_rx: worker_input_rx, output_tx: worker_output_tx };
+
                         let session_result = Create_Session(
                             "worker".to_string(),
                             &model_path,
@@ -1082,10 +1089,11 @@ async fn Handle_Control_Command(
                             layer_end,
                             device_clone,
                             Some(tensor_io),
+                            worker_io_handle,
                         ).await;
 
                         match session_result {
-                            Ok((session_handle, _output_data_rx, model_info)) => {
+                            Ok((session_handle, model_info)) => {
                                 Send_Ui(&ui_tx_clone, Ui_Message::Log(format!(
                                     "✓ Worker 模型加载完成 (arch: {}, input: {}, output: {})",
                                     model_info.architecture, model_info.has_input_head, model_info.has_output_head

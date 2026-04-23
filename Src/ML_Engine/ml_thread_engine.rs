@@ -4,27 +4,27 @@
 //! ML Session 引擎核心
 //!
 //! 基于 Session 设计的推理引擎。一个 Session 对应一个 OS 线程，
-//! 一个模型对应一个 Session。Session 通过三平面通道架构与外部通信。
+//! 一个模型对应一个 Session。Session 通过通道架构与外部通信。
 //!
 //! ## 核心组件
 //! - `Session`：推理会话容器（线程私有，有状态）
-//! - `Session_Handle`：Control 层持有的句柄，通过通道与 Session 通信
+//! - `Session_Handle`：句柄，通过命令通道与 Session 通信
 //! - `Session_Command`：命令平面协议
 //! - `Session_Config`：Session 创建配置
 //! - `Inference_Backend`：推理后端抽象
 //! - `Session_Thread()`：线程入口函数
 //! - `Execute()`：指令执行器
 //!
-//! ## 三平面通道架构
+//! ## 通道架构
 //! | 通道 | 方向 | 平面 | 内容 |
 //! |---|---|---|---|
-//! | cmd_rx | Control → Session | 命令平面 | Run_Program, Shutdown |
-//! | input_data_rx | Control → Session | 数据平面(Control) | Prompt(String) |
-//! | output_data_tx | Session → Control | 数据平面(Control) | Text(String), Info(Model_Info) |
+//! | cmd_rx | 上层 → Session | 命令平面 | Run_Program, Shutdown |
+//! | io_handle.input_rx | 前端 → Session | 文本平面(输入) | String (prompt) |
+//! | io_handle.output_tx | Session → 前端 | 文本平面(输出) | String (completion) |
 //! | tensor_io | 上游/下游节点 ↔ Session | 数据平面(网络) | 张量帧 |
 //!
 //! ## 设计原则
-//! - **Session = 容器**：持有 backend、register、config、通道、tensor_io
+//! - **Session = 容器**：持有 backend、register、config、io_handle、tensor_io
 //! - **独占线程**：一个 Session 独占一个 OS 线程，不阻塞 tokio
 //! - **指令泵**：所有操作通过指令序列（Program）驱动
 //! - **每步可取消**：通过 cancel_flag 实现用户中途取消
@@ -51,9 +51,10 @@ use super::gguf_tensor::{
     GGUF_Tensor_Serialize, GGUF_Tensor_Deserialize,
 };
 use super::ml_thread_engine_instruction::{
-    Engine_Input, Engine_Output, Instruction, Model_Info, Pipeline_Params, Pipeline_Result,
+    Instruction, Model_Info, Pipeline_Params, Pipeline_Result,
     Inference_Input, Set_Target,
 };
+use crate::llm_io::IoHandle;
 use super::ml_thread_register::{
     Register_File,
     TEXT1, TEXT2,
@@ -102,7 +103,7 @@ pub struct Session_Config {
 
 /// Session 内部命令
 ///
-/// 通过 cmd_tx/cmd_rx 通道在 Control 层和 Session 线程之间传递。
+/// 通过 cmd_tx/cmd_rx 通道在上层和 Session 线程之间传递。
 /// 仅两个变体：Run_Program 和 Shutdown。
 pub enum Session_Command {
     /// 执行指令序列
@@ -132,8 +133,8 @@ pub enum Session_Command {
 /// 有状态，独占线程。一个模型对应一个 Session。
 /// 所有字段为线程私有，不需要 `Arc<Mutex<>>`。
 ///
-/// Session 由 `Session_Thread` 内部构造，不暴露给 Control 层。
-/// Control 层通过 `Session_Handle` 与 Session 通信。
+/// Session 由 `Session_Thread` 内部构造，不暴露给上层。
+/// 上层通过 `Session_Handle` 与 Session 通信。
 pub struct Session {
     /// Session 唯一标识
     pub id: String,
@@ -141,13 +142,10 @@ pub struct Session {
     /// 命令接收通道（命令平面）
     pub cmd_rx: mpsc::Receiver<Session_Command>,
 
-    /// 数据输入通道（数据平面-Control入）
-    /// Input 指令从此通道读取用户数据（如 Prompt 文本）
-    pub input_data_rx: mpsc::Receiver<Engine_Input>,
-
-    /// 数据输出通道（数据平面-Control出）
-    /// Output 指令通过此通道发送推理结果（如流式 token 文本片段、模型信息等）
-    pub output_data_tx: mpsc::Sender<Engine_Output>,
+    /// 文本 I/O 平面（来自 LLM_IO）
+    /// Input 指令从 io_handle.input_rx 读取用户输入（String）
+    /// Output 指令通过 io_handle.output_tx 发送推理结果（String）
+    pub io_handle: IoHandle,
 
     /// 推理后端（模型等内容）
     pub backend: Inference_Backend,
@@ -164,12 +162,14 @@ pub struct Session {
 }
 
 // ============================================================
-// Session_Handle（Control 层持有的句柄）
+// Session_Handle（上层持有的句柄）
 // ============================================================
 
 /// Session 句柄
 ///
-/// Control 层持有的句柄，通过内部通道与 Session 线程通信。
+/// 上层持有的句柄，通过命令通道与 Session 线程通信。
+/// 文本 I/O 由 LLM_IO 的 IoHandle 直接注入 Session_Thread，不经过此句柄。
+///
 /// 可 Clone，可 Send。
 #[derive(Clone)]
 pub struct Session_Handle {
@@ -177,23 +177,19 @@ pub struct Session_Handle {
     session_id: String,
     /// 命令发送通道（命令平面）
     cmd_tx: mpsc::Sender<Session_Command>,
-    /// 数据输入发送通道（数据平面-Control入）
-    input_data_tx: mpsc::Sender<Engine_Input>,
 }
 
 impl Session_Handle {
     /// 创建 Session_Handle 实例
     ///
-    /// 由 `Create_Session` 内部调用。
+    /// 由 `Create_Session` / `ML_Engine_Service` 内部调用。
     pub fn New(
         session_id: String,
         cmd_tx: mpsc::Sender<Session_Command>,
-        input_data_tx: mpsc::Sender<Engine_Input>,
     ) -> Self {
         Self {
             session_id,
             cmd_tx,
-            input_data_tx,
         }
     }
 
@@ -230,25 +226,6 @@ impl Session_Handle {
         reply_rx
             .await
             .map_err(|_| anyhow::anyhow!("Session {} 回复通道已关闭", self.session_id))?
-    }
-
-    /// Send_Input - 向 Session 发送用户数据（如 prompt 文本）
-    ///
-    /// 通过 input_data_tx 发送数据。
-    /// Input 指令会从 input_data_rx 中读取此数据。
-    ///
-    /// # 参数
-    /// - `input`: 引擎输入 (`Engine_Input`)
-    pub async fn Send_Input(&self, input: Engine_Input) -> Result<()> {
-        self.input_data_tx
-            .send(input)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Session {} input_data 通道已关闭",
-                    self.session_id
-                )
-            })
     }
 
     /// Shutdown - 关闭 Session，停止线程，释放资源
@@ -289,16 +266,14 @@ impl Session_Handle {
 /// - `session_id`: 线程标识
 /// - `session_config`: Session 所需的配置信息
 /// - `cmd_rx`: 命令通道
-/// - `input_data_rx`: 数据输入通道
-/// - `output_data_tx`: 数据输出通道
+/// - `io_handle`: LLM_IO 提供的文本 I/O 端点（替代 input_data_rx + output_data_tx）
 /// - `tensor_io`: 张量 IO 句柄 (Option)
 /// - `ready_tx`: 就绪信号通道 (oneshot)
 pub fn Session_Thread(
     session_id: String,
     session_config: Session_Config,
     cmd_rx: mpsc::Receiver<Session_Command>,
-    input_data_rx: mpsc::Receiver<Engine_Input>,
-    output_data_tx: mpsc::Sender<Engine_Output>,
+    io_handle: IoHandle,
     tensor_io: Option<Tensor_IO_Handle>,
     ready_tx: oneshot::Sender<Result<Model_Info>>,
 ) {
@@ -386,8 +361,7 @@ pub fn Session_Thread(
     let mut session = Session {
         id: session_id.clone(),
         cmd_rx,
-        input_data_rx,
-        output_data_tx,
+        io_handle,
         backend,
         config: session_config,
         tensor_io,
@@ -470,7 +444,7 @@ struct Execution_Context<'a> {
 /// 执行指令序列
 ///
 /// 逐条执行 program 中的指令。使用 Session 的 backend、register、
-/// tensor_io、input_data_rx、output_data_tx 等资源。
+/// tensor_io、io_handle 等资源。
 ///
 /// ## 执行流程
 /// 1. 重置所有寄存器（清空上次残留状态）
@@ -575,11 +549,11 @@ fn Execute_Instruction(
     ctx: &mut Execution_Context,
 ) -> Result<()> {
     match inst {
-        // ===== Input: 阻塞读取 input_data_rx → TEXT1 =====
+        // ===== Input: 阻塞读取 io_handle.input_rx → TEXT1 =====
         Instruction::Input => {
             info!("Session [{}]: [Input] 等待输入...", session.id);
-            match session.input_data_rx.blocking_recv() {
-                Some(Engine_Input::Prompt(text)) => {
+            match session.io_handle.input_rx.blocking_recv() {
+                Some(text) => {
                     info!("Session [{}]: [Input] 收到 prompt ({} chars)", session.id, text.len());
                     session.register.Set_Text(TEXT1, &text);
                 }
@@ -757,21 +731,19 @@ fn Execute_Instruction(
             }
         }
 
-        // ===== Output: TEXT2 → output_data_tx =====
+        // ===== Output: TEXT2 → io_handle.output_tx =====
         Instruction::Output => {
             let text = session.register.Get_Text(TEXT2).to_string();
-            if let Err(e) = session.output_data_tx.blocking_send(Engine_Output::Text(text)) {
+            if let Err(e) = session.io_handle.output_tx.blocking_send(text) {
                 warn!("Session [{}]: [Output] 发送失败: {}", session.id, e);
                 Set_Error_Flags(&mut session.register);
             }
         }
 
-        // ===== EndOutput: 发送结束信号 =====
+        // ===== EndOutput: 输出结束（由 LLM_IO 通道生命周期管理） =====
         Instruction::EndOutput => {
-            info!("Session [{}]: [EndOutput] 发送输出结束信号", session.id);
-            if let Err(e) = session.output_data_tx.blocking_send(Engine_Output::End) {
-                warn!("Session [{}]: [EndOutput] 发送失败: {}", session.id, e);
-            }
+            info!("Session [{}]: [EndOutput] 输出结束", session.id);
+            // 通道关闭由 IoHandle 的 Drop 触发，此处为 noop
         }
 
         // ===== Send: TENSOR2 → 序列化 → tensor_io.Send() =====
