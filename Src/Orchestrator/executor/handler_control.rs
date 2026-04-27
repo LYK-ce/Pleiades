@@ -50,32 +50,29 @@ mod tests {
     use super::super::task_engine::{TaskEngine, StepResult};
     use super::super::TaskProgram;
     use crate::orchestrator::instruction::TaskInstruction;
+    use crate::orchestrator::job::JobId;
     use crate::orchestrator::slot::{SlotId, SlotValue, ConstValue};
-    use crate::orchestrator::{ComputeCapability, InferenceCapability, NetworkCapability, UiCapability};
-    use crate::orchestrator::slot::{DeviceLease, SessionHandle};
+    use crate::orchestrator::UiCapability;
+    use crate::orchestrator::test_utils::StubNetwork;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+    use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use super::super::Capabilities;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
-    struct StubCompute;
+    struct StubMLEngine;
     #[async_trait]
-    impl ComputeCapability for StubCompute {
-        async fn acquire_device(&self, _pref: Option<String>) -> Result<DeviceLease, String> {
-            Ok(DeviceLease)
-        }
-    }
-
-    struct StubInference;
-    #[async_trait]
-    impl InferenceCapability for StubInference {
-        async fn create_session(&self, _model: &str, _dev: DeviceLease) -> Result<SessionHandle, String> {
-            Ok(SessionHandle)
-        }
-        async fn shutdown_session(&self, _sess: SessionHandle) -> Result<(), String> { Ok(()) }
+    impl ML_Engine_Capability for StubMLEngine {
+        async fn Create_Session(&self, _config: ML_Session_Config, _io_handle: crate::llm_io::IoHandle) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program(&self, _session_id: &str, _program: Vec<Instruction>, _params: Pipeline_Params, _cancel_flag: Arc<AtomicBool>) -> Result<Pipeline_Result, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
     }
 
     async fn stub_caps() -> (Arc<Capabilities>, TempDir) {
@@ -83,9 +80,8 @@ mod tests {
         let storage = StorageManager::New(temp_dir.path()).await.unwrap();
         let caps = Arc::new(Capabilities {
             storage,
-            compute: Box::new(StubCompute),
-            inference: Box::new(StubInference),
-            network: NetworkCapability,
+            ml_engine: Box::new(StubMLEngine),
+            network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
         });
@@ -100,7 +96,7 @@ mod tests {
         labels.insert("target".to_string(), 3); // 跳转到索引 3
 
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Bool(true), dst: SlotId(0) },  // 0
@@ -137,7 +133,7 @@ mod tests {
         labels.insert("skip".to_string(), 3);
 
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Bool(false), dst: SlotId(0) }, // 0
@@ -173,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn tc03_jump_if_label_not_found() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
 
         engine.load(&TaskProgram {
             instructions: vec![
@@ -200,7 +196,7 @@ mod tests {
         labels.insert("target".to_string(), 2);
 
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::U64(123), dst: SlotId(0) }, // 写入 U64 而非 Bool
@@ -224,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn tc05_abort_returns_reason() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
 
         engine.load(&TaskProgram {
             instructions: vec![

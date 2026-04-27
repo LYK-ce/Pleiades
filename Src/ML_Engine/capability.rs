@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicBool;
 use async_trait::async_trait;
 
 use crate::llm_io::IoHandle;
-use crate::network::tensor_stream_manager::Tensor_IO_Handle;
+use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
 use super::ml_thread_engine_instruction::{
     Instruction, Pipeline_Params, Pipeline_Result, Model_Info,
 };

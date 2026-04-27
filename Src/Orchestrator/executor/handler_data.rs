@@ -30,31 +30,28 @@ impl super::TaskEngine {
 mod tests {
     use super::super::TaskEngine;
     use super::super::Capabilities;
-    use super::super::{ComputeCapability, InferenceCapability};
-    use crate::orchestrator::slot::{SlotId, SlotValue, ConstValue, DeviceLease, SessionHandle};
-    use crate::orchestrator::{NetworkCapability, UiCapability};
+    use crate::orchestrator::job::JobId;
+    use crate::orchestrator::slot::{SlotId, SlotValue, ConstValue};
+    use crate::orchestrator::UiCapability;
+    use crate::orchestrator::test_utils::StubNetwork;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+    use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use super::super::task_engine::StepResult;
     use async_trait::async_trait;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
-    struct StubCompute;
+    struct StubMLEngine;
     #[async_trait]
-    impl ComputeCapability for StubCompute {
-        async fn acquire_device(&self, _pref: Option<String>) -> Result<DeviceLease, String> {
-            Ok(DeviceLease)
-        }
-    }
-
-    struct StubInference;
-    #[async_trait]
-    impl InferenceCapability for StubInference {
-        async fn create_session(&self, _model: &str, _dev: DeviceLease) -> Result<SessionHandle, String> {
-            Ok(SessionHandle)
-        }
-        async fn shutdown_session(&self, _sess: SessionHandle) -> Result<(), String> { Ok(()) }
+    impl ML_Engine_Capability for StubMLEngine {
+        async fn Create_Session(&self, _config: ML_Session_Config, _io_handle: crate::llm_io::IoHandle) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program(&self, _session_id: &str, _program: Vec<Instruction>, _params: Pipeline_Params, _cancel_flag: Arc<AtomicBool>) -> Result<Pipeline_Result, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
     }
 
     async fn stub_caps() -> (Arc<Capabilities>, TempDir) {
@@ -62,9 +59,8 @@ mod tests {
         let storage = StorageManager::New(temp_dir.path()).await.unwrap();
         let caps = Arc::new(Capabilities {
             storage,
-            compute: Box::new(StubCompute),
-            inference: Box::new(StubInference),
-            network: NetworkCapability,
+            ml_engine: Box::new(StubMLEngine),
+            network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
         });
@@ -76,7 +72,7 @@ mod tests {
     #[tokio::test]
     async fn test_const_write_and_read() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         let dst = SlotId(0);
         let value = ConstValue::String("test_value".to_string());
 
@@ -96,7 +92,7 @@ mod tests {
     #[tokio::test]
     async fn test_const_overwrite() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         let dst = SlotId(0);
 
         // 写入旧值
@@ -118,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn test_move_success() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         let src = SlotId(0);
         let dst = SlotId(1);
 
@@ -146,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn test_move_from_empty_slot() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         let src = SlotId(0); // 空槽位
         let dst = SlotId(1);
 

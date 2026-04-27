@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-10
+//Date ： 2026-04-24
 
 //! 网络服务核心模块
 //! 负责Swarm管理、连接管理、事件处理
@@ -8,16 +8,15 @@
 //! - Network_Service: 网络服务实例，运行事件循环
 //! - NodeHandle: 对外暴露的API句柄（定义在 node_handle.rs）
 //! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
-//! - Inbound_Request_Manager: 入站请求与响应路由管理器（定义在 inbound_request_manager.rs）
-//! - File_Transfer_Manager: 文件传输管理器（定义在 file_transfer_manager.rs）
-//! - Tensor_Stream_Manager: 张量流传输管理器（定义在 tensor_stream_manager.rs）
+//! - Inbound_Manager: 入站请求与响应路由管理器（定义在 inbound_manager.rs）
+//! - Outbound_Manager: 出站响应路由管理器（定义在 outbound_manager.rs）
 //!
 //! 事件分流：
 //! - Response → 通过 oneshot 路由回 Send_Data 调用方
-//! - 入站 Request → 通过 inbound_tx 转发给 Control 层
-//! - 连接/发现事件 → 通过 event_sender 上报
-//! - 文件传输事件 → 通过 event_sender 上报
-//! - 入站张量流 → 交给 Tensor_Stream_Manager 保存
+//! - 入站 Request → 通过 inbound_tx 转发给 Orchestrator
+//! - 入站文件流 → 通过 orchestrator_event_tx 转发给 Orchestrator
+//! - 入站张量流 → 通过 orchestrator_event_tx 转发给 Orchestrator
+//! - 连接/发现/Ping 事件 → Network 内部处理（PeerManager）
 //!
 //! 注意：
 //! 我们当前暂时先不考虑广域网的环境，只专注于当前的局域网环境。
@@ -35,7 +34,6 @@ use libp2p::{
 };
 use libp2p_stream as stream;
 use std::error::Error;
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -46,9 +44,10 @@ use super::data_protocol::{
 };
 use super::inbound_manager::Inbound_Manager;
 use super::outbound_manager::Outbound_Manager;
-use super::file_transfer_manager::File_Transfer_Manager;
-use super::tensor_stream_manager::Tensor_Stream_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
+use super::capability::{Network_Inbound_Event, Network_Service_Capability};
+use super::stream_protocol::FILE_STREAM_PROTOCOL;
+use super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL;
 
 // 导入 PeerManagement 模块
 use crate::peer_management::{PeerHandle, PeerInfo, PeerStatus};
@@ -107,45 +106,6 @@ pub struct PleiadesNetworkBehaviour {
     pub ping: ping::Behaviour,
 }
 
-
-/// 网络事件（发送给上层）
-///
-/// 注意：DataReceived 不再通过此通道发送，改走 inbound_tx。
-/// Response 在内部通过 oneshot 路由回 Send_Data 调用方。
-#[derive(Debug)]
-pub enum NetworkEvent {
-    /// 发现新节点
-    PeerDiscovered(PeerId),
-    /// 节点离开
-    PeerLeft(PeerId),
-    /// 连接建立
-    ConnectionEstablished(PeerId),
-    /// 连接断开
-    ConnectionClosed(PeerId),
-    /// 收到流式文件传输
-    FileStreamReceived {
-        peer: PeerId,
-        file_path: PathBuf,
-    },
-    /// 流式文件传输进度（每 10MB 上报一次）
-    FileStreamProgress {
-        peer: PeerId,
-        file_name: String,
-        direction: String,
-        sent: u64,
-        total: u64,
-    },
-    /// 流式文件发送失败
-    FileStreamError {
-        peer: PeerId,
-        error: String,
-    },
-    /// DHT记录查询结果
-    RecordFound { key: Vec<u8>, value: Vec<u8> },
-    /// DHT记录未找到
-    RecordNotFound { key: Vec<u8> },
-}
-
 /// 网络服务（内部实现）
 #[allow(nonstandard_style)]
 pub struct Network_Service {
@@ -155,8 +115,6 @@ pub struct Network_Service {
     local_peer_id: PeerId,
     /// peer manager handler 持有的peer manager handle，我们通过它来管理节点信息表
     peer_handle: PeerHandle,
-    /// 事件发送器（发送给上层，用于连接/文件/DHT等事件）
-    event_sender: mpsc::Sender<NetworkEvent>,
     /// 命令接收器（接收外部命令）
     cmd_rx: mpsc::Receiver<NodeCommand>,
     /// 配置
@@ -168,14 +126,18 @@ pub struct Network_Service {
     inbound_manager: Inbound_Manager,
     /// 出站响应路由管理器（负责出站 Response 路由回调用方）
     outbound_manager: Outbound_Manager,
-    /// 文件传输管理器（负责流式传输控制、文件保存目录、发送/接收任务）
-    file_transfer_manager: File_Transfer_Manager,
-    /// 入站张量流管理器（接收端，持有 input_buffer）
-    inbound_tensor_manager: Option<Tensor_Stream_Manager>,
-    /// 出站张量流管理器（发送端，持有 output_buffer）
-    outbound_tensor_manager: Option<Tensor_Stream_Manager>,
-    /// 张量流控制句柄（用于创建 Tensor_Stream_Manager 实例）
-    tensor_stream_control: stream::Control,
+
+    // ===== Orchestrator 事件转发 =====
+
+    /// 转发复杂入站事件（文件流、张量流）给 Orchestrator
+    orchestrator_event_tx: mpsc::Sender<Network_Inbound_Event>,
+
+    // ===== 流控制句柄（用于 accept 入站流） =====
+
+    /// 文件流控制句柄（用于 Start() 中 accept 入站文件流）
+    file_accept_control: stream::Control,
+    /// 张量流控制句柄（用于 Start() 中 accept 入站张量流）
+    tensor_accept_control: stream::Control,
 }
 
 impl Network_Service {
@@ -184,17 +146,22 @@ impl Network_Service {
     /// # Arguments
     /// * `config` - 网络配置
     /// * `keypair` - 密钥对
-    /// * `event_sender` - 事件发送通道（连接/文件/DHT 事件）
     /// * `peer_handle` - PeerManager 句柄，用于管理节点信息
     ///
     /// # Returns
-    /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端)
+    /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端,
+    ///  Network_Service_Capability, orchestrator_event_rx 入站事件接收端)
     pub async fn Init(
         config: NetworkConfig,
         keypair: Keypair,
-        event_sender: mpsc::Sender<NetworkEvent>,
         peer_handle: PeerHandle,
-    ) -> Result<(Self, NodeHandle, mpsc::Receiver<InboundRequest>), Box<dyn Error>> {
+    ) -> Result<(
+        Self,
+        NodeHandle,
+        mpsc::Receiver<InboundRequest>,
+        Network_Service_Capability,
+        mpsc::Receiver<Network_Inbound_Event>,
+    ), Box<dyn Error>> {
         info!("初始化网络服务...");
 
         // 1. 使用传入的持久化密钥对
@@ -206,6 +173,10 @@ impl Network_Service {
 
         // 3. 创建入站请求通道
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundRequest>(100);
+
+        // 3.1 创建 Orchestrator 事件通道
+        let (orchestrator_event_tx, orchestrator_event_rx) =
+            mpsc::channel::<Network_Inbound_Event>(100);
 
         // 4. 创建Swarm
         let node_swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -259,32 +230,42 @@ impl Network_Service {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(86400)))
             .build();
 
-        // 5. 获取流式传输控制句柄并创建文件传输管理器
-        let stream_control = node_swarm.behaviour().stream.new_control();
-        let save_dir = PathBuf::from("Pleiades_Workspace");
-        let file_transfer_manager = File_Transfer_Manager::New(stream_control, save_dir);
-
-        // 5.1 获取第二个控制句柄（用于 tensor stream）
-        let tensor_stream_control = node_swarm.behaviour().stream.new_control();
+        // 5. 创建流控制句柄
+        //    - file_accept_control: Network_Service 用于 accept 入站文件流
+        //    - file_open_control: Capability 用于 open 出站文件流
+        //    - tensor_accept_control: Network_Service 用于 accept 入站张量流
+        //    - tensor_open_control: Capability 用于 open 出站张量流
+        let file_accept_control = node_swarm.behaviour().stream.new_control();
+        let file_open_control = node_swarm.behaviour().stream.new_control();
+        let tensor_accept_control = node_swarm.behaviour().stream.new_control();
+        let tensor_open_control = node_swarm.behaviour().stream.new_control();
 
         // 6. 创建入站请求管理器和出站响应路由管理器
         let inbound_manager = Inbound_Manager::New(inbound_tx);
         let outbound_manager = Outbound_Manager::New();
 
-        // 7. 创建Node实例
+        // 7. 创建 NodeHandle
+        let handle = NodeHandle::New(cmd_tx, local_peer_id);
+
+        // 8. 创建 Network_Service_Capability（用于 Orchestrator）
+        let capability = Network_Service_Capability::New(
+            handle.clone(),
+            file_open_control,
+            tensor_open_control,
+        );
+
+        // 9. 创建 Network_Service 实例
         let mut node = Self {
             swarm: node_swarm,
             local_peer_id,
             peer_handle,
-            event_sender,
             cmd_rx,
             config,
             inbound_manager,
             outbound_manager,
-            file_transfer_manager,
-            inbound_tensor_manager: None,
-            outbound_tensor_manager: None,
-            tensor_stream_control,
+            orchestrator_event_tx,
+            file_accept_control,
+            tensor_accept_control,
         };
 
         // 添加引导节点
@@ -298,16 +279,13 @@ impl Network_Service {
             }
         }
 
-        // 8. 创建NodeHandle
-        let handle = NodeHandle::New(cmd_tx, local_peer_id);
-
         info!("网络节点初始化完成");
-        Ok((node, handle, inbound_rx))
+        Ok((node, handle, inbound_rx, capability, orchestrator_event_rx))
     }
 
     /// 启动网络服务
     ///
-    /// 使用tokio::select!同时监听Swarm事件、外部命令和流式传输入站流
+    /// 使用tokio::select!同时监听Swarm事件、外部命令和入站流
     pub async fn Start(&mut self) -> Result<(), Box<dyn Error>> {
         // 1. 启动监听
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", self.config.listen_port).parse()?;
@@ -322,15 +300,12 @@ impl Network_Service {
         }
 
         // 3. 注册流式传输协议，接受入站流
-        let mut incoming_file_streams = self.file_transfer_manager.Accept_Incoming();
+        let mut incoming_file_streams = self.file_accept_control
+            .accept(StreamProtocol::new(FILE_STREAM_PROTOCOL))
+            .expect("文件流协议注册失败");
 
-        // 3.1 注册张量流协议，创建临时 manager 获取 incoming 迭代器
-        // 注意：tensor_stream_manager 是 Option，这里用临时 manager 来注册协议
-        let mut temp_tensor_control = self.tensor_stream_control.clone();
-        let mut incoming_tensor_streams = temp_tensor_control
-            .accept(libp2p::StreamProtocol::new(
-                super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL,
-            ))
+        let mut incoming_tensor_streams = self.tensor_accept_control
+            .accept(StreamProtocol::new(TENSOR_STREAM_PROTOCOL))
             .expect("张量流协议注册失败");
 
         // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
@@ -349,23 +324,25 @@ impl Network_Service {
                         break;
                     }
                 }
-                // 处理入站文件流式传输
+                // 处理入站文件流 → 转发给 Orchestrator
                 Some((peer_id, stream)) = incoming_file_streams.next() => {
-                    info!("收到文件流式传输连接 from {}", peer_id);
-                    self.file_transfer_manager.Spawn_Receive(
-                        peer_id,
-                        stream,
-                        self.event_sender.clone(),
-                    );
+                    info!("收到入站文件流 from {}, 转发给 Orchestrator", peer_id);
+                    let _ = self.orchestrator_event_tx.send(
+                        Network_Inbound_Event::FileStreamArrived {
+                            peer: peer_id,
+                            stream,
+                        }
+                    ).await;
                 }
-                // 处理入站张量流
+                // 处理入站张量流 → 转发给 Orchestrator
                 Some((peer_id, stream)) = incoming_tensor_streams.next() => {
-                    info!("收到张量流连接 from {}", peer_id);
-                    if let Some(ref mut manager) = self.inbound_tensor_manager {
-                        manager.Set_Stream(peer_id, stream);
-                    } else {
-                        warn!("收到张量流但入站 Tensor_Stream_Manager 未创建, 忽略 (from {})", peer_id);
-                    }
+                    info!("收到入站张量流 from {}, 转发给 Orchestrator", peer_id);
+                    let _ = self.orchestrator_event_tx.send(
+                        Network_Inbound_Event::TensorStreamArrived {
+                            peer: peer_id,
+                            stream,
+                        }
+                    ).await;
                 }
             }
         }
@@ -408,10 +385,6 @@ impl Network_Service {
                 if let Err(e) = self.peer_handle.add_peer(peer_info).await {
                     warn!("添加节点到 PeerManager 失败: {}", e);
                 }
-                let _ = self
-                    .event_sender
-                    .send(NetworkEvent::ConnectionEstablished(peer_id))
-                    .await;
             }
 
             // 连接断开
@@ -421,10 +394,6 @@ impl Network_Service {
                 if let Err(e) = self.peer_handle.remove_peer(&peer_id).await {
                     warn!("从 PeerManager 移除节点失败: {}", e);
                 }
-                let _ = self
-                    .event_sender
-                    .send(NetworkEvent::ConnectionClosed(peer_id))
-                    .await;
             }
 
             // 新监听地址
@@ -461,15 +430,6 @@ impl Network_Service {
                 if let Some(tx) = response_tx {
                     self.outbound_manager.Register_Outbound(outbound_id, tx);
                 }
-            }
-            NodeCommand::SendFileStream { peer, file_path, completion_tx } => {
-                info!("流式发送文件到 {} | path={}", peer, file_path.display());
-                self.file_transfer_manager.Spawn_Send(
-                    peer,
-                    file_path,
-                    completion_tx,
-                    self.event_sender.clone(),
-                );
             }
             NodeCommand::PutRecord { key, value } => {
                 let record_key = kad::RecordKey::new(&key);
@@ -521,62 +481,6 @@ impl Network_Service {
                     }
                 }
             }
-            NodeCommand::GetPeers { reply } => {
-                let peers = self.Get_Peers().await;
-                debug!("查询已连接节点列表: {} 个", peers.len());
-                let _ = reply.send(peers);
-            }
-            NodeCommand::GetPeerInfo { peer, reply } => {
-                let info = self.Get_Peer_Info(&peer).await;
-                debug!("查询节点信息: {} -> {:?}", peer, info.is_some());
-                let _ = reply.send(info);
-            }
-            // ===== Tensor Stream 命令 =====
-            NodeCommand::CreateTensorStream { reply } => {
-                info!("创建 Tensor_Stream_Manager (inbound + outbound)");
-                let inbound_control = self.tensor_stream_control.clone();
-                let outbound_control = self.tensor_stream_control.clone();
-                self.inbound_tensor_manager = Some(Tensor_Stream_Manager::New(inbound_control));
-                self.outbound_tensor_manager = Some(Tensor_Stream_Manager::New(outbound_control));
-                let _ = reply.send(Ok(()));
-            }
-            NodeCommand::OpenTensorStream { peer, reply } => {
-                info!("打开出站张量流 → {}", peer);
-                if let Some(ref mut manager) = self.outbound_tensor_manager {
-                    let result = manager.Open_Stream(peer).await;
-                    let _ = reply.send(result.map_err(|e| format!("{}", e)));
-                } else {
-                    let _ = reply.send(Err("出站 Tensor_Stream_Manager 未创建".to_string()));
-                }
-            }
-            NodeCommand::TakeTensorStreams { reply } => {
-                info!("移交张量流所有权");
-                // 先检查两边都就绪，再 Take（避免 Take 后另一边 None 导致 stream 丢失）
-                let inbound_ready = self.inbound_tensor_manager.as_ref()
-                    .map_or(false, |m| m.Has_Stream());
-                let outbound_ready = self.outbound_tensor_manager.as_ref()
-                    .map_or(false, |m| m.Has_Stream());
-
-                if inbound_ready && outbound_ready {
-                    let inbound = self.inbound_tensor_manager.as_mut()
-                        .unwrap().Take_Stream().unwrap();
-                    let outbound = self.outbound_tensor_manager.as_mut()
-                        .unwrap().Take_Stream().unwrap();
-                    let _ = reply.send(Ok((inbound, outbound)));
-                } else {
-                    let _ = reply.send(Err(format!(
-                        "张量流未就绪（inbound: {}, outbound: {}）",
-                        inbound_ready, outbound_ready
-                    )));
-                }
-            }
-            NodeCommand::CloseTensorStream { reply } => {
-                info!("关闭张量流 Manager");
-                // 清理 manager（如果 stream 已被 Take，manager 里为空；否则 drop stream）
-                self.outbound_tensor_manager = None;
-                self.inbound_tensor_manager = None;
-                let _ = reply.send(Ok(()));
-            }
             NodeCommand::UpdateInfo { reply } => {
                 info!("开始批量带宽测试");
                 // 获取所有节点
@@ -612,11 +516,7 @@ impl Network_Service {
             }
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
-                // 清理张量流 manager
-                self.outbound_tensor_manager = None;
-                self.inbound_tensor_manager = None;
                 // 关闭所有连接
-                // 使用 peer_handle 获取所有节点
                 match self.peer_handle.list_peers().await {
                     Ok(peer_infos) => {
                         for peer_info in peer_infos {
@@ -641,6 +541,9 @@ impl Network_Service {
     }
 
     /// 处理mDNS事件
+    ///
+    /// mDNS 发现/离开仅更新 Kademlia 路由表，
+    /// 不再通过 event_sender 通知上层（PeerManager 已通过 peer_handle 独立跟踪）。
     async fn Handle_Mdns_Event(&mut self, event: mdns::Event) {
         match event {
             mdns::Event::Discovered(peers) => {
@@ -652,53 +555,32 @@ impl Network_Service {
                             .behaviour_mut()
                             .kademlia
                             .add_address(&peer_id, addr);
-                        let _ = self
-                            .event_sender
-                            .send(NetworkEvent::PeerDiscovered(peer_id))
-                            .await;
                     }
                 }
             }
             mdns::Event::Expired(peers) => {
                 for (peer_id, _addr) in peers {
                     info!("节点离开: {}", peer_id);
-                    let _ = self
-                        .event_sender
-                        .send(NetworkEvent::PeerLeft(peer_id))
-                        .await;
                 }
             }
         }
     }
 
     /// 处理Kademlia事件
+    ///
+    /// DHT 结果不再通过 event_sender 通知上层。
+    /// 未来通过 orchestrator_event_tx 或 Capability oneshot 模式投递结果。
     async fn Handle_Kademlia_Event(&mut self, event: kad::Event) {
         match event {
             kad::Event::OutboundQueryProgressed { result, .. } => match result {
                 kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))) => {
                     info!("DHT记录查询成功: {:?}", peer_record.record.key);
-                    let _ = self
-                        .event_sender
-                        .send(NetworkEvent::RecordFound {
-                            key: peer_record.record.key.to_vec(),
-                            value: peer_record.record.value,
-                        })
-                        .await;
                 }
                 kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
                     debug!("DHT记录查询完成，无更多记录");
                 }
                 kad::QueryResult::GetRecord(Err(e)) => {
                     warn!("DHT记录查询失败: {:?}", e);
-                    let key = match e {
-                        kad::GetRecordError::NotFound { key, .. } => key.to_vec(),
-                        kad::GetRecordError::QuorumFailed { key, .. } => key.to_vec(),
-                        kad::GetRecordError::Timeout { key, .. } => key.to_vec(),
-                    };
-                    let _ = self
-                        .event_sender
-                        .send(NetworkEvent::RecordNotFound { key })
-                        .await;
                 }
                 kad::QueryResult::PutRecord(Ok(_)) => {
                     info!("DHT记录写入成功");
@@ -723,7 +605,7 @@ impl Network_Service {
 
     /// 处理请求响应事件
     ///
-    /// - Request（入站）：存储 ResponseChannel，通过 inbound_tx 转发给 Control 层
+    /// - Request（入站）：存储 ResponseChannel，通过 inbound_tx 转发给 Orchestrator
     /// - Response（出站回复）：通过 oneshot 路由回 Send_Data 调用方
     /// - OutboundFailure：通知等待方发送失败
     async fn Handle_Request_Response_Event(
@@ -732,7 +614,7 @@ impl Network_Service {
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
-                // ===== 入站请求：通过 inbound_manager 转发给 Control 层 =====
+                // ===== 入站请求：通过 inbound_manager 转发给 Orchestrator =====
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
@@ -773,7 +655,7 @@ impl Network_Service {
 
     /// 处理Ping心跳事件
     ///
-    /// 心跳事件完全在Network层内部处理，不向Control层发送事件。
+    /// 心跳事件完全在Network层内部处理，不向上层发送事件。
     /// - 成功收到Pong: 通过peer_handle更新延迟信息
     /// - 超时: 通过peer_handle将节点状态设置为Disconnected
     /// - 不支持/其他错误: 仅记录日志
@@ -807,28 +689,6 @@ impl Network_Service {
             // 其他错误
             Err(ping::Failure::Other { error }) => {
                 info!("Ping错误 ({}): {}", peer_id, error);
-            }
-        }
-    }
-
-    /// 获取当前已连接的所有节点列表
-    pub async fn Get_Peers(&mut self) -> Vec<PeerId> {
-        match self.peer_handle.list_peers().await {
-            Ok(peer_infos) => peer_infos.iter().map(|info| info.peer_id).collect(),
-            Err(e) => {
-                warn!("获取节点列表失败: {}", e);
-                Vec::new()
-            }
-        }
-    }
-
-    /// 获取特定节点的详细信息
-    pub async fn Get_Peer_Info(&mut self, peer_id: &PeerId) -> Option<PeerInfo> {
-        match self.peer_handle.get_peer(peer_id).await {
-            Ok(peer_info) => Some(peer_info),
-            Err(e) => {
-                warn!("获取节点信息失败 ({}): {}", peer_id, e);
-                None
             }
         }
     }
@@ -869,7 +729,7 @@ impl Network_Service {
     /// 测试单个数据包大小的带宽
     async fn test_single_bandwidth(&mut self, peer_id: &PeerId, size_bytes: u64) -> Result<u64, Box<dyn Error + Send + Sync>> {
         use tokio::sync::oneshot;
-        use std::time::{Instant, Duration};
+        use std::time::Instant;
         
         // 1. 准备payload：size_bytes的小端字节序表示
         let mut payload = Vec::with_capacity(8);
@@ -914,7 +774,7 @@ impl Network_Service {
                 size_bytes, response.payload.len()).into());
         }
         
-        // 7. 计算带宽 (Mbps)
+        // 8. 计算带宽 (Mbps)
         let duration_secs = end_time.duration_since(start_time).as_secs_f64();
         let bandwidth_mbps = (size_bytes as f64 * 8.0) / (duration_secs * 1_000_000.0);
         

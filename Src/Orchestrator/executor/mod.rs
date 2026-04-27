@@ -5,30 +5,19 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use super::job::{JobId, JobKind, JobState, LifecycleEvent};
-use async_trait::async_trait;
-use super::slot::{DeviceLease, SessionHandle};
+use super::slot::{SlotId, SlotValue};
+use super::compiler::SLOT_IO;
 use crate::llm_io::IoHandle;
 
 mod task_engine;
 mod handler_data;
-mod handler_compute;
 mod handler_inference;
+mod handler_network;
 mod handler_control;
 use task_engine::{TaskEngine, StepResult};
 
 /// 从 instruction 模块导入 TaskProgram
 pub use super::instruction::TaskProgram;
-
-#[async_trait]
-pub trait ComputeCapability: Send + Sync {
-    async fn acquire_device(&self, pref: Option<String>) -> Result<DeviceLease, String>;
-}
-
-#[async_trait]
-pub trait InferenceCapability: Send + Sync {
-    async fn create_session(&self, model: &str, dev: DeviceLease) -> Result<SessionHandle, String>;
-    async fn shutdown_session(&self, sess: SessionHandle) -> Result<(), String>;
-}
 
 use super::Capabilities;
 
@@ -39,14 +28,16 @@ pub struct JobExecutor {
     program: TaskProgram,
     cancel: CancellationToken,
     capabilities: Arc<Capabilities>,
-    io: IoHandle,
     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     task_engine: TaskEngine,
     state: JobState,
 }
 
 impl JobExecutor {
-    /// 创建新的 JobExecutor 实例（占位符）
+    /// 创建新的 JobExecutor 实例
+    ///
+    /// `io` 参数会被注入到 TaskEngine 的 SlotFile 约定槽位 `SLOT_IO`，
+    /// 供后续 CreateSession 指令通过 `take_io_handle(SLOT_IO)` 消费。
     pub fn new(
         job_id: JobId,
         kind: JobKind,
@@ -56,14 +47,15 @@ impl JobExecutor {
         io: IoHandle,
         lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     ) -> Self {
-        let task_engine = TaskEngine::new(Arc::clone(&capabilities));
+        let mut task_engine = TaskEngine::new(job_id, Arc::clone(&capabilities));
+        // 将 IoHandle 注入到约定槽位，Compiler 生成的 CreateSession 指令会引用 SLOT_IO
+        task_engine.slots.set(SLOT_IO, SlotValue::IoHandle(io));
         JobExecutor {
             job_id,
             kind,
             program,
             cancel,
             capabilities,
-            io,
             lifecycle_tx,
             task_engine,
             state: JobState::Preparing,
@@ -157,32 +149,29 @@ mod executor_tests {
     use super::*;
     use crate::orchestrator::job::{JobId, JobKind, JobResult};
     use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
-    use crate::orchestrator::slot::{DeviceLease, SessionHandle, SlotId, ConstValue};
-    use crate::orchestrator::{NetworkCapability, UiCapability};
+    use crate::orchestrator::slot::{SlotId, ConstValue};
+    use crate::orchestrator::UiCapability;
+    use crate::orchestrator::test_utils::StubNetwork;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+    use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
     // ---- Stub 实现 ----
 
-    struct StubCompute;
+    struct StubMLEngine;
     #[async_trait]
-    impl ComputeCapability for StubCompute {
-        async fn acquire_device(&self, _pref: Option<String>) -> Result<DeviceLease, String> {
-            Ok(DeviceLease)
-        }
-    }
-
-    struct StubInference;
-    #[async_trait]
-    impl InferenceCapability for StubInference {
-        async fn create_session(&self, _model: &str, _dev: DeviceLease) -> Result<SessionHandle, String> {
-            Ok(SessionHandle)
-        }
-        async fn shutdown_session(&self, _sess: SessionHandle) -> Result<(), String> { Ok(()) }
+    impl ML_Engine_Capability for StubMLEngine {
+        async fn Create_Session(&self, _config: ML_Session_Config, _io_handle: IoHandle) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program(&self, _session_id: &str, _program: Vec<Instruction>, _params: Pipeline_Params, _cancel_flag: Arc<AtomicBool>) -> Result<Pipeline_Result, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
     }
 
     async fn stub_capabilities() -> (Arc<Capabilities>, TempDir) {
@@ -190,9 +179,8 @@ mod executor_tests {
         let storage = StorageManager::New(temp_dir.path()).await.unwrap();
         let caps = Arc::new(Capabilities {
             storage,
-            compute: Box::new(StubCompute),
-            inference: Box::new(StubInference),
-            network: NetworkCapability,
+            ml_engine: Box::new(StubMLEngine),
+            network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
         });

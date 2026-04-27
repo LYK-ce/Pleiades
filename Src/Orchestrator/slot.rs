@@ -9,10 +9,6 @@ use crate::llm_io;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlotId(pub u32);
 
-/// Phase 2 设备租约的占位符。
-#[derive(Debug, Clone)]
-pub struct DeviceLease;
-
 /// Phase 2 ML Session 句柄的占位符。
 #[derive(Debug, Clone)]
 pub struct SessionHandle;
@@ -49,8 +45,6 @@ pub enum SlotValue {
     String(String),
     /// 模型路径、文件位置
     PathBuf(PathBuf),
-    /// 计算设备租约（RAII，Phase 2 先用 Stub）
-    DeviceLease(DeviceLease),
     /// ML Session 句柄（Phase 2 先用 Stub）
     SessionHandle(SessionHandle),
     /// 步骤执行失败的错误传递
@@ -136,15 +130,6 @@ impl SlotFile {
         match self.get(slot) {
             Some(SlotValue::Bool(b)) => Ok(*b),
             Some(_) => Err(format!("Slot {} is not a Bool", slot.0)),
-            None => Err(format!("Slot {} is empty", slot.0)),
-        }
-    }
-
-    /// 取出设备租约，类型不匹配时返回错误。
-    pub fn take_device(&mut self, slot: SlotId) -> Result<DeviceLease, String> {
-        match self.take(slot) {
-            Some(SlotValue::DeviceLease(d)) => Ok(d),
-            Some(_) => Err(format!("Slot {} is not a DeviceLease", slot.0)),
             None => Err(format!("Slot {} is empty", slot.0)),
         }
     }

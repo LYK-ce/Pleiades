@@ -10,9 +10,11 @@
 //! - config: 配置文件解析模块
 //! - network: P2P网络通信模块
 //! - ml_engine: ML推理引擎模块
-//! - control: 控制层模块
-//! - tui: TUI 终端界面模块
+//! - orchestrator: 编排器模块
+//! - storage: 存储管理模块
 //! - llm_io: LLM 文本交互通道模块
+//! - peer_management: 节点管理模块
+//! - event_bus: 全局事件总线模块
 
 #[path = "Config/mod.rs"]
 pub mod config;
@@ -22,12 +24,6 @@ pub mod network;
 
 #[path = "ML_Engine/mod.rs"]
 pub mod ml_engine;
-
-#[path = "Control/mod.rs"]
-pub mod control;
-
-#[path = "TUI/mod.rs"]
-pub mod tui;
 
 #[path = "PeerManagement/mod.rs"]
 pub mod peer_management;
@@ -41,20 +37,23 @@ pub mod storage;
 #[path = "LLM_IO/mod.rs"]
 pub mod llm_io;
 
+#[path = "EventBus/mod.rs"]
+pub mod event_bus;
+
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
 // Network模块类型导出
-pub use network::{NetworkConfig, NetworkEvent, Network_Service, NodeCommand, NodeHandle};
+pub use network::{NetworkConfig, Network_Service, NodeCommand, NodeHandle};
 pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
+pub use network::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
 pub use network::data_protocol;
 pub use network::stream_protocol;
 pub use network::tensor_stream_protocol;
-pub use network::tensor_stream_manager;
 pub use network::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
-    Tensor_Buffer, Tensor_Stream_Manager, Tensor_IO_Handle,
+    Tensor_Buffer, Tensor_IO_Handle,
 };
 
 // ML_Engine模块类型导出
@@ -84,16 +83,11 @@ pub use ml_engine::{
     Session_Command, Session_Thread, Execute,
 };
 
-// Control模块类型导出
-pub use control::{CLI_Command, Control_Loop, Node_State};
-pub use control::{Control_Command, Serialize_Command, Deserialize_Command};
-pub use control::Ui_Message;
-
-// TUI模块类型导出
-pub use tui::TUI_Loop;
-
 // PeerManagement模块类型导出
 pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, PeerError, create_peer_management};
 
 // LLM_IO模块类型导出
 pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoChannels, IoFrontend, IoHandle, LLM_IO_Broker};
+
+// EventBus模块类型导出
+pub use event_bus::{EventBus, Bus_Event};

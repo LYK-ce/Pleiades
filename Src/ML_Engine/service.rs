@@ -333,10 +333,15 @@ impl ML_Engine_Capability for ML_Engine_Service {
             })?;
 
         // Step 3: 在阻塞线程中执行 GGUF_Split_Model（同步 I/O）
+        // 注意: GGUF_Split_Model 将第 4 个参数视为输出目录（非文件路径），
+        //       内部自动生成文件名 "{stem}_split_{start}_{end}.pgguf"。
+        //       因此传入 out_path 的父目录（Storage base_dir），
+        //       使生成的文件落在 Storage 管理的目录中。
+        //       调用方的 output_file_id 应与生成的文件名一致。
         let src_clone = src_path.clone();
-        let out_clone = out_path.clone();
+        let out_dir = out_path.parent().unwrap_or(&out_path).to_path_buf();
         tokio::task::spawn_blocking(move || {
-            GGUF_Split_Model(&src_clone, start, end, &out_clone)
+            GGUF_Split_Model(&src_clone, start, end, &out_dir)
         })
         .await
         .map_err(|e| {

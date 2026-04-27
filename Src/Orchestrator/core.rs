@@ -1,17 +1,19 @@
 // Presented by KeJi
-// Date ： 2026-04-23
+// Date ： 2026-04-24
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 use super::job::{JobId, JobKind, LifecycleEvent};
 use super::command::{UserCommand, NetworkCommand};
 use super::executor::JobExecutor;
 use super::compiler::Compiler;
 use super::Capabilities;
 use crate::llm_io::{IoHandle, LLM_IO_Capability};
+use crate::network::Network_Inbound_Event;
 
 /// 生命周期通道缓冲大小
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
@@ -46,13 +48,14 @@ pub struct Core {
     // 通道
     user_cmd_rx: mpsc::Receiver<UserCommand>,
     network_cmd_rx: mpsc::Receiver<NetworkCommand>,
+    network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     lifecycle_rx: mpsc::Receiver<LifecycleEvent>,
 }
 
 impl Core {
     /// 创建新的 Core 实例
-    /// 
+    ///
     /// lifecycle 通道由 Core 内部创建，不需要外部传入。
     /// JobExecutor 通过 lifecycle_tx 的克隆向 Core 报告生命周期事件。
     pub fn new(
@@ -60,6 +63,7 @@ impl Core {
         capabilities: Arc<Capabilities>,
         user_cmd_rx: mpsc::Receiver<UserCommand>,
         network_cmd_rx: mpsc::Receiver<NetworkCommand>,
+        network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
         Core {
@@ -69,6 +73,7 @@ impl Core {
             capabilities,
             user_cmd_rx,
             network_cmd_rx,
+            network_inbound_rx,
             lifecycle_tx,
             lifecycle_rx,
         }
@@ -88,6 +93,10 @@ impl Core {
                 // 网络命令
                 Some(cmd) = self.network_cmd_rx.recv(), if !self.shutting_down => {
                     self.route_network(cmd).await;
+                }
+                // Network 转发的入站事件（文件流、张量流）
+                Some(event) = self.network_inbound_rx.recv(), if !self.shutting_down => {
+                    self.handle_network_inbound(event).await;
                 }
                 // 生命周期事件
                 Some(event) = self.lifecycle_rx.recv() => {
@@ -127,8 +136,8 @@ impl Core {
                 self.shutdown();
             }
             UserCommand::DisplayPeer => {
-                let peers = self.capabilities.network.list_peers();
-                self.capabilities.ui.display(peers);
+                // TODO: 通过 PeerManager Capability 查询节点列表
+                warn!("DisplayPeer 尚未对接 PeerManager Capability");
             }
             UserCommand::SetDevice { device } => {
                 self.capabilities.set_compute_preference(device);
@@ -142,7 +151,7 @@ impl Core {
             NetworkCommand::PipelineFlow { peer_id } => {
                 let job_id = JobId(generate_id());
                 // 先编译，失败则提前返回
-                let program = match self.compiler.compile_worker_relay(job_id, peer_id, None) {
+                let program = match self.compiler.compile_relay(job_id, peer_id, None) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!("编译失败: {:?}", e);
@@ -152,7 +161,7 @@ impl Core {
                 // 编译成功后再分配 IO 通道
                 match self.capabilities.io_broker.Allocate(job_id).await {
                     Ok(channels) => {
-                        self.spawn_job(job_id, JobKind::WorkerRelay, program, channels.ml_side);
+                        self.spawn_job(job_id, JobKind::Relay, program, channels.ml_side);
                     }
                     Err(e) => {
                         eprintln!("IO 分配失败: {}", e);
@@ -195,6 +204,23 @@ impl Core {
         }
     }
 
+    /// 处理 Network 转发的入站事件
+    ///
+    /// - FileStreamArrived: compile 接收作业 → spawn Job（stream 存入 SlotFile）
+    /// - TensorStreamArrived: 保存入站 tensor stream 供后续 Job 使用
+    async fn handle_network_inbound(&mut self, event: Network_Inbound_Event) {
+        match event {
+            Network_Inbound_Event::FileStreamArrived { peer, stream: _ } => {
+                // TODO: 解析 pending_file_receives 中的元数据，compile 接收作业并 spawn Job
+                info!("收到入站文件流 from {}, 待实现接收作业 spawn", peer);
+            }
+            Network_Inbound_Event::TensorStreamArrived { peer, stream: _ } => {
+                // TODO: 保存入站 tensor stream，供后续 pipeline Job 使用
+                info!("收到入站张量流 from {}, 待实现 stream 注入", peer);
+            }
+        }
+    }
+
     fn handle_lifecycle_event(&mut self, event: LifecycleEvent) {
         match event {
             LifecycleEvent::Done { job_id, .. } => {
@@ -216,34 +242,31 @@ mod core_tests {
     use super::*;
     use crate::orchestrator::job::{JobId, JobKind, JobResult};
     use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
-    use crate::orchestrator::slot::{SlotId, ConstValue, DeviceLease, SessionHandle};
-    use crate::orchestrator::{NetworkCapability, UiCapability, Capabilities};
-    use crate::orchestrator::executor::{ComputeCapability, InferenceCapability};
+    use crate::orchestrator::slot::{SlotId, ConstValue};
+    use crate::orchestrator::{UiCapability, Capabilities};
+    use crate::orchestrator::test_utils::StubNetwork;
+    use crate::network::Network_Inbound_Event;
     use crate::storage::StorageManager;
     use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability};
+    use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+    use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
     use tokio::time::{timeout, Duration};
 
     // ---- Stub 实现 ----
 
-    struct StubCompute;
+    struct StubMLEngine;
     #[async_trait]
-    impl ComputeCapability for StubCompute {
-        async fn acquire_device(&self, _pref: Option<String>) -> Result<DeviceLease, String> {
-            Ok(DeviceLease)
-        }
-    }
-
-    struct StubInference;
-    #[async_trait]
-    impl InferenceCapability for StubInference {
-        async fn create_session(&self, _model: &str, _dev: DeviceLease) -> Result<SessionHandle, String> {
-            Ok(SessionHandle)
-        }
-        async fn shutdown_session(&self, _sess: SessionHandle) -> Result<(), String> { Ok(()) }
+    impl ML_Engine_Capability for StubMLEngine {
+        async fn Create_Session(&self, _config: ML_Session_Config, _io_handle: crate::llm_io::IoHandle) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program(&self, _session_id: &str, _program: Vec<Instruction>, _params: Pipeline_Params, _cancel_flag: Arc<AtomicBool>) -> Result<Pipeline_Result, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
     }
 
     /// 创建 Stub Capabilities + TempDir（TempDir 必须保持存活以维持临时目录）
@@ -252,9 +275,8 @@ mod core_tests {
         let storage = StorageManager::New(temp_dir.path()).await.unwrap();
         let caps = Arc::new(Capabilities {
             storage,
-            compute: Box::new(StubCompute),
-            inference: Box::new(StubInference),
-            network: NetworkCapability,
+            ml_engine: Box::new(StubMLEngine),
+            network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
         });
@@ -266,7 +288,8 @@ mod core_tests {
         let (caps, temp_dir) = stub_capabilities().await;
         let (_user_tx, user_rx) = mpsc::channel(16);
         let (_net_tx, net_rx) = mpsc::channel(16);
-        let core = Core::new(Arc::new(Compiler), caps, user_rx, net_rx);
+        let (_inbound_tx, inbound_rx) = mpsc::channel::<Network_Inbound_Event>(16);
+        let core = Core::new(Arc::new(Compiler), caps, user_rx, net_rx, inbound_rx);
         (core, temp_dir)
     }
 

@@ -1,13 +1,17 @@
 // Presented by KeJi
-// Date ： 2026-04-21
+// Date ： 2026-04-27
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct JobId(pub u64);
 
 #[derive(Debug, Clone, Copy)]
 pub enum JobKind {
+    /// 单机推理
     Run,
-    WorkerRelay,
+    /// 分布式协调者
+    Coordinator,
+    /// 分布式中继 Worker
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy)]

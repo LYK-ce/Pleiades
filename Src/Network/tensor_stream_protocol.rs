@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-10
+//Date ： 2026-04-24
 
 //! 张量流式传输协议模块
 //!
@@ -8,13 +8,13 @@
 //! 本模块使用 libp2p::stream 提供的持久化双向流，
 //! 张量以 fire-and-forget 方式发送，无需等待 ACK。
 //!
-//! 张量帧格式:
+//! ## 帧格式
 //! +-------------------+--------------------+---------------------+
 //! |   Offset          |   Tensor Length    |   Raw Tensor Data   |
 //! |   8 bytes u64 LE  |   8 bytes u64 LE  |   Length bytes      |
 //! +-------------------+--------------------+---------------------+
 //!
-//! EOF 哨兵帧（标记推理会话结束）:
+//! ## EOF 哨兵帧（标记推理会话结束）
 //! +-------------------+--------------------+
 //! |   u64::MAX        |   0u64             |
 //! |   8 bytes         |   8 bytes          |
@@ -22,6 +22,10 @@
 //!
 //! 发送方写入 [offset][length][data]，接收方读取 header 后精确读取 data。
 //! 使用长度前缀保证帧边界，支持 Prefill (~8MB) 和 Decode (~16KB) 不同大小的张量。
+//!
+//! ## Tensor_IO_Handle
+//! 推理阶段由 ML Engine worker 线程持有，直接操作 stream 做张量收发。
+//! stream 由 Orchestrator 通过 Network_Capability 获取后注入。
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -201,4 +205,104 @@ pub async fn Send_EOF(stream: &mut libp2p::Stream) -> io::Result<()> {
     stream.write_all(&0u64.to_le_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+// ============================================================
+// Tensor_IO_Handle — 张量 I/O 句柄（ML Engine worker 线程持有）
+// ============================================================
+
+/// 张量 I/O 句柄
+///
+/// 由 ML Engine 的 worker 线程持有，提供同步的 `Receive` 和 `Send` 方法。
+/// 内部直接操作 `libp2p::Stream`，不经过 Network_Service 事件循环。
+///
+/// ## 使用方式
+/// ```ignore
+/// loop {
+///     let (offset, data) = tensor_io.Receive()?;    // 直接 stream.read
+///     let result = model.inference(data, offset);     // 推理
+///     tensor_io.Send(offset, &result)?;               // 直接 stream.write
+/// }
+/// ```
+///
+/// ## 生命周期
+/// drop Handle 时，stream 自动关闭（TCP FIN）。
+pub struct Tensor_IO_Handle {
+    /// 入站流（从上游节点接收张量）
+    inbound_stream: libp2p::Stream,
+    /// 出站流（向下游节点发送张量）
+    outbound_stream: libp2p::Stream,
+    /// 私有缓冲区（ML Engine 线程独有，无需共享）
+    buffer: Tensor_Buffer,
+    /// tokio runtime 句柄（用于在阻塞线程中调用 async I/O）
+    rt: tokio::runtime::Handle,
+}
+
+impl Tensor_IO_Handle {
+    /// 创建 Tensor_IO_Handle
+    ///
+    /// # 参数
+    /// - `inbound_stream`: 入站流（从 Orchestrator 事件获取）
+    /// - `outbound_stream`: 出站流（从 Network_Capability.open_tensor_stream 获取）
+    /// - `rt`: tokio runtime 句柄
+    pub fn New(
+        inbound_stream: libp2p::Stream,
+        outbound_stream: libp2p::Stream,
+        rt: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            inbound_stream,
+            outbound_stream,
+            buffer: Tensor_Buffer::New(64 * 1024), // 64KB 初始容量
+            rt,
+        }
+    }
+
+    /// 接收张量（阻塞调用，适合 ML Engine worker 线程）
+    ///
+    /// 从入站流读取一帧张量数据。返回 offset。
+    /// 数据存储在内部缓冲区中，下次调用 Receive 会覆盖。
+    ///
+    /// # Returns
+    /// - `Ok(offset)`: 当前帧偏移。通过 `Get_Buffer()` 获取数据。
+    ///   若 offset == u64::MAX 表示 EOF（推理结束）。
+    /// - `Err`: 流读取失败
+    pub fn Receive(&mut self) -> io::Result<u64> {
+        self.rt.block_on(
+            Receive_Tensor_Frame(&mut self.inbound_stream, &mut self.buffer)
+        )
+    }
+
+    /// 发送张量（阻塞调用，适合 ML Engine worker 线程）
+    ///
+    /// 将数据写入出站流。Fire-and-forget，无需等 ACK。
+    ///
+    /// # 参数
+    /// - `offset`: 当前推理步骤的位置偏移
+    /// - `data`: 张量原始字节数据
+    pub fn Send(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+        self.rt.block_on(
+            Send_Tensor_Frame(&mut self.outbound_stream, offset, data)
+        )
+    }
+
+    /// 发送 EOF 并关闭出站流
+    ///
+    /// 推理结束时由协调者调用。
+    pub fn Send_EOF(&mut self) -> io::Result<()> {
+        self.rt.block_on(Send_EOF(&mut self.outbound_stream))
+    }
+
+    /// 获取最近一次 Receive 读取的数据
+    ///
+    /// 返回内部缓冲区的只读引用。
+    /// 调用 Receive 后有效，下次 Receive 会覆盖。
+    pub fn Get_Buffer(&self) -> &[u8] {
+        self.buffer.As_Slice()
+    }
+
+    /// 获取最近一次 Receive 读取的数据长度
+    pub fn Get_Buffer_Len(&self) -> usize {
+        self.buffer.Len()
+    }
 }

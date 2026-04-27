@@ -103,7 +103,7 @@ pub fn Ensure_Config() -> Result<(Pleiades_Config, PathBuf), Box<dyn std::error:
 /// - `value`: 新值（字符串）
 ///
 /// # 示例
-/// ```rust
+/// ```ignore
 /// Update_Config(path, "Runtime", "device", "cuda");
 /// Update_Config(path, "Network", "Transport_Protocol", "QUIC");
 /// Update_Config(path, "Log", "level", "debug");

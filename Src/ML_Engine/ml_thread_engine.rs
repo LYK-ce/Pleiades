@@ -63,7 +63,7 @@ use super::ml_thread_register::{
     FLAG1, FLAG4,
     META1, META2, META4, META5,
 };
-use crate::network::tensor_stream_manager::Tensor_IO_Handle;
+use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
 
 // ============================================================
 // 推理后端

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use super::{Capabilities, TaskProgram};
 use crate::orchestrator::instruction::TaskInstruction;
+use crate::orchestrator::job::JobId;
 use crate::orchestrator::slot::{SlotId, SlotFile};
 
 /// 执行模式：正向执行或补偿链执行
@@ -23,6 +24,8 @@ pub enum StepResult {
 
 /// 私有 TaskEngine 结构体
 pub struct TaskEngine {
+    /// Job 标识，用于生成 session_id 等
+    pub(super) job_id: JobId,
     /// 指令指针，pub(super) 以允许 handler_control 跳转修改
     pub(super) ip: usize,
     /// 槽位文件，pub(super) 以允许 handler 文件访问
@@ -35,8 +38,9 @@ pub struct TaskEngine {
 }
 
 impl TaskEngine {
-    pub fn new(capabilities: Arc<Capabilities>) -> Self {
+    pub fn new(job_id: JobId, capabilities: Arc<Capabilities>) -> Self {
         TaskEngine {
+            job_id,
             ip: 0,
             slots: SlotFile::new(),
             program: None,
@@ -79,11 +83,20 @@ impl TaskEngine {
         self.ip += 1;
         // 处理指令，JumpIf 条件为真时会在 handler 内部覆盖 ip
         match instr {
+            // 数据操作
             TaskInstruction::Const { value, dst } => self.handle_const(value, dst),
             TaskInstruction::Move { src, dst } => self.handle_move(src, dst),
-            TaskInstruction::AcquireDevice { preferred, result } => self.handle_acquire_device(preferred, result),
-            TaskInstruction::CreateSession { model, device, io, result } => self.handle_create_session(model, device, io, result),
-            TaskInstruction::ShutdownSession { session } => self.handle_shutdown_session(session),
+            // 推理生命周期
+            TaskInstruction::CreateSession { model, device, io, result } => self.handle_create_session(model, device, io, result).await,
+            TaskInstruction::ShutdownSession { session } => self.handle_shutdown_session(session).await,
+            TaskInstruction::RunProgram { session, result } => self.handle_run_program(session, result).await,
+            TaskInstruction::AnalyzeModel { model, result } => self.handle_analyze_model(model, result).await,
+            TaskInstruction::SplitModel { source, start, end, output } => self.handle_split_model(source, start, end, output).await,
+            // 网络操作
+            TaskInstruction::SendFile { peer, file } => self.handle_send_file(peer, file).await,
+            TaskInstruction::ReceiveFile { result } => self.handle_receive_file(result).await,
+            TaskInstruction::OpenTensorStream { peer, result } => self.handle_open_tensor_stream(peer, result).await,
+            // 控制流
             TaskInstruction::JumpIf { condition, label } => self.handle_jump_if(condition, &label),
             TaskInstruction::Abort { reason } => self.handle_abort(&reason),
         }
@@ -99,30 +112,26 @@ impl TaskEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::{ComputeCapability, InferenceCapability, NetworkCapability, UiCapability};
+    use crate::orchestrator::UiCapability;
+    use crate::orchestrator::test_utils::StubNetwork;
     use crate::orchestrator::slot::ConstValue;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
+    use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use crate::orchestrator::slot::{DeviceLease, SessionHandle};
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
-    struct StubCompute;
+    struct StubMLEngine;
     #[async_trait]
-    impl ComputeCapability for StubCompute {
-        async fn acquire_device(&self, _pref: Option<String>) -> Result<DeviceLease, String> {
-            Ok(DeviceLease)
-        }
-    }
-
-    struct StubInference;
-    #[async_trait]
-    impl InferenceCapability for StubInference {
-        async fn create_session(&self, _model: &str, _dev: DeviceLease) -> Result<SessionHandle, String> {
-            Ok(SessionHandle)
-        }
-        async fn shutdown_session(&self, _sess: SessionHandle) -> Result<(), String> { Ok(()) }
+    impl ML_Engine_Capability for StubMLEngine {
+        async fn Create_Session(&self, _config: ML_Session_Config, _io_handle: crate::llm_io::IoHandle) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program(&self, _session_id: &str, _program: Vec<Instruction>, _params: Pipeline_Params, _cancel_flag: Arc<AtomicBool>) -> Result<Pipeline_Result, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, ML_Engine_Error> { unimplemented!("stub") }
+        async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), ML_Engine_Error> { unimplemented!("stub") }
     }
 
     async fn stub_caps() -> (Arc<Capabilities>, TempDir) {
@@ -130,9 +139,8 @@ mod tests {
         let storage = StorageManager::New(temp_dir.path()).await.unwrap();
         let caps = Arc::new(Capabilities {
             storage,
-            compute: Box::new(StubCompute),
-            inference: Box::new(StubInference),
-            network: NetworkCapability,
+            ml_engine: Box::new(StubMLEngine),
+            network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
         });
@@ -143,14 +151,14 @@ mod tests {
     #[tokio::test]
     async fn unloaded_engine_aborts() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         assert!(matches!(engine.step().await, StepResult::Abort(_)));
     }
 
     #[tokio::test]
     async fn empty_program_done() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![],
             compensation: vec![],
@@ -162,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn single_instruction_then_done() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![TaskInstruction::Abort { reason: "x".into() }],
             compensation: vec![],
@@ -175,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn compensation_mode_switch() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) },
@@ -199,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn multi_step_natural_finish() {
         let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(caps);
+        let mut engine = TaskEngine::new(JobId(999), caps);
         engine.load(&TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) },
