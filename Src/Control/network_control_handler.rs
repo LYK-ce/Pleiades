@@ -327,6 +327,19 @@ impl NetworkCommandHandler {
                     }
                 }
             }
+
+            Control_Command::Verify_File { file_name } => {
+                // 文件传输阶段3：校验文件是否已成功接收
+                // 当前为占位符，后续由 Orchestrator Core 层处理（查 Storage.exists）
+                debug!("VERIFY_FILE (来自 {}): 校验文件 '{}'", peer, file_name);
+                Self::Send_Ui(ui_tx, Ui_Message::Log(format!(
+                    "收到文件校验请求 (来自 {}): {}", peer, file_name
+                ))).await;
+                // 占位符：默认回复 confirmed（后续接入 Storage 校验）
+                let _ = node_handle
+                    .Send_Response(request_id, DataType::Command, b"confirmed".to_vec())
+                    .await;
+            }
         }
     }
 

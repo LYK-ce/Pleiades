@@ -87,7 +87,7 @@ pub use ml_engine::{
 pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, PeerError, create_peer_management};
 
 // LLM_IO模块类型导出
-pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoChannels, IoFrontend, IoHandle, LLM_IO_Broker};
+pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoFrontend, IoHandle, LLM_IO_Broker};
 
 // EventBus模块类型导出
 pub use event_bus::{EventBus, Bus_Event};

@@ -3,7 +3,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use crate::llm_io;
+use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
+use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
 
 /// 槽位编号，类似寄存器索引。由 `TaskProgramBuilder` 在编译时分配。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +54,20 @@ pub enum SlotValue {
     Error(String),
     /// LLM IO 句柄（含 mpsc::Receiver，只能 take 不能 clone/get）
     IoHandle(llm_io::IoHandle),
+    /// 模型分析结果（架构名、层数、input/output head 等）
+    ModelInfo(Model_Info),
+    /// 入站网络流（文件流或张量流，只能 take 不能 clone/get）
+    ///
+    /// 使用 `Mutex<Option<T>>` 包装解决 `libp2p::Stream: !Sync` 问题：
+    /// `Mutex<T>: Sync` 当 `T: Send`，而 `libp2p::Stream: Send`。
+    /// 实际访问时通过 `take` 取得 SlotValue 所有权后调用 `into_inner()`，
+    /// 无需加锁，零争用开销。
+    Stream(Mutex<Option<libp2p::Stream>>),
+    /// 张量 IO 句柄（包含 inbound + outbound stream，由 BuildTensorIo 指令组装）
+    ///
+    /// 使用 `Mutex<Option<T>>` 包装，原因同 `Stream`：
+    /// `Tensor_IO_Handle` 内含 `libp2p::Stream`（`Send + !Sync`）。
+    TensorIo(Mutex<Option<Tensor_IO_Handle>>),
 }
 
 /// 从 ConstValue 到 SlotValue 的无损转换
@@ -167,6 +184,45 @@ impl SlotFile {
         match self.take(slot) {
             Some(SlotValue::IoHandle(h)) => Ok(h),
             Some(_) => Err(format!("Slot {} is not an IoHandle", slot.0)),
+            None => Err(format!("Slot {} is empty", slot.0)),
+        }
+    }
+
+    /// 读取 ModelInfo 类型的槽位值（只读引用），类型不匹配时返回错误。
+    pub fn get_model_info(&self, slot: SlotId) -> Result<&Model_Info, String> {
+        match self.get(slot) {
+            Some(SlotValue::ModelInfo(m)) => Ok(m),
+            Some(_) => Err(format!("Slot {} is not a ModelInfo", slot.0)),
+            None => Err(format!("Slot {} is empty", slot.0)),
+        }
+    }
+
+    /// 取出 Stream，类型不匹配时返回错误。
+    /// Stream 不可 Clone，只能 take 一次。
+    /// 通过 `into_inner()` 消费 Mutex 本身（无需加锁），再从 Option 中取出值。
+    pub fn take_stream(&mut self, slot: SlotId) -> Result<libp2p::Stream, String> {
+        match self.take(slot) {
+            Some(SlotValue::Stream(mutex)) => {
+                mutex.into_inner()
+                    .map_err(|e| format!("Slot {} stream mutex poisoned: {}", slot.0, e))?
+                    .ok_or_else(|| format!("Slot {} stream already taken", slot.0))
+            }
+            Some(_) => Err(format!("Slot {} is not a Stream", slot.0)),
+            None => Err(format!("Slot {} is empty", slot.0)),
+        }
+    }
+
+    /// 取出 Tensor_IO_Handle，类型不匹配时返回错误。
+    /// Tensor_IO_Handle 不可 Clone，只能 take 一次。
+    /// 通过 `into_inner()` 消费 Mutex 本身（无需加锁），再从 Option 中取出值。
+    pub fn take_tensor_io(&mut self, slot: SlotId) -> Result<Tensor_IO_Handle, String> {
+        match self.take(slot) {
+            Some(SlotValue::TensorIo(mutex)) => {
+                mutex.into_inner()
+                    .map_err(|e| format!("Slot {} tensor_io mutex poisoned: {}", slot.0, e))?
+                    .ok_or_else(|| format!("Slot {} tensor_io already taken", slot.0))
+            }
+            Some(_) => Err(format!("Slot {} is not a TensorIo", slot.0)),
             None => Err(format!("Slot {} is empty", slot.0)),
         }
     }

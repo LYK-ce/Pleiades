@@ -56,6 +56,7 @@ mod tests {
     use crate::orchestrator::test_utils::StubNetwork;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use super::super::Capabilities;
@@ -84,6 +85,7 @@ mod tests {
             network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
+            tensor_io_broker: Tensor_IO_Broker::New(),
         });
         (caps, temp_dir)
     }

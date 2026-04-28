@@ -154,6 +154,7 @@ mod executor_tests {
     use crate::orchestrator::test_utils::StubNetwork;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
@@ -183,6 +184,7 @@ mod executor_tests {
             network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
+            tensor_io_broker: Tensor_IO_Broker::New(),
         });
         (caps, temp_dir)
     }
@@ -190,8 +192,8 @@ mod executor_tests {
     /// 创建 stub IoHandle 用于测试
     async fn stub_io_handle(caps: &Arc<Capabilities>, job_id: JobId) -> IoHandle {
         use crate::llm_io::LLM_IO_Capability;
-        let channels = caps.io_broker.Allocate(job_id).await.unwrap();
-        channels.ml_side
+        caps.io_broker.Allocate(job_id).await.unwrap();
+        caps.io_broker.Take_ML_Side(job_id).await.unwrap()
     }
 
     // ---- TC-01: 正向执行自然结束 ----

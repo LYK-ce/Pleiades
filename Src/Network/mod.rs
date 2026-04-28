@@ -51,4 +51,5 @@ pub use tensor_stream_protocol::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
     Tensor_Buffer, Tensor_IO_Handle,
     Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF,
+    Write_Tensor_Stream_Handshake, Read_Tensor_Stream_Handshake,
 };

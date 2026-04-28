@@ -30,6 +30,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use std::fmt;
 use futures::prelude::*;
 use std::io;
 
@@ -305,4 +306,51 @@ impl Tensor_IO_Handle {
     pub fn Get_Buffer_Len(&self) -> usize {
         self.buffer.Len()
     }
+}
+
+/// Manual Debug impl since `libp2p::Stream` doesn't implement Debug.
+impl fmt::Debug for Tensor_IO_Handle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tensor_IO_Handle")
+            .field("buffer_len", &self.buffer.Len())
+            .finish_non_exhaustive()
+    }
+}
+
+// ============================================================
+// Tensor Stream Handshake — 流建立时的 JobId 交换
+// ============================================================
+
+/// 写入 Tensor Stream Handshake 帧（8 字节）
+///
+/// 发起方在 open_tensor_stream 后调用，写入 target_job_id
+/// 供接收方 Core 读取并路由到正确的 Job。
+///
+/// # 参数
+/// - `stream`: 已打开的出站流
+/// - `target_job_id`: 接收方的 JobId（u64）
+pub async fn Write_Tensor_Stream_Handshake(
+    stream: &mut libp2p::Stream,
+    target_job_id: u64,
+) -> io::Result<()> {
+    stream.write_all(&target_job_id.to_le_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// 读取 Tensor Stream Handshake 帧（8 字节）
+///
+/// 接收方 Core 从入站流读取 target_job_id，用于路由到正确的 Job。
+///
+/// # 参数
+/// - `stream`: 入站流
+///
+/// # 返回
+/// - target_job_id（u64）
+pub async fn Read_Tensor_Stream_Handshake(
+    stream: &mut libp2p::Stream,
+) -> io::Result<u64> {
+    let mut buf = [0u8; 8];
+    stream.read_exact(&mut buf).await?;
+    Ok(u64::from_le_bytes(buf))
 }

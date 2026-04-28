@@ -8,11 +8,13 @@ pub mod executor;
 pub mod command;
 pub mod slot;
 pub mod instruction;
+pub mod tensor_io_broker;
 
 use crate::storage::StorageManager;
 use crate::llm_io::LLM_IO_Broker;
 use crate::network::Network_Capability;
 use crate::ml_engine::capability::ML_Engine_Capability;
+use tensor_io_broker::Tensor_IO_Broker;
 
 // 用户界面能力占位符
 pub struct UiCapability;
@@ -31,6 +33,7 @@ pub struct Capabilities {
     pub network: Box<dyn Network_Capability>,
     pub ui: UiCapability,
     pub io_broker: LLM_IO_Broker,
+    pub tensor_io_broker: Tensor_IO_Broker,
 }
 
 impl Capabilities {

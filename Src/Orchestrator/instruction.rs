@@ -30,11 +30,16 @@ pub enum TaskInstruction {
     // ─── 推理生命周期（handler_inference.rs）────────────────
 
     /// 从 `model` 槽位读取模型路径，从 `device` 槽位读取设备字符串，
-    /// 从 `io` 槽位 **take** IoHandle，创建 ML Session，session_id 写入 `result` 槽位
+    /// 从 `start`/`end` 槽位读取层范围（U64），
+    /// 从 `io` 槽位 **take** IoHandle，创建 ML Session，session_id 写入 `result` 槽位。
+    /// `tensor_io` 为可选槽位：分布式推理时 take Tensor_IO_Handle，单机推理时为 None。
     CreateSession {
         model: SlotId,
         device: SlotId,
+        start: SlotId,
+        end: SlotId,
         io: SlotId,
+        tensor_io: Option<SlotId>,
         result: SlotId,
     },
     /// 从 `session` 槽位读取 session_id，调用 ML Engine 关闭 Session
@@ -67,13 +72,67 @@ pub enum TaskInstruction {
         peer: SlotId,
         file: SlotId,
     },
-    /// 从远端 Peer 接收文件，文件 ID 写入 `result` 槽位
+    /// 从入站 Stream 接收文件数据并存入 Storage
+    ///
+    /// 所有输入槽位由 Core 在 spawn Job 时注入 SlotFile：
+    /// - `stream`: 入站 libp2p::Stream（take 语义）
+    /// - `file_name`: 文件名（来自阶段1元数据协商）
+    /// - `file_size`: 文件大小（来自阶段1元数据协商）
+    /// - `checksum`: 发送方校验和（来自阶段1元数据协商）
+    /// - `result`: 输出 file_id
     ReceiveFile {
+        stream: SlotId,
+        file_name: SlotId,
+        file_size: SlotId,
+        checksum: SlotId,
         result: SlotId,
     },
-    /// 与远端 Peer 建立 Tensor Stream 连接，Tensor_IO_Handle 写入 `result` 槽位
+    /// 请求远端 Peer 加入 Pipeline，获取其 Relay Job ID
+    ///
+    /// 1. 从各槽位读取 PeerId、model_file_id、device、layer_start、layer_end
+    /// 2. 构造 REQUEST_PIPELINE payload（携带 coordinator_job_id + 上述参数）
+    /// 3. 通过 `send_data(peer, DataType::Command, payload)` 发送
+    /// 4. 等待远端 Core 回复 relay_job_id
+    /// 5. 将 relay_job_id（U64）存入 `result` 槽位
+    RequestPipeline {
+        peer: SlotId,
+        model: SlotId,
+        device: SlotId,
+        start: SlotId,
+        end: SlotId,
+        result: SlotId,
+    },
+    /// 向下游 Peer 主动打开出站张量流
+    ///
+    /// 1. 从 `peer` 槽位读取下游 PeerId
+    /// 2. 从 `target_job` 槽位读取远端 Job ID（用于 handshake 帧）
+    /// 3. 调用 `network.open_tensor_stream(peer)` 打开出站流
+    /// 4. 在流上写入 handshake 帧（target_job_id）
+    /// 5. 将 outbound 存入 `Tensor_IO_Broker.Store_Outbound(job_id, stream)`
     OpenTensorStream {
         peer: SlotId,
+        target_job: SlotId,
+    },
+    /// 从 Tensor_IO_Broker 取出入站张量流（阻塞直到到达）
+    ///
+    /// 调用 `broker.Take_Inbound(job_id).await`，raw `libp2p::Stream` 写入 `result` 槽位
+    TakeInboundStream {
+        result: SlotId,
+    },
+    /// 从 Tensor_IO_Broker 取出出站张量流（阻塞直到就绪）
+    ///
+    /// 调用 `broker.Take_Outbound(job_id).await`，raw `libp2p::Stream` 写入 `result` 槽位
+    TakeOutboundStream {
+        result: SlotId,
+    },
+    /// 组装 Tensor_IO_Handle
+    ///
+    /// 从 `inbound`/`outbound` 槽位 take 两条 raw stream，
+    /// 调用 `Tensor_IO_Handle::New(inbound, outbound, rt)` 组装，
+    /// 结果写入 `result` 槽位（SlotValue::TensorIo）
+    BuildTensorIo {
+        inbound: SlotId,
+        outbound: SlotId,
         result: SlotId,
     },
 

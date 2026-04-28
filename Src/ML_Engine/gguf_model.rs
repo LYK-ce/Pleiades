@@ -136,7 +136,8 @@ pub fn GGUF_Load_Model(
         );
     }
 
-    if arch_info.is_split {
+    // 对于非 split 文件，将 end 钳位到 max_layer_index（支持 usize::MAX 作为 "全部加载" 哨兵）
+    let end = if arch_info.is_split {
         // 对于 split 文件，判断 [start, end] 是否在 [split_start, split_end] 范围内
         if start < arch_info.split_start || end > arch_info.split_end {
             anyhow::bail!(
@@ -147,18 +148,11 @@ pub fn GGUF_Load_Model(
                 arch_info.split_end
             );
         }
+        end
     } else {
-        // 对于完整 gguf 文件，判断 [start, end] 是否在 [0, N+1] 范围内
-        if end > max_layer_index {
-            anyhow::bail!(
-                "Layer range [{}, {}] exceeds model max layer index ({}, total {} transformer blocks)",
-                start,
-                end,
-                max_layer_index,
-                arch_info.num_layers
-            );
-        }
-    }
+        // 对于完整 gguf 文件，钳位 end 到 [0, N+1]
+        end.min(max_layer_index)
+    };
 
     // 4. 构建 RotaryEmbedding
     let rotary = Arc::new(

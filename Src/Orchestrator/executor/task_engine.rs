@@ -87,15 +87,19 @@ impl TaskEngine {
             TaskInstruction::Const { value, dst } => self.handle_const(value, dst),
             TaskInstruction::Move { src, dst } => self.handle_move(src, dst),
             // 推理生命周期
-            TaskInstruction::CreateSession { model, device, io, result } => self.handle_create_session(model, device, io, result).await,
+            TaskInstruction::CreateSession { model, device, start, end, io, tensor_io, result } => self.handle_create_session(model, device, start, end, io, tensor_io, result).await,
             TaskInstruction::ShutdownSession { session } => self.handle_shutdown_session(session).await,
             TaskInstruction::RunProgram { session, result } => self.handle_run_program(session, result).await,
             TaskInstruction::AnalyzeModel { model, result } => self.handle_analyze_model(model, result).await,
             TaskInstruction::SplitModel { source, start, end, output } => self.handle_split_model(source, start, end, output).await,
             // 网络操作
             TaskInstruction::SendFile { peer, file } => self.handle_send_file(peer, file).await,
-            TaskInstruction::ReceiveFile { result } => self.handle_receive_file(result).await,
-            TaskInstruction::OpenTensorStream { peer, result } => self.handle_open_tensor_stream(peer, result).await,
+            TaskInstruction::ReceiveFile { stream, file_name, file_size, checksum, result } => self.handle_receive_file(stream, file_name, file_size, checksum, result).await,
+            TaskInstruction::RequestPipeline { peer, model, device, start, end, result } => self.handle_request_pipeline(peer, model, device, start, end, result).await,
+            TaskInstruction::OpenTensorStream { peer, target_job } => self.handle_open_tensor_stream(peer, target_job).await,
+            TaskInstruction::TakeInboundStream { result } => self.handle_take_inbound_stream(result).await,
+            TaskInstruction::TakeOutboundStream { result } => self.handle_take_outbound_stream(result).await,
+            TaskInstruction::BuildTensorIo { inbound, outbound, result } => self.handle_build_tensor_io(inbound, outbound, result).await,
             // 控制流
             TaskInstruction::JumpIf { condition, label } => self.handle_jump_if(condition, &label),
             TaskInstruction::Abort { reason } => self.handle_abort(&reason),
@@ -117,6 +121,7 @@ mod tests {
     use crate::orchestrator::slot::ConstValue;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
+    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
@@ -143,6 +148,7 @@ mod tests {
             network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
+            tensor_io_broker: Tensor_IO_Broker::New(),
         });
         (caps, temp_dir)
     }

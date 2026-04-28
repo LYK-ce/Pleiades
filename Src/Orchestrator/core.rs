@@ -14,6 +14,7 @@ use super::compiler::Compiler;
 use super::Capabilities;
 use crate::llm_io::{IoHandle, LLM_IO_Capability};
 use crate::network::Network_Inbound_Event;
+use crate::network::tensor_stream_protocol::Read_Tensor_Stream_Handshake;
 
 /// 生命周期通道缓冲大小
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
@@ -107,64 +108,108 @@ impl Core {
     }
 
     /// 路由用户命令（异步，因需要调用 io_broker.Allocate）
+    ///
+    /// 每个分支处理完后通过 `reply` 通道回传结果给前端。
     async fn route_user(&mut self, cmd: UserCommand) {
         match cmd {
-            UserCommand::Run { model_path } => {
+            UserCommand::Run { model_path, reply } => {
                 let job_id = JobId(generate_id());
-                // 先编译，失败则提前返回（不分配 IO 通道）
+                // 先编译，失败则回传错误
                 let program = match self.compiler.compile_run(job_id, model_path, None) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("编译失败: {:?}", e);
+                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
                         return;
                     }
                 };
-                // 编译成功后再分配 IO 通道
-                match self.capabilities.io_broker.Allocate(job_id).await {
-                    Ok(channels) => {
-                        self.spawn_job(job_id, JobKind::Run, program, channels.ml_side);
+                // 编译成功后分配 IO 通道
+                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+                    let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
+                    return;
+                }
+                match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+                    Ok(io) => {
+                        self.spawn_job(job_id, JobKind::Run, program, io);
+                        let _ = reply.send(Ok(job_id));
                     }
                     Err(e) => {
-                        eprintln!("IO 分配失败: {}", e);
+                        let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
                     }
                 }
             }
-            UserCommand::Cancel { job_id } => {
-                self.cancel_job(job_id);
+            UserCommand::Cancel { job_id, reply } => {
+                if self.registry.contains_key(&job_id) {
+                    self.cancel_job(job_id);
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let _ = reply.send(Err(format!("Job {:?} 不存在", job_id)));
+                }
             }
-            UserCommand::Quit => {
+            UserCommand::Quit { reply } => {
                 self.shutdown();
+                let _ = reply.send(());
             }
-            UserCommand::DisplayPeer => {
+            UserCommand::DisplayPeer { reply } => {
                 // TODO: 通过 PeerManager Capability 查询节点列表
                 warn!("DisplayPeer 尚未对接 PeerManager Capability");
+                let _ = reply.send(Err("DisplayPeer 尚未实现".to_string()));
             }
-            UserCommand::SetDevice { device } => {
-                self.capabilities.set_compute_preference(device);
+            UserCommand::SetDevice { device, reply } => {
+                // TODO: 实现设备偏好设置
+                warn!("SetDevice 尚未实现, device={}", device);
+                let _ = reply.send(Err("SetDevice 尚未实现".to_string()));
             }
         }
     }
 
     /// 路由网络命令（异步，因需要调用 io_broker.Allocate）
+    ///
+    /// PipelineFlow 处理完成后通过 `reply` 通道回传 relay_job_id，
+    /// 供远端 Control 层回复给 Coordinator。
     async fn route_network(&mut self, cmd: NetworkCommand) {
         match cmd {
-            NetworkCommand::PipelineFlow { peer_id } => {
+            NetworkCommand::PipelineFlow {
+                coordinator_peer_id,
+                coordinator_job_id,
+                model_file_id,
+                device,
+                layer_start,
+                layer_end,
+                reply,
+            } => {
                 let job_id = JobId(generate_id());
-                // 先编译，失败则提前返回
-                let program = match self.compiler.compile_relay(job_id, peer_id, None) {
+                // 先编译，失败则回传错误
+                let program = match self.compiler.compile_relay(
+                    job_id,
+                    coordinator_peer_id,
+                    coordinator_job_id,
+                    model_file_id,
+                    Some(device),
+                    layer_start,
+                    layer_end,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("编译失败: {:?}", e);
+                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
                         return;
                     }
                 };
-                // 编译成功后再分配 IO 通道
-                match self.capabilities.io_broker.Allocate(job_id).await {
-                    Ok(channels) => {
-                        self.spawn_job(job_id, JobKind::Relay, program, channels.ml_side);
+                // 编译成功后分配 IO 通道
+                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+                    let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
+                    return;
+                }
+                match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+                    Ok(io) => {
+                        // 分布式 Job 需要预注册 Tensor_IO_Broker
+                        if let Err(e) = self.capabilities.tensor_io_broker.Prepare(job_id).await {
+                            warn!("Tensor_IO_Broker Prepare 失败: {}", e);
+                        }
+                        self.spawn_job(job_id, JobKind::Relay, program, io);
+                        let _ = reply.send(Ok(job_id));
                     }
                     Err(e) => {
-                        eprintln!("IO 分配失败: {}", e);
+                        let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
                     }
                 }
             }
@@ -207,16 +252,28 @@ impl Core {
     /// 处理 Network 转发的入站事件
     ///
     /// - FileStreamArrived: compile 接收作业 → spawn Job（stream 存入 SlotFile）
-    /// - TensorStreamArrived: 保存入站 tensor stream 供后续 Job 使用
+    /// - TensorStreamArrived: 读取 handshake → 通过 Tensor_IO_Broker 路由到目标 Job
     async fn handle_network_inbound(&mut self, event: Network_Inbound_Event) {
         match event {
             Network_Inbound_Event::FileStreamArrived { peer, stream: _ } => {
                 // TODO: 解析 pending_file_receives 中的元数据，compile 接收作业并 spawn Job
                 info!("收到入站文件流 from {}, 待实现接收作业 spawn", peer);
             }
-            Network_Inbound_Event::TensorStreamArrived { peer, stream: _ } => {
-                // TODO: 保存入站 tensor stream，供后续 pipeline Job 使用
-                info!("收到入站张量流 from {}, 待实现 stream 注入", peer);
+            Network_Inbound_Event::TensorStreamArrived { peer, mut stream } => {
+                // 1. 从 stream 读取 handshake 帧（target_job_id）
+                match Read_Tensor_Stream_Handshake(&mut stream).await {
+                    Ok(target_job_id) => {
+                        let job_id = super::job::JobId(target_job_id);
+                        info!("收到入站张量流 from {}, target_job_id={}, 路由到 Broker", peer, target_job_id);
+                        // 2. 通过 Broker 路由到目标 Job
+                        if let Err(e) = self.capabilities.tensor_io_broker.Store_Inbound(job_id, stream).await {
+                            warn!("Tensor_IO_Broker Store_Inbound 失败: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("读取张量流 handshake 失败 from {}: {}", peer, e);
+                    }
+                }
             }
         }
     }
@@ -224,6 +281,13 @@ impl Core {
     fn handle_lifecycle_event(&mut self, event: LifecycleEvent) {
         match event {
             LifecycleEvent::Done { job_id, .. } => {
+                // 清理 Tensor_IO_Broker 条目（幂等，对非分布式 Job 无影响）
+                let caps = self.capabilities.clone();
+                let job = job_id;
+                // 使用 tokio::spawn 异步清理，避免在同步方法中 .await
+                tokio::spawn(async move {
+                    caps.tensor_io_broker.Deallocate(job).await;
+                });
                 self.registry.remove(&job_id);  // 同步 HashMap 操作
             }
         }
@@ -248,6 +312,7 @@ mod core_tests {
     use crate::network::Network_Inbound_Event;
     use crate::storage::StorageManager;
     use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability};
+    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
@@ -279,6 +344,7 @@ mod core_tests {
             network: Box::new(StubNetwork),
             ui: UiCapability,
             io_broker: LLM_IO_Broker::New(),
+            tensor_io_broker: Tensor_IO_Broker::New(),
         });
         (caps, temp_dir)
     }
@@ -295,7 +361,8 @@ mod core_tests {
 
     /// 通过 LLM_IO_Broker 分配一个 IoHandle（ML 侧端点）
     async fn stub_io_handle(broker: &LLM_IO_Broker, job_id: JobId) -> IoHandle {
-        broker.Allocate(job_id).await.unwrap().ml_side
+        broker.Allocate(job_id).await.unwrap();
+        broker.Take_ML_Side(job_id).await.unwrap()
     }
 
     // ---- TC-01: spawn 简单 Const Job → Done/Success ----

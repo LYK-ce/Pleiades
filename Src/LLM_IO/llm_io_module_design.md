@@ -1,4 +1,4 @@
-# LLM_IO 模块设计文档（Phase 2）
+# LLM_IO 模块设计文档（Phase 2，更新 2026-04-27）
 
 ## 一、设计概述
 
@@ -14,24 +14,29 @@ LLM_IO 是系统的**大语言模型文本交互层**，负责为外部前端（
 
 1. **有状态会话**：先创建 Session，再持续多轮对话，避免每轮重复加载模型
 2. **前端二选一**：同一时刻只存在一个输入源（TUI 模式 或 API 模式）
-3. **通道由前端申请**：`LLM_IO_Broker` 分配通道后，前端保留外侧端点，将 ML 侧端点注入 Job
+3. **Broker 托管分发**：编排层调用 `Allocate` 创建通道对并托管于 Broker，编排层取出 ML 侧端点注入 Job，前端通过 `Take_Frontend` 取出前端侧端点进行交互
 4. **零拷贝直传**：Prompt/Completion 不经过 Core 内核、不经过 JobExecutor 循环，直传 ML Thread
 5. **不维护历史**：对话上下文由 ML Thread 内部通过 KV Cache 维护，LLM_IO 只负责单轮文本转发
 
 ### 1.3 用法概览
 
 ```rust
-// 1. 创建 Broker
-let broker = LLM_IO_Broker::new();
+// 1. 创建 Broker（通常在 Capabilities 中全局持有）
+let broker = LLM_IO_Broker::New();
 
-// 2. 为指定 Job 分配通道
-let channels = broker.allocate(JobId(42)).await?;
+// 2. 编排层为指定 Job 分配通道（两端托管于 Broker）
+broker.Allocate(job_id).await?;
 
-// 3. 前端保留外侧端点
-let frontend = channels.frontend;  // input_tx + output_rx
+// 3. 编排层取出 ML 侧端点，注入 JobExecutor
+let io_handle = broker.Take_ML_Side(job_id).await?;
+spawn_job(job_id, program, io_handle);
 
-// 4. ML 侧端点随 Job 注入编排层
-let program = compiler.compile_run(job_id, model_path, channels.ml_side);
+// 4. 前端取出前端侧端点，进行文本交互
+let frontend = broker.Take_Frontend(job_id).await?;
+frontend.input_tx.send("你好".to_string()).await?;
+while let Some(token) = frontend.output_rx.recv().await {
+    print!("{}", token);
+}
 ```
 
 ---
@@ -49,8 +54,8 @@ src/llm_io/
 
 | 文件 | 职责 | 公开内容 |
 |------|------|---------|
-| `capability.rs` | 定义 `LLM_IO_Capability` trait、`LLM_IO_Error`、`IoChannels`、`IoFrontend`、`IoHandle` | 全部公开 |
-| `broker.rs` | `LLM_IO_Broker` 结构体；通道分配、回收、状态查询 | `LLM_IO_Broker` |
+| `capability.rs` | 定义 `LLM_IO_Capability` trait、`LLM_IO_Error`、`IoFrontend`、`IoHandle` | 全部公开 |
+| `broker.rs` | `LLM_IO_Broker` 结构体；通道分配、托管、分发和回收 | `LLM_IO_Broker` |
 | `mod.rs` | 通过 `pub use` 将上述类型提升到模块级；底部附模块级集成测试 | 模块聚合 |
 
 ---
@@ -62,16 +67,21 @@ src/llm_io/
 ```rust
 #[async_trait]
 pub trait LLM_IO_Capability: Send + Sync {
-    /// 为指定 Job 创建一组双向文本通道。
-    /// 返回前端侧端点（IoFrontend）和 ML 侧端点（IoHandle）。
-    async fn allocate(&self, job_id: JobId) -> Result<IoChannels, LLM_IO_Error>;
+    /// 为指定 Job 创建一组双向文本通道，两端由 Broker 内部托管。
+    async fn Allocate(&self, job_id: JobId) -> Result<(), LLM_IO_Error>;
 
-    /// 强制关闭指定 Job 的通道，清理内部索引。
-    /// 若 job_id 不存在，幂等返回 Ok。
-    async fn deallocate(&self, job_id: JobId) -> Result<(), LLM_IO_Error>;
+    /// 取出指定 Job 的 ML 侧端点（IoHandle），take 语义，只能取一次。
+    async fn Take_ML_Side(&self, job_id: JobId) -> Result<IoHandle, LLM_IO_Error>;
+
+    /// 取出指定 Job 的前端侧端点（IoFrontend），take 语义，只能取一次。
+    async fn Take_Frontend(&self, job_id: JobId) -> Result<IoFrontend, LLM_IO_Error>;
+
+    /// 从内部索引中移除指定 Job 的通道条目。
+    /// 仅清理内部索引，通道的实际生命周期由两端句柄的 Drop 决定。
+    async fn Deallocate(&self, job_id: JobId) -> Result<(), LLM_IO_Error>;
 
     /// 查询指定 Job 的通道是否仍存在于内部索引中。
-    async fn is_active(&self, job_id: JobId) -> bool;
+    async fn Is_Active(&self, job_id: JobId) -> bool;
 }
 ```
 
@@ -79,9 +89,11 @@ pub trait LLM_IO_Capability: Send + Sync {
 
 | 方法 | 调用方 | 行为 |
 |------|--------|------|
-| `allocate` | Core / 前端 | 创建 `mpsc` 双向通道，注册到内部索引，返回两端句柄 |
-| `deallocate` | Core / 前端 | 从索引移除条目，不强制关闭底层 `mpsc`（Drop 由所有者负责） |
-| `is_active` | Core / 前端 | 检查内部索引中是否存在该 job_id 的通道记录 |
+| `Allocate` | 编排层 (Core) | 创建 `mpsc` 双向通道，两端存入内部索引，不返回端点 |
+| `Take_ML_Side` | 编排层 (Core) | 从索引取出 ML 侧端点（take 语义），注入 JobExecutor |
+| `Take_Frontend` | 前端 / 测试 | 从索引取出前端侧端点（take 语义），用于文本交互 |
+| `Deallocate` | 编排层 (Core) | 从索引移除条目，不强制关闭底层 `mpsc`（Drop 由所有者负责） |
+| `Is_Active` | 编排层 / 前端 | 检查内部索引中是否存在该 job_id 的通道记录 |
 
 ---
 
@@ -92,12 +104,8 @@ pub trait LLM_IO_Capability: Send + Sync {
 #### 公开类型
 
 - **`LLM_IO_Error`**：错误枚举
-  - `AllocationFailed(String)` — 通道创建失败（如内存不足）
-  - `InvalidJobId(String)` — job_id 格式非法
-
-- **`IoChannels`**：`allocate` 的返回类型
-  - `frontend: IoFrontend`
-  - `ml_side: IoHandle`
+  - `AllocationFailed(String)` — 通道创建失败（如 job_id 已存在）
+  - `NotFound(String)` — 指定 job_id 未找到或端点已被取走
 
 - **`IoFrontend`**：前端持有的外侧端点
   - `input_tx: mpsc::Sender<String>` — 发送 Prompt
@@ -114,14 +122,14 @@ pub trait LLM_IO_Capability: Send + Sync {
 ```rust
 #[cfg(test)]
 mod tests {
-    // test_io_channels_construct_and_destructure
-    //   验证 IoChannels 能正确构造，且 frontend/ml_side 字段可访问
+    // test_io_endpoints_construct
+    //   验证 IoFrontend 和 IoHandle 能正确构造
 
     // test_io_frontend_clone_sender
     //   验证 input_tx 可以 Clone（多前端场景预留）
 
     // test_llm_io_error_display
-    //   验证 LLM_IO_Error 的 Display 输出格式正确
+    //   验证 LLM_IO_Error 的 Display 输出格式正确（含 NotFound）
 }
 ```
 
@@ -131,57 +139,56 @@ mod tests {
 
 ```rust
 pub struct LLM_IO_Broker {
-    channels: std::sync::Mutex<std::collections::HashMap<JobId, ChannelEntry>>,
+    channels: tokio::sync::Mutex<HashMap<JobId, ChannelEntry>>,
 }
 
 struct ChannelEntry {
-    frontend_input_tx: mpsc::Sender<String>,   // 保留引用用于 deallocate 清理
-    ml_output_tx: mpsc::Sender<String>,        // 保留引用用于 deallocate 清理
+    _frontend_input_tx: mpsc::Sender<String>,   // 保留 Sender 克隆用于 Deallocate 时加速通道关闭
+    _ml_output_tx: mpsc::Sender<String>,        // 保留 Sender 克隆用于 Deallocate 时加速通道关闭
+    ml_side: Option<IoHandle>,                   // Take_ML_Side 后变为 None
+    frontend: Option<IoFrontend>,                // Take_Frontend 后变为 None
 }
 ```
 
 #### 实现逻辑
 
-- **`new()`**：创建空索引表
-- **`allocate(job_id)`**：
-  1. 创建 `input_tx/input_rx`（缓冲 64）
-  2. 创建 `output_tx/output_rx`（缓冲 64）
-  3. 组装 `IoFrontend { input_tx, output_rx }` 和 `IoHandle { input_rx, output_tx }`
-  4. 在索引中插入 `ChannelEntry`（保留两份 Sender 用于后续查询/清理）
-  5. 返回 `IoChannels`
-- **`deallocate(job_id)`**：
-  1. 获取索引写锁
-  2. 移除对应条目（若存在）
-  3. 返回 `Ok(())`
-- **`is_active(job_id)`**：
-  1. 获取索引读锁
-  2. 检查条目是否存在
+- **`New()`**：创建空索引表
+- **`Allocate(job_id)`**：
+  1. 若 job_id 已存在，返回 `AllocationFailed` 错误
+  2. 创建 `input_tx/input_rx`（缓冲 64）
+  3. 创建 `output_tx/output_rx`（缓冲 64）
+  4. 组装 `IoFrontend { input_tx.clone(), output_rx }` 和 `IoHandle { input_rx, output_tx.clone() }`
+  5. 在索引中插入 `ChannelEntry`（Sender 克隆 + 两端 `Option::Some`）
+  6. 返回 `Ok(())`
+- **`Take_ML_Side(job_id)`**：
+  1. 查找条目，不存在返回 `NotFound`
+  2. `Option::take()` 取出 `IoHandle`，已被取走返回 `NotFound`
+- **`Take_Frontend(job_id)`**：
+  1. 查找条目，不存在返回 `NotFound`
+  2. `Option::take()` 取出 `IoFrontend`，已被取走返回 `NotFound`
+- **`Deallocate(job_id)`**：
+  1. 移除对应条目（若存在），幂等返回 `Ok(())`
+  2. 仅清理内部索引，通道的实际生命周期由两端句柄的 Drop 决定
+- **`Is_Active(job_id)`**：
+  1. 检查条目是否存在
 
-#### 内联测试（broker.rs 底部）
+#### 内联测试（broker.rs 底部，12 个）
 
 ```rust
 #[cfg(test)]
 mod tests {
-    // test_allocate_returns_valid_channels
-    //   验证 allocate 返回的 IoChannels 两端非空，Sender/Receiver 可正常收发
-
-    // test_allocate_registers_in_index
-    //   验证 allocate 后 is_active(job_id) 返回 true
-
-    // test_deallocate_removes_from_index
-    //   验证 deallocate 后 is_active(job_id) 返回 false
-
-    // test_deallocate_idempotent
-    //   验证对不存在的 job_id 调用 deallocate 不 panic，返回 Ok
-
-    // test_frontend_drop_closes_ml_input_rx
-    //   验证前端 IoFrontend Drop 后，ML 侧的 input_rx.recv() 返回 None
-
-    // test_ml_side_drop_closes_frontend_output_rx
-    //   验证 IoHandle Drop 后，前端的 output_rx.recv() 返回 None
-
-    // test_multiple_allocate_same_job_id_overwrites
-    //   验证对同一 job_id 重复 allocate 时，旧条目被覆盖（或返回错误，视设计而定）
+    // test_allocate_and_take_channels — Allocate + Take 两端后可正常收发
+    // test_allocate_registers_in_index — Allocate 后 Is_Active 返回 true
+    // test_deallocate_removes_from_index — Deallocate 后 Is_Active 返回 false
+    // test_deallocate_idempotent — 对不存在的 job_id Deallocate 不 panic
+    // test_frontend_drop_closes_ml_input_rx — Take + Deallocate + drop frontend → ML recv None
+    // test_ml_side_drop_closes_frontend_output_rx — Take + Deallocate + drop ml → frontend recv None
+    // test_duplicate_allocate_returns_error — 重复 Allocate 返回 AllocationFailed
+    // test_reallocate_after_deallocate — Deallocate 后可重新 Allocate
+    // test_take_ml_side_not_found — 不存在的 job_id Take 返回 NotFound
+    // test_take_frontend_not_found — 不存在的 job_id Take 返回 NotFound
+    // test_take_ml_side_already_taken — 重复 Take 返回 NotFound（已被取走）
+    // test_take_frontend_already_taken — 重复 Take 返回 NotFound（已被取走）
 }
 ```
 

@@ -63,6 +63,16 @@ pub enum Control_Command {
     Pipeline_Flow {
         next_peer: PeerId,
     },
+
+    /// 校验文件是否已成功接收
+    ///
+    /// 文件传输阶段3：发送方在文件数据传输完成后，主动发送 Verify_File 请求，
+    /// 接收方检查 Storage 中文件是否存在并回复 "confirmed" 或 "failed"。
+    ///
+    /// - `file_name`: 待校验的文件名（对应 Storage 中的 file_id）
+    Verify_File {
+        file_name: String,
+    },
 }
 
 // ============================================================
@@ -93,6 +103,9 @@ pub fn Serialize_Command(cmd: &Control_Command) -> Vec<u8> {
         } => format!("LOAD|{}|{}|{}", model_path, start, end),
         Control_Command::Pipeline_Flow { next_peer } => {
             format!("PIPELINE_FLOW|{}", next_peer)
+        }
+        Control_Command::Verify_File { ref file_name } => {
+            format!("VERIFY_FILE|{}", file_name)
         }
     };
     text.into_bytes()
@@ -156,6 +169,18 @@ pub fn Deserialize_Command(payload: &[u8]) -> Result<Control_Command, String> {
                 .parse::<PeerId>()
                 .map_err(|e| format!("PIPELINE_FLOW 命令 peer_id 解析失败: {}", e))?;
             Ok(Control_Command::Pipeline_Flow { next_peer })
+        }
+
+        "VERIFY_FILE" => {
+            if parts.len() < 2 {
+                return Err(
+                    "VERIFY_FILE 命令格式错误: 需要 2 个字段. 格式: VERIFY_FILE|file_name"
+                        .to_string(),
+                );
+            }
+            Ok(Control_Command::Verify_File {
+                file_name: parts[1].to_string(),
+            })
         }
 
         unknown => Err(format!("未知命令类型: '{}'", unknown)),
