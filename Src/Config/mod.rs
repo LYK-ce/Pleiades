@@ -10,5 +10,5 @@
 pub mod config;
 pub mod identity;
 
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config};
 pub use identity::Ensure_Identity;

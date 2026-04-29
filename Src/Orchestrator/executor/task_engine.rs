@@ -116,8 +116,8 @@ impl TaskEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::UiCapability;
-    use crate::orchestrator::test_utils::StubNetwork;
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::event_bus::EventBus;
     use crate::orchestrator::slot::ConstValue;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
@@ -146,7 +146,8 @@ mod tests {
             storage,
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
-            ui: UiCapability,
+            peer_manager: Box::new(StubPeerManager),
+            event_bus: Arc::new(EventBus::New(16)),
             io_broker: LLM_IO_Broker::New(),
             tensor_io_broker: Tensor_IO_Broker::New(),
         });

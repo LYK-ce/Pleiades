@@ -41,7 +41,7 @@ pub mod llm_io;
 pub mod event_bus;
 
 // Config模块类型导出
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
 // Network模块类型导出
 pub use network::{NetworkConfig, Network_Service, NodeCommand, NodeHandle};
@@ -84,7 +84,8 @@ pub use ml_engine::{
 };
 
 // PeerManagement模块类型导出
-pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, PeerError, create_peer_management};
+pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, create_peer_management};
+pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
 // LLM_IO模块类型导出
 pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoFrontend, IoHandle, LLM_IO_Broker};

@@ -13,7 +13,9 @@
 //!
 //! 事件分流：
 //! - Response → 通过 oneshot 路由回 Send_Data 调用方
-//! - 入站 Request → 通过 inbound_tx 转发给 Orchestrator
+//! - 入站 Request（DataType 预筛选）：
+//!   - Command / File → 通过 inbound_tx 转发给 Orchestrator Core B5
+//!   - BandwidthTest / Data / Info → Network 内部直接回复，不转发
 //! - 入站文件流 → 通过 orchestrator_event_tx 转发给 Orchestrator
 //! - 入站张量流 → 通过 orchestrator_event_tx 转发给 Orchestrator
 //! - 连接/发现/Ping 事件 → Network 内部处理（PeerManager）
@@ -40,7 +42,7 @@ use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
 use super::data_protocol::{
-    Network_Data, PleiadesCodec, DATA_PROTOCOL,
+    DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
 };
 use super::inbound_manager::Inbound_Manager;
 use super::outbound_manager::Outbound_Manager;
@@ -50,7 +52,7 @@ use super::stream_protocol::FILE_STREAM_PROTOCOL;
 use super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL;
 
 // 导入 PeerManagement 模块
-use crate::peer_management::{PeerHandle, PeerInfo, PeerStatus};
+use crate::peer_management::{PeerInfo, PeerStatus, Peer_Management_Capability};
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -113,8 +115,8 @@ pub struct Network_Service {
     swarm: Swarm<PleiadesNetworkBehaviour>,
     /// 本地节点ID
     local_peer_id: PeerId,
-    /// peer manager handler 持有的peer manager handle，我们通过它来管理节点信息表
-    peer_handle: PeerHandle,
+    /// peer manager capability 持有的节点管理能力 trait object，我们通过它来管理节点信息表
+    peer_handle: Box<dyn Peer_Management_Capability>,
     /// 命令接收器（接收外部命令）
     cmd_rx: mpsc::Receiver<NodeCommand>,
     /// 配置
@@ -146,7 +148,7 @@ impl Network_Service {
     /// # Arguments
     /// * `config` - 网络配置
     /// * `keypair` - 密钥对
-    /// * `peer_handle` - PeerManager 句柄，用于管理节点信息
+    /// * `peer_handle` - PeerManager Capability，用于管理节点信息
     ///
     /// # Returns
     /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端,
@@ -154,7 +156,7 @@ impl Network_Service {
     pub async fn Init(
         config: NetworkConfig,
         keypair: Keypair,
-        peer_handle: PeerHandle,
+        peer_handle: Box<dyn Peer_Management_Capability>,
     ) -> Result<(
         Self,
         NodeHandle,
@@ -381,8 +383,8 @@ impl Network_Service {
                     peer_id,
                     vec![endpoint.get_remote_address().clone()]
                 );
-                // 使用 peer_handle 添加节点
-                if let Err(e) = self.peer_handle.add_peer(peer_info).await {
+                // 使用 peer_handle Capability 添加节点
+                if let Err(e) = self.peer_handle.Add_Peer(peer_info).await {
                     warn!("添加节点到 PeerManager 失败: {}", e);
                 }
             }
@@ -390,8 +392,8 @@ impl Network_Service {
             // 连接断开
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 info!("连接断开: {} 原因: {:?}", peer_id, cause);
-                // 使用 peer_handle 移除节点
-                if let Err(e) = self.peer_handle.remove_peer(&peer_id).await {
+                // 使用 peer_handle Capability 移除节点
+                if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
                     warn!("从 PeerManager 移除节点失败: {}", e);
                 }
             }
@@ -462,8 +464,8 @@ impl Network_Service {
             NodeCommand::Disconnect { peer } => {
                 info!("断开连接: {}", peer);
                 let _ = self.swarm.disconnect_peer_id(peer);
-                // 使用 peer_handle 移除节点
-                if let Err(e) = self.peer_handle.remove_peer(&peer).await {
+                // 使用 peer_handle Capability 移除节点
+                if let Err(e) = self.peer_handle.Remove_Peer(&peer).await {
                     warn!("从 PeerManager 移除节点失败: {}", e);
                 }
             }
@@ -484,7 +486,7 @@ impl Network_Service {
             NodeCommand::UpdateInfo { reply } => {
                 info!("开始批量带宽测试");
                 // 获取所有节点
-                let peers = match self.peer_handle.list_peers().await {
+                let peers = match self.peer_handle.List_Peers().await {
                     Ok(peers) => peers,
                     Err(e) => {
                         let _ = reply.send(Err(format!("获取节点列表失败: {}", e).into()));
@@ -517,7 +519,7 @@ impl Network_Service {
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
                 // 关闭所有连接
-                match self.peer_handle.list_peers().await {
+                match self.peer_handle.List_Peers().await {
                     Ok(peer_infos) => {
                         for peer_info in peer_infos {
                             let _ = self.swarm.disconnect_peer_id(peer_info.peer_id);
@@ -528,7 +530,7 @@ impl Network_Service {
                     }
                 }
                 // 清空 peer_handle
-                if let Err(e) = self.peer_handle.clear().await {
+                if let Err(e) = self.peer_handle.Clear().await {
                     warn!("清空 PeerManager 失败: {}", e);
                 }
                 // 清理所有 pending 状态
@@ -605,7 +607,9 @@ impl Network_Service {
 
     /// 处理请求响应事件
     ///
-    /// - Request（入站）：存储 ResponseChannel，通过 inbound_tx 转发给 Orchestrator
+    /// - Request（入站）：按 DataType 预筛选分流
+    ///   - BandwidthTest / Data / Info → Network 内部直接回复（不转发给 Orchestrator）
+    ///   - Command / File → 通过 inbound_manager 转发给 Orchestrator Core B5
     /// - Response（出站回复）：通过 oneshot 路由回 Send_Data 调用方
     /// - OutboundFailure：通知等待方发送失败
     async fn Handle_Request_Response_Event(
@@ -614,14 +618,44 @@ impl Network_Service {
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
-                // ===== 入站请求：通过 inbound_manager 转发给 Orchestrator =====
+                // ===== 入站请求：按 DataType 预筛选分流 =====
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
                     info!("收到数据请求 from {} | type={:?} | size={} bytes",
                           peer, request.data_type, request.payload.len());
 
-                    self.inbound_manager.Register_Inbound(peer, request, channel).await;
+                    match request.data_type {
+                        // ===== 网络层直接处理：纯网络测量，无业务语义 =====
+                        DataType::BandwidthTest => {
+                            self.Handle_Bandwidth_Test_Inbound(request.payload, channel);
+                        }
+                        // ===== 网络层直接处理：预留类型，直接回复 OK =====
+                        DataType::Data => {
+                            let response = Network_Data {
+                                data_type: DataType::Data,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm.behaviour_mut()
+                                .request_response.send_response(channel, response) {
+                                error!("Data 入站回复失败: {:?}", e);
+                            }
+                        }
+                        DataType::Info => {
+                            let response = Network_Data {
+                                data_type: DataType::Info,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm.behaviour_mut()
+                                .request_response.send_response(channel, response) {
+                                error!("Info 入站回复失败: {:?}", e);
+                            }
+                        }
+                        // ===== 需要 Orchestrator 业务决策：转发给 Core B5 =====
+                        DataType::Command | DataType::File => {
+                            self.inbound_manager.Register_Inbound(peer, request, channel).await;
+                        }
+                    }
                 }
                 // ===== 出站响应：通过 outbound_manager 路由回 Send_Data 调用方 =====
                 request_response::Message::Response { request_id, response, .. } => {
@@ -653,6 +687,46 @@ impl Network_Service {
         }
     }
 
+    /// 处理入站带宽测试请求（Network 内部直接回复）
+    ///
+    /// 读取请求 payload 中的目标数据包大小（u64 小端字节序），
+    /// 创建等大的响应数据包（填充零）直接回复，不转发给 Orchestrator。
+    ///
+    /// 安全措施：设置 50MB 上限，防止恶意节点发送巨大 size 导致 OOM。
+    /// 50MB 与出站 `test_single_bandwidth()` 的最大测试包大小一致。
+    fn Handle_Bandwidth_Test_Inbound(
+        &mut self,
+        payload: Vec<u8>,
+        channel: request_response::ResponseChannel<Network_Data>,
+    ) {
+        const MAX_BANDWIDTH_TEST_SIZE: u64 = 50_000_000; // 50MB 上限
+
+        let response_payload = if payload.len() >= 8 {
+            let size = u64::from_le_bytes([
+                payload[0], payload[1], payload[2], payload[3],
+                payload[4], payload[5], payload[6], payload[7],
+            ]);
+            let capped_size = size.min(MAX_BANDWIDTH_TEST_SIZE);
+            if size != capped_size {
+                warn!("带宽测试请求大小超限: {}B, 截断到 {}B", size, capped_size);
+            }
+            vec![0u8; capped_size as usize]
+        } else {
+            warn!("带宽测试请求 payload 不足 8 字节: {}", payload.len());
+            vec![0u8; 8]
+        };
+
+        let response = Network_Data {
+            data_type: DataType::BandwidthTest,
+            payload: response_payload,
+        };
+
+        if let Err(e) = self.swarm.behaviour_mut()
+            .request_response.send_response(channel, response) {
+            error!("带宽测试回复失败: {:?}", e);
+        }
+    }
+
     /// 处理Ping心跳事件
     ///
     /// 心跳事件完全在Network层内部处理，不向上层发送事件。
@@ -668,8 +742,8 @@ impl Network_Service {
                 let latency_ms = rtt.as_millis() as u64;
                 info!("Ping成功: {} | RTT: {}ms", peer_id, latency_ms);
 
-                // 使用 peer_handle 更新心跳延迟信息
-                if let Err(e) = self.peer_handle.update_heartbeat(&peer_id, Some(latency_ms)).await {
+                // 使用 peer_handle Capability 更新心跳延迟信息
+                if let Err(e) = self.peer_handle.Update_Heartbeat(&peer_id, Some(latency_ms)).await {
                     info!("更新节点心跳失败 ({}): {}", peer_id, e);
                 }
             }
@@ -678,7 +752,7 @@ impl Network_Service {
                 info!("Ping超时: {}", peer_id);
 
                 // 将节点状态设置为 Disconnected
-                if let Err(e) = self.peer_handle.update_status(&peer_id, PeerStatus::Disconnected).await {
+                if let Err(e) = self.peer_handle.Update_Status(&peer_id, PeerStatus::Disconnected).await {
                     info!("更新节点状态失败 ({}): {}", peer_id, e);
                 }
             }
@@ -717,7 +791,7 @@ impl Network_Service {
         
         if has_success {
             // 更新PeerManager中的带宽信息
-            if let Err(e) = self.peer_handle.update_bandwidth(peer_id, Some(max_bandwidth)).await {
+            if let Err(e) = self.peer_handle.Update_Bandwidth(peer_id, Some(max_bandwidth)).await {
                 info!("更新带宽信息失败: peer={}, error={}", peer_id, e);
             }
             Ok(max_bandwidth)

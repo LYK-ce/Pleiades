@@ -4,10 +4,14 @@
 //! 入站请求管理器
 //!
 //! 从 inbound_request_manager.rs 中拆分出的独立组件，负责：
-//! 1. **入站请求管理**：为入站请求分配 ID，存储 ResponseChannel，转发给 Control 层
+//! 1. **入站请求管理**：为入站请求分配 ID，存储 ResponseChannel，转发给 Orchestrator Core
 //! 2. **入站回复**：根据 request_id 取出 ResponseChannel，发送回复
 //!
 //! Network_Service 通过持有 `Inbound_Manager` 实例来使用这些功能。
+//!
+//! 注意：Network_Service 的 Handle_Request_Response_Event 已实现 DataType 预筛选，
+//! 仅 Command 和 File 类型的入站请求会通过此管理器转发给 Orchestrator Core。
+//! BandwidthTest / Data / Info 由 Network 内部直接回复，不经过此管理器。
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -30,12 +34,12 @@ use super::node_handle::InboundRequest;
 /// 入站请求管理器
 ///
 /// 管理入站请求的分发和回复：
-/// - `pending_replies`: request_id → ResponseChannel，用于 Control 层调用 Send_Response 时取出 channel
-/// - `inbound_tx`: 入站请求转发通道，发送给 Control 层
+/// - `pending_replies`: request_id → ResponseChannel，用于 Orchestrator Core 调用 Send_Response 时取出 channel
+/// - `inbound_tx`: 入站请求转发通道，发送给 Orchestrator Core（仅 Command + File 类型）
 pub struct Inbound_Manager {
     /// 入站 ResponseChannel 存储：request_id → ResponseChannel
     pending_replies: HashMap<u64, ResponseChannel<Network_Data>>,
-    /// 入站请求发送器（转发给 Control 层）
+    /// 入站请求发送器（转发给 Orchestrator Core）
     inbound_tx: mpsc::Sender<InboundRequest>,
     /// 入站请求 ID 自增计数器
     next_inbound_id: u64,
@@ -45,7 +49,7 @@ impl Inbound_Manager {
     /// 创建新的 Inbound_Manager
     ///
     /// # 参数
-    /// - `inbound_tx`: 入站请求发送通道（发给 Control 层）
+    /// - `inbound_tx`: 入站请求发送通道（发给 Orchestrator Core）
     pub fn New(inbound_tx: mpsc::Sender<InboundRequest>) -> Self {
         Self {
             pending_replies: HashMap::new(),
@@ -54,10 +58,13 @@ impl Inbound_Manager {
         }
     }
 
-    /// 注册入站请求并转发给 Control 层
+    /// 注册入站请求并转发给 Orchestrator Core
     ///
     /// 为入站请求分配唯一 ID，存储 ResponseChannel，
-    /// 通过 inbound_tx 将请求（不含 libp2p 内部类型）转发给 Control 层。
+    /// 通过 inbound_tx 将请求（不含 libp2p 内部类型）转发给 Orchestrator Core。
+    ///
+    /// 注意：仅 DataType::Command 和 DataType::File 的入站请求会到达此方法，
+    /// 其他类型已被 Network_Service 内部直接处理。
     ///
     /// # 参数
     /// - `peer`: 发送请求的节点
@@ -93,7 +100,7 @@ impl Inbound_Manager {
 
     /// 发送回复（根据 request_id 取出 ResponseChannel）
     ///
-    /// Control 层调用 Send_Response 时，通过此方法取出之前存储的 channel 并发送回复。
+    /// Orchestrator Core 调用 Send_Response 时，通过此方法取出之前存储的 channel 并发送回复。
     ///
     /// # 参数
     /// - `request_id`: 入站请求 ID

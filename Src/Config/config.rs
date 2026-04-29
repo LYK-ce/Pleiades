@@ -23,6 +23,7 @@ pub struct Pleiades_Config {
     pub Log: Option<Log_Config>,
     pub Network: Option<Network_Config>,
     pub Runtime: Option<Runtime_Config>,
+    pub Storage: Option<Storage_Config>,
 }
 
 /// [Log] 段配置
@@ -52,6 +53,13 @@ pub struct Runtime_Config {
     pub max_token: Option<u32>,
     pub temperature: Option<f64>,
     pub seed: Option<u64>,
+}
+
+/// [Storage] 段配置
+#[derive(Debug, Deserialize)]
+pub struct Storage_Config {
+    /// 存储配额（单位：GB），0 表示不限制
+    pub quota_gb: Option<u64>,
 }
 
 /// 读取并解析 config.toml 配置文件

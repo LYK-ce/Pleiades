@@ -184,44 +184,8 @@ pub trait Peer_Management_Capability: Send + Sync {
 - **文件**：`Src/lib.rs`
 - **改动**：导出 `Peer_Management_Capability` 和 `Peer_Management_Error`
 
-### 步骤 5：集成到 Orchestrator Capabilities
 
-- **文件**：`Orchestrator/mod.rs`
-- **改动**：
-  ```rust
-  pub struct Capabilities {
-      pub storage: StorageManager,
-      pub ml_engine: Box<dyn ML_Engine_Capability>,
-      pub network: Box<dyn Network_Capability>,
-      pub io_broker: LLM_IO_Broker,
-      pub tensor_io_broker: Tensor_IO_Broker,
-      pub peer_manager: Box<dyn Peer_Management_Capability>,  // 新增
-      // ui: UiCapability 移除
-  }
-  ```
-- **附带清理**：移除 `UiCapability` 和 `set_compute_preference`（由 Core 内部状态替代）
-
-### 步骤 6：更新 Core DisplayPeer 分支
-
-- **文件**：`Orchestrator/core.rs`
-- **改动**：
-  ```rust
-  UserCommand::DisplayPeer { reply } => {
-      match self.capabilities.peer_manager.List_Peers().await {
-          Ok(peers) => {
-              let peer_strs: Vec<String> = peers.iter()
-                  .map(|p| format!("{}", p.peer_id))
-                  .collect();
-              let _ = reply.send(Ok(peer_strs));
-          }
-          Err(e) => {
-              let _ = reply.send(Err(format!("{}", e)));
-          }
-      }
-  }
-  ```
-
-### 步骤 7：更新 Network_Service
+### 步骤 5：更新 Network_Service
 
 - **文件**：`Network/network_service.rs`
 - **改动**：
@@ -229,7 +193,7 @@ pub trait Peer_Management_Capability: Send + Sync {
   2. 所有 `self.peer_handle.add_peer()` 等调用更新为 trait 方法名（`Add_Peer` 等）
   3. 构造函数参数类型同步更新
 
-### 步骤 8：更新所有测试 Stub
+### 步骤 6：更新所有测试 Stub
 
 - **涉及文件**：`Orchestrator/core.rs` 测试、`executor/handler_*.rs` 测试、`tests/common/mod.rs`
 - **改动**：
@@ -237,7 +201,7 @@ pub trait Peer_Management_Capability: Send + Sync {
   2. Capabilities 初始化加入 `peer_manager: Box::new(StubPeerManager)`
 - **注意**：Network_Service 测试可能需要更新（如果使用了 PeerHandle 直接构造）
 
-### 步骤 9：清理旧代码
+### 步骤 7：清理旧代码
 
 - 移除 `peer_handle.rs` 中旧的直接方法（如果步骤 2 选择移除）
 - 移除 `PeerError`（统一为 `Peer_Management_Error`）

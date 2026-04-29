@@ -42,6 +42,10 @@ pub const SLOT_OUTBOUND: SlotId = SlotId(10);
 pub const SLOT_TENSOR_IO: SlotId = SlotId(11);
 /// Coordinator Job ID 槽位（Relay 用，由 compile_relay 写入）
 pub const SLOT_COORDINATOR_JOB: SlotId = SlotId(12);
+/// 模型分析结果槽位（AnalyzeModel 写入）
+pub const SLOT_MODEL_INFO: SlotId = SlotId(13);
+/// 文件分发动态槽位起始偏移（每个 peer 占 4 个槽位）
+pub const DISTRIBUTE_DYNAMIC_SLOT_BASE: u32 = 14;
 
 /// 编译器错误类型
 #[derive(Debug, thiserror::Error)]
@@ -323,6 +327,92 @@ impl Compiler {
         Ok(builder.build())
     }
 
+    /// 编译 Distribute 作业的 TaskProgram（文件分发 — 模型分片 + 发送）
+    ///
+    /// 每个 peer 由用户指定分片范围 `(peer_id, layer_start, layer_end)`。
+    ///
+    /// 生成的指令序列：
+    /// ```text
+    /// 正向：Const(model) → AnalyzeModel
+    ///       → 对每个 peer: Const(start/end/shard_name) → SplitModel → Const(peer) → SendFile
+    /// 补偿：（空 — 临时分片由 Storage 自动管理）
+    /// ```
+    pub fn compile_distribute(
+        &self,
+        _job_id: JobId,
+        model_path: String,
+        peers: Vec<(String, usize, usize)>,
+    ) -> Result<TaskProgram, CompilerError> {
+        if model_path.is_empty() {
+            return Err(CompilerError::InvalidParameter("模型路径不能为空".to_string()));
+        }
+        if peers.is_empty() {
+            return Err(CompilerError::InvalidParameter("Distribute 至少需要一个 Peer".to_string()));
+        }
+        for (i, (peer_id, _, _)) in peers.iter().enumerate() {
+            if peer_id.is_empty() {
+                return Err(CompilerError::InvalidParameter(
+                    format!("peers[{}] 的 peer_id 不能为空", i),
+                ));
+            }
+        }
+
+        let mut builder = TaskProgramBuilder::new();
+
+        // 1. 注入模型路径 + 分析模型
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String(model_path.clone()),
+            dst: SLOT_MODEL,
+        });
+        builder.push_instruction(TaskInstruction::AnalyzeModel {
+            model: SLOT_MODEL,
+            result: SLOT_MODEL_INFO,
+        });
+
+        // 2. 对每个 peer 生成 SplitModel + SendFile
+        //    动态槽位分配：每个 peer 占 4 个槽：layer_start, layer_end, shard_output, peer_id
+        for (i, (peer_id, layer_start, layer_end)) in peers.iter().enumerate() {
+            let base = DISTRIBUTE_DYNAMIC_SLOT_BASE + (i as u32) * 4;
+            let slot_layer_start = SlotId(base);
+            let slot_layer_end = SlotId(base + 1);
+            let slot_shard = SlotId(base + 2);
+            let slot_peer = SlotId(base + 3);
+
+            // 生成分片文件名：{model_base}_shard_{start}_{end}
+            let shard_name = format!("{}_shard_{}_{}", model_path, layer_start, layer_end);
+
+            builder.push_instruction(TaskInstruction::Const {
+                value: ConstValue::U64(*layer_start as u64),
+                dst: slot_layer_start,
+            });
+            builder.push_instruction(TaskInstruction::Const {
+                value: ConstValue::U64(*layer_end as u64),
+                dst: slot_layer_end,
+            });
+            builder.push_instruction(TaskInstruction::Const {
+                value: ConstValue::String(shard_name),
+                dst: slot_shard,
+            });
+            builder.push_instruction(TaskInstruction::SplitModel {
+                source: SLOT_MODEL,
+                start: slot_layer_start,
+                end: slot_layer_end,
+                output: slot_shard,
+            });
+            builder.push_instruction(TaskInstruction::Const {
+                value: ConstValue::String(peer_id.clone()),
+                dst: slot_peer,
+            });
+            builder.push_instruction(TaskInstruction::SendFile {
+                peer: slot_peer,
+                file: slot_shard,
+            });
+        }
+
+        // 补偿序列为空 — 临时分片由 Storage 自动管理
+        Ok(builder.build())
+    }
+
     // ─── ML Thread 程序构建 ────────────────────────────────
 
     /// 构建单机推理的 ML 指令序列
@@ -500,6 +590,15 @@ impl Compiler {
                     params.layer_end.unwrap_or(usize::MAX),
                 )
             }
+            JobKind::Distribute => {
+                let model_path = params.model_path.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Distribute 作业需要 model_path".to_string())
+                })?;
+                let distribute_peers = params.distribute_peers.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Distribute 作业需要 distribute_peers".to_string())
+                })?;
+                self.compile_distribute(job_id, model_path, distribute_peers)
+            }
         }
     }
 }
@@ -513,6 +612,8 @@ pub struct CompileParams {
     pub peers: Option<Vec<String>>,
     pub layer_start: Option<usize>,
     pub layer_end: Option<usize>,
+    /// 文件分发目标节点列表 (peer_id, layer_start, layer_end)
+    pub distribute_peers: Option<Vec<(String, usize, usize)>>,
 }
 
 /// 内部 TaskProgramBuilder（不暴露）
@@ -1017,5 +1118,209 @@ mod compiler_tests {
                 }
                 other => panic!("唯一指令应为 Loop，实际为 {:?}", other),
             }
+        }
+    
+        // ─── E 组：compile_distribute ────────────────────────────
+    
+        /// TC-16: compile_distribute 正常编译 — 单 peer
+        #[test]
+        fn tc16_compile_distribute_single_peer() {
+            let compiler = Compiler;
+            let program = compiler
+                .compile_distribute(
+                    test_job_id(),
+                    "model.gguf".into(),
+                    vec![("peer_a".into(), 0, 12)],
+                )
+                .unwrap();
+    
+            // 正向：Const(model) + AnalyzeModel + 1 peer × (Const×3 + SplitModel + Const + SendFile) = 2 + 6 = 8
+            assert_eq!(program.instructions.len(), 8, "正向指令数量 (单 peer)");
+            // 补偿为空
+            assert_eq!(program.compensation.len(), 0, "补偿指令数量");
+    
+            // 第 1 条：Const(model_path)
+            match &program.instructions[0] {
+                TaskInstruction::Const { value, dst } => {
+                    assert_eq!(*dst, SLOT_MODEL);
+                    match value {
+                        ConstValue::String(s) => assert_eq!(s, "model.gguf"),
+                        other => panic!("应为 String，实际为 {:?}", other),
+                    }
+                }
+                other => panic!("第 1 条应为 Const，实际为 {:?}", other),
+            }
+    
+            // 第 2 条：AnalyzeModel
+            match &program.instructions[1] {
+                TaskInstruction::AnalyzeModel { model, result } => {
+                    assert_eq!(*model, SLOT_MODEL);
+                    assert_eq!(*result, SLOT_MODEL_INFO);
+                }
+                other => panic!("第 2 条应为 AnalyzeModel，实际为 {:?}", other),
+            }
+    
+            // 第 6 条（索引 5）：SplitModel
+            match &program.instructions[5] {
+                TaskInstruction::SplitModel { source, .. } => {
+                    assert_eq!(*source, SLOT_MODEL, "SplitModel.source 应为 SLOT_MODEL");
+                }
+                other => panic!("第 6 条应为 SplitModel，实际为 {:?}", other),
+            }
+    
+            // 最后一条：SendFile
+            match program.instructions.last() {
+                Some(TaskInstruction::SendFile { .. }) => {}
+                other => panic!("最后一条应为 SendFile，实际为 {:?}", other),
+            }
+        }
+    
+        /// TC-17: compile_distribute 多 peer — 指令数量正确
+        #[test]
+        fn tc17_compile_distribute_multi_peer() {
+            let compiler = Compiler;
+            let program = compiler
+                .compile_distribute(
+                    test_job_id(),
+                    "model.gguf".into(),
+                    vec![
+                        ("peer_a".into(), 0, 8),
+                        ("peer_b".into(), 8, 16),
+                        ("peer_c".into(), 16, 24),
+                    ],
+                )
+                .unwrap();
+    
+            // 正向：2 + 3 peers × 6 = 20
+            assert_eq!(program.instructions.len(), 20, "正向指令数量 (3 peers)");
+            assert_eq!(program.compensation.len(), 0, "补偿指令数量");
+    
+            // 每个 peer 块包含一个 SplitModel 和一个 SendFile
+            let split_count = program.instructions.iter()
+                .filter(|i| matches!(i, TaskInstruction::SplitModel { .. }))
+                .count();
+            let send_count = program.instructions.iter()
+                .filter(|i| matches!(i, TaskInstruction::SendFile { .. }))
+                .count();
+            assert_eq!(split_count, 3, "SplitModel 数量");
+            assert_eq!(send_count, 3, "SendFile 数量");
+        }
+    
+        /// TC-18: compile_distribute 动态槽位正确分配
+        #[test]
+        fn tc18_compile_distribute_dynamic_slots() {
+            let compiler = Compiler;
+            let program = compiler
+                .compile_distribute(
+                    test_job_id(),
+                    "model.gguf".into(),
+                    vec![
+                        ("peer_a".into(), 0, 8),
+                        ("peer_b".into(), 8, 16),
+                    ],
+                )
+                .unwrap();
+    
+            // peer 0 的动态槽位基址 = 14，占位 14,15,16,17
+            // peer 1 的动态槽位基址 = 18，占位 18,19,20,21
+    
+            // 查找第一个 SplitModel
+            let idx0 = find_instr(&program, |i| matches!(i, TaskInstruction::SplitModel { .. })).unwrap();
+            match &program.instructions[idx0] {
+                TaskInstruction::SplitModel { start, end, output, .. } => {
+                    assert_eq!(*start, SlotId(14), "peer 0 layer_start 槽位");
+                    assert_eq!(*end, SlotId(15), "peer 0 layer_end 槽位");
+                    assert_eq!(*output, SlotId(16), "peer 0 shard 槽位");
+                }
+                _ => unreachable!(),
+            }
+    
+            // 查找第二个 SplitModel（跳过第一个）
+            let idx1 = program.instructions.iter()
+                .enumerate()
+                .filter(|(_, i)| matches!(i, TaskInstruction::SplitModel { .. }))
+                .nth(1)
+                .map(|(idx, _)| idx)
+                .unwrap();
+            match &program.instructions[idx1] {
+                TaskInstruction::SplitModel { start, end, output, .. } => {
+                    assert_eq!(*start, SlotId(18), "peer 1 layer_start 槽位");
+                    assert_eq!(*end, SlotId(19), "peer 1 layer_end 槽位");
+                    assert_eq!(*output, SlotId(20), "peer 1 shard 槽位");
+                }
+                _ => unreachable!(),
+            }
+        }
+    
+        /// TC-19: compile_distribute 空路径 → InvalidParameter
+        #[test]
+        fn tc19_compile_distribute_empty_path() {
+            let compiler = Compiler;
+            let result = compiler.compile_distribute(
+                test_job_id(),
+                "".into(),
+                vec![("peer_a".into(), 0, 8)],
+            );
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("模型路径不能为空"), "错误消息: {}", err_msg);
+        }
+    
+        /// TC-20: compile_distribute 空 peers → InvalidParameter
+        #[test]
+        fn tc20_compile_distribute_empty_peers() {
+            let compiler = Compiler;
+            let result = compiler.compile_distribute(
+                test_job_id(),
+                "model.gguf".into(),
+                vec![],
+            );
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("至少需要一个 Peer"), "错误消息: {}", err_msg);
+        }
+    
+        /// TC-21: compile_distribute 空 peer_id → InvalidParameter
+        #[test]
+        fn tc21_compile_distribute_empty_peer_id() {
+            let compiler = Compiler;
+            let result = compiler.compile_distribute(
+                test_job_id(),
+                "model.gguf".into(),
+                vec![("".into(), 0, 8)],
+            );
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("peer_id 不能为空"), "错误消息: {}", err_msg);
+        }
+    
+        /// TC-22: AnalyzeModel 在所有 SplitModel 之前
+        #[test]
+        fn tc22_compile_distribute_analyze_before_split() {
+            let compiler = Compiler;
+            let program = compiler
+                .compile_distribute(
+                    test_job_id(),
+                    "model.gguf".into(),
+                    vec![("peer_a".into(), 0, 12)],
+                )
+                .unwrap();
+    
+            let idx_analyze = find_instr(&program, |i| {
+                matches!(i, TaskInstruction::AnalyzeModel { .. })
+            })
+            .expect("应包含 AnalyzeModel");
+    
+            let idx_split = find_instr(&program, |i| {
+                matches!(i, TaskInstruction::SplitModel { .. })
+            })
+            .expect("应包含 SplitModel");
+    
+            assert!(
+                idx_analyze < idx_split,
+                "AnalyzeModel({}) 应在 SplitModel({}) 之前",
+                idx_analyze,
+                idx_split
+            );
         }
 }

@@ -150,11 +150,11 @@ mod executor_tests {
     use crate::orchestrator::job::{JobId, JobKind, JobResult};
     use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
     use crate::orchestrator::slot::{SlotId, ConstValue};
-    use crate::orchestrator::UiCapability;
-    use crate::orchestrator::test_utils::StubNetwork;
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
     use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
+    use crate::event_bus::EventBus;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
@@ -182,7 +182,8 @@ mod executor_tests {
             storage,
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
-            ui: UiCapability,
+            peer_manager: Box::new(StubPeerManager),
+            event_bus: Arc::new(EventBus::New(16)),
             io_broker: LLM_IO_Broker::New(),
             tensor_io_broker: Tensor_IO_Broker::New(),
         });

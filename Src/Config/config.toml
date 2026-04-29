@@ -35,3 +35,8 @@ model_path = ""  # 请填写您的 GGUF 模型路径
 max_token  = 128
 temperature = 0.8
 seed = 299792458
+
+
+[Storage]
+# 存储配额（单位：GB），0 表示不限制
+quota_gb = 0

@@ -12,6 +12,8 @@ pub enum JobKind {
     Coordinator,
     /// 分布式中继 Worker
     Relay,
+    /// 文件分发（模型分片 + 发送）
+    Distribute,
 }
 
 #[derive(Debug, Clone, Copy)]

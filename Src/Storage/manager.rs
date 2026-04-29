@@ -1,35 +1,56 @@
 //Presented by KeJi
-//Date ： 2026-04-23
+//Date ： 2026-04-29
 
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
-use super::capability::{StorageCapability, StorageError, ChecksumAlgorithm};
+use super::capability::{StorageCapability, StorageError, ChecksumAlgorithm, QuotaInfo};
 use super::guard::{ReadGuard, WriteGuard};
+use super::reservation::{Reservation, ReservationMap};
 
-/// 文件状态，内部用于管理锁
+/// 文件状态，内部用于管理锁和大小
 struct FileState {
     lock: Arc<RwLock<()>>,
+    /// 文件磁盘大小（字节），初始扫描或 commit 时更新
+    size: u64,
 }
 
 /// 存储管理器
 ///
-/// 职责：锁管理 + 路径解析 + 文件注册表。
+/// 职责：锁管理 + 路径解析 + 文件注册表 + 配额管理。
 /// 不封装 I/O，消费模块自行决定如何读写文件。
 pub struct StorageManager {
     base_dir: PathBuf,
     files: RwLock<HashMap<String, FileState>>,
+    // === 配额管理 ===
+    /// 配额上限（字节），0 表示不限制
+    quota: u64,
+    /// 当前已用空间（字节）— 仅统计已 commit 的文件
+    used: AtomicU64,
+    /// 预留表：file_id → 预留字节数（与 Reservation 共享）
+    reservation_map: ReservationMap,
 }
 
 impl StorageManager {
-    /// 新建存储管理器，扫描指定目录下的现有文件并建立索引。
+    /// 新建存储管理器（无配额限制），扫描指定目录下的现有文件并建立索引。
     /// 如果目录不存在，会创建它。
     pub async fn New(base_dir: impl Into<PathBuf>) -> Result<Self, StorageError> {
+        Self::New_With_Quota(base_dir, 0).await
+    }
+
+    /// 新建存储管理器（带配额限制），扫描指定目录下的现有文件并建立索引。
+    /// 如果目录不存在，会创建它。
+    ///
+    /// # 参数
+    /// - `base_dir`: 存储目录路径
+    /// - `quota`: 配额上限（字节），0 表示不限制
+    pub async fn New_With_Quota(base_dir: impl Into<PathBuf>, quota: u64) -> Result<Self, StorageError> {
         let base_dir = base_dir.into();
         // 幂等创建目录
         fs::create_dir_all(&base_dir).await.map_err(|e| {
@@ -37,6 +58,7 @@ impl StorageManager {
         })?;
 
         let mut files = HashMap::new();
+        let mut initial_used: u64 = 0;
         let mut entries = fs::read_dir(&base_dir).await.map_err(|e| {
             StorageError::Io(format!("read_dir failed: {}", e))
         })?;
@@ -54,24 +76,35 @@ impl StorageManager {
                 StorageError::Io(format!("metadata failed: {}", e))
             })?;
             if metadata.is_file() {
+                let size = metadata.len();
                 files.insert(
                     file_name_str.to_string(),
                     FileState {
                         lock: Arc::new(RwLock::new(())),
+                        size,
                     },
                 );
+                initial_used += size;
             }
         }
 
         Ok(Self {
             base_dir,
             files: RwLock::new(files),
+            quota,
+            used: AtomicU64::new(initial_used),
+            reservation_map: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
     /// 获取基础目录（用于测试）
     pub fn Base_Dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// 获取配额上限（字节），0 表示不限制
+    pub fn Quota(&self) -> u64 {
+        self.quota
     }
 
     /// 内部辅助：验证 file_id 合法性
@@ -104,18 +137,27 @@ impl StorageManager {
         drop(files); // 释放读锁，准备获取写锁
 
         let full_path = self.Full_Path(file_id);
-        if fs::metadata(&full_path).await.is_ok() {
-            // 磁盘存在，插入索引
-            let mut files = self.files.write().await;
-            // 双重检查
-            if let Some(state) = files.get(file_id) {
-                return Ok(Arc::clone(&state.lock));
+        match fs::metadata(&full_path).await {
+            Ok(metadata) if metadata.is_file() => {
+                let size = metadata.len();
+                // 磁盘存在，插入索引
+                let mut files = self.files.write().await;
+                // 双重检查
+                if let Some(state) = files.get(file_id) {
+                    return Ok(Arc::clone(&state.lock));
+                }
+                let lock = Arc::new(RwLock::new(()));
+                files.insert(file_id.to_string(), FileState {
+                    lock: Arc::clone(&lock),
+                    size,
+                });
+                // 惰性发现的文件也要计入已用空间
+                self.used.fetch_add(size, Ordering::Relaxed);
+                Ok(lock)
             }
-            let lock = Arc::new(RwLock::new(()));
-            files.insert(file_id.to_string(), FileState { lock: Arc::clone(&lock) });
-            Ok(lock)
-        } else {
-            Err(StorageError::NotFound(format!("file not found: {}", file_id)))
+            _ => {
+                Err(StorageError::NotFound(format!("file not found: {}", file_id)))
+            }
         }
     }
 
@@ -133,8 +175,29 @@ impl StorageManager {
             return Arc::clone(&state.lock);
         }
         let lock = Arc::new(RwLock::new(()));
-        files.insert(file_id.to_string(), FileState { lock: Arc::clone(&lock) });
+        files.insert(file_id.to_string(), FileState {
+            lock: Arc::clone(&lock),
+            size: 0,
+        });
         lock
+    }
+
+    /// 内部辅助：计算当前预留总量
+    fn Total_Reserved(&self) -> u64 {
+        match self.reservation_map.lock() {
+            Ok(map) => map.values().sum(),
+            Err(_) => 0,
+        }
+    }
+
+    /// 内部辅助：计算可用空间
+    fn Calc_Available(&self) -> u64 {
+        if self.quota == 0 {
+            return u64::MAX;
+        }
+        let used = self.used.load(Ordering::Relaxed);
+        let reserved = self.Total_Reserved();
+        self.quota.saturating_sub(used).saturating_sub(reserved)
     }
 }
 
@@ -191,6 +254,7 @@ impl StorageCapability for StorageManager {
         match Arc::clone(&state.lock).try_write_owned() {
             Ok(_guard) => {
                 // 没有活跃守卫，可以删除
+                let file_size = state.size;
                 drop(_guard);
                 drop(files);
                 let mut files = self.files.write().await;
@@ -203,6 +267,10 @@ impl StorageCapability for StorageManager {
                         }
                     }
                     files.remove(file_id);
+                    // 释放已用配额
+                    if file_size > 0 {
+                        self.used.fetch_sub(file_size, Ordering::Relaxed);
+                    }
                 }
                 Ok(())
             }
@@ -223,6 +291,13 @@ impl StorageCapability for StorageManager {
                     if files.contains_key(file_id) {
                         let full_path = self.Full_Path(file_id);
                         if fs::metadata(&full_path).await.is_err() {
+                            // 僵尸条目：释放配额并移除索引
+                            if let Some(state) = files.get(file_id) {
+                                let file_size = state.size;
+                                if file_size > 0 {
+                                    self.used.fetch_sub(file_size, Ordering::Relaxed);
+                                }
+                            }
                             files.remove(file_id);
                         }
                     }
@@ -303,6 +378,111 @@ impl StorageCapability for StorageManager {
             }
         };
         Ok(hasher)
+    }
+
+    // === 配额管理 ===
+
+    async fn reserve(&self, file_id: &str, size: u64) -> Result<Reservation, StorageError> {
+        Self::Validate_File_Id(file_id)?;
+
+        // 配额为 0 表示不限制
+        if self.quota == 0 {
+            let mut map = self.reservation_map.lock()
+                .map_err(|e| StorageError::Io(format!("reservation lock poisoned: {}", e)))?;
+            map.insert(file_id.to_string(), size);
+            return Ok(Reservation::New(
+                file_id.to_string(),
+                size,
+                Arc::clone(&self.reservation_map),
+            ));
+        }
+
+        // 有配额限制：原子检查并扣减
+        let mut map = self.reservation_map.lock()
+            .map_err(|e| StorageError::Io(format!("reservation lock poisoned: {}", e)))?;
+
+        let used = self.used.load(Ordering::Relaxed);
+        let current_reserved: u64 = map.values().sum();
+        let available = self.quota.saturating_sub(used).saturating_sub(current_reserved);
+
+        if size > available {
+            return Err(StorageError::QuotaExceeded {
+                requested: size,
+                available,
+            });
+        }
+
+        // 预留成功
+        map.insert(file_id.to_string(), size);
+        Ok(Reservation::New(
+            file_id.to_string(),
+            size,
+            Arc::clone(&self.reservation_map),
+        ))
+    }
+
+    async fn commit(&self, reservation: Reservation) -> Result<(), StorageError> {
+        let file_id = reservation.file_id.clone();
+        let _reserved_size = reservation.size;
+
+        // 标记为已提交，阻止 Drop 释放预留
+        reservation.Mark_Committed();
+
+        // 获取磁盘上的实际文件大小
+        let full_path = self.Full_Path(&file_id);
+        let actual_size = match fs::metadata(&full_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(e) => {
+                // 文件不存在或无法读取，回退：从预留表移除，调整已用空间
+                if let Ok(mut map) = self.reservation_map.lock() {
+                    map.remove(&file_id);
+                }
+                return Err(StorageError::Io(format!(
+                    "commit failed, cannot stat file '{}': {}",
+                    file_id, e
+                )));
+            }
+        };
+
+        // 从预留表移除
+        if let Ok(mut map) = self.reservation_map.lock() {
+            map.remove(&file_id);
+        }
+
+        // 更新 FileState 中的 size 并调整 used
+        {
+            let mut files = self.files.write().await;
+            if let Some(state) = files.get_mut(&file_id) {
+                let old_size = state.size;
+                state.size = actual_size;
+                // 调整 used：减去旧大小，加上实际大小
+                if old_size > 0 {
+                    self.used.fetch_sub(old_size, Ordering::Relaxed);
+                }
+            }
+            // 注意：如果 file_id 不在索引中（不应发生，因为 acquire_write 会创建），
+            // 这里不做处理
+        }
+        self.used.fetch_add(actual_size, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    async fn quota_info(&self) -> QuotaInfo {
+        let used = self.used.load(Ordering::Relaxed);
+        let reserved = self.Total_Reserved();
+        let available = if self.quota == 0 {
+            u64::MAX
+        } else {
+            self.quota.saturating_sub(used).saturating_sub(reserved)
+        };
+
+        QuotaInfo {
+            total: self.quota,
+            used,
+            reserved,
+            available,
+        }
     }
 }
 
@@ -559,5 +739,200 @@ mod tests {
         drop(wg);
         let sum2 = manager.checksum("test.bin", None).await.unwrap();
         assert_ne!(sum1, sum2);
+    }
+
+    // === 配额管理测试 ===
+
+    #[tokio::test]
+    async fn test_reserve_within_quota_succeeds() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+        let reservation = manager.reserve("model.gguf", 5_000).await.unwrap();
+        assert_eq!(reservation.File_Id(), "model.gguf");
+        assert_eq!(reservation.Size(), 5_000);
+    }
+
+    #[tokio::test]
+    async fn test_reserve_exceeding_quota_returns_quota_exceeded() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+        let err = manager.reserve("big_model.gguf", 15_000).await.unwrap_err();
+        match err {
+            StorageError::QuotaExceeded { requested, available } => {
+                assert_eq!(requested, 15_000);
+                assert_eq!(available, 10_000);
+            }
+            _ => panic!("expected QuotaExceeded, got {:?}", err),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reserve_zero_quota_means_unlimited() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap(); // quota=0
+        // 应始终成功，无论大小
+        let reservation = manager.reserve("huge.gguf", u64::MAX / 2).await.unwrap();
+        assert_eq!(reservation.File_Id(), "huge.gguf");
+    }
+
+    #[tokio::test]
+    async fn test_quota_info_reflects_current_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.total, 10_000);
+        assert_eq!(info.used, 0);
+        assert_eq!(info.reserved, 0);
+        assert_eq!(info.available, 10_000);
+
+        // 预留一些空间
+        let _reservation = manager.reserve("model.gguf", 3_000).await.unwrap();
+        let info = manager.quota_info().await;
+        assert_eq!(info.reserved, 3_000);
+        assert_eq!(info.available, 7_000);
+    }
+
+    #[tokio::test]
+    async fn test_reserve_then_commit_updates_used() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 100_000).await.unwrap();
+
+        // 预留
+        let reservation = manager.reserve("data.bin", 50_000).await.unwrap();
+
+        // 写入文件
+        let (path, wg) = manager.acquire_write("data.bin").await.unwrap();
+        let data = vec![0u8; 1024]; // 写入 1024 字节
+        tokio::fs::write(&path, &data).await.unwrap();
+        drop(wg);
+
+        // 提交
+        manager.commit(reservation).await.unwrap();
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 1024); // 实际文件大小
+        assert_eq!(info.reserved, 0); // 预留已清除
+        assert_eq!(info.available, 100_000 - 1024);
+    }
+
+    #[tokio::test]
+    async fn test_reservation_drop_without_commit_releases_space() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+
+        {
+            let _reservation = manager.reserve("model.gguf", 8_000).await.unwrap();
+            let info = manager.quota_info().await;
+            assert_eq!(info.reserved, 8_000);
+            assert_eq!(info.available, 2_000);
+            // _reservation drops here without commit
+        }
+
+        // Drop 后预留应被释放
+        let info = manager.quota_info().await;
+        assert_eq!(info.reserved, 0);
+        assert_eq!(info.available, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_reserves_do_not_exceed_quota() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+
+        // 第一个预留成功
+        let _r1 = manager.reserve("model_a.gguf", 6_000).await.unwrap();
+        // 第二个预留成功（6000 + 3000 = 9000 <= 10000）
+        let _r2 = manager.reserve("model_b.gguf", 3_000).await.unwrap();
+        // 第三个预留失败（9000 + 2000 = 11000 > 10000）
+        let err = manager.reserve("model_c.gguf", 2_000).await.unwrap_err();
+        match err {
+            StorageError::QuotaExceeded { requested, available } => {
+                assert_eq!(requested, 2_000);
+                assert_eq!(available, 1_000);
+            }
+            _ => panic!("expected QuotaExceeded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_file_frees_quota() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+
+        // 写入文件并提交
+        let reservation = manager.reserve("data.bin", 5_000).await.unwrap();
+        let (path, wg) = manager.acquire_write("data.bin").await.unwrap();
+        let data = vec![0u8; 2048];
+        tokio::fs::write(&path, &data).await.unwrap();
+        drop(wg);
+        manager.commit(reservation).await.unwrap();
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 2048);
+
+        // 删除文件
+        manager.remove("data.bin").await.unwrap();
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 0);
+        assert_eq!(info.available, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_new_scans_existing_files_sizes_into_used() {
+        let temp_dir = TempDir::new().unwrap();
+        // 先写入一些文件
+        tokio::fs::write(temp_dir.path().join("file_a.bin"), vec![0u8; 1000]).await.unwrap();
+        tokio::fs::write(temp_dir.path().join("file_b.bin"), vec![0u8; 2000]).await.unwrap();
+
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 3000);
+        assert_eq!(info.available, 7000);
+    }
+
+    #[tokio::test]
+    async fn test_new_with_existing_files_exceeding_quota_still_works() {
+        let temp_dir = TempDir::new().unwrap();
+        // 写入超过配额的文件
+        tokio::fs::write(temp_dir.path().join("big.bin"), vec![0u8; 5000]).await.unwrap();
+
+        // 配额只有 3000，但已有文件 5000 — 初始化不应失败
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 3_000).await.unwrap();
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 5000);
+        assert_eq!(info.available, 0); // saturating_sub
+
+        // 新预留应被拒绝
+        let err = manager.reserve("new.bin", 100).await.unwrap_err();
+        assert!(matches!(err, StorageError::QuotaExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_quota_info_unlimited() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap(); // quota=0
+        let info = manager.quota_info().await;
+        assert_eq!(info.total, 0);
+        assert_eq!(info.available, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_commit_adjusts_for_actual_size_difference() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 100_000).await.unwrap();
+
+        // 预留 50000 但只写入 100 字节
+        let reservation = manager.reserve("small.bin", 50_000).await.unwrap();
+        let (path, wg) = manager.acquire_write("small.bin").await.unwrap();
+        tokio::fs::write(&path, vec![0u8; 100]).await.unwrap();
+        drop(wg);
+        manager.commit(reservation).await.unwrap();
+
+        // used 应反映实际大小，而非预留大小
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 100);
+        assert_eq!(info.available, 100_000 - 100);
     }
 }
