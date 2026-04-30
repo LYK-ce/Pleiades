@@ -58,6 +58,22 @@ pub enum UserCommand {
         peers: Vec<(String, usize, usize)>,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
+    /// 列出 Storage 当前追踪的所有文件
+    ///
+    /// 处理流程：先调用 Storage::flush() 同步磁盘状态，再调用 list() 返回文件列表。
+    /// 回复：`Ok(Vec<String>)` 文件 ID 列表；`Err(String)` 操作失败原因
+    List {
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    /// 向指定节点发送单个文件
+    ///
+    /// 编译为 Const(file) → Const(peer) → SendFile 的三指令程序。
+    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 编译或分配失败原因
+    Send {
+        file_path: String,
+        peer_id: String,
+        reply: oneshot::Sender<Result<JobId, String>>,
+    },
 }
 
 // ============================================================
@@ -71,7 +87,6 @@ pub enum UserCommand {
 ///
 /// ## 命令列表
 /// - `REQUEST_PIPELINE`: 远端 Coordinator 请求本节点作为 Worker 加入流水线
-/// - `VERIFY_FILE`: 文件传输阶段3，发送方校验接收方是否成功接收文件
 #[derive(Debug, Clone)]
 pub enum NetworkProtocol {
     /// 请求加入流水线（远端 Coordinator → 本节点）
@@ -92,23 +107,12 @@ pub enum NetworkProtocol {
         /// 模型层范围 — 结束层
         layer_end: usize,
     },
-    /// 校验文件是否已成功接收
-    ///
-    /// 格式: `VERIFY_FILE|{file_name}`
-    ///
-    /// 处理: Core 查 StorageManager 确认文件存在
-    /// 回复: `confirmed` 或 `failed|{reason}`
-    Verify_File {
-        /// 待校验的文件名（对应 Storage 中的 file_id）
-        file_name: String,
-    },
 }
 
 /// 反序列化: payload bytes → NetworkProtocol
 ///
 /// # 格式（文本，`|` 分隔）
 /// - `"REQUEST_PIPELINE|{coordinator_job_id}|{model_file_id}|{device}|{layer_start}|{layer_end}"`
-/// - `"VERIFY_FILE|{file_name}"`
 pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> {
     let text = std::str::from_utf8(payload)
         .map_err(|e| format!("payload 非 UTF-8: {}", e))?;
@@ -142,17 +146,6 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                 layer_end,
             })
         }
-        "VERIFY_FILE" => {
-            if parts.len() != 2 {
-                return Err(format!(
-                    "VERIFY_FILE 格式错误: 需要 2 个字段, 实际 {}. 格式: VERIFY_FILE|file_name",
-                    parts.len()
-                ));
-            }
-            Ok(NetworkProtocol::Verify_File {
-                file_name: parts[1].to_string(),
-            })
-        }
         unknown => Err(format!("未知命令前缀: '{}'", unknown)),
     }
 }
@@ -172,9 +165,6 @@ pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
             "REQUEST_PIPELINE|{}|{}|{}|{}|{}",
             coordinator_job_id, model_file_id, device, layer_start, layer_end
         ),
-        NetworkProtocol::Verify_File { file_name } => {
-            format!("VERIFY_FILE|{}", file_name)
-        }
     };
     text.into_bytes()
 }
@@ -218,26 +208,6 @@ mod command_tests {
     }
 
     #[test]
-    fn test_parse_verify_file_ok() {
-        let payload = b"VERIFY_FILE|model_shard_0_15.gguf";
-        let result = Parse_Network_Command(payload).unwrap();
-        match result {
-            NetworkProtocol::Verify_File { file_name } => {
-                assert_eq!(file_name, "model_shard_0_15.gguf");
-            }
-            _ => panic!("expected Verify_File"),
-        }
-    }
-
-    #[test]
-    fn test_parse_verify_file_wrong_field_count() {
-        let payload = b"VERIFY_FILE";
-        let result = Parse_Network_Command(payload);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("需要 2 个字段"));
-    }
-
-    #[test]
     fn test_parse_unknown_command() {
         let payload = b"UNKNOWN_CMD|abc";
         let result = Parse_Network_Command(payload);
@@ -274,18 +244,4 @@ mod command_tests {
         }
     }
 
-    #[test]
-    fn test_serialize_roundtrip_verify_file() {
-        let cmd = NetworkProtocol::Verify_File {
-            file_name: "test_file.gguf".to_string(),
-        };
-        let bytes = Serialize_Network_Command(&cmd);
-        let parsed = Parse_Network_Command(&bytes).unwrap();
-        match parsed {
-            NetworkProtocol::Verify_File { file_name } => {
-                assert_eq!(file_name, "test_file.gguf");
-            }
-            _ => panic!("expected Verify_File"),
-        }
-    }
 }

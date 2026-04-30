@@ -14,6 +14,10 @@ pub enum JobKind {
     Relay,
     /// 文件分发（模型分片 + 发送）
     Distribute,
+    /// 文件接收（入站文件流 → Storage 写入）
+    Receive,
+    /// 单文件发送（send <file> <peer>）
+    Send,
 }
 
 #[derive(Debug, Clone, Copy)]

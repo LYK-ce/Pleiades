@@ -21,7 +21,7 @@ use tensor_io_broker::Tensor_IO_Broker;
 
 // 统一的能力结构体，供整个 Orchestrator 层使用
 pub struct Capabilities {
-    pub storage: StorageManager,
+    pub storage: Arc<StorageManager>,
     pub ml_engine: Box<dyn ML_Engine_Capability>,
     pub network: Box<dyn Network_Capability>,
     pub peer_manager: Box<dyn Peer_Management_Capability>,

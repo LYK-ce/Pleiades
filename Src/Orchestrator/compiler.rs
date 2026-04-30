@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-28
+//Date ： 2026-04-29
 
 use std::collections::HashMap;
 
@@ -46,6 +46,27 @@ pub const SLOT_COORDINATOR_JOB: SlotId = SlotId(12);
 pub const SLOT_MODEL_INFO: SlotId = SlotId(13);
 /// 文件分发动态槽位起始偏移（每个 peer 占 4 个槽位）
 pub const DISTRIBUTE_DYNAMIC_SLOT_BASE: u32 = 14;
+
+// ─── ReceiveFile 专用槽位 ────────────────────────────────
+// Core 在 FileStreamArrived 时注入 stream 到 SLOT_RECEIVE_STREAM，
+// 其余元数据由 compile_receive_file 生成的 Const 指令写入。
+
+/// 入站 stream 槽位（Core 外部注入，compile_receive_file 引用）
+pub const SLOT_RECEIVE_STREAM: SlotId = SlotId(100);
+/// 文件名槽位（Const 指令写入）
+pub const SLOT_RECEIVE_FILE_NAME: SlotId = SlotId(101);
+/// 文件大小槽位（Const 指令写入）
+pub const SLOT_RECEIVE_FILE_SIZE: SlotId = SlotId(102);
+/// 校验和槽位（Const 指令写入）
+pub const SLOT_RECEIVE_CHECKSUM: SlotId = SlotId(103);
+/// 接收结果槽位（ReceiveFile 指令写入 file_id）
+pub const SLOT_RECEIVE_RESULT: SlotId = SlotId(104);
+
+// ─── SendFile（单文件发送）专用槽位 ────────────────────────
+/// 发送文件路径槽位
+pub const SLOT_SEND_FILE: SlotId = SlotId(200);
+/// 发送目标节点 ID 槽位
+pub const SLOT_SEND_PEER: SlotId = SlotId(201);
 
 /// 编译器错误类型
 #[derive(Debug, thiserror::Error)]
@@ -413,6 +434,101 @@ impl Compiler {
         Ok(builder.build())
     }
 
+    /// 编译 Send 作业的 TaskProgram（向指定节点发送单个文件）
+    ///
+    /// 生成的指令序列：
+    /// ```text
+    /// 正向：Const(file_path) → Const(peer_id) → SendFile
+    /// 补偿：（空 — 发送失败无需回滚）
+    /// ```
+    pub fn compile_send(
+        &self,
+        _job_id: JobId,
+        file_path: String,
+        peer_id: String,
+    ) -> Result<TaskProgram, CompilerError> {
+        if file_path.is_empty() {
+            return Err(CompilerError::InvalidParameter("文件路径不能为空".to_string()));
+        }
+        if peer_id.is_empty() {
+            return Err(CompilerError::InvalidParameter("节点 ID 不能为空".to_string()));
+        }
+
+        let mut builder = TaskProgramBuilder::new();
+
+        // 1. 注入文件路径
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String(file_path),
+            dst: SLOT_SEND_FILE,
+        });
+
+        // 2. 注入目标节点 ID
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String(peer_id),
+            dst: SLOT_SEND_PEER,
+        });
+
+        // 3. 发送文件
+        builder.push_instruction(TaskInstruction::SendFile {
+            peer: SLOT_SEND_PEER,
+            file: SLOT_SEND_FILE,
+        });
+
+        // 补偿为空 — 发送失败无需回滚
+        Ok(builder.build())
+    }
+
+    /// 编译 ReceiveFile 作业的 TaskProgram（接收方文件接收）
+    ///
+    /// Core 在 FileStreamArrived 中调用此方法，生成只含一条 ReceiveFile 指令的程序。
+    /// **入站 stream 由 Core 在 spawn 前通过 `executor.inject_slot()` 注入**，
+    /// 其余元数据（file_name/file_size/checksum）由此方法生成 Const 指令写入。
+    ///
+    /// 生成的指令序列：
+    /// ```text
+    /// 正向：Const(file_name) → Const(file_size) → Const(checksum) → ReceiveFile
+    /// 补偿：（空 — 接收失败时 handler 自行清理损坏文件）
+    /// ```
+    pub fn compile_receive_file(
+        &self,
+        _job_id: JobId,
+        file_name: String,
+        file_size: u64,
+        checksum: String,
+    ) -> Result<TaskProgram, CompilerError> {
+        if file_name.is_empty() {
+            return Err(CompilerError::InvalidParameter("file_name 不能为空".to_string()));
+        }
+
+        let mut builder = TaskProgramBuilder::new();
+
+        // 1. 注入元数据（Const 指令）
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String(file_name),
+            dst: SLOT_RECEIVE_FILE_NAME,
+        });
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::U64(file_size),
+            dst: SLOT_RECEIVE_FILE_SIZE,
+        });
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String(checksum),
+            dst: SLOT_RECEIVE_CHECKSUM,
+        });
+
+        // 2. ReceiveFile 指令（stream 槽由 Core 外部注入）
+        builder.push_instruction(TaskInstruction::ReceiveFile {
+            stream: SLOT_RECEIVE_STREAM,
+            file_name: SLOT_RECEIVE_FILE_NAME,
+            file_size: SLOT_RECEIVE_FILE_SIZE,
+            checksum: SLOT_RECEIVE_CHECKSUM,
+            result: SLOT_RECEIVE_RESULT,
+        });
+
+        // 补偿为空 — ReceiveFile handler 自行清理损坏文件
+        Ok(builder.build())
+    }
+
     // ─── ML Thread 程序构建 ────────────────────────────────
 
     /// 构建单机推理的 ML 指令序列
@@ -599,6 +715,27 @@ impl Compiler {
                 })?;
                 self.compile_distribute(job_id, model_path, distribute_peers)
             }
+            JobKind::Send => {
+                let file_path = params.model_path.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Send 作业需要 file_path (model_path)".to_string())
+                })?;
+                let peer_id = params.send_peer_id.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Send 作业需要 send_peer_id".to_string())
+                })?;
+                self.compile_send(job_id, file_path, peer_id)
+            }
+            JobKind::Receive => {
+                let file_name = params.receive_file_name.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Receive 作业需要 receive_file_name".to_string())
+                })?;
+                let file_size = params.receive_file_size.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Receive 作业需要 receive_file_size".to_string())
+                })?;
+                let checksum = params.receive_checksum.ok_or_else(|| {
+                    CompilerError::InvalidParameter("Receive 作业需要 receive_checksum".to_string())
+                })?;
+                self.compile_receive_file(job_id, file_name, file_size, checksum)
+            }
         }
     }
 }
@@ -614,6 +751,14 @@ pub struct CompileParams {
     pub layer_end: Option<usize>,
     /// 文件分发目标节点列表 (peer_id, layer_start, layer_end)
     pub distribute_peers: Option<Vec<(String, usize, usize)>>,
+    /// ReceiveFile 作业：文件名
+    pub receive_file_name: Option<String>,
+    /// ReceiveFile 作业：文件大小
+    pub receive_file_size: Option<u64>,
+    /// ReceiveFile 作业：校验和
+    pub receive_checksum: Option<String>,
+    /// Send 作业：目标节点 ID
+    pub send_peer_id: Option<String>,
 }
 
 /// 内部 TaskProgramBuilder（不暴露）

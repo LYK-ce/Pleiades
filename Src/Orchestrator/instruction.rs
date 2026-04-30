@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-27
+//Date ： 2026-04-29
 
 use std::collections::HashMap;
 
@@ -76,9 +76,9 @@ pub enum TaskInstruction {
     ///
     /// 所有输入槽位由 Core 在 spawn Job 时注入 SlotFile：
     /// - `stream`: 入站 libp2p::Stream（take 语义）
-    /// - `file_name`: 文件名（来自阶段1元数据协商）
-    /// - `file_size`: 文件大小（来自阶段1元数据协商）
-    /// - `checksum`: 发送方校验和（来自阶段1元数据协商）
+    /// - `file_name`: 文件名（来自 in-band header）
+    /// - `file_size`: 文件大小（来自 in-band header）
+    /// - `checksum`: 发送方校验和（来自 in-band header）
     /// - `result`: 输出 file_id
     ReceiveFile {
         stream: SlotId,

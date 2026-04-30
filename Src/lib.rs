@@ -40,6 +40,9 @@ pub mod llm_io;
 #[path = "EventBus/mod.rs"]
 pub mod event_bus;
 
+#[path = "TUI/mod.rs"]
+pub mod tui;
+
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 

@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Date ： 2026-04-29
 
 //! 网络服务核心模块
 //! 负责Swarm管理、连接管理、事件处理
@@ -36,10 +36,13 @@ use libp2p::{
 };
 use libp2p_stream as stream;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
+
+use crate::event_bus::{EventBus, Bus_Event};
 
 use super::data_protocol::{
     DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
@@ -121,6 +124,8 @@ pub struct Network_Service {
     cmd_rx: mpsc::Receiver<NodeCommand>,
     /// 配置
     config: NetworkConfig,
+    /// 全局事件总线，用于发布网络层事件（节点发现/离开、连接建立/断开等）
+    event_bus: Arc<EventBus>,
 
     // ===== 组件化管理器 =====
 
@@ -149,6 +154,7 @@ impl Network_Service {
     /// * `config` - 网络配置
     /// * `keypair` - 密钥对
     /// * `peer_handle` - PeerManager Capability，用于管理节点信息
+    /// * `event_bus` - 全局事件总线，用于发布网络事件
     ///
     /// # Returns
     /// (Network_Service实例, NodeHandle句柄, inbound_rx 入站请求接收端,
@@ -157,6 +163,7 @@ impl Network_Service {
         config: NetworkConfig,
         keypair: Keypair,
         peer_handle: Box<dyn Peer_Management_Capability>,
+        event_bus: Arc<EventBus>,
     ) -> Result<(
         Self,
         NodeHandle,
@@ -263,6 +270,7 @@ impl Network_Service {
             peer_handle,
             cmd_rx,
             config,
+            event_bus,
             inbound_manager,
             outbound_manager,
             orchestrator_event_tx,
@@ -320,7 +328,7 @@ impl Network_Service {
                         break;
                     }
                 }
-                // 处理外部命令
+                // 处理来自本系统内部其他组件的命令，主要是来自core的命令。
                 Some(cmd) = self.cmd_rx.recv() => {
                     if !self.Handle_Command(cmd).await {
                         break;
@@ -387,6 +395,10 @@ impl Network_Service {
                 if let Err(e) = self.peer_handle.Add_Peer(peer_info).await {
                     warn!("添加节点到 PeerManager 失败: {}", e);
                 }
+                // 发布连接建立事件到 EventBus
+                self.event_bus.Publish(Bus_Event::Connection_Established {
+                    peer_id: peer_id.to_string(),
+                });
             }
 
             // 连接断开
@@ -396,6 +408,10 @@ impl Network_Service {
                 if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
                     warn!("从 PeerManager 移除节点失败: {}", e);
                 }
+                // 发布连接断开事件到 EventBus
+                self.event_bus.Publish(Bus_Event::Connection_Closed {
+                    peer_id: peer_id.to_string(),
+                });
             }
 
             // 新监听地址
@@ -544,8 +560,8 @@ impl Network_Service {
 
     /// 处理mDNS事件
     ///
-    /// mDNS 发现/离开仅更新 Kademlia 路由表，
-    /// 不再通过 event_sender 通知上层（PeerManager 已通过 peer_handle 独立跟踪）。
+    /// mDNS 发现/离开更新 Kademlia 路由表，
+    /// 并通过 EventBus 发布节点发现/离开事件通知 TUI 等消费者。
     async fn Handle_Mdns_Event(&mut self, event: mdns::Event) {
         match event {
             mdns::Event::Discovered(peers) => {
@@ -557,12 +573,20 @@ impl Network_Service {
                             .behaviour_mut()
                             .kademlia
                             .add_address(&peer_id, addr);
+                        // 发布节点发现事件到 EventBus
+                        self.event_bus.Publish(Bus_Event::Peer_Discovered {
+                            peer_id: peer_id.to_string(),
+                        });
                     }
                 }
             }
             mdns::Event::Expired(peers) => {
                 for (peer_id, _addr) in peers {
                     info!("节点离开: {}", peer_id);
+                    // 发布节点离开事件到 EventBus
+                    self.event_bus.Publish(Bus_Event::Peer_Left {
+                        peer_id: peer_id.to_string(),
+                    });
                 }
             }
         }

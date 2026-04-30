@@ -9,3 +9,5 @@
 5. 根据c:\workspace\Workspace\Workspace\Pleiades\Src\Network\network_reforge.md，实现第五步
    完成
 6. 根据c:\workspace\Workspace\Workspace\Pleiades\Src\Network\network_reforge.md，实现第六步
+   完成
+7. 当前的Network层还没有使用EventBus来发布消息，补充EventBus进行消息发布的功能。

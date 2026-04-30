@@ -8,15 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use libp2p::PeerId;
 use super::job::{JobId, JobKind, JobResult, LifecycleEvent};
 use super::command::{UserCommand, NetworkProtocol, Parse_Network_Command};
 use super::executor::JobExecutor;
-use super::compiler::Compiler;
+use super::compiler::{Compiler, SLOT_RECEIVE_STREAM};
+use super::slot::SlotValue;
 use super::Capabilities;
 use crate::llm_io::{IoHandle, LLM_IO_Capability};
 use crate::network::{Network_Inbound_Event, InboundRequest, DataType};
 use crate::network::tensor_stream_protocol::Read_Tensor_Stream_Handshake;
+use crate::network::stream_protocol::{Read_File_Stream_Header, Write_File_Stream_Ack};
 use crate::config::Update_Config;
 use crate::event_bus::Bus_Event;
 use crate::storage::StorageCapability;
@@ -41,22 +42,13 @@ struct JobHandle {
     cancel: CancellationToken,
 }
 
-/// 文件接收元数据（B2 DataType::File 入站存入，B3 FileStreamArrived 消费）
-///
-/// 当前仅记录文件名和大小。
-/// 文件校验由独立的 VERIFY_FILE 命令（Phase 3）处理，不在此阶段传入 checksum。
-struct FileMetadata {
-    file_name: String,
-    file_size: u64,
-}
-
 /// Orchestrator Core 结构体
 ///
 /// ## select! 分支总览
 /// | # | 通道 | 来源 | 处理方法 |
 /// |---|------|------|---------|
 /// | B1 | `user_cmd_rx` | TUI / CLI | `route_user()` |
-/// | B2 | `inbound_rx` | Network Request-Response（仅 Command + File） | `handle_inbound_request()` |
+/// | B2 | `inbound_rx` | Network Request-Response（仅 Command） | `handle_inbound_request()` |
 /// | B3 | `network_inbound_rx` | Network Stream（文件流 + 张量流） | `handle_network_inbound()` |
 /// | B4 | `lifecycle_rx` | JobExecutor | `handle_lifecycle_event()` |
 pub struct Core {
@@ -72,7 +64,7 @@ pub struct Core {
     // --- B1: 用户命令 ---
     user_cmd_rx: mpsc::Receiver<UserCommand>,
 
-    // --- B2: Request-Response 入站（仅 Command + File） ---
+    // --- B2: Request-Response 入站（仅 Command） ---
     inbound_rx: mpsc::Receiver<InboundRequest>,
 
     // --- B3: Stream 入站 ---
@@ -81,9 +73,6 @@ pub struct Core {
     // --- B4: 生命周期 ---
     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     lifecycle_rx: mpsc::Receiver<LifecycleEvent>,
-
-    // --- B2/B3 共享状态 ---
-    pending_file_receives: HashMap<PeerId, Vec<FileMetadata>>,
 
     // --- SetDevice ---
     device_preference: String,
@@ -114,7 +103,6 @@ impl Core {
             network_inbound_rx,
             lifecycle_tx,
             lifecycle_rx,
-            pending_file_receives: HashMap::new(),
             device_preference: String::new(),
         }
     }
@@ -133,14 +121,13 @@ impl Core {
                 Some(cmd) = self.user_cmd_rx.recv(), if !self.shutting_down => {
                     self.route_user(cmd).await;
                 }
-                // B2: Request-Response 入站请求（仅 Command + File）
+                // B2: Request-Response 入站请求（仅 Command）
                 Some(req) = self.inbound_rx.recv(), if !self.shutting_down => {
                     self.handle_inbound_request(req).await;
                 }
                 // B3: Network 转发的 Stream 入站事件（文件流 + 张量流）
                 Some(event) = self.network_inbound_rx.recv(), if !self.shutting_down => {
-                    // TODO: self.handle_network_inbound(event).await;
-                    let _ = event;  // 临时消耗，防止未使用变量警告
+                    self.handle_network_inbound(event).await;
                 }
                 // B4: 生命周期事件（始终活跃）
                 Some(event) = self.lifecycle_rx.recv() => {
@@ -150,102 +137,20 @@ impl Core {
         }
     }
 
-    /// 处理 B2 入站请求（Request-Response 协议，仅 Command + File）
+    /// 处理 B2 入站请求（Request-Response 协议，仅 Command）
     ///
-    /// Network_Service 按 DataType 预筛选后，仅将 Command 和 File 类型转发到此方法。
+    /// Network_Service 按 DataType 预筛选后，仅将 Command 类型转发到此方法。
+    /// 文件传输已改为 in-band header + stream 方案，不再使用 Request-Response。
     /// 每个请求携带 request_id，处理完后必须通过 network.send_response(request_id, ...) 回复。
     async fn handle_inbound_request(&mut self, req: InboundRequest) {
         match req.data_type {
-            DataType::File => {
-                self.handle_network_file(req).await;
-            }
             DataType::Command => {
                 self.handle_network_command(req).await;
             }
             _ => {
-                // BandwidthTest / Data / Info 不应到达此处（已被 Network 内部处理）
+                // File / BandwidthTest / Data / Info 不应到达此处
                 warn!("B2: 收到非预期的 DataType {:?} from {}, request_id={}", req.data_type, req.peer, req.request_id);
             }
-        }
-    }
-
-    /// 处理 DataType::File 入站请求（文件元数据协商，阶段1 接收侧）
-    ///
-    /// 发送方 handle_send_file() 阶段1 发送 `file_name|file_size`，
-    /// 接收方解析后检查存储空间，存入 `pending_file_receives`，回复 ACCEPT 或 REJECT。
-    ///
-    /// ## 处理流程
-    /// 1. 解析 payload 为 `file_name|file_size`
-    /// 2. 查询 `storage.quota_info()` 检查可用空间是否 >= file_size
-    /// 3. 空间充足 → 存入 `pending_file_receives[peer]` → 回复 ACCEPT
-    /// 4. 空间不足 → 回复 `REJECT|insufficient storage space`
-    ///
-    /// ## 注意
-    /// - 此阶段仅做空间检查，不预留空间（`reserve()` 在 B3 FileStreamArrived 真正接收时调用）
-    /// - 文件校验由独立的 VERIFY_FILE 命令（Phase 3）处理
-    /// - 未来可增加防重复接收检查
-    async fn handle_network_file(&mut self, req: InboundRequest) {
-        // 1. 解析 payload: "file_name|file_size"
-        let payload_str = match std::str::from_utf8(&req.payload) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("B2/File: payload 非 UTF-8 from {}: {}", req.peer, e);
-                let _ = self.capabilities.network.send_response(
-                    req.request_id, DataType::Command, b"REJECT|payload not UTF-8".to_vec()
-                ).await;
-                return;
-            }
-        };
-
-        let parts: Vec<&str> = payload_str.split('|').collect();
-        if parts.len() != 2 {
-            warn!("B2/File: payload 格式错误 from {}: 需要 2 字段(file_name|file_size), 实际 {}", req.peer, parts.len());
-            let _ = self.capabilities.network.send_response(
-                req.request_id, DataType::Command, b"REJECT|invalid format".to_vec()
-            ).await;
-            return;
-        }
-
-        let file_name = parts[0].to_string();
-        let file_size = match parts[1].parse::<u64>() {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("B2/File: file_size 解析失败 from {}: {}", req.peer, e);
-                let _ = self.capabilities.network.send_response(
-                    req.request_id, DataType::Command, b"REJECT|invalid file_size".to_vec()
-                ).await;
-                return;
-            }
-        };
-
-        // 2. 检查存储空间是否充足
-        let quota = self.capabilities.storage.quota_info().await;
-        if quota.total > 0 && file_size > quota.available {
-            warn!(
-                "B2/File: 存储空间不足 from {}: 请求 {} bytes, 可用 {} bytes",
-                req.peer, file_size, quota.available
-            );
-            let reject_msg = format!("REJECT|insufficient storage space: need {} bytes, available {} bytes", file_size, quota.available);
-            let _ = self.capabilities.network.send_response(
-                req.request_id, DataType::Command, reject_msg.into_bytes()
-            ).await;
-            return;
-        }
-
-        // 3. 存入 pending_file_receives（供 B3 FileStreamArrived 消费）
-        let metadata = FileMetadata { file_name: file_name.clone(), file_size };
-        self.pending_file_receives
-            .entry(req.peer)
-            .or_insert_with(Vec::new)
-            .push(metadata);
-
-        info!("B2/File: 接受文件元数据 from {}: name={}, size={}, request_id={}", req.peer, file_name, file_size, req.request_id);
-
-        // 4. 回复 ACCEPT
-        if let Err(e) = self.capabilities.network.send_response(
-            req.request_id, DataType::Command, b"ACCEPT".to_vec()
-        ).await {
-            warn!("B2/File: send_response(ACCEPT) 失败: {}", e);
         }
     }
 
@@ -283,14 +188,6 @@ impl Core {
                     req.peer, coordinator_job_id, model_file_id, device, layer_start, layer_end, req.request_id
                 );
             }
-            NetworkProtocol::Verify_File { file_name } => {
-                // TODO: 查 StorageManager 确认文件存在
-                //       → send_response(confirmed / failed|reason)
-                info!(
-                    "B2/Command: VERIFY_FILE from {}, file={}, request_id={}, 待实现",
-                    req.peer, file_name, req.request_id
-                );
-            }
         }
     }
 
@@ -311,14 +208,14 @@ impl Core {
                         return;
                     }
                 };
-                // 编译成功后分配 IO 通道
+                // 编译成功后分配 IO 通道（推理类 Job 需要 IoHandle）
                 if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
                     let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
                     return;
                 }
                 match self.capabilities.io_broker.Take_ML_Side(job_id).await {
                     Ok(io) => {
-                        self.spawn_job(job_id, JobKind::Run, program, io);
+                        self.spawn_job(job_id, JobKind::Run, program, Some(io));
                         let _ = reply.send(Ok(job_id));
                     }
                     Err(e) => {
@@ -383,18 +280,42 @@ impl Core {
                         return;
                     }
                 };
-                // 分配 IO 通道（Distribute Job 不使用 ML 推理，但保持接口一致）
-                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
-                    let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
-                    return;
-                }
-                match self.capabilities.io_broker.Take_ML_Side(job_id).await {
-                    Ok(io) => {
-                        self.spawn_job(job_id, JobKind::Distribute, program, io);
-                        let _ = reply.send(Ok(job_id));
+                // Distribute Job 不使用 ML 推理，无需 IO 通道
+                self.spawn_job(job_id, JobKind::Distribute, program, None);
+                let _ = reply.send(Ok(job_id));
+            }
+            UserCommand::Send { file_path, peer_id, reply } => {
+                let job_id = JobId(generate_id());
+                // 编译发送作业
+                let program = match self.compiler.compile_send(job_id, file_path, peer_id) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
+                        return;
+                    }
+                };
+                // Send Job 不使用 ML 推理，无需 IO 通道
+                self.spawn_job(job_id, JobKind::Send, program, None);
+                let _ = reply.send(Ok(job_id));
+            }
+            UserCommand::List { reply } => {
+                // 1. flush — 同步磁盘，确保索引与磁盘一致
+                match self.capabilities.storage.flush().await {
+                    Ok((discovered, cleaned)) => {
+                        info!("Storage flush 完成: 新发现 {} 个文件, 清理 {} 个僵尸条目", discovered, cleaned);
                     }
                     Err(e) => {
-                        let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
+                        let _ = reply.send(Err(format!("flush 失败: {}", e)));
+                        return;
+                    }
+                }
+                // 2. list — 获取文件列表
+                match self.capabilities.storage.list().await {
+                    Ok(files) => {
+                        let _ = reply.send(Ok(files));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("list 失败: {}", e)));
                     }
                 }
             }
@@ -426,7 +347,7 @@ impl Core {
             layer_end,
         ).map_err(|e| format!("编译失败: {:?}", e))?;
 
-        // 分配 IO 通道
+        // 分配 IO 通道（Relay 是推理类 Job，需要 IoHandle）
         self.capabilities.io_broker.Allocate(job_id).await
             .map_err(|e| format!("IO 分配失败: {}", e))?;
 
@@ -438,13 +359,13 @@ impl Core {
             warn!("Tensor_IO_Broker Prepare 失败: {}", e);
         }
 
-        self.spawn_job(job_id, JobKind::Relay, program, io);
+        self.spawn_job(job_id, JobKind::Relay, program, Some(io));
         Ok(job_id)
     }
 
     /// 将已编译的程序 spawn 为独立的 Job 任务。
     /// 职责单一：仅负责创建 Executor 并注册到 registry。
-    fn spawn_job(&mut self, job_id: JobId, kind: JobKind, program: super::instruction::TaskProgram, io: IoHandle) {
+    fn spawn_job(&mut self, job_id: JobId, kind: JobKind, program: super::instruction::TaskProgram, io: Option<IoHandle>) {
         // 发布 Job 创建事件
         self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
             job_id: job_id.0,
@@ -484,13 +405,81 @@ impl Core {
 
     /// 处理 Network 转发的入站事件
     ///
-    /// - FileStreamArrived: compile 接收作业 → spawn Job（stream 存入 SlotFile）
+    /// - FileStreamArrived: 读取 in-band header → 检查空间 → ACK → compile 接收作业 → spawn Job
     /// - TensorStreamArrived: 读取 handshake → 通过 Tensor_IO_Broker 路由到目标 Job
     async fn handle_network_inbound(&mut self, event: Network_Inbound_Event) {
         match event {
-            Network_Inbound_Event::FileStreamArrived { peer, stream: _ } => {
-                // TODO: 解析 pending_file_receives 中的元数据，compile 接收作业并 spawn Job
-                info!("收到入站文件流 from {}, 待实现接收作业 spawn", peer);
+            Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
+                // 1. 读取 in-band header（file_name, file_size, checksum）
+                let (file_name, file_size, checksum) = match Read_File_Stream_Header(&mut stream).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!("B3/File: 读取文件流 header 失败 from {}: {}", peer, e);
+                        return;
+                    }
+                };
+
+                // 2. 检查存储空间
+                let quota = self.capabilities.storage.quota_info().await;
+                if quota.total > 0 && file_size > quota.available {
+                    warn!(
+                        "B3/File: 存储空间不足 from {}: 请求 {} bytes, 可用 {} bytes",
+                        peer, file_size, quota.available
+                    );
+                    let _ = Write_File_Stream_Ack(&mut stream, false).await;
+                    return;
+                }
+
+                // 3. 回复 ACCEPT
+                if let Err(e) = Write_File_Stream_Ack(&mut stream, true).await {
+                    warn!("B3/File: 写入 ACK 失败 from {}: {}", peer, e);
+                    return;
+                }
+
+                info!(
+                    "B3/File: 接受文件流 from {}: name={}, size={}, checksum={}",
+                    peer, file_name, file_size, checksum
+                );
+
+                // 4. compile ReceiveFile Job
+                let job_id = JobId(generate_id());
+                let program = match self.compiler.compile_receive_file(
+                    job_id, file_name.clone(), file_size, checksum,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("B3/File: 编译 ReceiveFile 失败 from {}: {:?}", peer, e);
+                        return;
+                    }
+                };
+
+                // 5. 创建 Executor + 注入 stream 到 SlotFile
+                // ReceiveFile Job 不使用 ML 推理，无需 IO 通道
+                let cancel = CancellationToken::new();
+                let mut executor = JobExecutor::new(
+                    job_id,
+                    JobKind::Receive,
+                    program,
+                    cancel.clone(),
+                    self.capabilities.clone(),
+                    None,
+                    self.lifecycle_tx.clone(),
+                );
+                executor.inject_slot(
+                    SLOT_RECEIVE_STREAM,
+                    SlotValue::Stream(std::sync::Mutex::new(Some(stream))),
+                );
+
+                // 7. 发布 Job 创建事件 + spawn + 注册
+                self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
+                    job_id: job_id.0,
+                    kind: "Receive".to_string(),
+                    model_name: file_name,
+                });
+                tokio::spawn(executor.run());
+                self.registry.insert(job_id, JobHandle { kind: JobKind::Receive, cancel });
+
+                info!("B3/File: ReceiveFile Job {:?} 已 spawn", job_id);
             }
             Network_Inbound_Event::TensorStreamArrived { peer, mut stream } => {
                 // 1. 从 stream 读取 handshake 帧（target_job_id）
@@ -582,7 +571,7 @@ mod core_tests {
     /// 创建 Stub Capabilities + TempDir（TempDir 必须保持存活以维持临时目录）
     async fn stub_capabilities() -> (Arc<Capabilities>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::New(temp_dir.path()).await.unwrap();
+        let storage = Arc::new(StorageManager::New(temp_dir.path()).await.unwrap());
         let caps = Arc::new(Capabilities {
             storage,
             ml_engine: Box::new(StubMLEngine),
@@ -632,7 +621,7 @@ mod core_tests {
         let io = stub_io_handle(&core.capabilities.io_broker, job_id).await;
 
         // spawn job
-        core.spawn_job(job_id, JobKind::Run, program, io);
+        core.spawn_job(job_id, JobKind::Run, program, Some(io));
 
         // 验证 registry 已注册
         assert!(core.registry.contains_key(&job_id));
@@ -675,7 +664,7 @@ mod core_tests {
         };
         let io = stub_io_handle(&core.capabilities.io_broker, job_id).await;
 
-        core.spawn_job(job_id, JobKind::Run, program, io);
+        core.spawn_job(job_id, JobKind::Run, program, Some(io));
 
         let event = timeout(Duration::from_secs(2), core.lifecycle_rx.recv())
             .await
@@ -718,7 +707,7 @@ mod core_tests {
                 labels: HashMap::new(),
             };
             let io = stub_io_handle(&core.capabilities.io_broker, jid).await;
-            core.spawn_job(jid, JobKind::Run, program, io);
+            core.spawn_job(jid, JobKind::Run, program, Some(io));
         }
 
         // 验证全部注册

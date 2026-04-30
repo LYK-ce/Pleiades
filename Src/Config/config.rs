@@ -58,6 +58,8 @@ pub struct Runtime_Config {
 /// [Storage] 段配置
 #[derive(Debug, Deserialize)]
 pub struct Storage_Config {
+    /// 工作目录（所有运行时数据的根目录），默认 "Pleiades_Workspace"
+    pub workspace_dir: Option<String>,
     /// 存储配额（单位：GB），0 表示不限制
     pub quota_gb: Option<u64>,
 }

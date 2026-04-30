@@ -36,20 +36,23 @@ pub struct JobExecutor {
 impl JobExecutor {
     /// 创建新的 JobExecutor 实例
     ///
-    /// `io` 参数会被注入到 TaskEngine 的 SlotFile 约定槽位 `SLOT_IO`，
-    /// 供后续 CreateSession 指令通过 `take_io_handle(SLOT_IO)` 消费。
+    /// `io` 参数为 `Option<IoHandle>`：
+    /// - `Some(io)`: 推理类 Job（Run/Coordinator/Relay），IoHandle 注入到 `SLOT_IO`
+    /// - `None`: 非推理 Job（Send/Distribute/Receive），无需 ML I/O 通道
     pub fn new(
         job_id: JobId,
         kind: JobKind,
         program: TaskProgram,
         cancel: CancellationToken,
         capabilities: Arc<Capabilities>,
-        io: IoHandle,
+        io: Option<IoHandle>,
         lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     ) -> Self {
         let mut task_engine = TaskEngine::new(job_id, Arc::clone(&capabilities));
-        // 将 IoHandle 注入到约定槽位，Compiler 生成的 CreateSession 指令会引用 SLOT_IO
-        task_engine.slots.set(SLOT_IO, SlotValue::IoHandle(io));
+        // 仅当提供 IoHandle 时注入到约定槽位（推理类 Job 需要）
+        if let Some(io) = io {
+            task_engine.slots.set(SLOT_IO, SlotValue::IoHandle(io));
+        }
         JobExecutor {
             job_id,
             kind,
@@ -60,6 +63,21 @@ impl JobExecutor {
             task_engine,
             state: JobState::Preparing,
         }
+    }
+
+    /// 在 spawn 前向 SlotFile 注入额外的运行时资源
+    ///
+    /// 用于 Core 在创建 Executor 后、调用 `run()` 前注入不可通过 Const 指令表达的值
+    /// （如 `libp2p::Stream`），因为 Stream 不属于 `ConstValue` 子集。
+    ///
+    /// # 用法
+    /// ```ignore
+    /// let mut executor = JobExecutor::new(...);
+    /// executor.inject_slot(SLOT_RECEIVE_STREAM, SlotValue::Stream(Mutex::new(Some(stream))));
+    /// tokio::spawn(executor.run());
+    /// ```
+    pub fn inject_slot(&mut self, slot_id: SlotId, value: SlotValue) {
+        self.task_engine.slots.set(slot_id, value);
     }
 
     /// 主执行循环
@@ -177,7 +195,7 @@ mod executor_tests {
 
     async fn stub_capabilities() -> (Arc<Capabilities>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::New(temp_dir.path()).await.unwrap();
+        let storage = Arc::new(StorageManager::New(temp_dir.path()).await.unwrap());
         let caps = Arc::new(Capabilities {
             storage,
             ml_engine: Box::new(StubMLEngine),
@@ -222,7 +240,7 @@ mod executor_tests {
             program,
             cancel,
             caps,
-            io,
+            Some(io),
             lifecycle_tx,
         );
 
@@ -265,7 +283,7 @@ mod executor_tests {
             program,
             cancel,
             caps,
-            io,
+            Some(io),
             lifecycle_tx,
         );
 
@@ -313,7 +331,7 @@ mod executor_tests {
             program,
             cancel.clone(),
             caps,
-            io,
+            Some(io),
             lifecycle_tx,
         );
 

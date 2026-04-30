@@ -46,7 +46,13 @@ pub use capability::{Network_Capability, Network_Error, Network_Inbound_Event, N
 pub use network_service::{NetworkConfig, Network_Service};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
 pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
-pub use stream_protocol::{FILE_STREAM_PROTOCOL, CHUNK_SIZE, Send_File_Data, Receive_File_Data};
+pub use stream_protocol::{
+    FILE_STREAM_PROTOCOL, CHUNK_SIZE,
+    FILE_HEADER_ACCEPT, FILE_HEADER_REJECT,
+    Write_File_Stream_Header, Read_File_Stream_Header,
+    Write_File_Stream_Ack, Read_File_Stream_Ack,
+    Send_File_Data, Receive_File_Data,
+};
 pub use tensor_stream_protocol::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
     Tensor_Buffer, Tensor_IO_Handle,

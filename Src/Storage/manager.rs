@@ -484,6 +484,85 @@ impl StorageCapability for StorageManager {
             available,
         }
     }
+
+    async fn flush(&self) -> Result<(usize, usize), StorageError> {
+        let mut discovered: usize = 0;
+        let mut cleaned: usize = 0;
+
+        // Phase 1: 扫描磁盘，发现新文件
+        let mut disk_files = std::collections::HashSet::new();
+        let mut entries = fs::read_dir(&self.base_dir).await.map_err(|e| {
+            StorageError::Io(format!("flush read_dir failed: {}", e))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            StorageError::Io(format!("flush next_entry failed: {}", e))
+        })? {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy().to_string();
+            // 忽略隐藏文件
+            if file_name_str.starts_with('.') {
+                continue;
+            }
+            let metadata = entry.metadata().await.map_err(|e| {
+                StorageError::Io(format!("flush metadata failed: {}", e))
+            })?;
+            if !metadata.is_file() {
+                continue;
+            }
+            disk_files.insert(file_name_str.clone());
+
+            // 检查是否已在索引中
+            let files = self.files.read().await;
+            if files.contains_key(&file_name_str) {
+                continue;
+            }
+            drop(files);
+
+            // 不在索引中，插入
+            let mut files = self.files.write().await;
+            // 双重检查
+            if !files.contains_key(&file_name_str) {
+                let size = metadata.len();
+                files.insert(file_name_str, FileState {
+                    lock: Arc::new(RwLock::new(())),
+                    size,
+                });
+                self.used.fetch_add(size, Ordering::Relaxed);
+                discovered += 1;
+            }
+        }
+
+        // Phase 2: 清理僵尸条目（索引有但磁盘无）
+        let files = self.files.read().await;
+        let zombies: Vec<String> = files.keys()
+            .filter(|k| !disk_files.contains(*k))
+            .cloned()
+            .collect();
+        drop(files);
+
+        for zombie_id in zombies {
+            let mut files = self.files.write().await;
+            if let Some(state) = files.get(&zombie_id) {
+                // 确保没有活跃锁才清理
+                match Arc::clone(&state.lock).try_write_owned() {
+                    Ok(_guard) => {
+                        let size = state.size;
+                        drop(_guard);
+                        files.remove(&zombie_id);
+                        if size > 0 {
+                            self.used.fetch_sub(size, Ordering::Relaxed);
+                        }
+                        cleaned += 1;
+                    }
+                    Err(_) => {
+                        // 有活跃锁，跳过
+                    }
+                }
+            }
+        }
+
+        Ok((discovered, cleaned))
+    }
 }
 
 #[cfg(test)]
@@ -934,5 +1013,173 @@ mod tests {
         let info = manager.quota_info().await;
         assert_eq!(info.used, 100);
         assert_eq!(info.available, 100_000 - 100);
+    }
+
+    // --- flush 测试 ---
+
+    #[tokio::test]
+    async fn test_flush_discovers_externally_added_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+
+        // 初始应无文件
+        let list = manager.list().await.unwrap();
+        assert!(list.is_empty());
+
+        // 外部直接写入文件（模拟其他进程或网络层落盘）
+        tokio::fs::write(temp_dir.path().join("ext_a.bin"), vec![0u8; 1000]).await.unwrap();
+        tokio::fs::write(temp_dir.path().join("ext_b.bin"), vec![0u8; 2000]).await.unwrap();
+
+        // flush 发现新文件
+        let (discovered, cleaned) = manager.flush().await.unwrap();
+        assert_eq!(discovered, 2);
+        assert_eq!(cleaned, 0);
+
+        // 文件应在索引中
+        let list = manager.list().await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(manager.exists("ext_a.bin").await.unwrap());
+        assert!(manager.exists("ext_b.bin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_flush_updates_used_quota() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 50_000).await.unwrap();
+
+        // 外部写入文件
+        tokio::fs::write(temp_dir.path().join("data.bin"), vec![0u8; 3000]).await.unwrap();
+
+        let info_before = manager.quota_info().await;
+        assert_eq!(info_before.used, 0);
+
+        let (discovered, _) = manager.flush().await.unwrap();
+        assert_eq!(discovered, 1);
+
+        let info_after = manager.quota_info().await;
+        assert_eq!(info_after.used, 3000);
+        assert_eq!(info_after.available, 47_000);
+    }
+
+    #[tokio::test]
+    async fn test_flush_cleans_zombie_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+
+        // 通过 manager 写入文件
+        let (path, wg) = manager.acquire_write("victim.txt").await.unwrap();
+        tokio::fs::write(&path, b"data").await.unwrap();
+        drop(wg);
+
+        assert!(manager.exists("victim.txt").await.unwrap());
+
+        // 外部直接删除磁盘文件（绕过 manager）
+        tokio::fs::remove_file(temp_dir.path().join("victim.txt")).await.unwrap();
+
+        // flush 应清理僵尸条目
+        let (discovered, cleaned) = manager.flush().await.unwrap();
+        assert_eq!(discovered, 0);
+        assert_eq!(cleaned, 1);
+
+        // 索引应不再包含该文件
+        let list = manager.list().await.unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_flush_cleans_zombie_frees_quota() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New_With_Quota(temp_dir.path(), 10_000).await.unwrap();
+
+        // 通过 reserve+write+commit 流程建立带配额的文件
+        let reservation = manager.reserve("old.bin", 5_000).await.unwrap();
+        let (path, wg) = manager.acquire_write("old.bin").await.unwrap();
+        tokio::fs::write(&path, vec![0u8; 2000]).await.unwrap();
+        drop(wg);
+        manager.commit(reservation).await.unwrap();
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 2000);
+
+        // 外部删除文件
+        tokio::fs::remove_file(temp_dir.path().join("old.bin")).await.unwrap();
+
+        // flush 清理并释放配额
+        let (_, cleaned) = manager.flush().await.unwrap();
+        assert_eq!(cleaned, 1);
+
+        let info = manager.quota_info().await;
+        assert_eq!(info.used, 0);
+        assert_eq!(info.available, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_flush_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+
+        tokio::fs::write(temp_dir.path().join("stable.bin"), vec![0u8; 500]).await.unwrap();
+
+        // 第一次 flush
+        let (d1, c1) = manager.flush().await.unwrap();
+        assert_eq!(d1, 1);
+        assert_eq!(c1, 0);
+
+        // 第二次 flush（无变化）
+        let (d2, c2) = manager.flush().await.unwrap();
+        assert_eq!(d2, 0);
+        assert_eq!(c2, 0);
+
+        // 索引不变
+        let list = manager.list().await.unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_flush_ignores_hidden_files_and_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+
+        // 创建隐藏文件和子目录
+        tokio::fs::write(temp_dir.path().join(".hidden"), b"secret").await.unwrap();
+        tokio::fs::create_dir(temp_dir.path().join("subdir")).await.unwrap();
+        // 正常文件
+        tokio::fs::write(temp_dir.path().join("normal.bin"), b"ok").await.unwrap();
+
+        let (discovered, cleaned) = manager.flush().await.unwrap();
+        assert_eq!(discovered, 1); // 只发现 normal.bin
+        assert_eq!(cleaned, 0);
+
+        let list = manager.list().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list.contains(&"normal.bin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_flush_mixed_discover_and_clean() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+
+        // 通过 manager 写入两个文件
+        let (p1, wg1) = manager.acquire_write("keep.bin").await.unwrap();
+        tokio::fs::write(&p1, b"keep").await.unwrap();
+        drop(wg1);
+
+        let (p2, wg2) = manager.acquire_write("remove.bin").await.unwrap();
+        tokio::fs::write(&p2, b"remove").await.unwrap();
+        drop(wg2);
+
+        // 外部添加新文件、删除已有文件
+        tokio::fs::write(temp_dir.path().join("new.bin"), b"new").await.unwrap();
+        tokio::fs::remove_file(temp_dir.path().join("remove.bin")).await.unwrap();
+
+        let (discovered, cleaned) = manager.flush().await.unwrap();
+        assert_eq!(discovered, 1); // new.bin
+        assert_eq!(cleaned, 1);   // remove.bin
+
+        let list = manager.list().await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.contains(&"keep.bin".to_string()));
+        assert!(list.contains(&"new.bin".to_string()));
     }
 }

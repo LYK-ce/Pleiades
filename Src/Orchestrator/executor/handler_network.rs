@@ -1,30 +1,27 @@
 //Presented by KeJi
-//Date ： 2026-04-28
+//Date ： 2026-04-29
 
 use std::sync::Mutex;
 use libp2p::PeerId;
 use crate::orchestrator::slot::{SlotId, SlotValue};
 use crate::network::DataType;
 use crate::network::tensor_stream_protocol::{Tensor_IO_Handle, Write_Tensor_Stream_Handshake};
+use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
 use crate::storage::{StorageCapability, ChecksumAlgorithm};
 use super::task_engine::StepResult;
 
 impl super::TaskEngine {
-    /// 处理 SendFile 指令：将本地文件通过三阶段协议发送到远端 Peer
+    /// 处理 SendFile 指令：将本地文件通过 in-band header 方案发送到远端 Peer
     ///
-    /// 阶段1：元数据协商（Request-Response，DataType::File）
+    /// 单阶段 Stream 协议（与张量流同构）：
     ///   1. 解析 PeerId
     ///   2. 从 Storage 获取文件路径 + 读锁
     ///   3. 获取文件大小 + 计算 checksum
-    ///   4. 发送元数据，等待对方 accept/reject
-    ///
-    /// 阶段2：文件数据传输（Stream 协议）
-    ///   5. 打开文件流
-    ///   6. 发送文件原始数据（64KB 分块）
-    ///   7. 释放读锁
-    ///
-    /// 阶段3：发送方主动验证（Request-Response，DataType::Command + Verify_File）
-    ///   8. 发送 Verify_File 命令，等待 confirmed/failed
+    ///   4. 打开文件流
+    ///   5. 写入 in-band header（file_name、file_size、checksum）
+    ///   6. 读取 ACK（ACCEPT / REJECT）
+    ///   7. 发送文件原始数据（64KB 分块）
+    ///   8. 释放读锁
     pub(super) async fn handle_send_file(&mut self, peer: SlotId, file: SlotId) -> StepResult {
         // 1. 解析 PeerId
         let peer_id_str = match self.slots.get_string(peer) {
@@ -41,8 +38,6 @@ impl super::TaskEngine {
             Ok(s) => s.clone(),
             Err(e) => return StepResult::Abort(format!("SendFile: file slot error: {}", e)),
         };
-
-        // ═══ 阶段1：元数据协商 ═══
 
         // 3. 从 Storage 获取文件路径 + 读锁
         let (path, read_guard) = match self.capabilities.storage.acquire_read(&file_id).await {
@@ -62,53 +57,37 @@ impl super::TaskEngine {
             Err(e) => return StepResult::Abort(format!("SendFile: checksum failed: {}", e)),
         };
 
-        // 6. 序列化元数据 payload（简单文本格式：file_name|file_size|checksum）
-        let metadata_payload = format!("{}|{}|{}", file_id, file_size, checksum).into_bytes();
-
-        // 7. 发送元数据，等待对方响应
-        let response = match self.capabilities.network.send_data(peer_id, DataType::File, metadata_payload).await {
-            Ok(r) => r,
-            Err(e) => return StepResult::Abort(format!("SendFile: metadata send failed: {}", e)),
-        };
-
-        // 8. 解析响应：reject → Abort
-        let response_str = String::from_utf8_lossy(&response.payload);
-        if !response_str.contains("ACCEPT") && !response_str.contains("accept") {
-            return StepResult::Abort(format!("SendFile: peer rejected file transfer: {}", response_str));
-        }
-
-        // ═══ 阶段2：文件数据传输 ═══
-
-        // 9. 打开文件流
+        // 6. 打开文件流
         let mut stream = match self.capabilities.network.open_file_stream(peer_id).await {
             Ok(s) => s,
             Err(e) => return StepResult::Abort(format!("SendFile: open_file_stream failed: {}", e)),
         };
 
-        // 10. 发送文件原始数据
+        // 7. 写入 in-band header（file_name、file_size、checksum）
+        if let Err(e) = Write_File_Stream_Header(&mut stream, &file_id, file_size, &checksum).await {
+            return StepResult::Abort(format!("SendFile: write header failed: {}", e));
+        }
+
+        // 8. 读取 ACK
+        match Read_File_Stream_Ack(&mut stream).await {
+            Ok(true) => { /* ACCEPT, 继续 */ }
+            Ok(false) => {
+                return StepResult::Abort("SendFile: peer rejected file transfer".to_string());
+            }
+            Err(e) => {
+                return StepResult::Abort(format!("SendFile: read ACK failed: {}", e));
+            }
+        }
+
+        // 9. 发送文件原始数据
         if let Err(e) = self.capabilities.network.send_file_data(&mut stream, &path).await {
             return StepResult::Abort(format!("SendFile: send_file_data failed: {}", e));
         }
 
-        // 11. 释放读锁
+        // 10. 释放读锁
         drop(read_guard);
 
-        // ═══ 阶段3：发送方主动验证 ═══
-
-        // 12. 发送 Verify_File 命令（"VERIFY_FILE|<file_name>" 文本协议格式）
-        let verify_payload = format!("VERIFY_FILE|{}", file_id).into_bytes();
-        let verify_response = match self.capabilities.network.send_data(peer_id, DataType::Command, verify_payload).await {
-            Ok(r) => r,
-            Err(e) => return StepResult::Abort(format!("SendFile: verify request failed: {}", e)),
-        };
-
-        // 13. 解析验证响应
-        let verify_str = String::from_utf8_lossy(&verify_response.payload);
-        if verify_str.contains("confirmed") {
-            StepResult::Continue
-        } else {
-            StepResult::Abort(format!("SendFile: receiver verification failed for '{}': {}", file_id, verify_str))
-        }
+        StepResult::Continue
     }
 
     /// 处理 ReceiveFile 指令：从入站 Stream 接收文件数据并存入 Storage

@@ -38,5 +38,7 @@ seed = 299792458
 
 
 [Storage]
+# 工作目录（所有运行时数据的根目录）
+workspace_dir = "Pleiades_Workspace"
 # 存储配额（单位：GB），0 表示不限制
 quota_gb = 0

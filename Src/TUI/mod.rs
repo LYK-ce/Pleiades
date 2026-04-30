@@ -1,10 +1,10 @@
 //Presented by KeJi
-//Date ： 2026-04-09
+//Date ： 2026-04-29
 
 //! TUI 模块 - 终端图形界面
 //!
-//! 使用 ratatui + crossterm 实现终端 UI，替代纯文本 CLI。
-//! 通过 mpsc channel 与 Control 层解耦通信。
+//! 使用 ratatui + crossterm 实现终端 UI。
+//! 通过 EventBus (broadcast) 接收系统事件，通过 mpsc 发送 UserCommand 给 Orchestrator Core。
 //!
 //! ## 子模块
 //! - app: 应用状态管理
@@ -20,7 +20,7 @@
 //! ├─────────────────────────┴────────────────┤
 //! │ Job (始终显示, 3行)                       │
 //! ├──────────────────────────────────────────┤
-//! │ Command (按需弹出)                       │
+//! │ Command (始终显示, 8行)                   │
 //! ├──────────────────────────────────────────┤
 //! │ 输入栏 (3行)                             │
 //! └──────────────────────────────────────────┘
@@ -35,7 +35,6 @@ pub mod network_panel;
 pub mod job_panel;
 pub mod command_panel;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
@@ -46,14 +45,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use app::{App, View_Mode, Job_State, Command_Output, Transfer_Direction};
 
-// Ui_Message 定义在 Control 层（crate::control::ui_message），
-// 任何 UI 实现都通过引用此类型获取显示数据。
-use crate::control::ui_message::Ui_Message;
-use crate::control::cli_command::CLI_Command;
+use crate::event_bus::Bus_Event;
+use crate::orchestrator::command::UserCommand;
+use crate::orchestrator::job::JobId;
 
 // ============================================================
 // TUI 主循环
@@ -62,16 +60,14 @@ use crate::control::cli_command::CLI_Command;
 /// TUI 主循环入口
 ///
 /// 在 `tokio::task::spawn_blocking` 中调用。
-/// 初始化终端 → 事件循环（渲染 + 键盘 + UI消息） → 恢复终端。
+/// 初始化终端 → 事件循环（渲染 + 键盘 + Bus_Event） → 恢复终端。
 ///
 /// # 参数
-/// - `ui_rx`: 接收 Control 层发来的 UI 消息
-/// - `cli_tx`: 发送用户命令给 Control 层
-pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_Command>) {
+/// - `event_rx`: 从 EventBus::Subscribe() 获得的 broadcast Receiver
+/// - `user_cmd_tx`: 发送用户命令给 Orchestrator Core
+pub fn TUI_Loop(mut event_rx: broadcast::Receiver<Bus_Event>, user_cmd_tx: mpsc::Sender<UserCommand>) {
     // 1. 初始化终端
-    let mut terminal = match ratatui::init() {
-        terminal => terminal,
-    };
+    let mut terminal = ratatui::init();
 
     // 启用鼠标捕获（滚轮等事件）
     crossterm::execute!(std::io::stdout(), EnableMouseCapture).ok();
@@ -86,16 +82,27 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
             break;
         }
 
-        // 2b. 非阻塞接收所有待处理的 UI 消息
-        while let Ok(msg) = ui_rx.try_recv() {
-            Handle_Ui_Message(&mut app, msg);
+        // 2b. 非阻塞接收所有待处理的 Bus_Event
+        loop {
+            match event_rx.try_recv() {
+                Ok(event) => Handle_Bus_Event(&mut app, event),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    app.Add_Log(format!("⚠ 丢失 {} 条事件", n));
+                    // continue 继续接收后续事件
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    app.should_quit = true;
+                    break;
+                }
+            }
         }
 
         // 2c. 处理输入事件（50ms 超时，约 20fps）
         if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
             match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    Handle_Key_Event(&mut app, key.code, key.modifiers, &cli_tx);
+                    Handle_Key_Event(&mut app, key.code, key.modifiers, &user_cmd_tx);
                 }
                 Ok(Event::Mouse(mouse)) => {
                     Handle_Mouse_Event(&mut app, mouse.kind, mouse.column, mouse.row);
@@ -106,7 +113,8 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
 
         // 2d. 检查退出标志
         if app.should_quit {
-            let _ = cli_tx.blocking_send(CLI_Command::Quit);
+            let (reply_tx, _reply_rx) = oneshot::channel();
+            let _ = user_cmd_tx.blocking_send(UserCommand::Quit { reply: reply_tx });
             break;
         }
     }
@@ -117,45 +125,35 @@ pub fn TUI_Loop(mut ui_rx: mpsc::Receiver<Ui_Message>, cli_tx: mpsc::Sender<CLI_
 }
 
 // ============================================================
-// UI 消息处理
+// Bus_Event 处理
 // ============================================================
 
-/// 处理 UI 消息，更新 App 状态
-fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
-    match msg {
-        Ui_Message::Log(text) => {
-            app.Add_Log(text);
+/// 处理 Bus_Event，更新 App 状态
+fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
+    match event {
+        Bus_Event::Log { message } => {
+            app.Add_Log(message);
         }
-        Ui_Message::State_Change(state) => {
-            match state.as_str() {
-                "Idle" => {
-                    app.view_mode = View_Mode::Idle;
-                    app.job = Job_State::Idle;
-                }
-                "Busy" => {
-                    app.view_mode = View_Mode::Busy;
-                }
-                _ => {}
-            }
-            app.Add_Log(format!("状态变更: {}", state));
+        Bus_Event::Error { message } => {
+            app.Add_Log(format!("[错误] {}", message));
         }
-        Ui_Message::Peer_Discovered(peer_id) => {
+        Bus_Event::Peer_Discovered { peer_id } => {
             app.Update_Peer(peer_id.clone(), false);
             app.Add_Log(format!("发现节点: {}", peer_id));
         }
-        Ui_Message::Peer_Left(peer_id) => {
+        Bus_Event::Peer_Left { peer_id } => {
             app.Remove_Peer(&peer_id);
             app.Add_Log(format!("节点离开: {}", peer_id));
         }
-        Ui_Message::Connection_Established(peer_id) => {
+        Bus_Event::Connection_Established { peer_id } => {
             app.Update_Peer(peer_id.clone(), true);
             app.Add_Log(format!("连接建立: {}", peer_id));
         }
-        Ui_Message::Connection_Closed(peer_id) => {
+        Bus_Event::Connection_Closed { peer_id } => {
             app.Update_Peer(peer_id.clone(), false);
             app.Add_Log(format!("连接断开: {}", peer_id));
         }
-        Ui_Message::File_Progress {
+        Bus_Event::File_Progress {
             file_name,
             direction,
             peer,
@@ -175,24 +173,22 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
                 total,
             };
         }
-        Ui_Message::Job_Inference {
+        Bus_Event::Inference_Started {
+            job_id: _,
             model_name,
             device_count,
             layer_range,
-            phase,
         } => {
             app.job = Job_State::Inference {
-                model_name,
+                model_name: model_name.clone(),
                 device_count,
-                layer_range,
-                phase,
+                layer_range: layer_range.clone(),
+                phase: "初始化".to_string(),
             };
+            app.view_mode = View_Mode::Busy;
+            app.Add_Log(format!("推理开始: {} [{}]", model_name, layer_range));
         }
-        Ui_Message::Job_Idle => {
-            app.job = Job_State::Idle;
-            app.view_mode = View_Mode::Idle;
-        }
-        Ui_Message::Inference_Token(token) => {
+        Bus_Event::Inference_Token { job_id: _, token } => {
             app.command_output.output_text.push_str(&token);
             app.command_output.token_count += 1;
             app.view_mode = View_Mode::Busy_Coordinator;
@@ -200,7 +196,8 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
             let line_count = app.command_output.output_text.lines().count();
             app.command_scroll = line_count.saturating_sub(1);
         }
-        Ui_Message::Inference_Complete {
+        Bus_Event::Inference_Completed {
+            job_id: _,
             text,
             tokens,
             tok_per_sec,
@@ -217,10 +214,31 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
                 tokens, tok_per_sec, total_secs
             ));
         }
-        Ui_Message::Error(text) => {
-            app.Add_Log(format!("[错误] {}", text));
+        Bus_Event::Job_Created { job_id, kind, model_name } => {
+            let msg = if model_name.is_empty() {
+                format!("Job #{} 已创建 [{}]", job_id, kind)
+            } else {
+                format!("Job #{} 已创建 [{}] 模型: {}", job_id, kind, model_name)
+            };
+            app.Add_Log(msg);
         }
-        Ui_Message::Device_Change(device) => {
+        Bus_Event::Job_State_Changed { job_id, phase } => {
+            app.Add_Log(format!("Job #{} 阶段: {}", job_id, phase));
+            // 更新 Inference 阶段（如果当前 Job 是推理类型）
+            if let Job_State::Inference { phase: ref mut current_phase, .. } = app.job {
+                *current_phase = phase;
+            }
+        }
+        Bus_Event::Job_Completed { job_id, result } => {
+            app.Add_Log(format!("Job #{} 完成: {}", job_id, result));
+            // 仅当当前不在推理输出模式时才切回 Idle
+            // （推理完成已由 Inference_Completed 处理）
+            if app.view_mode != View_Mode::Busy_Coordinator {
+                app.job = Job_State::Idle;
+                app.view_mode = View_Mode::Idle;
+            }
+        }
+        Bus_Event::Device_Changed { device } => {
             app.Add_Log(format!("设备已切换: {}", device.to_uppercase()));
             app.device = device;
         }
@@ -232,7 +250,7 @@ fn Handle_Ui_Message(app: &mut App, msg: Ui_Message) {
 // ============================================================
 
 /// 处理键盘事件
-fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, cli_tx: &mpsc::Sender<CLI_Command>) {
+fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, user_cmd_tx: &mpsc::Sender<UserCommand>) {
     // Ctrl+C: 强制退出
     if modifiers.contains(KeyModifiers::CONTROL) && key_code == KeyCode::Char('c') {
         app.should_quit = true;
@@ -244,7 +262,7 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, c
         KeyCode::Enter => {
             let input = app.Take_Input();
             if !input.is_empty() {
-                Handle_Command_Input(app, &input, cli_tx);
+                Handle_Command_Input(app, &input, user_cmd_tx);
             }
         }
         // Esc: 清空输入
@@ -258,36 +276,28 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, c
         // ↑: 根据修饰键决定滚动目标
         KeyCode::Up => {
             if modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+Up: 命令面板向上滚动
                 app.Scroll_Command_Up();
             } else {
-                // 普通 Up: 日志向上滚动
                 app.Scroll_Up();
             }
         }
         // ↓: 根据修饰键决定滚动目标
         KeyCode::Down => {
             if modifiers.contains(KeyModifiers::CONTROL) {
-                // Ctrl+Down: 命令面板向下滚动
                 app.Scroll_Command_Down();
             } else {
-                // 普通 Down: 日志向下滚动
                 app.Scroll_Down();
             }
         }
         // PageUp: 命令面板向上滚动（快速）
         KeyCode::PageUp => {
-            app.Scroll_Command_Up();
-            // 快速滚动：一次滚动5行
-            for _ in 0..4 {
+            for _ in 0..5 {
                 app.Scroll_Command_Up();
             }
         }
         // PageDown: 命令面板向下滚动（快速）
         KeyCode::PageDown => {
-            app.Scroll_Command_Down();
-            // 快速滚动：一次滚动5行
-            for _ in 0..4 {
+            for _ in 0..5 {
                 app.Scroll_Command_Down();
             }
         }
@@ -306,10 +316,7 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, c
 /// 处理鼠标事件
 ///
 /// 根据鼠标位置判断光标所在面板，将滚轮事件路由到对应的滚动方法。
-/// - 光标在 Log 面板区域 → 日志滚动
-/// - 光标在 Command 面板区域 → 命令输出滚动
 fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u16) {
-    // 判断鼠标所在面板
     let in_log = row >= app.log_area.y && row < app.log_area.y + app.log_area.height;
     let in_command = row >= app.command_area.y && row < app.command_area.y + app.command_area.height;
 
@@ -332,9 +339,15 @@ fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u1
     }
 }
 
-/// 处理用户输入的命令，通过 cli_tx 发送给 Control 层
-fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Command>) {
+// ============================================================
+// 命令输入处理
+// ============================================================
+
+/// 处理用户输入的命令，通过 user_cmd_tx 发送 UserCommand 给 Orchestrator Core
+fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<UserCommand>) {
     let trimmed = input.trim();
+
+    // ---- 本地命令（不发给 Core） ----
 
     if trimmed == "quit" || trimmed == "exit" {
         app.should_quit = true;
@@ -347,128 +360,33 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
         return;
     }
 
+    if trimmed == "help" {
+        app.command_output = Command_Output::New();
+        app.command_scroll = 0;
+        app.command_output.output_text = [
+            "可用命令:",
+            "  run <model_path>         - 启动本地推理",
+            "  send <file> <peer>       - 向节点发送文件",
+            "  cancel <job_id>          - 取消指定作业",
+            "  display-peer / dp        - 查看节点列表",
+            "  set-device cpu/cuda      - 切换计算设备",
+            "  ls                       - 列出存储文件",
+            "  distribute <model> <peer:start-end> ... - 分发模型分片",
+            "  clear                    - 清空日志",
+            "  quit / exit              - 退出",
+            "  help                     - 显示此帮助",
+        ].join("\n");
+        app.command_output.completed = true;
+        return;
+    }
+
     // 每次新命令清空 Command 面板并重置滚动
     app.command_output = Command_Output::New();
     app.command_scroll = 0;
 
-    if trimmed == "ls" {
-        // 列出 Pleiades_Workspace 下的文件
-        app.Add_Log("执行命令: ls".to_string());
-        let workspace_dir = std::path::Path::new("Pleiades_Workspace");
-        if workspace_dir.exists() {
-            let mut file_list = String::new();
-            match std::fs::read_dir(workspace_dir) {
-                Ok(entries) => {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let metadata = entry.metadata();
-                        let size_str = match metadata {
-                            Ok(m) => {
-                                let size = m.len();
-                                if size > 1_073_741_824 {
-                                    format!("{:.2} GB", size as f64 / 1_073_741_824.0)
-                                } else if size > 1_048_576 {
-                                    format!("{:.2} MB", size as f64 / 1_048_576.0)
-                                } else if size > 1024 {
-                                    format!("{:.1} KB", size as f64 / 1024.0)
-                                } else {
-                                    format!("{} B", size)
-                                }
-                            }
-                            Err(_) => "???".to_string(),
-                        };
-                        file_list.push_str(&format!("  {} ({})\n", name, size_str));
-                    }
-                    if file_list.is_empty() {
-                        file_list = "  (空目录)".to_string();
-                    }
-                }
-                Err(e) => {
-                    file_list = format!("  读取目录失败: {}", e);
-                }
-            }
-            app.command_output.output_text = format!("Pleiades_Workspace/\n{}", file_list);
-            app.command_output.completed = true;
-        } else {
-            app.command_output.output_text = "Pleiades_Workspace/ 目录不存在".to_string();
-            app.command_output.completed = true;
-        }
-        return;
-    }
-
-    if trimmed.starts_with("set-device ") {
-        let device_str = trimmed.strip_prefix("set-device ").unwrap_or("").trim().to_lowercase();
-        if device_str == "cpu" || device_str == "cuda" {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            let cmd = CLI_Command::SetDevice {
-                device: device_str.clone(),
-                reply: reply_tx,
-            };
-
-            app.Add_Log(format!("执行命令: set-device {}", device_str));
-
-            if cli_tx.blocking_send(cmd).is_err() {
-                app.Add_Log("[错误] Control 层已关闭".to_string());
-                app.should_quit = true;
-                return;
-            }
-
-            // 同步等待 Control 层的回复
-            match reply_rx.blocking_recv() {
-                Ok(Ok(msg)) => {
-                    app.command_output.output_text = msg;
-                    app.command_output.completed = true;
-                }
-                Ok(Err(e)) => {
-                    app.command_output.output_text = format!("错误: {}", e);
-                    app.command_output.completed = true;
-                }
-                Err(_) => {
-                    app.command_output.output_text = "Control 层未响应".to_string();
-                    app.command_output.completed = true;
-                }
-            }
-        } else {
-            app.command_output.output_text = format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
-            app.command_output.completed = true;
-        }
-        return;
-    }
-
-    if trimmed == "display-peer" || trimmed == "dp" {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = CLI_Command::DisplayPeer {
-            reply: reply_tx,
-        };
-
-        app.Add_Log("执行命令: display-peer".to_string());
-
-        if cli_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Control 层已关闭".to_string());
-            app.should_quit = true;
-            return;
-        }
-
-        // 同步等待 Control 层的回复
-        match reply_rx.blocking_recv() {
-            Ok(Ok(msg)) => {
-                app.command_output.output_text = msg;
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Control 层未响应".to_string();
-                app.command_output.completed = true;
-            }
-        }
-        return;
-    }
+    // ---- run <model_path> ----
 
     if trimmed.starts_with("run ") {
-        // 解析 run 命令: run <model_path>（不含 prompt）
         let model_path_str = trimmed.strip_prefix("run ").unwrap_or("").trim();
 
         if model_path_str.is_empty() {
@@ -477,38 +395,332 @@ fn Handle_Command_Input(app: &mut App, input: &str, cli_tx: &mpsc::Sender<CLI_Co
             return;
         }
 
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        let cmd = CLI_Command::Run {
-            model_path: PathBuf::from(model_path_str),
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::Run {
+            model_path: model_path_str.to_string(),
             reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: run {}", model_path_str));
         app.command_output.output_text = "建立推理会话中...".to_string();
 
-        if cli_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Control 层已关闭".to_string());
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
+            return;
+        }
+
+        // 同步等待 Core 回复
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.Add_Log(format!("推理 Job #{} 已创建", job_id.0));
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
         }
         return;
     }
 
-    // 非命令文本 → 视为 prompt 输入（发送给活跃的推理 Session）
-    let (reply_tx, _reply_rx) = oneshot::channel();
-    let cmd = CLI_Command::Input {
-        prompt: trimmed.to_string(),
-        reply: reply_tx,
-    };
+    // ---- cancel <job_id> ----
 
-    app.Add_Log(format!("发送 prompt: {}", trimmed));
-    app.command_output = Command_Output::New();
-    app.command_output.output_text = String::new();
-    app.command_scroll = 0;
+    if trimmed.starts_with("cancel ") {
+        let id_str = trimmed.strip_prefix("cancel ").unwrap_or("").trim();
+        let job_id = match id_str.parse::<u64>() {
+            Ok(id) => JobId(id),
+            Err(_) => {
+                app.command_output.output_text = format!("错误: 无效的 Job ID '{}'\n用法: cancel <job_id>", id_str);
+                app.command_output.completed = true;
+                return;
+            }
+        };
 
-    if cli_tx.blocking_send(cmd).is_err() {
-        app.Add_Log("[错误] Control 层已关闭".to_string());
-        app.should_quit = true;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::Cancel {
+            job_id,
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: cancel {}", id_str));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(())) => {
+                app.command_output.output_text = format!("Job #{} 取消信号已发送", job_id.0);
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
     }
+
+    // ---- display-peer / dp ----
+
+    if trimmed == "display-peer" || trimmed == "dp" {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::DisplayPeer {
+            reply: reply_tx,
+        };
+
+        app.Add_Log("执行命令: display-peer".to_string());
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(peers)) => {
+                if peers.is_empty() {
+                    app.command_output.output_text = "当前无已知节点".to_string();
+                } else {
+                    app.command_output.output_text = peers.join("\n");
+                }
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- set-device <cpu/cuda> ----
+
+    if trimmed.starts_with("set-device ") {
+        let device_str = trimmed.strip_prefix("set-device ").unwrap_or("").trim().to_lowercase();
+        if device_str != "cpu" && device_str != "cuda" {
+            app.command_output.output_text = format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
+            app.command_output.completed = true;
+            return;
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::SetDevice {
+            device: device_str.clone(),
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: set-device {}", device_str));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(())) => {
+                app.command_output.output_text = format!("设备已切换为: {}", device_str.to_uppercase());
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- ls (列出存储文件) ----
+
+    if trimmed == "ls" {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::List {
+            reply: reply_tx,
+        };
+
+        app.Add_Log("执行命令: ls".to_string());
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(files)) => {
+                if files.is_empty() {
+                    app.command_output.output_text = "存储为空（无文件）".to_string();
+                } else {
+                    let mut output = format!("共 {} 个文件:\n", files.len());
+                    for file_id in &files {
+                        output.push_str(&format!("  {}\n", file_id));
+                    }
+                    app.command_output.output_text = output;
+                }
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- send <file> <peer> ----
+
+    if trimmed.starts_with("send ") {
+        let args: Vec<&str> = trimmed.strip_prefix("send ").unwrap_or("").trim().split_whitespace().collect();
+
+        if args.len() != 2 {
+            app.command_output.output_text = "错误: 参数不正确\n用法: send <file> <peer_id>".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let file_path = args[0].to_string();
+        let peer_id = args[1].to_string();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::Send {
+            file_path: file_path.clone(),
+            peer_id: peer_id.clone(),
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: send {} → {}", file_path, peer_id));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.command_output.output_text = format!("发送 Job #{} 已创建 ({} → {})", job_id.0, file_path, peer_id);
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- distribute <model_path> <peer_id:start-end> ... ----
+
+    if trimmed.starts_with("distribute ") {
+        let args: Vec<&str> = trimmed.strip_prefix("distribute ").unwrap_or("").trim().split_whitespace().collect();
+
+        if args.len() < 2 {
+            app.command_output.output_text = "错误: 参数不足\n用法: distribute <model_path> <peer_id:start-end> ...".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let model_path = args[0].to_string();
+        let mut peers: Vec<(String, usize, usize)> = Vec::new();
+
+        for arg in &args[1..] {
+            match Parse_Peer_Assignment(arg) {
+                Ok(assignment) => peers.push(assignment),
+                Err(e) => {
+                    app.command_output.output_text = format!("错误: 解析 '{}' 失败: {}\n格式: peer_id:start-end", arg, e);
+                    app.command_output.completed = true;
+                    return;
+                }
+            }
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::DistributeModel {
+            model_path: model_path.clone(),
+            peers,
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: distribute {}", model_path));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.command_output.output_text = format!("分发 Job #{} 已创建", job_id.0);
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- 未识别的命令 ----
+
+    app.command_output.output_text = format!("未知命令: '{}'\n输入 help 查看可用命令", trimmed);
+    app.command_output.completed = true;
+}
+
+/// 解析 peer 分配字符串，格式: `peer_id:start-end`
+///
+/// 例: `12D3KooW...abc:0-15` → `("12D3KooW...abc", 0, 15)`
+fn Parse_Peer_Assignment(arg: &str) -> Result<(String, usize, usize), String> {
+    let parts: Vec<&str> = arg.rsplitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err("缺少 ':' 分隔符".to_string());
+    }
+    let peer_id = parts[1].to_string();
+    let range_str = parts[0];
+
+    let range_parts: Vec<&str> = range_str.split('-').collect();
+    if range_parts.len() != 2 {
+        return Err("层范围格式错误，应为 start-end".to_string());
+    }
+
+    let start = range_parts[0].parse::<usize>()
+        .map_err(|e| format!("start 解析失败: {}", e))?;
+    let end = range_parts[1].parse::<usize>()
+        .map_err(|e| format!("end 解析失败: {}", e))?;
+
+    Ok((peer_id, start, end))
 }
 
 // ============================================================

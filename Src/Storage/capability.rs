@@ -147,6 +147,14 @@ pub trait StorageCapability: Send + Sync {
     ///
     /// 返回当前配额使用情况的快照。
     async fn quota_info(&self) -> QuotaInfo;
+
+    // === 目录同步 ===
+
+    /// 重新扫描 base_dir，将磁盘上存在但未纳入索引的文件加入管理，
+    /// 同时清理索引中存在但磁盘上已消失的僵尸条目（跳过有活跃锁的条目）。
+    ///
+    /// 返回 (新发现文件数, 清理僵尸数)。
+    async fn flush(&self) -> Result<(usize, usize), StorageError>;
 }
 
 #[cfg(test)]

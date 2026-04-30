@@ -421,7 +421,7 @@ mod tests {
 
     async fn make_caps(ml_engine: impl ML_Engine_Capability + 'static) -> (Arc<Capabilities>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = StorageManager::New(temp_dir.path()).await.unwrap();
+        let storage = Arc::new(StorageManager::New(temp_dir.path()).await.unwrap());
         let caps = Arc::new(Capabilities {
             storage,
             ml_engine: Box::new(ml_engine),
