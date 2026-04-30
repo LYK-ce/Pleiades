@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-29
+//Date ： 2026-04-30
 
 //! Pleiades 入口点
 //!
@@ -170,8 +170,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 10. ML Engine — 推理引擎（共享 Storage）
     let ml_engine = ML_Engine_Service::New(storage.clone());
 
-    // 11. LLM_IO_Broker + Tensor_IO_Broker
-    let io_broker = LLM_IO_Broker::New();
+    // 11. LLM_IO_Broker (Arc 共享给 Capabilities 和 TUI) + Tensor_IO_Broker
+    let io_broker = Arc::new(LLM_IO_Broker::New());
     let tensor_io_broker = Tensor_IO_Broker::New();
 
     // ══════════════════════════════════════════════════════
@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: Box::new(net_capability),
         peer_manager: peer_capability_for_caps,
         event_bus: event_bus.clone(),
-        io_broker,
+        io_broker: io_broker.clone(),
         tensor_io_broker,
     });
 
@@ -218,8 +218,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 16. 启动 TUI（spawn_blocking，因为 ratatui 是同步阻塞 API）
     let event_rx = event_bus.Subscribe();
+    let io_broker_for_tui = io_broker.clone();
     tokio::task::spawn_blocking(move || {
-        TUI_Loop(event_rx, user_cmd_tx);
+        TUI_Loop(event_rx, user_cmd_tx, io_broker_for_tui);
     });
 
     // 17. Core 主循环（阻塞当前 task 直到 Quit）

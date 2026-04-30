@@ -1,5 +1,5 @@
 // Presented by KeJi
-// Date ： 2026-04-28
+// Date ： 2026-04-30
 
 pub mod core;
 pub mod job;
@@ -26,7 +26,7 @@ pub struct Capabilities {
     pub network: Box<dyn Network_Capability>,
     pub peer_manager: Box<dyn Peer_Management_Capability>,
     pub event_bus: Arc<EventBus>,
-    pub io_broker: LLM_IO_Broker,
+    pub io_broker: Arc<LLM_IO_Broker>,
     pub tensor_io_broker: Tensor_IO_Broker,
 }
 

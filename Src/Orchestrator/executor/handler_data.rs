@@ -64,7 +64,7 @@ mod tests {
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
             event_bus: Arc::new(EventBus::New(16)),
-            io_broker: LLM_IO_Broker::New(),
+            io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_io_broker: Tensor_IO_Broker::New(),
         });
         (caps, temp_dir)

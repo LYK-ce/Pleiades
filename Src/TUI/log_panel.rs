@@ -1,10 +1,10 @@
 //Presented by KeJi
-//Date ： 2026-04-07
+//Date ： 2026-04-30
 
 //! Log 显示区
 //!
 //! 位于左上角，占 70% 宽度。显示带时间戳的滚动日志列表。
-//! 支持 ↑↓ 键滚动查看历史日志。
+//! 支持 ↑↓ 键滚动查看历史日志。文本自动换行。
 
 #![allow(non_snake_case)]
 
@@ -13,14 +13,15 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use super::app::App;
 
 /// 渲染 Log 面板
 ///
-/// 显示日志列表，支持滚动。最新日志在底部。
+/// 显示日志列表，支持滚动和自动换行。最新日志在底部。
+/// 使用 Paragraph + Wrap 实现长文本自动换行（替代 List 的截断行为）。
 ///
 /// # 参数
 /// - `frame`: ratatui 帧
@@ -33,22 +34,8 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
         .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(Color::DarkGray));
 
-    // 计算可见区域高度（减去边框 2 行）
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    // 计算显示范围
-    let total = app.logs.len();
-    let start = if total > inner_height {
-        // 如果日志数量超过可见高度，使用 scroll 偏移
-        let max_scroll = total - inner_height;
-        app.log_scroll.min(max_scroll)
-    } else {
-        0
-    };
-    let end = (start + inner_height).min(total);
-
-    // 构建列表项
-    let items: Vec<ListItem> = app.logs[start..end]
+    // 构建带样式的行
+    let lines: Vec<Line> = app.logs
         .iter()
         .map(|log| {
             let style = if log.contains("[错误]") || log.contains("ERROR") || log.contains("失败") {
@@ -61,11 +48,14 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::White)
             };
 
-            ListItem::new(Line::from(Span::styled(log.as_str(), style)))
+            Line::from(Span::styled(log.as_str(), style))
         })
         .collect();
 
-    let list = List::new(items).block(block);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.log_scroll as u16, 0));
 
-    frame.render_widget(list, area);
+    frame.render_widget(paragraph, area);
 }
