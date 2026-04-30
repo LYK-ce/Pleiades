@@ -1,11 +1,11 @@
 //Presented by KeJi
-//Date ： 2026-04-29
+//Date ： 2026-04-30
 
 use std::sync::Mutex;
 use libp2p::PeerId;
 use crate::orchestrator::slot::{SlotId, SlotValue};
 use crate::network::DataType;
-use crate::network::tensor_stream_protocol::{Tensor_IO_Handle, Write_Tensor_Stream_Handshake};
+use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
 use crate::storage::{StorageCapability, ChecksumAlgorithm};
 use super::task_engine::StepResult;
@@ -238,106 +238,7 @@ impl super::TaskEngine {
         }
     }
 
-    /// 处理 OpenTensorStream 指令：向下游 Peer 打开出站张量流并存入 Broker
-    ///
-    /// 1. 从 `peer` 槽位读取下游 PeerId
-    /// 2. 从 `target_job` 槽位读取远端 Job ID（用于 handshake 帧）
-    /// 3. 调用 `network.open_tensor_stream(peer)` 打开出站流
-    /// 4. 在流上写入 handshake 帧（target_job_id）
-    /// 5. 将 outbound 存入 `Tensor_IO_Broker.Store_Outbound(job_id, stream)`
-    pub(super) async fn handle_open_tensor_stream(&mut self, peer: SlotId, target_job: SlotId) -> StepResult {
-        // 1. 解析 PeerId
-        let peer_id_str = match self.slots.get_string(peer) {
-            Ok(s) => s.clone(),
-            Err(e) => return StepResult::Abort(format!("OpenTensorStream: peer slot error: {}", e)),
-        };
-        let peer_id: PeerId = match peer_id_str.parse() {
-            Ok(id) => id,
-            Err(e) => return StepResult::Abort(format!("OpenTensorStream: invalid PeerId '{}': {}", peer_id_str, e)),
-        };
-
-        // 2. 读取 target_job_id
-        let target_job_id = match self.slots.get_u64(target_job) {
-            Ok(v) => v,
-            Err(e) => return StepResult::Abort(format!("OpenTensorStream: target_job slot error: {}", e)),
-        };
-
-        // 3. 打开出站流
-        let mut stream = match self.capabilities.network.open_tensor_stream(peer_id).await {
-            Ok(s) => s,
-            Err(e) => return StepResult::Abort(format!("OpenTensorStream: open_tensor_stream failed: {}", e)),
-        };
-
-        // 4. 写入 handshake 帧（target_job_id）
-        if let Err(e) = Write_Tensor_Stream_Handshake(&mut stream, target_job_id).await {
-            return StepResult::Abort(format!("OpenTensorStream: handshake write failed: {}", e));
-        }
-
-        // 5. 存入 Broker
-        if let Err(e) = self.capabilities.tensor_io_broker.Store_Outbound(self.job_id, stream).await {
-            return StepResult::Abort(format!("OpenTensorStream: broker Store_Outbound failed: {}", e));
-        }
-
-        StepResult::Continue
-    }
-
-    /// 处理 TakeInboundStream 指令：从 Tensor_IO_Broker 取出入站张量流
-    ///
-    /// 调用 `broker.Take_Inbound(job_id).await`（阻塞直到 inbound 到达）
-    /// raw `libp2p::Stream` 写入 `result` 槽位
-    pub(super) async fn handle_take_inbound_stream(&mut self, result: SlotId) -> StepResult {
-        match self.capabilities.tensor_io_broker.Take_Inbound(self.job_id).await {
-            Ok(stream) => {
-                self.slots.set(result, SlotValue::Stream(Mutex::new(Some(stream))));
-                StepResult::Continue
-            }
-            Err(e) => StepResult::Abort(format!("TakeInboundStream: broker Take_Inbound failed: {}", e)),
-        }
-    }
-
-    /// 处理 TakeOutboundStream 指令：从 Tensor_IO_Broker 取出出站张量流
-    ///
-    /// 调用 `broker.Take_Outbound(job_id).await`（阻塞直到 outbound 就绪）
-    /// raw `libp2p::Stream` 写入 `result` 槽位
-    pub(super) async fn handle_take_outbound_stream(&mut self, result: SlotId) -> StepResult {
-        match self.capabilities.tensor_io_broker.Take_Outbound(self.job_id).await {
-            Ok(stream) => {
-                self.slots.set(result, SlotValue::Stream(Mutex::new(Some(stream))));
-                StepResult::Continue
-            }
-            Err(e) => StepResult::Abort(format!("TakeOutboundStream: broker Take_Outbound failed: {}", e)),
-        }
-    }
-
-    /// 处理 BuildTensorIo 指令：组装 Tensor_IO_Handle
-    ///
-    /// 从 `inbound`/`outbound` 槽位 take 两条 raw stream，
-    /// 调用 `Tensor_IO_Handle::New(inbound, outbound, rt)` 组装，
-    /// 结果写入 `result` 槽位（SlotValue::TensorIo）
-    pub(super) async fn handle_build_tensor_io(
-        &mut self,
-        inbound: SlotId,
-        outbound: SlotId,
-        result: SlotId,
-    ) -> StepResult {
-        // 1. 取出 inbound stream
-        let inbound_stream = match self.slots.take_stream(inbound) {
-            Ok(s) => s,
-            Err(e) => return StepResult::Abort(format!("BuildTensorIo: inbound slot error: {}", e)),
-        };
-
-        // 2. 取出 outbound stream
-        let outbound_stream = match self.slots.take_stream(outbound) {
-            Ok(s) => s,
-            Err(e) => return StepResult::Abort(format!("BuildTensorIo: outbound slot error: {}", e)),
-        };
-
-        // 3. 组装 Tensor_IO_Handle
-        let rt = tokio::runtime::Handle::current();
-        let tensor_io = Tensor_IO_Handle::New(inbound_stream, outbound_stream, rt);
-
-        // 4. 存入 result 槽位
-        self.slots.set(result, SlotValue::TensorIo(Mutex::new(Some(tensor_io))));
-        StepResult::Continue
-    }
+    // NOTE: handle_open_tensor_stream, handle_take_inbound_stream,
+    // handle_take_outbound_stream, handle_build_tensor_io 已在 Phase 3 移除。
+    // 张量流连接现由 Core 在 spawn Job 之前完成（"先连接后启动"模式）。
 }

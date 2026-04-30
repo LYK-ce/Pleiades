@@ -34,11 +34,7 @@ pub const SLOT_LAYER_END: SlotId = SlotId(6);
 pub const SLOT_PEER: SlotId = SlotId(7);
 /// 远端 Relay Job ID 槽位（由 RequestPipeline 写入）
 pub const SLOT_TARGET_JOB: SlotId = SlotId(8);
-/// 入站 raw stream 槽位（由 TakeInboundStream 写入）
-pub const SLOT_INBOUND: SlotId = SlotId(9);
-/// 出站 raw stream 槽位（由 TakeOutboundStream 写入）
-pub const SLOT_OUTBOUND: SlotId = SlotId(10);
-/// 组装后的 Tensor IO Handle 槽位（由 BuildTensorIo 写入）
+/// 组装后的 Tensor IO Endpoint 槽位（由 Core 在 spawn 前预注入）
 pub const SLOT_TENSOR_IO: SlotId = SlotId(11);
 /// Coordinator Job ID 槽位（Relay 用，由 compile_relay 写入）
 pub const SLOT_COORDINATOR_JOB: SlotId = SlotId(12);
@@ -143,12 +139,12 @@ impl Compiler {
     /// 编译 Coordinator 作业的 TaskProgram（分布式协调者 — 纯流水线推理）
     ///
     /// 前提：模型文件已在各节点本地（文件分发是独立命令）。
+    /// Core 在 spawn 前负责建立 Tensor Stream 并将 Endpoint 预注入 SLOT_TENSOR_IO。
     ///
     /// 生成的指令序列：
     /// ```text
     /// 正向：Const(model/device/layers) → Const(peer) → RequestPipeline
-    ///       → OpenTensorStream → TakeInbound → TakeOutbound → BuildTensorIo
-    ///       → CreateSession(with tensor_io) → RunProgram
+    ///       → CreateSession(with tensor_io=SLOT_TENSOR_IO) → RunProgram
     /// 补偿：ShutdownSession
     /// ```
     pub fn compile_coordinator(
@@ -209,24 +205,7 @@ impl Compiler {
             result: SLOT_TARGET_JOB,
         });
 
-        // 3. 建立双向 Tensor Stream
-        builder.push_instruction(TaskInstruction::OpenTensorStream {
-            peer: SLOT_PEER,
-            target_job: SLOT_TARGET_JOB,
-        });
-        builder.push_instruction(TaskInstruction::TakeInboundStream {
-            result: SLOT_INBOUND,
-        });
-        builder.push_instruction(TaskInstruction::TakeOutboundStream {
-            result: SLOT_OUTBOUND,
-        });
-        builder.push_instruction(TaskInstruction::BuildTensorIo {
-            inbound: SLOT_INBOUND,
-            outbound: SLOT_OUTBOUND,
-            result: SLOT_TENSOR_IO,
-        });
-
-        // 4. 创建 ML Session（带 tensor_io）+ 运行推理
+        // 3. 创建 ML Session（tensor_io 由 Core 预注入 SLOT_TENSOR_IO）+ 运行推理
         builder.push_instruction(TaskInstruction::CreateSession {
             model: SLOT_MODEL,
             device: SLOT_DEVICE,
@@ -253,12 +232,11 @@ impl Compiler {
     ///
     /// 前提：模型分片已在本地（文件分发是独立命令）。
     /// 由远端 Core 的 route_network(PipelineFlow) 调用。
+    /// Core 在 spawn 前负责建立 Tensor Stream 并将 Endpoint 预注入 SLOT_TENSOR_IO。
     ///
     /// 生成的指令序列：
     /// ```text
-    /// 正向：Const(coordinator_peer/job) → OpenTensorStream
-    ///       → TakeInbound → TakeOutbound → BuildTensorIo
-    ///       → Const(model/device/layers) → CreateSession(with tensor_io) → RunProgram
+    /// 正向：Const(model/device/layers) → CreateSession(with tensor_io=SLOT_TENSOR_IO) → RunProgram
     /// 补偿：ShutdownSession
     /// ```
     pub fn compile_relay(
@@ -291,21 +269,7 @@ impl Compiler {
             value: ConstValue::U64(coordinator_job_id),
             dst: SLOT_COORDINATOR_JOB,
         });
-        builder.push_instruction(TaskInstruction::OpenTensorStream {
-            peer: SLOT_PEER,
-            target_job: SLOT_COORDINATOR_JOB,
-        });
-        builder.push_instruction(TaskInstruction::TakeInboundStream {
-            result: SLOT_INBOUND,
-        });
-        builder.push_instruction(TaskInstruction::TakeOutboundStream {
-            result: SLOT_OUTBOUND,
-        });
-        builder.push_instruction(TaskInstruction::BuildTensorIo {
-            inbound: SLOT_INBOUND,
-            outbound: SLOT_OUTBOUND,
-            result: SLOT_TENSOR_IO,
-        });
+        // NOTE: Tensor Stream 连接由 Core 在 spawn 前完成，Endpoint 预注入 SLOT_TENSOR_IO
 
         // 2. 注入模型/设备/层范围参数
         builder.push_instruction(TaskInstruction::Const {
@@ -325,7 +289,7 @@ impl Compiler {
             dst: SLOT_LAYER_END,
         });
 
-        // 3. 创建 ML Session（带 tensor_io）+ 运行推理
+        // 3. 创建 ML Session（tensor_io 由 Core 预注入 SLOT_TENSOR_IO）+ 运行推理
         builder.push_instruction(TaskInstruction::CreateSession {
             model: SLOT_MODEL,
             device: SLOT_DEVICE,

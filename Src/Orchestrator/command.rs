@@ -86,10 +86,12 @@ pub enum UserCommand {
 /// 接收方通过 `Parse_Network_Command()` 解析，发送方通过 `Serialize_Network_Command()` 序列化。
 ///
 /// ## 命令列表
-/// - `REQUEST_PIPELINE`: 远端 Coordinator 请求本节点作为 Worker 加入流水线
+/// - `REQUEST_PIPELINE`: 远端 Coordinator 请求本节点作为 Worker 加入流水线（旧路径，保留兼容）
+/// - `ESTABLISH_TENSOR_STREAM`: 请求 Worker 向指定 target 打开一条张量流
+/// - `JOIN_PIPELINE`: 通知 Worker 启动推理 Job（加载模型后回复 OK）
 #[derive(Debug, Clone)]
 pub enum NetworkProtocol {
-    /// 请求加入流水线（远端 Coordinator → 本节点）
+    /// 请求加入流水线（远端 Coordinator → 本节点）— 旧路径，保留向后兼容
     ///
     /// 格式: `REQUEST_PIPELINE|{coordinator_job_id}|{model_file_id}|{device}|{layer_start}|{layer_end}`
     ///
@@ -98,6 +100,38 @@ pub enum NetworkProtocol {
     Request_Pipeline {
         /// Coordinator 的 Job ID（用于 Relay 的 OpenTensorStream handshake）
         coordinator_job_id: u64,
+        /// 模型文件 ID（本地已有的模型分片）
+        model_file_id: String,
+        /// 推理设备偏好（"cpu" / "cuda"）
+        device: String,
+        /// 模型层范围 — 起始层
+        layer_start: usize,
+        /// 模型层范围 — 结束层
+        layer_end: usize,
+    },
+
+    /// 请求 Worker 向指定 target 打开一条张量流（Phase 1）
+    ///
+    /// 格式: `ESTABLISH_TENSOR_STREAM|{inference_id}|{target_peer_id}`
+    ///
+    /// 处理: Worker 打开出站流 → handshake → 注册到 TensorPortSwitch
+    /// 回复: `OK` 或 `FAIL|{reason}`
+    Establish_Tensor_Stream {
+        /// 分布式推理全局唯一 ID
+        inference_id: u64,
+        /// 目标节点的 PeerId（Worker 需向此节点打开出站张量流）
+        target_peer_id: String,
+    },
+
+    /// 通知 Worker 启动推理 Job（Phase 2）
+    ///
+    /// 格式: `JOIN_PIPELINE|{inference_id}|{model_file_id}|{device}|{layer_start}|{layer_end}`
+    ///
+    /// 处理: Worker 取出张量流 → 加载模型 → spawn Job → 回复 OK
+    /// 回复: `OK` 或 `FAIL|{reason}`（超时 300s）
+    Join_Pipeline {
+        /// 分布式推理全局唯一 ID（关联张量流）
+        inference_id: u64,
         /// 模型文件 ID（本地已有的模型分片）
         model_file_id: String,
         /// 推理设备偏好（"cpu" / "cuda"）
@@ -146,13 +180,51 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                 layer_end,
             })
         }
+        "ESTABLISH_TENSOR_STREAM" => {
+            if parts.len() != 3 {
+                return Err(format!(
+                    "ESTABLISH_TENSOR_STREAM 格式错误: 需要 3 个字段, 实际 {}. 格式: ESTABLISH_TENSOR_STREAM|inference_id|target_peer_id",
+                    parts.len()
+                ));
+            }
+            let inference_id = parts[1].parse::<u64>()
+                .map_err(|e| format!("inference_id 解析失败: {}", e))?;
+            let target_peer_id = parts[2].to_string();
+            Ok(NetworkProtocol::Establish_Tensor_Stream {
+                inference_id,
+                target_peer_id,
+            })
+        }
+        "JOIN_PIPELINE" => {
+            if parts.len() != 6 {
+                return Err(format!(
+                    "JOIN_PIPELINE 格式错误: 需要 6 个字段, 实际 {}. 格式: JOIN_PIPELINE|inference_id|model_file_id|device|layer_start|layer_end",
+                    parts.len()
+                ));
+            }
+            let inference_id = parts[1].parse::<u64>()
+                .map_err(|e| format!("inference_id 解析失败: {}", e))?;
+            let model_file_id = parts[2].to_string();
+            let device = parts[3].to_string();
+            let layer_start = parts[4].parse::<usize>()
+                .map_err(|e| format!("layer_start 解析失败: {}", e))?;
+            let layer_end = parts[5].parse::<usize>()
+                .map_err(|e| format!("layer_end 解析失败: {}", e))?;
+            Ok(NetworkProtocol::Join_Pipeline {
+                inference_id,
+                model_file_id,
+                device,
+                layer_start,
+                layer_end,
+            })
+        }
         unknown => Err(format!("未知命令前缀: '{}'", unknown)),
     }
 }
 
 /// 序列化: NetworkProtocol → payload bytes
 ///
-/// 供发送方（如 Coordinator Job 的 RequestPipeline 指令）使用。
+/// 供发送方（如 Coordinator 的三阶段编排逻辑）使用。
 pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
     let text = match cmd {
         NetworkProtocol::Request_Pipeline {
@@ -164,6 +236,23 @@ pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
         } => format!(
             "REQUEST_PIPELINE|{}|{}|{}|{}|{}",
             coordinator_job_id, model_file_id, device, layer_start, layer_end
+        ),
+        NetworkProtocol::Establish_Tensor_Stream {
+            inference_id,
+            target_peer_id,
+        } => format!(
+            "ESTABLISH_TENSOR_STREAM|{}|{}",
+            inference_id, target_peer_id
+        ),
+        NetworkProtocol::Join_Pipeline {
+            inference_id,
+            model_file_id,
+            device,
+            layer_start,
+            layer_end,
+        } => format!(
+            "JOIN_PIPELINE|{}|{}|{}|{}|{}",
+            inference_id, model_file_id, device, layer_start, layer_end
         ),
     };
     text.into_bytes()
@@ -241,6 +330,109 @@ mod command_tests {
                 assert_eq!(layer_end, 20);
             }
             _ => panic!("expected Request_Pipeline"),
+        }
+    }
+
+    #[test]
+    fn test_parse_establish_tensor_stream_ok() {
+        let payload = b"ESTABLISH_TENSOR_STREAM|12345678|12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz";
+        let result = Parse_Network_Command(payload).unwrap();
+        match result {
+            NetworkProtocol::Establish_Tensor_Stream {
+                inference_id,
+                target_peer_id,
+            } => {
+                assert_eq!(inference_id, 12345678);
+                assert_eq!(target_peer_id, "12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz");
+            }
+            _ => panic!("expected Establish_Tensor_Stream"),
+        }
+    }
+
+    #[test]
+    fn test_parse_establish_tensor_stream_wrong_field_count() {
+        let payload = b"ESTABLISH_TENSOR_STREAM|123";
+        let result = Parse_Network_Command(payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("需要 3 个字段"));
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_establish_tensor_stream() {
+        let cmd = NetworkProtocol::Establish_Tensor_Stream {
+            inference_id: 9999,
+            target_peer_id: "12D3KooWPeerB".to_string(),
+        };
+        let bytes = Serialize_Network_Command(&cmd);
+        let parsed = Parse_Network_Command(&bytes).unwrap();
+        match parsed {
+            NetworkProtocol::Establish_Tensor_Stream {
+                inference_id,
+                target_peer_id,
+            } => {
+                assert_eq!(inference_id, 9999);
+                assert_eq!(target_peer_id, "12D3KooWPeerB");
+            }
+            _ => panic!("expected Establish_Tensor_Stream"),
+        }
+    }
+
+    #[test]
+    fn test_parse_join_pipeline_ok() {
+        let payload = b"JOIN_PIPELINE|55555|model_shard_10_19|cuda|10|19";
+        let result = Parse_Network_Command(payload).unwrap();
+        match result {
+            NetworkProtocol::Join_Pipeline {
+                inference_id,
+                model_file_id,
+                device,
+                layer_start,
+                layer_end,
+            } => {
+                assert_eq!(inference_id, 55555);
+                assert_eq!(model_file_id, "model_shard_10_19");
+                assert_eq!(device, "cuda");
+                assert_eq!(layer_start, 10);
+                assert_eq!(layer_end, 19);
+            }
+            _ => panic!("expected Join_Pipeline"),
+        }
+    }
+
+    #[test]
+    fn test_parse_join_pipeline_wrong_field_count() {
+        let payload = b"JOIN_PIPELINE|123|model";
+        let result = Parse_Network_Command(payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("需要 6 个字段"));
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_join_pipeline() {
+        let cmd = NetworkProtocol::Join_Pipeline {
+            inference_id: 77777,
+            model_file_id: "shard_20_29".to_string(),
+            device: "cpu".to_string(),
+            layer_start: 20,
+            layer_end: 29,
+        };
+        let bytes = Serialize_Network_Command(&cmd);
+        let parsed = Parse_Network_Command(&bytes).unwrap();
+        match parsed {
+            NetworkProtocol::Join_Pipeline {
+                inference_id,
+                model_file_id,
+                device,
+                layer_start,
+                layer_end,
+            } => {
+                assert_eq!(inference_id, 77777);
+                assert_eq!(model_file_id, "shard_20_29");
+                assert_eq!(device, "cpu");
+                assert_eq!(layer_start, 20);
+                assert_eq!(layer_end, 29);
+            }
+            _ => panic!("expected Join_Pipeline"),
         }
     }
 

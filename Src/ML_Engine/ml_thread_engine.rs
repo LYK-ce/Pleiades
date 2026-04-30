@@ -63,7 +63,7 @@ use super::ml_thread_register::{
     FLAG1, FLAG4,
     META1, META2, META4, META5,
 };
-use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
+use crate::tensor_io::Tensor_IO_Endpoint;
 
 // ============================================================
 // 推理后端
@@ -153,9 +153,9 @@ pub struct Session {
     /// 创建时传入的配置，只读
     pub config: Session_Config,
 
-    /// 张量 IO 句柄（数据平面-网络）
-    /// 包含入站和出站张量流。单机推理时为 None。
-    pub tensor_io: Option<Tensor_IO_Handle>,
+    /// 张量 IO 端点（数据平面-网络）
+    /// 通过 Tensor_Port_Switch 或独立构造获得。单机推理时为 None。
+    pub tensor_io: Option<Tensor_IO_Endpoint>,
 
     /// 寄存器组
     pub register: Register_File,
@@ -274,7 +274,7 @@ pub fn Session_Thread(
     session_config: Session_Config,
     cmd_rx: mpsc::Receiver<Session_Command>,
     io_handle: IoHandle,
-    tensor_io: Option<Tensor_IO_Handle>,
+    tensor_io: Option<Tensor_IO_Endpoint>,
     ready_tx: oneshot::Sender<Result<Model_Info>>,
 ) {
     info!(

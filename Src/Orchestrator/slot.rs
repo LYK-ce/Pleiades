@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use crate::llm_io;
 use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
-use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
+use crate::tensor_io::Tensor_IO_Endpoint;
 
 /// 槽位编号，类似寄存器索引。由 `TaskProgramBuilder` 在编译时分配。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,11 +63,11 @@ pub enum SlotValue {
     /// 实际访问时通过 `take` 取得 SlotValue 所有权后调用 `into_inner()`，
     /// 无需加锁，零争用开销。
     Stream(Mutex<Option<libp2p::Stream>>),
-    /// 张量 IO 句柄（包含 inbound + outbound stream，由 BuildTensorIo 指令组装）
+    /// 张量 IO 端点（包含共享锁 stream 引用，由 Core 在 spawn 前预注入 SLOT_TENSOR_IO）
     ///
     /// 使用 `Mutex<Option<T>>` 包装，原因同 `Stream`：
-    /// `Tensor_IO_Handle` 内含 `libp2p::Stream`（`Send + !Sync`）。
-    TensorIo(Mutex<Option<Tensor_IO_Handle>>),
+    /// `Tensor_IO_Endpoint` 内含 `libp2p::Stream`（`Send + !Sync`）。
+    TensorIo(Mutex<Option<Tensor_IO_Endpoint>>),
 }
 
 /// 从 ConstValue 到 SlotValue 的无损转换
@@ -212,10 +212,10 @@ impl SlotFile {
         }
     }
 
-    /// 取出 Tensor_IO_Handle，类型不匹配时返回错误。
-    /// Tensor_IO_Handle 不可 Clone，只能 take 一次。
+    /// 取出 Tensor_IO_Endpoint，类型不匹配时返回错误。
+    /// Tensor_IO_Endpoint 不可 Clone，只能 take 一次。
     /// 通过 `into_inner()` 消费 Mutex 本身（无需加锁），再从 Option 中取出值。
-    pub fn take_tensor_io(&mut self, slot: SlotId) -> Result<Tensor_IO_Handle, String> {
+    pub fn take_tensor_io(&mut self, slot: SlotId) -> Result<Tensor_IO_Endpoint, String> {
         match self.take(slot) {
             Some(SlotValue::TensorIo(mutex)) => {
                 mutex.into_inner()

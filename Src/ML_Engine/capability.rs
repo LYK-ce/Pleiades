@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicBool;
 use async_trait::async_trait;
 
 use crate::llm_io::IoHandle;
-use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
+use crate::tensor_io::Tensor_IO_Endpoint;
 use super::ml_thread_engine_instruction::{
     Instruction, Pipeline_Params, Pipeline_Result, Model_Info,
 };
@@ -88,8 +88,8 @@ pub struct ML_Session_Config {
     pub layer_end: usize,
     /// 使用的设备（"cpu" 或 "cuda"）
     pub device: String,
-    /// 网络张量 IO 句柄（分布式推理用，单机为 None）
-    pub tensor_io: Option<Tensor_IO_Handle>,
+    /// 网络张量 IO 端点（分布式推理用，单机为 None）
+    pub tensor_io: Option<Tensor_IO_Endpoint>,
 }
 
 // ─── Trait 定义 ─────────────────────────────────────────────

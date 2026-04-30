@@ -171,7 +171,7 @@ mod executor_tests {
     use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
-    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
+    use crate::tensor_io::Tensor_Port_Switch;
     use crate::event_bus::EventBus;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
@@ -203,7 +203,7 @@ mod executor_tests {
             peer_manager: Box::new(StubPeerManager),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
-            tensor_io_broker: Tensor_IO_Broker::New(),
+            tensor_switch: Arc::new(Tensor_Port_Switch::New()),
         });
         (caps, temp_dir)
     }

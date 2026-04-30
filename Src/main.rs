@@ -36,7 +36,7 @@ use pleiades::network::{NetworkConfig, Network_Service};
 use pleiades::storage::StorageManager;
 use pleiades::ml_engine::ML_Engine_Service;
 use pleiades::llm_io::LLM_IO_Broker;
-use pleiades::orchestrator::tensor_io_broker::Tensor_IO_Broker;
+use pleiades::tensor_io::Tensor_Port_Switch;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::compiler::Compiler;
@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 11. LLM_IO_Broker (Arc 共享给 Capabilities 和 TUI) + Tensor_IO_Broker
     let io_broker = Arc::new(LLM_IO_Broker::New());
-    let tensor_io_broker = Tensor_IO_Broker::New();
+    let tensor_switch = Arc::new(Tensor_Port_Switch::New());
 
     // ══════════════════════════════════════════════════════
     // Phase 5: 组装 Orchestrator
@@ -186,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peer_manager: peer_capability_for_caps,
         event_bus: event_bus.clone(),
         io_broker: io_broker.clone(),
-        tensor_io_broker,
+        tensor_switch,
     });
 
     // 13. 用户命令通道 (TUI → Core)

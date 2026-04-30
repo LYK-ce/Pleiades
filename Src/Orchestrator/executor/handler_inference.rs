@@ -61,7 +61,7 @@ impl super::TaskEngine {
             Err(e) => return StepResult::Abort(format!("CreateSession: io slot error: {}", e)),
         };
 
-        // 6. 如果有 tensor_io 槽位，take Tensor_IO_Handle
+        // 6. 如果有 tensor_io 槽位，take Tensor_IO_Endpoint（由 Core 预注入 SLOT_TENSOR_IO）
         let tensor_io_handle = match tensor_io {
             Some(slot) => {
                 match self.slots.take_tensor_io(slot) {
@@ -255,7 +255,7 @@ mod tests {
     use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
     use crate::storage::StorageManager;
     use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability, IoHandle};
-    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
+    use crate::tensor_io::Tensor_Port_Switch;
     use crate::event_bus::EventBus;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{
@@ -429,7 +429,7 @@ mod tests {
             peer_manager: Box::new(StubPeerManager),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
-            tensor_io_broker: Tensor_IO_Broker::New(),
+            tensor_switch: Arc::new(Tensor_Port_Switch::New()),
         });
         (caps, temp_dir)
     }

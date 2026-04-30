@@ -40,7 +40,7 @@ use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model};
 use super::ml_thread_engine::{Session_Config, Session_Handle, Session_Thread};
 use super::ml_thread_engine_instruction::Model_Info;
 use crate::llm_io::IoHandle;
-use crate::network::tensor_stream_protocol::Tensor_IO_Handle;
+use crate::tensor_io::Tensor_IO_Endpoint;
 
 // ============================================================
 // Create_Session
@@ -73,7 +73,7 @@ pub async fn Create_Session(
     layer_start: usize,
     layer_end: usize,
     device: String,
-    tensor_io: Option<Tensor_IO_Handle>,
+    tensor_io: Option<Tensor_IO_Endpoint>,
     io_handle: IoHandle,
 ) -> Result<(Session_Handle, Model_Info)> {
     info!(

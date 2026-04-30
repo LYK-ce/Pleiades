@@ -96,10 +96,6 @@ impl TaskEngine {
             TaskInstruction::SendFile { peer, file } => self.handle_send_file(peer, file).await,
             TaskInstruction::ReceiveFile { stream, file_name, file_size, checksum, result } => self.handle_receive_file(stream, file_name, file_size, checksum, result).await,
             TaskInstruction::RequestPipeline { peer, model, device, start, end, result } => self.handle_request_pipeline(peer, model, device, start, end, result).await,
-            TaskInstruction::OpenTensorStream { peer, target_job } => self.handle_open_tensor_stream(peer, target_job).await,
-            TaskInstruction::TakeInboundStream { result } => self.handle_take_inbound_stream(result).await,
-            TaskInstruction::TakeOutboundStream { result } => self.handle_take_outbound_stream(result).await,
-            TaskInstruction::BuildTensorIo { inbound, outbound, result } => self.handle_build_tensor_io(inbound, outbound, result).await,
             // 控制流
             TaskInstruction::JumpIf { condition, label } => self.handle_jump_if(condition, &label),
             TaskInstruction::Abort { reason } => self.handle_abort(&reason),
@@ -121,7 +117,7 @@ mod tests {
     use crate::orchestrator::slot::ConstValue;
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
-    use crate::orchestrator::tensor_io_broker::Tensor_IO_Broker;
+    use crate::tensor_io::Tensor_Port_Switch;
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
@@ -149,7 +145,7 @@ mod tests {
             peer_manager: Box::new(StubPeerManager),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
-            tensor_io_broker: Tensor_IO_Broker::New(),
+            tensor_switch: Arc::new(Tensor_Port_Switch::New()),
         });
         (caps, temp_dir)
     }

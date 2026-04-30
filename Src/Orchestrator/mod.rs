@@ -8,7 +8,7 @@ pub mod executor;
 pub mod command;
 pub mod slot;
 pub mod instruction;
-pub mod tensor_io_broker;
+pub mod inference_id;
 
 use std::sync::Arc;
 use crate::storage::StorageManager;
@@ -17,7 +17,7 @@ use crate::network::Network_Capability;
 use crate::ml_engine::capability::ML_Engine_Capability;
 use crate::peer_management::Peer_Management_Capability;
 use crate::event_bus::EventBus;
-use tensor_io_broker::Tensor_IO_Broker;
+use crate::tensor_io::Tensor_Port_Switch;
 
 // 统一的能力结构体，供整个 Orchestrator 层使用
 pub struct Capabilities {
@@ -27,7 +27,8 @@ pub struct Capabilities {
     pub peer_manager: Box<dyn Peer_Management_Capability>,
     pub event_bus: Arc<EventBus>,
     pub io_broker: Arc<LLM_IO_Broker>,
-    pub tensor_io_broker: Tensor_IO_Broker,
+    /// 张量流热切换管理器（"先连接后启动"模式）
+    pub tensor_switch: Arc<Tensor_Port_Switch>,
 }
 
 /// 测试辅助模块（供所有 Orchestrator 子模块的测试共用）

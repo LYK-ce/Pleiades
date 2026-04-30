@@ -102,39 +102,9 @@ pub enum TaskInstruction {
         end: SlotId,
         result: SlotId,
     },
-    /// 向下游 Peer 主动打开出站张量流
-    ///
-    /// 1. 从 `peer` 槽位读取下游 PeerId
-    /// 2. 从 `target_job` 槽位读取远端 Job ID（用于 handshake 帧）
-    /// 3. 调用 `network.open_tensor_stream(peer)` 打开出站流
-    /// 4. 在流上写入 handshake 帧（target_job_id）
-    /// 5. 将 outbound 存入 `Tensor_IO_Broker.Store_Outbound(job_id, stream)`
-    OpenTensorStream {
-        peer: SlotId,
-        target_job: SlotId,
-    },
-    /// 从 Tensor_IO_Broker 取出入站张量流（阻塞直到到达）
-    ///
-    /// 调用 `broker.Take_Inbound(job_id).await`，raw `libp2p::Stream` 写入 `result` 槽位
-    TakeInboundStream {
-        result: SlotId,
-    },
-    /// 从 Tensor_IO_Broker 取出出站张量流（阻塞直到就绪）
-    ///
-    /// 调用 `broker.Take_Outbound(job_id).await`，raw `libp2p::Stream` 写入 `result` 槽位
-    TakeOutboundStream {
-        result: SlotId,
-    },
-    /// 组装 Tensor_IO_Handle
-    ///
-    /// 从 `inbound`/`outbound` 槽位 take 两条 raw stream，
-    /// 调用 `Tensor_IO_Handle::New(inbound, outbound, rt)` 组装，
-    /// 结果写入 `result` 槽位（SlotValue::TensorIo）
-    BuildTensorIo {
-        inbound: SlotId,
-        outbound: SlotId,
-        result: SlotId,
-    },
+    // NOTE: OpenTensorStream / TakeInboundStream / TakeOutboundStream / BuildTensorIo
+    // 已在 Phase 3 中移除。张量流连接现由 Core 在 spawn Job 之前完成（"先连接后启动"模式），
+    // Tensor_IO_Endpoint 通过 SLOT_TENSOR_IO 预注入。
 
     // ─── 控制流（handler_control.rs）────────────────────────
 

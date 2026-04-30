@@ -37,6 +37,9 @@ pub mod storage;
 #[path = "LLM_IO/mod.rs"]
 pub mod llm_io;
 
+#[path = "Tensor_IO/mod.rs"]
+pub mod tensor_io;
+
 #[path = "EventBus/mod.rs"]
 pub mod event_bus;
 
@@ -56,7 +59,7 @@ pub use network::stream_protocol;
 pub use network::tensor_stream_protocol;
 pub use network::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
-    Tensor_Buffer, Tensor_IO_Handle,
+    Tensor_Buffer,
 };
 
 // ML_Engine模块类型导出
@@ -92,6 +95,12 @@ pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
 // LLM_IO模块类型导出
 pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoFrontend, IoHandle, LLM_IO_Broker};
+
+// Tensor_IO模块类型导出
+pub use tensor_io::{
+    Tensor_Port_Switch, Tensor_IO_Endpoint, Tensor_IO_Capability,
+    Tensor_IO_Error, FailureReport,
+};
 
 // EventBus模块类型导出
 pub use event_bus::{EventBus, Bus_Event};
