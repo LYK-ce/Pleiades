@@ -12,6 +12,7 @@ use super::job::{JobId, JobKind, JobResult, LifecycleEvent};
 use super::command::{UserCommand, NetworkProtocol, Parse_Network_Command};
 use super::executor::JobExecutor;
 use super::compiler::{Compiler, SLOT_RECEIVE_STREAM, SLOT_TENSOR_IO};
+use super::inference_id::Generate_Inference_Id;
 use super::slot::SlotValue;
 use super::Capabilities;
 use crate::llm_io::{IoHandle, LLM_IO_Capability};
@@ -21,7 +22,6 @@ use crate::network::stream_protocol::{Read_File_Stream_Header, Write_File_Stream
 use crate::config::Update_Config;
 use crate::event_bus::Bus_Event;
 use crate::storage::StorageCapability;
-use crate::tensor_io::Tensor_IO_Capability;
 
 /// 生命周期通道缓冲大小
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
@@ -41,20 +41,9 @@ pub enum PortalError {
 struct JobHandle {
     kind: JobKind,
     cancel: CancellationToken,
-}
-
-/// 等待入站张量流完成的分布式 Job 暂存条目
-///
-/// "先连接后启动"模式中：Core 在收到 REQUEST_PIPELINE 后编译 Job、
-/// 打开出站张量流，然后将此条目存入 `pending_distributed_jobs`。
-/// 当对应的入站 TensorStreamArrived 事件到达时，取出此条目、
-/// 注册到 Tensor_Port_Switch、注入 Endpoint、spawn Job。
-struct PendingDistributedJob {
-    kind: JobKind,
-    program: super::instruction::TaskProgram,
-    io: IoHandle,
-    /// 出站张量流（已完成 handshake）
-    outbound: libp2p::Stream,
+    /// 关联的 inference_id（仅 Pipeline 相关 Job: Coordinator/Relay）
+    /// 用于 lifecycle 清理时调用 Deregister_Pipeline
+    inference_id: Option<u64>,
 }
 
 /// Orchestrator Core 结构体
@@ -70,13 +59,6 @@ pub struct Core {
     // --- 内核状态 ---
     registry: HashMap<JobId, JobHandle>,
     shutting_down: bool,
-
-    // --- "先连接后启动"暂存 ---
-    /// 等待入站张量流到达的分布式 Job（key = relay_job_id）
-    ///
-    /// `route_pipeline_flow` 在完成出站流建立后将条目存入此 map，
-    /// `handle_network_inbound` TensorStreamArrived 分支取出条目完成 spawn。
-    pending_distributed_jobs: HashMap<JobId, PendingDistributedJob>,
 
     // --- 路由工具 ---
     compiler: Arc<Compiler>,
@@ -117,7 +99,6 @@ impl Core {
         Core {
             registry: HashMap::new(),
             shutting_down: false,
-            pending_distributed_jobs: HashMap::new(),
             compiler,
             capabilities,
             config_path,
@@ -197,44 +178,6 @@ impl Core {
         };
 
         match protocol {
-            NetworkProtocol::Request_Pipeline {
-                coordinator_job_id,
-                model_file_id,
-                device,
-                layer_start,
-                layer_end,
-            } => {
-                let coordinator_peer_id = req.peer.to_string();
-                info!(
-                    "B2/Command: REQUEST_PIPELINE from {}, coordinator_job_id={}, model={}, device={}, layers={}-{}",
-                    coordinator_peer_id, coordinator_job_id, model_file_id, device, layer_start, layer_end
-                );
-
-                // 调用 route_pipeline_flow → 回复 OK|job_id 或 REJECT|reason
-                let response = match self.route_pipeline_flow(
-                    coordinator_peer_id,
-                    coordinator_job_id,
-                    model_file_id,
-                    device,
-                    layer_start,
-                    layer_end,
-                ).await {
-                    Ok(relay_job_id) => {
-                        info!("REQUEST_PIPELINE 成功: relay_job_id={:?}", relay_job_id);
-                        format!("OK|{}", relay_job_id.0)
-                    }
-                    Err(reason) => {
-                        warn!("REQUEST_PIPELINE 失败: {}", reason);
-                        format!("REJECT|{}", reason)
-                    }
-                };
-
-                if let Err(e) = self.capabilities.network.send_response(
-                    req.request_id, DataType::Command, response.into_bytes()
-                ).await {
-                    warn!("send_response 失败: {}", e);
-                }
-            }
             NetworkProtocol::Establish_Tensor_Stream {
                 inference_id,
                 target_peer_id,
@@ -307,7 +250,6 @@ impl Core {
                     req.peer, inference_id, model_file_id, device, layer_start, layer_end
                 );
 
-                let coordinator_peer_id = req.peer.to_string();
                 let job_id = JobId(generate_id());
 
                 // 1. 等待 Create_Endpoint 就绪（短暂重试，最多 3s）
@@ -343,10 +285,8 @@ impl Core {
                 // 2. 编译 Relay 程序
                 let program = match self.compiler.compile_relay(
                     job_id,
-                    coordinator_peer_id,
-                    inference_id, // inference_id 作为新语义的 coordinator_job_id
                     model_file_id,
-                    Some(device),
+                    device,
                     layer_start,
                     layer_end,
                 ) {
@@ -411,7 +351,7 @@ impl Core {
                     SlotValue::TensorIo(Mutex::new(Some(endpoint))),
                 );
                 tokio::spawn(executor.run());
-                self.registry.insert(job_id, JobHandle { kind: JobKind::Relay, cancel });
+                self.registry.insert(job_id, JobHandle { kind: JobKind::Relay, cancel, inference_id: Some(inference_id) });
 
                 info!("JOIN_PIPELINE 成功: inference_id={}, job_id={:?}", inference_id, job_id);
 
@@ -554,72 +494,65 @@ impl Core {
                     }
                 }
             }
+            UserCommand::Pipeline { model_path, reply } => {
+                // Phase 0: 生成全局唯一 inference_id + 规划拓扑
+                let local_peer_id = self.capabilities.network.get_local_peer_id();
+                let inference_id = Generate_Inference_Id(&local_peer_id);
+                let job_id = JobId(generate_id());
+                let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
+
+                info!(
+                    "UserCommand::Pipeline: inference_id={}, job_id={:?}, model={}, device={}",
+                    inference_id, job_id, model_path, device
+                );
+
+                // 编译 Pipeline TaskProgram
+                let program = match self.compiler.compile_pipeline(job_id, inference_id, model_path, device) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
+                        return;
+                    }
+                };
+
+                // Pipeline Job 需要 IO 通道（Coordinator 推理需要与前端交互）
+                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+                    let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
+                    return;
+                }
+                match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+                    Ok(io) => {
+                        // 发布 Job 创建事件
+                        self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
+                            job_id: job_id.0,
+                            kind: format!("{:?}", JobKind::Pipeline),
+                            model_name: String::new(),
+                        });
+
+                        let cancel = CancellationToken::new();
+                        let executor = JobExecutor::new(
+                            job_id,
+                            JobKind::Pipeline,
+                            program,
+                            cancel.clone(),
+                            self.capabilities.clone(),
+                            Some(io),
+                            self.lifecycle_tx.clone(),
+                        );
+                        tokio::spawn(executor.run());
+                        self.registry.insert(job_id, JobHandle {
+                            kind: JobKind::Pipeline,
+                            cancel,
+                            inference_id: Some(inference_id),
+                        });
+                        let _ = reply.send(Ok(job_id));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
+                    }
+                }
+            }
         }
-    }
-
-    /// 路由 Pipeline Flow 请求（远端 Coordinator 请求本节点作为 Worker 加入流水线）
-    ///
-    /// "先连接后启动"模式：
-    /// 1. 编译 Relay Job
-    /// 2. 分配 IO 通道
-    /// 3. 打开出站张量流 → 写 handshake（target = coordinator_job_id）
-    /// 4. 将 Job 存入 `pending_distributed_jobs`（等待入站流到达后再 spawn）
-    ///
-    /// 当 TensorStreamArrived 事件到达时（target = relay_job_id），
-    /// `handle_network_inbound` 取出 pending entry → 注册 Switch → spawn Job。
-    async fn route_pipeline_flow(
-        &mut self,
-        coordinator_peer_id: String,
-        coordinator_job_id: u64,
-        model_file_id: String,
-        device: String,
-        layer_start: usize,
-        layer_end: usize,
-    ) -> Result<JobId, String> {
-        let job_id = JobId(generate_id());
-
-        // 1. 编译 Relay 程序
-        let program = self.compiler.compile_relay(
-            job_id,
-            coordinator_peer_id.clone(),
-            coordinator_job_id,
-            model_file_id,
-            Some(device),
-            layer_start,
-            layer_end,
-        ).map_err(|e| format!("编译失败: {:?}", e))?;
-
-        // 2. 分配 IO 通道（Relay 是推理类 Job，需要 IoHandle）
-        self.capabilities.io_broker.Allocate(job_id).await
-            .map_err(|e| format!("IO 分配失败: {}", e))?;
-
-        let io = self.capabilities.io_broker.Take_ML_Side(job_id).await
-            .map_err(|e| format!("IO Take_ML_Side 失败: {}", e))?;
-
-        // 3. 打开出站张量流到 Coordinator，写 handshake
-        let peer_id: libp2p::PeerId = coordinator_peer_id.parse()
-            .map_err(|e| format!("PeerId 解析失败: {}", e))?;
-
-        let mut outbound = self.capabilities.network.open_tensor_stream(peer_id).await
-            .map_err(|e| format!("open_tensor_stream 失败: {}", e))?;
-
-        Write_Tensor_Stream_Handshake(&mut outbound, coordinator_job_id).await
-            .map_err(|e| format!("Write_Tensor_Stream_Handshake 失败: {}", e))?;
-
-        info!(
-            "Relay Job {:?}: 出站张量流已建立 → coordinator {}, 等待入站流到达",
-            job_id, coordinator_peer_id
-        );
-
-        // 4. 暂存 pending entry，等待入站流到达后完成 spawn
-        self.pending_distributed_jobs.insert(job_id, PendingDistributedJob {
-            kind: JobKind::Relay,
-            program,
-            io,
-            outbound,
-        });
-
-        Ok(job_id)
     }
 
     /// 将已编译的程序 spawn 为独立的 Job 任务。
@@ -646,7 +579,7 @@ impl Core {
         );
         tokio::spawn(executor.run());  // 同步 spawn，立即返回
         
-        self.registry.insert(job_id, JobHandle { kind, cancel });
+        self.registry.insert(job_id, JobHandle { kind, cancel, inference_id: None });
     }
 
     fn cancel_job(&mut self, job_id: JobId) {
@@ -665,7 +598,7 @@ impl Core {
     /// 处理 Network 转发的入站事件
     ///
     /// - FileStreamArrived: 读取 in-band header → 检查空间 → ACK → compile 接收作业 → spawn Job
-    /// - TensorStreamArrived: 读取 handshake → 从 pending_distributed_jobs 取出条目 → 注册 Switch → spawn Job
+    /// - TensorStreamArrived: 读取 handshake → Register_Inbound 到 Pipeline entries
     async fn handle_network_inbound(&mut self, event: Network_Inbound_Event) {
         match event {
             Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
@@ -736,66 +669,22 @@ impl Core {
                     model_name: file_name,
                 });
                 tokio::spawn(executor.run());
-                self.registry.insert(job_id, JobHandle { kind: JobKind::Receive, cancel });
+                self.registry.insert(job_id, JobHandle { kind: JobKind::Receive, cancel, inference_id: None });
 
                 info!("B3/File: ReceiveFile Job {:?} 已 spawn", job_id);
             }
             Network_Inbound_Event::TensorStreamArrived { peer, mut stream } => {
-                // 1. 从 stream 读取 handshake 帧（inference_id / target_job_id）
+                // 从 stream 读取 handshake 帧（inference_id）
                 match Read_Tensor_Stream_Handshake(&mut stream).await {
-                    Ok(handshake_id) => {
-                        info!("B3/Tensor: 收到入站张量流 from {}, handshake_id={}", peer, handshake_id);
+                    Ok(inference_id) => {
+                        info!("B3/Tensor: 收到入站张量流 from {}, inference_id={}", peer, inference_id);
 
-                        let job_id = super::job::JobId(handshake_id);
-
-                        // 2. 旧路径优先：检查 pending_distributed_jobs
-                        if let Some(pending) = self.pending_distributed_jobs.remove(&job_id) {
-                            // 旧路径：注册到 Tensor_Port_Switch → 获得 Endpoint → spawn
-                            let rt = tokio::runtime::Handle::current();
-                            match self.capabilities.tensor_switch.Register(
-                                job_id,
-                                stream,
-                                vec![pending.outbound],
-                                rt,
-                            ).await {
-                                Ok((endpoint, _failure_rx)) => {
-                                    self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
-                                        job_id: job_id.0,
-                                        kind: format!("{:?}", pending.kind),
-                                        model_name: String::new(),
-                                    });
-
-                                    let cancel = CancellationToken::new();
-                                    let mut executor = JobExecutor::new(
-                                        job_id,
-                                        pending.kind,
-                                        pending.program,
-                                        cancel.clone(),
-                                        self.capabilities.clone(),
-                                        Some(pending.io),
-                                        self.lifecycle_tx.clone(),
-                                    );
-                                    executor.inject_slot(
-                                        SLOT_TENSOR_IO,
-                                        SlotValue::TensorIo(Mutex::new(Some(endpoint))),
-                                    );
-                                    tokio::spawn(executor.run());
-                                    self.registry.insert(job_id, JobHandle { kind: pending.kind, cancel });
-
-                                    info!("B3/Tensor: (旧路径) 分布式 Job {:?} 已完成 Switch 注册并 spawn", job_id);
-                                }
-                                Err(e) => {
-                                    warn!("B3/Tensor: Tensor_Port_Switch Register 失败 for {:?}: {}", job_id, e);
-                                }
-                            }
-                        } else {
-                            // 3. 新路径：注册为 Pipeline 入站流（供后续 Join_Pipeline / Create_Endpoint 使用）
-                            self.capabilities.tensor_switch.Register_Inbound(handshake_id, stream).await;
-                            info!(
-                                "B3/Tensor: (新路径) inference_id={} 入站流已注册到 Pipeline entries (from {})",
-                                handshake_id, peer
-                            );
-                        }
+                        // 注册为 Pipeline 入站流（供 Join_Pipeline / Create_Endpoint 使用）
+                        self.capabilities.tensor_switch.Register_Inbound(inference_id, stream).await;
+                        info!(
+                            "B3/Tensor: inference_id={} 入站流已注册到 Pipeline entries (from {})",
+                            inference_id, peer
+                        );
                     }
                     Err(e) => {
                         warn!("B3/Tensor: 读取张量流 handshake 失败 from {}: {}", peer, e);
@@ -819,16 +708,18 @@ impl Core {
                     result: result_str,
                 });
 
-                // 清理 Tensor_Port_Switch 条目（幂等，对非分布式 Job 无影响）
-                let caps = self.capabilities.clone();
-                let job = job_id;
-                // 使用 tokio::spawn 异步清理，避免在同步方法中 .await
-                tokio::spawn(async move {
-                    caps.tensor_switch.Deregister(job).await;
-                });
+                // 先获取 inference_id（在 remove 之前），用于清理 Pipeline 条目
+                let inference_id = self.registry.get(&job_id)
+                    .and_then(|handle| handle.inference_id);
 
-                // 清理可能残留的 pending entry（Job 未完成 spawn 就结束的异常场景）
-                self.pending_distributed_jobs.remove(&job_id);
+                // 清理 Tensor_Port_Switch Pipeline 条目（仅 Pipeline 相关 Job）
+                if let Some(inf_id) = inference_id {
+                    let caps = self.capabilities.clone();
+                    // 使用 tokio::spawn 异步清理，避免在同步方法中 .await
+                    tokio::spawn(async move {
+                        caps.tensor_switch.Deregister_Pipeline(inf_id).await;
+                    });
+                }
 
                 self.registry.remove(&job_id);  // 同步 HashMap 操作
             }
@@ -850,7 +741,7 @@ mod core_tests {
     use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
     use crate::orchestrator::slot::{SlotId, ConstValue};
     use crate::orchestrator::Capabilities;
-    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::network::{Network_Inbound_Event, InboundRequest};
     use crate::storage::StorageManager;
     use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability};
@@ -886,6 +777,7 @@ mod core_tests {
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
+            scheduler: Box::new(StubScheduler),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_switch: Arc::new(Tensor_Port_Switch::New()),

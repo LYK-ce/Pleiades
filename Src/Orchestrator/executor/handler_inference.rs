@@ -122,7 +122,7 @@ impl super::TaskEngine {
     /// 处理 RunProgram 指令：向 Session 提交 ML 指令序列执行推理
     ///
     /// 1. 从 `session` 槽位 `get_string` 获取 session_id
-    /// 2. 构造 ML 指令序列（通过 `Compiler::build_run_ml_program`）
+    /// 2. 读取 `SLOT_ML_PROGRAM_MODE` 分派对应 ML 程序（run/relay/coordinator）
     /// 3. 构造 `Pipeline_Params`（使用默认值）
     /// 4. 调用 `capabilities.ml_engine.Run_Program(session_id, program, params, cancel_flag).await`
     /// 5. 成功 → 将完成标记写入 `result` 槽位，返回 Continue
@@ -134,9 +134,16 @@ impl super::TaskEngine {
             Err(e) => return StepResult::Abort(format!("RunProgram: session slot error: {}", e)),
         };
 
-        // 2. 构造 ML 指令序列（单机推理）
+        // 2. 根据 ML_PROGRAM_MODE 分派对应 ML 指令序列
         let params = Pipeline_Params::default();
-        let program = Compiler::build_run_ml_program(&params);
+        let mode = self.slots.get_string(crate::orchestrator::compiler::SLOT_ML_PROGRAM_MODE)
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| "run".to_string());
+        let program = match mode.as_str() {
+            "relay" => Compiler::build_relay_ml_program(),
+            "coordinator" => Compiler::build_coordinator_ml_program(&params),
+            _ => Compiler::build_run_ml_program(&params),
+        };
 
         // 3. 构造 cancel_flag（当前使用非取消标志，后续可接入 CancellationToken）
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -252,7 +259,7 @@ mod tests {
     use super::super::Capabilities;
     use crate::orchestrator::job::JobId;
     use crate::orchestrator::slot::{SlotId, SlotValue};
-    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::storage::StorageManager;
     use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability, IoHandle};
     use crate::tensor_io::Tensor_Port_Switch;
@@ -427,6 +434,7 @@ mod tests {
             ml_engine: Box::new(ml_engine),
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
+            scheduler: Box::new(StubScheduler),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_switch: Arc::new(Tensor_Port_Switch::New()),

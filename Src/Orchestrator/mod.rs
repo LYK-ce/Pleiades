@@ -1,5 +1,5 @@
 // Presented by KeJi
-// Date ： 2026-04-30
+// Date ： 2026-05-04
 
 pub mod core;
 pub mod job;
@@ -16,6 +16,7 @@ use crate::llm_io::LLM_IO_Broker;
 use crate::network::Network_Capability;
 use crate::ml_engine::capability::ML_Engine_Capability;
 use crate::peer_management::Peer_Management_Capability;
+use crate::scheduler::Scheduler_Capability;
 use crate::event_bus::EventBus;
 use crate::tensor_io::Tensor_Port_Switch;
 
@@ -25,6 +26,7 @@ pub struct Capabilities {
     pub ml_engine: Box<dyn ML_Engine_Capability>,
     pub network: Box<dyn Network_Capability>,
     pub peer_manager: Box<dyn Peer_Management_Capability>,
+    pub scheduler: Box<dyn Scheduler_Capability>,
     pub event_bus: Arc<EventBus>,
     pub io_broker: Arc<LLM_IO_Broker>,
     /// 张量流热切换管理器（"先连接后启动"模式）
@@ -38,6 +40,7 @@ pub(crate) mod test_utils {
     use crate::network::{Network_Capability, Network_Error};
     use crate::peer_management::{Peer_Management_Capability, Peer_Management_Error};
     use crate::peer_management::{PeerInfo, PeerStatus, PeerCapability};
+    use crate::scheduler::{Scheduler_Capability, Scheduler_Error, Scheduler_Input, Pipeline_Plan};
 
     /// Network_Capability 的空桩实现（用于不实际调用网络的单元测试）
     pub struct StubNetwork;
@@ -54,6 +57,7 @@ pub(crate) mod test_utils {
         async fn open_tensor_stream(&self, _peer: libp2p::PeerId) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn get_record(&self, _key: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
+        fn get_local_peer_id(&self) -> libp2p::PeerId { libp2p::PeerId::random() }
     }
 
     /// Peer_Management_Capability 的空桩实现（用于不实际调用节点管理的单元测试）
@@ -75,5 +79,22 @@ pub(crate) mod test_utils {
         async fn Update_Bandwidth(&self, _peer_id: &libp2p::PeerId, _bandwidth_mbps: Option<u64>) -> Result<(), Peer_Management_Error> { Ok(()) }
         async fn Cleanup_Timeout_Peers(&self, _timeout_secs: u64) -> Result<usize, Peer_Management_Error> { Ok(0) }
         async fn Clear(&self) -> Result<(), Peer_Management_Error> { Ok(()) }
+    }
+
+    /// Scheduler_Capability 的空桩实现（返回空 Plan，无 Worker）
+    pub struct StubScheduler;
+
+    #[async_trait]
+    impl Scheduler_Capability for StubScheduler {
+        async fn Plan_Pipeline(&self, input: Scheduler_Input) -> Result<Pipeline_Plan, Scheduler_Error> {
+            // 默认退化为单机模式（无 Worker）
+            Ok(Pipeline_Plan {
+                inference_id: input.inference_id,
+                coord_layer_start: 0,
+                coord_layer_end: input.model_info.num_layers,
+                coord_outbound_target: None,
+                workers: vec![],
+            })
+        }
     }
 }

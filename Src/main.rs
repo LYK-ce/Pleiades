@@ -37,6 +37,7 @@ use pleiades::storage::StorageManager;
 use pleiades::ml_engine::ML_Engine_Service;
 use pleiades::llm_io::LLM_IO_Broker;
 use pleiades::tensor_io::Tensor_Port_Switch;
+use pleiades::scheduler::Scheduler_Service;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::compiler::Compiler;
@@ -153,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timeout_interval:   n.and_then(|n| n.timeout_interval).unwrap_or(300),
             heartbeat_interval: n.and_then(|n| n.heartbeat_interval).unwrap_or(60),
             heartbeat_timeout:  n.and_then(|n| n.heartbeat_timeout).unwrap_or(10),
+            request_response_timeout: n.and_then(|n| n.request_response_timeout).unwrap_or(300),
         }
     };
 
@@ -179,11 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ══════════════════════════════════════════════════════
 
     // 12. 组装 Capabilities
+    let scheduler = Scheduler_Service::New();
     let capabilities = Arc::new(Capabilities {
         storage,
         ml_engine: Box::new(ml_engine),
         network: Box::new(net_capability),
         peer_manager: peer_capability_for_caps,
+        scheduler: Box::new(scheduler),
         event_bus: event_bus.clone(),
         io_broker: io_broker.clone(),
         tensor_switch,

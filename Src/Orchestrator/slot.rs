@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use crate::llm_io;
 use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
 use crate::tensor_io::Tensor_IO_Endpoint;
+use crate::scheduler::Pipeline_Plan;
 
 /// 槽位编号，类似寄存器索引。由 `TaskProgramBuilder` 在编译时分配。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,6 +69,8 @@ pub enum SlotValue {
     /// 使用 `Mutex<Option<T>>` 包装，原因同 `Stream`：
     /// `Tensor_IO_Endpoint` 内含 `libp2p::Stream`（`Send + !Sync`）。
     TensorIo(Mutex<Option<Tensor_IO_Endpoint>>),
+    /// Pipeline 拓扑规划（由 PlanPipeline 指令写入，EstablishStreams/JoinWorkers 读取）
+    PipelinePlan(Pipeline_Plan),
 }
 
 /// 从 ConstValue 到 SlotValue 的无损转换
@@ -223,6 +226,24 @@ impl SlotFile {
                     .ok_or_else(|| format!("Slot {} tensor_io already taken", slot.0))
             }
             Some(_) => Err(format!("Slot {} is not a TensorIo", slot.0)),
+            None => Err(format!("Slot {} is empty", slot.0)),
+        }
+    }
+
+    /// 只读引用 Pipeline_Plan，类型不匹配时返回错误。
+    pub fn get_pipeline_plan(&self, slot: SlotId) -> Result<&Pipeline_Plan, String> {
+        match self.get(slot) {
+            Some(SlotValue::PipelinePlan(p)) => Ok(p),
+            Some(_) => Err(format!("Slot {} is not a PipelinePlan", slot.0)),
+            None => Err(format!("Slot {} is empty", slot.0)),
+        }
+    }
+
+    /// 取出 Pipeline_Plan 所有权，类型不匹配时返回错误。
+    pub fn take_pipeline_plan(&mut self, slot: SlotId) -> Result<Pipeline_Plan, String> {
+        match self.take(slot) {
+            Some(SlotValue::PipelinePlan(p)) => Ok(p),
+            Some(_) => Err(format!("Slot {} is not a PipelinePlan", slot.0)),
             None => Err(format!("Slot {} is empty", slot.0)),
         }
     }

@@ -13,6 +13,7 @@
 //! - orchestrator: 编排器模块
 //! - storage: 存储管理模块
 //! - llm_io: LLM 文本交互通道模块
+//! - scheduler: 分布式流水线拓扑调度模块
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
 
@@ -39,6 +40,9 @@ pub mod llm_io;
 
 #[path = "Tensor_IO/mod.rs"]
 pub mod tensor_io;
+
+#[path = "Scheduler/mod.rs"]
+pub mod scheduler;
 
 #[path = "EventBus/mod.rs"]
 pub mod event_bus;
@@ -98,9 +102,12 @@ pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoFrontend, IoHandle, LLM_IO_B
 
 // Tensor_IO模块类型导出
 pub use tensor_io::{
-    Tensor_Port_Switch, Tensor_IO_Endpoint, Tensor_IO_Capability,
+    Tensor_Port_Switch, Tensor_IO_Endpoint,
     Tensor_IO_Error, FailureReport,
 };
+
+// Scheduler模块类型导出
+pub use scheduler::{Scheduler_Capability, Scheduler_Error, Scheduler_Input, Pipeline_Plan, Worker_Assignment, Scheduler_Service};
 
 // EventBus模块类型导出
 pub use event_bus::{EventBus, Bus_Event};

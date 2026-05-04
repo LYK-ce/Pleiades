@@ -23,6 +23,6 @@ pub mod tensor_port_switch;
 // ─── 聚合导出 ───────────────────────────────────────────────
 
 pub use tensor_port_switch::{
-    Tensor_Port_Switch, Tensor_IO_Endpoint, Tensor_IO_Capability,
+    Tensor_Port_Switch, Tensor_IO_Endpoint,
     Tensor_IO_Error, FailureReport,
 };

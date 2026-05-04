@@ -8,7 +8,7 @@ pub struct JobId(pub u64);
 pub enum JobKind {
     /// 单机推理
     Run,
-    /// 分布式协调者
+    /// 分布式协调者（旧版，保留兼容）
     Coordinator,
     /// 分布式中继 Worker
     Relay,
@@ -18,6 +18,8 @@ pub enum JobKind {
     Receive,
     /// 单文件发送（send <file> <peer>）
     Send,
+    /// 三阶段分布式流水线编排（Coordinator 侧）
+    Pipeline,
 }
 
 #[derive(Debug, Clone, Copy)]

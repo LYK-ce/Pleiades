@@ -47,9 +47,9 @@ mod tests {
         let peer_id = libp2p::PeerId::random();
         let id1 = Generate_Inference_Id(&peer_id);
         let id2 = Generate_Inference_Id(&peer_id);
-        // 低 32 位递增
+        // 低 32 位严格递增（并行测试可能导致跳跃，仅断言 low2 > low1）
         let low1 = (id1 & 0xFFFF_FFFF) as u32;
         let low2 = (id2 & 0xFFFF_FFFF) as u32;
-        assert_eq!(low2, low1 + 1);
+        assert!(low2 > low1, "低 32 位应严格递增: low1={}, low2={}", low1, low2);
     }
 }

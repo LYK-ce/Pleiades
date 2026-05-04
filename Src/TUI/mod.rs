@@ -450,6 +450,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         app.command_output.output_text = [
             "可用命令:",
             "  run <model_path>         - 启动本地推理",
+            "  pipeline <model_path>    - 启动分布式流水线推理",
             "  send <file> <peer>       - 向节点发送文件",
             "  cancel <job_id>          - 取消指定作业",
             "  display-peer / dp        - 查看节点列表",
@@ -780,6 +781,64 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             Ok(Ok(job_id)) => {
                 app.command_output.output_text = format!("分发 Job #{} 已创建", job_id.0);
                 app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.command_output.output_text = format!("错误: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- pipeline <model_path> ----
+
+    if trimmed.starts_with("pipeline ") {
+        let model_path_str = trimmed.strip_prefix("pipeline ").unwrap_or("").trim();
+
+        if model_path_str.is_empty() {
+            app.command_output.output_text = "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::Pipeline {
+            model_path: model_path_str.to_string(),
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
+        app.command_output.output_text = "启动分布式流水线推理中...".to_string();
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.Add_Log(format!("Pipeline Job #{} 已创建", job_id.0));
+
+                // 从 IO Broker 获取前端端点（会合点设计）
+                let rt = tokio::runtime::Handle::current();
+                match rt.block_on(io_broker.Take_Frontend(job_id)) {
+                    Ok(frontend) => {
+                        app.active_frontend = Some(frontend);
+                        app.active_job_id = Some(job_id);
+                        app.command_output.output_text = "流水线已建立，请在 Prompt 框输入内容".to_string();
+                        app.Add_Log(format!("IoFrontend 获取成功, Pipeline Job #{}", job_id.0));
+                    }
+                    Err(e) => {
+                        app.Add_Log(format!("[错误] 获取前端通道失败: {}", e));
+                        app.command_output.output_text = format!("流水线建立成功但通道获取失败: {}", e);
+                        app.command_output.completed = true;
+                    }
+                }
             }
             Ok(Err(e)) => {
                 app.command_output.output_text = format!("错误: {}", e);

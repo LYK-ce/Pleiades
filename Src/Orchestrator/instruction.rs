@@ -10,7 +10,7 @@ use super::slot::{SlotId, ConstValue};
 /// ## 指令分类
 /// - **数据操作**: Const, Move
 /// - **推理生命周期**: CreateSession, ShutdownSession, RunProgram, AnalyzeModel, SplitModel
-/// - **网络操作**: SendFile, ReceiveFile, OpenTensorStream
+/// - **网络操作**: SendFile, ReceiveFile
 /// - **控制流**: JumpIf, Abort
 #[derive(Debug, Clone)]
 pub enum TaskInstruction {
@@ -87,24 +87,51 @@ pub enum TaskInstruction {
         checksum: SlotId,
         result: SlotId,
     },
-    /// 请求远端 Peer 加入 Pipeline，获取其 Relay Job ID
+    // ─── Pipeline 规划（handler_scheduler.rs）─────────────────
+
+    /// 规划 Pipeline 拓扑
     ///
-    /// 1. 从各槽位读取 PeerId、model_file_id、device、layer_start、layer_end
-    /// 2. 构造 REQUEST_PIPELINE payload（携带 coordinator_job_id + 上述参数）
-    /// 3. 通过 `send_data(peer, DataType::Command, payload)` 发送
-    /// 4. 等待远端 Core 回复 relay_job_id
-    /// 5. 将 relay_job_id（U64）存入 `result` 槽位
-    RequestPipeline {
-        peer: SlotId,
-        model: SlotId,
-        device: SlotId,
-        start: SlotId,
-        end: SlotId,
+    /// 1. 从 `model_info` 槽位读取模型分析结果
+    /// 2. 从 `inference_id` 槽位读取 inference_id
+    /// 3. 查询 PeerManager 获取可用节点快照
+    /// 4. 调用 Scheduler 纯函数计算拓扑
+    /// 5. 将 Pipeline_Plan 写入 `result` 槽位
+    PlanPipeline {
+        model_info: SlotId,
+        inference_id: SlotId,
         result: SlotId,
     },
-    // NOTE: OpenTensorStream / TakeInboundStream / TakeOutboundStream / BuildTensorIo
-    // 已在 Phase 3 中移除。张量流连接现由 Core 在 spawn Job 之前完成（"先连接后启动"模式），
-    // Tensor_IO_Endpoint 通过 SLOT_TENSOR_IO 预注入。
+
+    // ─── Pipeline 编排（handler_network.rs）──────────────────
+
+    /// Phase 1：建立所有张量流连接
+    ///
+    /// 1. 向所有 Worker 并发发送 `ESTABLISH_TENSOR_STREAM` 命令
+    /// 2. Coordinator 自身打开到第一个 Worker 的出站流 + handshake
+    /// 3. 等待所有 Worker 回复 OK
+    /// 4. 将结果写入 `result` 槽位
+    /// 任一 Worker 回复 FAIL → Abort
+    EstablishStreams {
+        plan: SlotId,
+        result: SlotId,
+    },
+    /// Phase 2：通知所有 Worker 加入流水线
+    ///
+    /// 1. 向所有 Worker 并发发送 `JOIN_PIPELINE` 命令
+    /// 2. 等待所有 Worker 回复 OK（超时 300s）
+    /// 3. 将结果写入 `result` 槽位
+    /// 任一 Worker 回复 FAIL → Abort
+    JoinWorkers {
+        plan: SlotId,
+        result: SlotId,
+    },
+    /// Pipeline 清理（补偿指令）
+    ///
+    /// 清理已建立的张量流、通知已启动的 Worker 停止。
+    /// 在 cancel 或 Abort 时执行。
+    TeardownPipeline {
+        plan: SlotId,
+    },
 
     // ─── 控制流（handler_control.rs）────────────────────────
 

@@ -78,6 +78,8 @@ pub struct NetworkConfig {
     pub heartbeat_interval: u64,
     /// 心跳超时（秒）
     pub heartbeat_timeout: u64,
+    /// Request-Response 协议超时（秒），默认300
+    pub request_response_timeout: u64,
 }
 
 impl Default for NetworkConfig {
@@ -92,6 +94,7 @@ impl Default for NetworkConfig {
             timeout_interval: 300,    // 默认300秒
             heartbeat_interval: 60,   // 默认60秒
             heartbeat_timeout: 10,    // 默认10秒
+            request_response_timeout: 300, // 默认300秒
         }
     }
 }
@@ -215,7 +218,7 @@ impl Network_Service {
                     ProtocolSupport::Full,
                 )];
                 let cfg = request_response::Config::default()
-                    .with_request_timeout(Duration::from_secs(30));
+                    .with_request_timeout(Duration::from_secs(config.request_response_timeout));
                 let request_response =
                     request_response::Behaviour::<PleiadesCodec>::new(protocols, cfg);
 
@@ -253,8 +256,8 @@ impl Network_Service {
         let inbound_manager = Inbound_Manager::New(inbound_tx);
         let outbound_manager = Outbound_Manager::New();
 
-        // 7. 创建 NodeHandle
-        let handle = NodeHandle::New(cmd_tx, local_peer_id);
+        // 7. 创建 NodeHandle（传入超时配置）
+        let handle = NodeHandle::New(cmd_tx, local_peer_id, config.request_response_timeout);
 
         // 8. 创建 Network_Service_Capability（用于 Orchestrator）
         let capability = Network_Service_Capability::New(
@@ -851,8 +854,8 @@ impl Network_Service {
         // 4. 注册到outbound_manager等待响应
         self.outbound_manager.Register_Outbound(outbound_id, response_tx);
         
-        // 5. 等待响应，设置30秒超时
-        let response_result = match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
+        // 5. 等待响应，设置超时
+        let response_result = match tokio::time::timeout(Duration::from_secs(self.config.request_response_timeout), response_rx).await {
             Ok(Ok(response_result)) => response_result,
             Ok(Err(_)) => return Err("响应通道已关闭".into()),
             Err(_) => return Err("带宽测试超时".into()),

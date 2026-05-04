@@ -83,12 +83,14 @@ pub struct NodeHandle {
     cmd_tx: mpsc::Sender<NodeCommand>,
     /// 本地节点ID
     local_peer_id: PeerId,
+    /// Request-Response 超时（秒）
+    response_timeout: u64,
 }
 
 impl NodeHandle {
     /// 创建新的 NodeHandle（仅供 Network_Service::Init 内部使用）
-    pub(crate) fn New(cmd_tx: mpsc::Sender<NodeCommand>, local_peer_id: PeerId) -> Self {
-        Self { cmd_tx, local_peer_id }
+    pub(crate) fn New(cmd_tx: mpsc::Sender<NodeCommand>, local_peer_id: PeerId, response_timeout: u64) -> Self {
+        Self { cmd_tx, local_peer_id, response_timeout }
     }
 
     /// 获取本地节点ID
@@ -123,12 +125,12 @@ impl NodeHandle {
             response_tx: Some(tx),
         }).await?;
 
-        // 等待 Response，30 秒超时
+        // 等待 Response，使用配置的超时
         let result = tokio::time::timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(self.response_timeout),
             rx,
         ).await
-            .map_err(|_| "Response timeout (30s)")?
+            .map_err(|_| format!("Response timeout ({}s)", self.response_timeout))?
             .map_err(|_| "Response channel closed")?
             .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
 

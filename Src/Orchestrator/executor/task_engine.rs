@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::{Capabilities, TaskProgram};
 use crate::orchestrator::instruction::TaskInstruction;
 use crate::orchestrator::job::JobId;
-use crate::orchestrator::slot::{SlotId, SlotFile};
+use crate::orchestrator::slot::SlotFile;
 
 /// 执行模式：正向执行或补偿链执行
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +95,12 @@ impl TaskEngine {
             // 网络操作
             TaskInstruction::SendFile { peer, file } => self.handle_send_file(peer, file).await,
             TaskInstruction::ReceiveFile { stream, file_name, file_size, checksum, result } => self.handle_receive_file(stream, file_name, file_size, checksum, result).await,
-            TaskInstruction::RequestPipeline { peer, model, device, start, end, result } => self.handle_request_pipeline(peer, model, device, start, end, result).await,
+            // Pipeline 规划
+            TaskInstruction::PlanPipeline { model_info, inference_id, result } => self.handle_plan_pipeline(model_info, inference_id, result).await,
+            // Pipeline 编排
+            TaskInstruction::EstablishStreams { plan, result } => self.handle_establish_streams(plan, result).await,
+            TaskInstruction::JoinWorkers { plan, result } => self.handle_join_workers(plan, result).await,
+            TaskInstruction::TeardownPipeline { plan } => self.handle_teardown_pipeline(plan).await,
             // 控制流
             TaskInstruction::JumpIf { condition, label } => self.handle_jump_if(condition, &label),
             TaskInstruction::Abort { reason } => self.handle_abort(&reason),
@@ -112,9 +117,9 @@ impl TaskEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::event_bus::EventBus;
-    use crate::orchestrator::slot::ConstValue;
+    use crate::orchestrator::slot::{SlotId, ConstValue};
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
     use crate::tensor_io::Tensor_Port_Switch;
@@ -143,6 +148,7 @@ mod tests {
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
+            scheduler: Box::new(StubScheduler),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_switch: Arc::new(Tensor_Port_Switch::New()),

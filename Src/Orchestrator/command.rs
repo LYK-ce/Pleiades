@@ -74,6 +74,16 @@ pub enum UserCommand {
         peer_id: String,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
+    /// 启动分布式流水线推理
+    ///
+    /// Coordinator 自动完成：分析模型 → 查询可用节点 → 规划拓扑 → 分发模型 → 建立流水线。
+    /// 用户只需提供模型路径，其余由编排逻辑自动处理。
+    ///
+    /// 回复：`Ok(JobId)` Pipeline Job 已启动；`Err(String)` 任一阶段失败
+    Pipeline {
+        model_path: String,
+        reply: oneshot::Sender<Result<JobId, String>>,
+    },
 }
 
 // ============================================================
@@ -86,30 +96,10 @@ pub enum UserCommand {
 /// 接收方通过 `Parse_Network_Command()` 解析，发送方通过 `Serialize_Network_Command()` 序列化。
 ///
 /// ## 命令列表
-/// - `REQUEST_PIPELINE`: 远端 Coordinator 请求本节点作为 Worker 加入流水线（旧路径，保留兼容）
 /// - `ESTABLISH_TENSOR_STREAM`: 请求 Worker 向指定 target 打开一条张量流
 /// - `JOIN_PIPELINE`: 通知 Worker 启动推理 Job（加载模型后回复 OK）
 #[derive(Debug, Clone)]
 pub enum NetworkProtocol {
-    /// 请求加入流水线（远端 Coordinator → 本节点）— 旧路径，保留向后兼容
-    ///
-    /// 格式: `REQUEST_PIPELINE|{coordinator_job_id}|{model_file_id}|{device}|{layer_start}|{layer_end}`
-    ///
-    /// 处理: Core 调用 `route_pipeline_flow()` 编译 + spawn Relay Job
-    /// 回复: `OK|{relay_job_id}` 或 `REJECT|{reason}`
-    Request_Pipeline {
-        /// Coordinator 的 Job ID（用于 Relay 的 OpenTensorStream handshake）
-        coordinator_job_id: u64,
-        /// 模型文件 ID（本地已有的模型分片）
-        model_file_id: String,
-        /// 推理设备偏好（"cpu" / "cuda"）
-        device: String,
-        /// 模型层范围 — 起始层
-        layer_start: usize,
-        /// 模型层范围 — 结束层
-        layer_end: usize,
-    },
-
     /// 请求 Worker 向指定 target 打开一条张量流（Phase 1）
     ///
     /// 格式: `ESTABLISH_TENSOR_STREAM|{inference_id}|{target_peer_id}`
@@ -146,7 +136,8 @@ pub enum NetworkProtocol {
 /// 反序列化: payload bytes → NetworkProtocol
 ///
 /// # 格式（文本，`|` 分隔）
-/// - `"REQUEST_PIPELINE|{coordinator_job_id}|{model_file_id}|{device}|{layer_start}|{layer_end}"`
+/// - `"ESTABLISH_TENSOR_STREAM|{inference_id}|{target_peer_id}"`
+/// - `"JOIN_PIPELINE|{inference_id}|{model_file_id}|{device}|{layer_start}|{layer_end}"`
 pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> {
     let text = std::str::from_utf8(payload)
         .map_err(|e| format!("payload 非 UTF-8: {}", e))?;
@@ -157,29 +148,6 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
     }
 
     match parts[0] {
-        "REQUEST_PIPELINE" => {
-            if parts.len() != 6 {
-                return Err(format!(
-                    "REQUEST_PIPELINE 格式错误: 需要 6 个字段, 实际 {}. 格式: REQUEST_PIPELINE|coordinator_job_id|model_file_id|device|layer_start|layer_end",
-                    parts.len()
-                ));
-            }
-            let coordinator_job_id = parts[1].parse::<u64>()
-                .map_err(|e| format!("coordinator_job_id 解析失败: {}", e))?;
-            let model_file_id = parts[2].to_string();
-            let device = parts[3].to_string();
-            let layer_start = parts[4].parse::<usize>()
-                .map_err(|e| format!("layer_start 解析失败: {}", e))?;
-            let layer_end = parts[5].parse::<usize>()
-                .map_err(|e| format!("layer_end 解析失败: {}", e))?;
-            Ok(NetworkProtocol::Request_Pipeline {
-                coordinator_job_id,
-                model_file_id,
-                device,
-                layer_start,
-                layer_end,
-            })
-        }
         "ESTABLISH_TENSOR_STREAM" => {
             if parts.len() != 3 {
                 return Err(format!(
@@ -227,16 +195,6 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
 /// 供发送方（如 Coordinator 的三阶段编排逻辑）使用。
 pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
     let text = match cmd {
-        NetworkProtocol::Request_Pipeline {
-            coordinator_job_id,
-            model_file_id,
-            device,
-            layer_start,
-            layer_end,
-        } => format!(
-            "REQUEST_PIPELINE|{}|{}|{}|{}|{}",
-            coordinator_job_id, model_file_id, device, layer_start, layer_end
-        ),
         NetworkProtocol::Establish_Tensor_Stream {
             inference_id,
             target_peer_id,
@@ -267,70 +225,11 @@ mod command_tests {
     use super::*;
 
     #[test]
-    fn test_parse_request_pipeline_ok() {
-        let payload = b"REQUEST_PIPELINE|42|model_shard_0_15|cuda|0|15";
-        let result = Parse_Network_Command(payload).unwrap();
-        match result {
-            NetworkProtocol::Request_Pipeline {
-                coordinator_job_id,
-                model_file_id,
-                device,
-                layer_start,
-                layer_end,
-            } => {
-                assert_eq!(coordinator_job_id, 42);
-                assert_eq!(model_file_id, "model_shard_0_15");
-                assert_eq!(device, "cuda");
-                assert_eq!(layer_start, 0);
-                assert_eq!(layer_end, 15);
-            }
-            _ => panic!("expected Request_Pipeline"),
-        }
-    }
-
-    #[test]
-    fn test_parse_request_pipeline_wrong_field_count() {
-        let payload = b"REQUEST_PIPELINE|42|model";
-        let result = Parse_Network_Command(payload);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("需要 6 个字段"));
-    }
-
-    #[test]
     fn test_parse_unknown_command() {
         let payload = b"UNKNOWN_CMD|abc";
         let result = Parse_Network_Command(payload);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("未知命令前缀"));
-    }
-
-    #[test]
-    fn test_serialize_roundtrip_request_pipeline() {
-        let cmd = NetworkProtocol::Request_Pipeline {
-            coordinator_job_id: 99,
-            model_file_id: "shard_a".to_string(),
-            device: "cpu".to_string(),
-            layer_start: 5,
-            layer_end: 20,
-        };
-        let bytes = Serialize_Network_Command(&cmd);
-        let parsed = Parse_Network_Command(&bytes).unwrap();
-        match parsed {
-            NetworkProtocol::Request_Pipeline {
-                coordinator_job_id,
-                model_file_id,
-                device,
-                layer_start,
-                layer_end,
-            } => {
-                assert_eq!(coordinator_job_id, 99);
-                assert_eq!(model_file_id, "shard_a");
-                assert_eq!(device, "cpu");
-                assert_eq!(layer_start, 5);
-                assert_eq!(layer_end, 20);
-            }
-            _ => panic!("expected Request_Pipeline"),
-        }
     }
 
     #[test]

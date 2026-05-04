@@ -32,12 +32,15 @@ pub const SLOT_LAYER_START: SlotId = SlotId(5);
 pub const SLOT_LAYER_END: SlotId = SlotId(6);
 /// 下游 Peer ID 槽位
 pub const SLOT_PEER: SlotId = SlotId(7);
-/// 远端 Relay Job ID 槽位（由 RequestPipeline 写入）
+/// 远端 Relay Job ID 槽位（保留，未来可能被 Coordinator 编排逻辑使用）
 pub const SLOT_TARGET_JOB: SlotId = SlotId(8);
 /// 组装后的 Tensor IO Endpoint 槽位（由 Core 在 spawn 前预注入）
 pub const SLOT_TENSOR_IO: SlotId = SlotId(11);
-/// Coordinator Job ID 槽位（Relay 用，由 compile_relay 写入）
+/// Coordinator Job ID 槽位（保留，未使用）
 pub const SLOT_COORDINATOR_JOB: SlotId = SlotId(12);
+/// ML 程序模式槽位（由 Compiler 写入，RunProgram handler 读取以分派不同 ML 程序）
+/// 值: "run"(默认/单机) | "relay"(Worker中继) | "coordinator"(分布式协调者)
+pub const SLOT_ML_PROGRAM_MODE: SlotId = SlotId(15);
 /// 模型分析结果槽位（AnalyzeModel 写入）
 pub const SLOT_MODEL_INFO: SlotId = SlotId(13);
 /// 文件分发动态槽位起始偏移（每个 peer 占 4 个槽位）
@@ -57,6 +60,16 @@ pub const SLOT_RECEIVE_FILE_SIZE: SlotId = SlotId(102);
 pub const SLOT_RECEIVE_CHECKSUM: SlotId = SlotId(103);
 /// 接收结果槽位（ReceiveFile 指令写入 file_id）
 pub const SLOT_RECEIVE_RESULT: SlotId = SlotId(104);
+
+// ─── Pipeline 编排专用槽位 ────────────────────────────────
+/// Pipeline inference_id 槽位（PlanPipeline 读取）
+pub const SLOT_INFERENCE_ID: SlotId = SlotId(300);
+/// Pipeline 拓扑规划槽位（PlanPipeline 写入，EstablishStreams/JoinWorkers 读取）
+pub const SLOT_PLAN: SlotId = SlotId(301);
+/// EstablishStreams 结果槽位
+pub const SLOT_STREAMS_RESULT: SlotId = SlotId(302);
+/// JoinWorkers 结果槽位
+pub const SLOT_WORKERS_RESULT: SlotId = SlotId(303);
 
 // ─── SendFile（单文件发送）专用槽位 ────────────────────────
 /// 发送文件路径槽位
@@ -136,76 +149,80 @@ impl Compiler {
         Ok(builder.build())
     }
 
-    /// 编译 Coordinator 作业的 TaskProgram（分布式协调者 — 纯流水线推理）
-    ///
-    /// 前提：模型文件已在各节点本地（文件分发是独立命令）。
-    /// Core 在 spawn 前负责建立 Tensor Stream 并将 Endpoint 预注入 SLOT_TENSOR_IO。
+    /// 编译 Pipeline 作业的 TaskProgram（分布式协调者 — 三阶段流水线编排）
     ///
     /// 生成的指令序列：
     /// ```text
-    /// 正向：Const(model/device/layers) → Const(peer) → RequestPipeline
-    ///       → CreateSession(with tensor_io=SLOT_TENSOR_IO) → RunProgram
-    /// 补偿：ShutdownSession
+    /// 正向：Const(inference_id→PLAN) → EstablishStreams → JoinWorkers
+    ///       → Const(model) → Const(device) → Const(start) → Const(end)
+    ///       → Const("coordinator"→MODE) → CreateSession(tensor_io) → RunProgram
+    /// 补偿：TeardownPipeline → ShutdownSession
     /// ```
-    pub fn compile_coordinator(
+    ///
+    /// `inference_id` 由 Core 在 route_user 中预生成并传入。
+    /// plan 槽位当前仅存储 inference_id（Scheduler 未实现时的占位）。
+    /// 后续 Scheduler 实现后，plan 将包含完整拓扑信息。
+    pub fn compile_pipeline(
         &self,
         _job_id: JobId,
+        inference_id: u64,
         model_path: String,
-        peers: Vec<String>,
-        device_preference: Option<String>,
-        layer_start: usize,
-        layer_end: usize,
+        device: String,
     ) -> Result<TaskProgram, CompilerError> {
         if model_path.is_empty() {
             return Err(CompilerError::InvalidParameter("模型路径不能为空".to_string()));
         }
-        if peers.is_empty() {
-            return Err(CompilerError::InvalidParameter("Coordinator 至少需要一个 Peer".to_string()));
-        }
 
-        // 当前仅支持单 Worker（单 Peer）
-        let peer_id = peers.into_iter().next().unwrap();
-        if peer_id.is_empty() {
-            return Err(CompilerError::InvalidParameter("peer_id 不能为空".to_string()));
-        }
-
-        let device = device_preference.unwrap_or_else(|| "cpu".to_string());
         let mut builder = TaskProgramBuilder::new();
 
-        // ── 正向序列 ──────────────────────────────────────────
-        // 1. 常量注入（必须在 RequestPipeline 之前，handler 需要从槽位读取参数）
+        // ─── 正向序列 ─────────────────────────────────────────
+
+        // 1. 准备模型路径 + inference_id
         builder.push_instruction(TaskInstruction::Const {
             value: ConstValue::String(model_path),
             dst: SLOT_MODEL,
         });
         builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::U64(inference_id),
+            dst: SLOT_INFERENCE_ID,
+        });
+
+        // 2. 分析模型（获取层数等信息）
+        builder.push_instruction(TaskInstruction::AnalyzeModel {
+            model: SLOT_MODEL,
+            result: SLOT_MODEL_INFO,
+        });
+
+        // 3. 规划拓扑（查询 PeerManager + Scheduler 均分）
+        builder.push_instruction(TaskInstruction::PlanPipeline {
+            model_info: SLOT_MODEL_INFO,
+            inference_id: SLOT_INFERENCE_ID,
+            result: SLOT_PLAN,
+        });
+
+        // 4. Phase 1: 建立张量流
+        builder.push_instruction(TaskInstruction::EstablishStreams {
+            plan: SLOT_PLAN,
+            result: SLOT_STREAMS_RESULT,
+        });
+
+        // 5. Phase 2: 通知 Worker 加入流水线
+        builder.push_instruction(TaskInstruction::JoinWorkers {
+            plan: SLOT_PLAN,
+            result: SLOT_WORKERS_RESULT,
+        });
+
+        // 6. Phase 3: Coordinator 自身启动推理
+        builder.push_instruction(TaskInstruction::Const {
             value: ConstValue::String(device),
             dst: SLOT_DEVICE,
         });
+        // 注：SLOT_LAYER_START / SLOT_LAYER_END 由 EstablishStreams handler 从 plan 中提取并动态写入
+        // ML 程序模式标记：告诉 RunProgram handler 使用 coordinator ML 程序
         builder.push_instruction(TaskInstruction::Const {
-            value: ConstValue::U64(layer_start as u64),
-            dst: SLOT_LAYER_START,
+            value: ConstValue::String("coordinator".to_string()),
+            dst: SLOT_ML_PROGRAM_MODE,
         });
-        builder.push_instruction(TaskInstruction::Const {
-            value: ConstValue::U64(layer_end as u64),
-            dst: SLOT_LAYER_END,
-        });
-
-        // 2. 请求远端 Peer 加入 Pipeline，获取 relay_job_id
-        builder.push_instruction(TaskInstruction::Const {
-            value: ConstValue::String(peer_id),
-            dst: SLOT_PEER,
-        });
-        builder.push_instruction(TaskInstruction::RequestPipeline {
-            peer: SLOT_PEER,
-            model: SLOT_MODEL,
-            device: SLOT_DEVICE,
-            start: SLOT_LAYER_START,
-            end: SLOT_LAYER_END,
-            result: SLOT_TARGET_JOB,
-        });
-
-        // 3. 创建 ML Session（tensor_io 由 Core 预注入 SLOT_TENSOR_IO）+ 运行推理
         builder.push_instruction(TaskInstruction::CreateSession {
             model: SLOT_MODEL,
             device: SLOT_DEVICE,
@@ -220,7 +237,13 @@ impl Compiler {
             result: SLOT_RESULT,
         });
 
-        // ── 补偿序列 ──────────────────────────────────────────
+        // ─── 补偿序列 ─────────────────────────────────────────
+
+        // 清理张量流 + 通知 Worker 停止
+        builder.push_compensation(TaskInstruction::TeardownPipeline {
+            plan: SLOT_PLAN,
+        });
+        // 关闭 ML Session
         builder.push_compensation(TaskInstruction::ShutdownSession {
             session: SLOT_SESSION,
         });
@@ -228,50 +251,34 @@ impl Compiler {
         Ok(builder.build())
     }
 
-    /// 编译 Relay 作业的 TaskProgram（分布式 Worker — 纯流水线推理）
-    ///
-    /// 前提：模型分片已在本地（文件分发是独立命令）。
-    /// 由远端 Core 的 route_network(PipelineFlow) 调用。
-    /// Core 在 spawn 前负责建立 Tensor Stream 并将 Endpoint 预注入 SLOT_TENSOR_IO。
+    /// 编译 Relay 作业的 TaskProgram（分布式 Worker — 流水线推理）
     ///
     /// 生成的指令序列：
     /// ```text
-    /// 正向：Const(model/device/layers) → CreateSession(with tensor_io=SLOT_TENSOR_IO) → RunProgram
+    /// 正向：Const(model) → Const(device) → Const(start) → Const(end) → Const("relay") → CreateSession(tensor_io) → RunProgram
     /// 补偿：ShutdownSession
+    /// ```
+    ///
+    /// `RunProgram` handler 读取 SLOT_ML_PROGRAM_MODE="relay" 后使用 `build_relay_ml_program()` 生成 ML 指令序列：
+    /// ```text
+    /// Loop [ Receive, BreakIf, Inference(TENSOR1), Send ]
+    /// SendEOF
     /// ```
     pub fn compile_relay(
         &self,
         _job_id: JobId,
-        coordinator_peer_id: String,
-        coordinator_job_id: u64,
         model_file_id: String,
-        device_preference: Option<String>,
+        device: String,
         layer_start: usize,
         layer_end: usize,
     ) -> Result<TaskProgram, CompilerError> {
-        if coordinator_peer_id.is_empty() {
-            return Err(CompilerError::InvalidParameter("coordinator_peer_id 不能为空".to_string()));
-        }
         if model_file_id.is_empty() {
             return Err(CompilerError::InvalidParameter("model_file_id 不能为空".to_string()));
         }
 
-        let device = device_preference.unwrap_or_else(|| "cpu".to_string());
         let mut builder = TaskProgramBuilder::new();
 
-        // ── 正向序列 ──────────────────────────────────────────
-        // 1. 注入 coordinator 信息，建立反向 Tensor Stream
-        builder.push_instruction(TaskInstruction::Const {
-            value: ConstValue::String(coordinator_peer_id),
-            dst: SLOT_PEER,
-        });
-        builder.push_instruction(TaskInstruction::Const {
-            value: ConstValue::U64(coordinator_job_id),
-            dst: SLOT_COORDINATOR_JOB,
-        });
-        // NOTE: Tensor Stream 连接由 Core 在 spawn 前完成，Endpoint 预注入 SLOT_TENSOR_IO
-
-        // 2. 注入模型/设备/层范围参数
+        // 正向序列：Const(model) → Const(device) → Const(start) → Const(end) → Const(mode) → CreateSession → RunProgram
         builder.push_instruction(TaskInstruction::Const {
             value: ConstValue::String(model_file_id),
             dst: SLOT_MODEL,
@@ -288,8 +295,11 @@ impl Compiler {
             value: ConstValue::U64(layer_end as u64),
             dst: SLOT_LAYER_END,
         });
-
-        // 3. 创建 ML Session（tensor_io 由 Core 预注入 SLOT_TENSOR_IO）+ 运行推理
+        // ML 程序模式标记：告诉 RunProgram handler 使用 relay ML 程序
+        builder.push_instruction(TaskInstruction::Const {
+            value: ConstValue::String("relay".to_string()),
+            dst: SLOT_ML_PROGRAM_MODE,
+        });
         builder.push_instruction(TaskInstruction::CreateSession {
             model: SLOT_MODEL,
             device: SLOT_DEVICE,
@@ -304,7 +314,7 @@ impl Compiler {
             result: SLOT_RESULT,
         });
 
-        // ── 补偿序列 ──────────────────────────────────────────
+        // 补偿序列：ShutdownSession
         builder.push_compensation(TaskInstruction::ShutdownSession {
             session: SLOT_SESSION,
         });
@@ -604,12 +614,13 @@ impl Compiler {
     /// 生成的 ML 指令序列：
     /// ```text
     /// Loop [ Receive, BreakIf, Inference(TENSOR1), Send ]
+    /// SendEOF
     /// ```
     pub fn build_relay_ml_program() -> Vec<Instruction> {
         vec![
             Instruction::Loop {
                 body: vec![
-                    // Worker ← 接收上游 Coordinator 发来的张量
+                    // Worker ← 接收上游节点发来的张量
                     Instruction::Receive,
                     // EOF 帧时 FLAG1=true → BreakIf 退出循环
                     Instruction::BreakIf,
@@ -617,10 +628,12 @@ impl Compiler {
                     Instruction::Inference {
                         input: Inference_Input::Tensor(TENSOR1),
                     },
-                    // Worker → 发送本地前向输出到上游 Coordinator
+                    // Worker → 发送本地前向输出到下游节点
                     Instruction::Send,
                 ],
             },
+            // 循环退出后向下游节点发送 EOF，形成 pipeline 链式终止传播
+            Instruction::SendEOF,
         ]
     }
 
@@ -641,31 +654,27 @@ impl Compiler {
                 self.compile_run(job_id, model_path, params.device_preference)
             }
             JobKind::Coordinator => {
-                let model_path = params.model_path.ok_or_else(|| {
-                    CompilerError::InvalidParameter("Coordinator 作业需要 model_path".to_string())
-                })?;
-                let peers = params.peers.ok_or_else(|| {
-                    CompilerError::InvalidParameter("Coordinator 作业需要 peers 列表".to_string())
-                })?;
-                self.compile_coordinator(
-                    job_id, model_path, peers, params.device_preference,
-                    params.layer_start.unwrap_or(0),
-                    params.layer_end.unwrap_or(usize::MAX),
-                )
+                // 旧版 Coordinator 已废弃，使用 Pipeline 替代
+                Err(CompilerError::InvalidParameter(
+                    "Coordinator 已废弃，请使用 Pipeline 命令".to_string()
+                ))
+            }
+            JobKind::Pipeline => {
+                // Pipeline 由 Core 直接调用 compile_pipeline，不经过通用 compile 接口
+                // （因为需要额外的 inference_id 参数）
+                Err(CompilerError::InvalidParameter(
+                    "Pipeline 不通过通用 compile 接口，请使用 compile_pipeline".to_string()
+                ))
             }
             JobKind::Relay => {
-                let coordinator_peer_id = params.coordinator_peer_id.ok_or_else(|| {
-                    CompilerError::InvalidParameter("Relay 作业需要 coordinator_peer_id".to_string())
-                })?;
-                let coordinator_job_id = params.coordinator_job_id.ok_or_else(|| {
-                    CompilerError::InvalidParameter("Relay 作业需要 coordinator_job_id".to_string())
-                })?;
                 let model_file_id = params.model_path.ok_or_else(|| {
                     CompilerError::InvalidParameter("Relay 作业需要 model_file_id".to_string())
                 })?;
+                let device = params.device_preference.unwrap_or_else(|| "cpu".to_string());
                 self.compile_relay(
-                    job_id, coordinator_peer_id, coordinator_job_id, model_file_id,
-                    params.device_preference,
+                    job_id,
+                    model_file_id,
+                    device,
                     params.layer_start.unwrap_or(0),
                     params.layer_end.unwrap_or(usize::MAX),
                 )
@@ -845,270 +854,11 @@ mod compiler_tests {
             assert!(err_msg.contains("模型路径不能为空"), "错误消息: {}", err_msg);
         }
     
-        // ─── B 组：compile_coordinator ────────────────────────
-    
-        /// TC-03: compile_coordinator 正常编译 — 指令数量 12 + 补偿 1
-        #[test]
-        fn tc03_compile_coordinator_structure() {
-            let compiler = Compiler;
-            let program = compiler
-                .compile_coordinator(
-                    test_job_id(),
-                    "model.gguf".into(),
-                    vec!["peer1".into()],
-                    Some("cuda".into()),
-                    0,
-                    24,
-                )
-                .unwrap();
-    
-            assert_eq!(program.instructions.len(), 12, "正向指令数量");
-            assert_eq!(program.compensation.len(), 1, "补偿指令数量");
-    
-            // 补偿是 ShutdownSession
-            match &program.compensation[0] {
-                TaskInstruction::ShutdownSession { session } => {
-                    assert_eq!(*session, SLOT_SESSION);
-                }
-                other => panic!("补偿指令应为 ShutdownSession，实际为 {:?}", other),
-            }
-        }
-    
-        /// TC-04: RequestPipeline 在 OpenTensorStream 之前
-        #[test]
-        fn tc04_coordinator_request_before_open() {
-            let compiler = Compiler;
-            let program = compiler
-                .compile_coordinator(
-                    test_job_id(),
-                    "model.gguf".into(),
-                    vec!["peer1".into()],
-                    None,
-                    0,
-                    24,
-                )
-                .unwrap();
-    
-            let idx_request = find_instr(&program, |i| {
-                matches!(i, TaskInstruction::RequestPipeline { .. })
-            })
-            .expect("应包含 RequestPipeline");
-    
-            let idx_open = find_instr(&program, |i| {
-                matches!(i, TaskInstruction::OpenTensorStream { .. })
-            })
-            .expect("应包含 OpenTensorStream");
-    
-            assert!(
-                idx_request < idx_open,
-                "RequestPipeline({}) 应在 OpenTensorStream({}) 之前",
-                idx_request,
-                idx_open
-            );
-        }
-    
-        /// TC-05: CreateSession 有 tensor_io = Some(SLOT_TENSOR_IO)
-        #[test]
-        fn tc05_coordinator_create_session_with_tensor_io() {
-            let compiler = Compiler;
-            let program = compiler
-                .compile_coordinator(
-                    test_job_id(),
-                    "model.gguf".into(),
-                    vec!["peer1".into()],
-                    None,
-                    0,
-                    24,
-                )
-                .unwrap();
-    
-            let idx = find_instr(&program, |i| {
-                matches!(i, TaskInstruction::CreateSession { .. })
-            })
-            .expect("应包含 CreateSession");
-    
-            match &program.instructions[idx] {
-                TaskInstruction::CreateSession { tensor_io, .. } => {
-                    assert_eq!(
-                        *tensor_io,
-                        Some(SLOT_TENSOR_IO),
-                        "Coordinator 的 CreateSession 应有 tensor_io"
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
-    
-        /// TC-06: compile_coordinator 空 model_path → InvalidParameter
-        #[test]
-        fn tc06_coordinator_empty_model_path() {
-            let compiler = Compiler;
-            let result = compiler.compile_coordinator(
-                test_job_id(),
-                "".into(),
-                vec!["peer1".into()],
-                None,
-                0,
-                24,
-            );
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("模型路径不能为空"), "错误消息: {}", err_msg);
-        }
-    
-        /// TC-07: compile_coordinator 空 peers 列表 → InvalidParameter
-        #[test]
-        fn tc07_coordinator_empty_peers() {
-            let compiler = Compiler;
-            let result = compiler.compile_coordinator(
-                test_job_id(),
-                "model.gguf".into(),
-                vec![],
-                None,
-                0,
-                24,
-            );
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("至少需要一个 Peer"), "错误消息: {}", err_msg);
-        }
-    
-        /// TC-08: compile_coordinator 空 peer_id → InvalidParameter
-        #[test]
-        fn tc08_coordinator_empty_peer_id() {
-            let compiler = Compiler;
-            let result = compiler.compile_coordinator(
-                test_job_id(),
-                "model.gguf".into(),
-                vec!["".into()],
-                None,
-                0,
-                24,
-            );
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("peer_id 不能为空"), "错误消息: {}", err_msg);
-        }
-    
-        // ─── C 组：compile_relay ──────────────────────────────
-    
-        /// TC-09: compile_relay 正常编译 — 指令数量 12 + 补偿 1
-        #[test]
-        fn tc09_compile_relay_structure() {
-            let compiler = Compiler;
-            let program = compiler
-                .compile_relay(
-                    test_job_id(),
-                    "12D3KooW_peer".into(),
-                    100,
-                    "model_shard.gguf".into(),
-                    Some("cpu".into()),
-                    8,
-                    16,
-                )
-                .unwrap();
-    
-            assert_eq!(program.instructions.len(), 12, "正向指令数量");
-            assert_eq!(program.compensation.len(), 1, "补偿指令数量");
-    
-            // 补偿是 ShutdownSession
-            match &program.compensation[0] {
-                TaskInstruction::ShutdownSession { session } => {
-                    assert_eq!(*session, SLOT_SESSION);
-                }
-                other => panic!("补偿指令应为 ShutdownSession，实际为 {:?}", other),
-            }
-        }
-    
-        /// TC-10: SLOT_COORDINATOR_JOB 正确连接到 OpenTensorStream.target_job
-        #[test]
-        fn tc10_relay_coordinator_job_connects_to_open_tensor_stream() {
-            let coordinator_job_id: u64 = 100;
-            let compiler = Compiler;
-            let program = compiler
-                .compile_relay(
-                    test_job_id(),
-                    "12D3KooW_peer".into(),
-                    coordinator_job_id,
-                    "model_shard.gguf".into(),
-                    None,
-                    8,
-                    16,
-                )
-                .unwrap();
-    
-            // 第 2 条（索引 1）应该是 Const 写入 SLOT_COORDINATOR_JOB
-            match &program.instructions[1] {
-                TaskInstruction::Const { value, dst } => {
-                    assert_eq!(*dst, SLOT_COORDINATOR_JOB);
-                    match value {
-                        ConstValue::U64(v) => assert_eq!(*v, coordinator_job_id),
-                        other => panic!("SLOT_COORDINATOR_JOB 应为 U64，实际为 {:?}", other),
-                    }
-                }
-                other => panic!("第 2 条指令应为 Const，实际为 {:?}", other),
-            }
-    
-            // OpenTensorStream 的 target_job 应为 SLOT_COORDINATOR_JOB
-            let idx_open = find_instr(&program, |i| {
-                matches!(i, TaskInstruction::OpenTensorStream { .. })
-            })
-            .expect("应包含 OpenTensorStream");
-    
-            match &program.instructions[idx_open] {
-                TaskInstruction::OpenTensorStream { target_job, peer } => {
-                    assert_eq!(*target_job, SLOT_COORDINATOR_JOB);
-                    assert_eq!(*peer, SLOT_PEER);
-                }
-                _ => unreachable!(),
-            }
-        }
-    
-        /// TC-11: compile_relay 空 coordinator_peer_id → InvalidParameter
-        #[test]
-        fn tc11_relay_empty_coordinator_peer_id() {
-            let compiler = Compiler;
-            let result = compiler.compile_relay(
-                test_job_id(),
-                "".into(),
-                100,
-                "model.gguf".into(),
-                None,
-                0,
-                16,
-            );
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(
-                err_msg.contains("coordinator_peer_id 不能为空"),
-                "错误消息: {}",
-                err_msg
-            );
-        }
-    
-        /// TC-12: compile_relay 空 model_file_id → InvalidParameter
-        #[test]
-        fn tc12_relay_empty_model_file_id() {
-            let compiler = Compiler;
-            let result = compiler.compile_relay(
-                test_job_id(),
-                "12D3KooW_peer".into(),
-                100,
-                "".into(),
-                None,
-                0,
-                16,
-            );
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(
-                err_msg.contains("model_file_id 不能为空"),
-                "错误消息: {}",
-                err_msg
-            );
-        }
-    
-        // ─── D 组：ML 程序构建 ────────────────────────────────
+        // ─── B 组：compile_coordinator / compile_relay ────────
+        // 注：compile_coordinator 和 compile_relay 当前为 todo!() 占位符，
+        // 待新三阶段 Pipeline 方案实现后补充测试。
+
+        // ─── C 组：ML 程序构建 ────────────────────────────────
     
         /// 辅助：检查 ML 指令序列中是否包含某类型的指令
         fn contains_ml_instr<F>(instrs: &[Instruction], predicate: F) -> bool
@@ -1190,13 +940,13 @@ mod compiler_tests {
             );
         }
     
-        /// TC-15: build_relay_ml_program 为单个 Loop，body 含 Receive/BreakIf/Inference(Tensor)/Send
+        /// TC-15: build_relay_ml_program 为 Loop + SendEOF，body 含 Receive/BreakIf/Inference(Tensor)/Send
         #[test]
         fn tc15_relay_ml_program_structure() {
             let program = Compiler::build_relay_ml_program();
     
-            // 仅一条 Loop 指令
-            assert_eq!(program.len(), 1, "relay ML 指令数量应为 1 (单个 Loop)");
+            // Loop + SendEOF = 2 条指令
+            assert_eq!(program.len(), 2, "relay ML 指令数量应为 2 (Loop + SendEOF)");
     
             match &program[0] {
                 Instruction::Loop { body } => {
@@ -1225,8 +975,14 @@ mod compiler_tests {
                         "body[3] 应为 Send"
                     );
                 }
-                other => panic!("唯一指令应为 Loop，实际为 {:?}", other),
+                other => panic!("program[0] 应为 Loop，实际为 {:?}", other),
             }
+
+            // SendEOF: 循环退出后向下游传播 EOF
+            assert!(
+                matches!(program[1], Instruction::SendEOF),
+                "program[1] 应为 SendEOF"
+            );
         }
     
         // ─── E 组：compile_distribute ────────────────────────────

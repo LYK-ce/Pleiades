@@ -254,6 +254,15 @@ pub trait Network_Capability: Send + Sync {
     /// # 参数
     /// - `key`: 键（原始字节）
     async fn get_record(&self, key: Vec<u8>) -> Result<(), Network_Error>;
+
+    // ========================================
+    // 节点信息
+    // ========================================
+
+    /// 获取本地节点的 PeerId
+    ///
+    /// Coordinator 编排 Pipeline 时需要 local PeerId 生成全局唯一 inference_id。
+    fn get_local_peer_id(&self) -> PeerId;
 }
 
 // ===== 入站事件枚举 =====
@@ -443,6 +452,14 @@ impl Network_Capability for Network_Service_Capability {
             .Get_Record(key)
             .await
             .map_err(|e| Network_Error::ChannelClosed(e.to_string()))
+    }
+
+    // ========================================
+    // 节点信息
+    // ========================================
+
+    fn get_local_peer_id(&self) -> PeerId {
+        self.node_handle.Get_Local_Peer_Id()
     }
 }
 

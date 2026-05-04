@@ -1,13 +1,15 @@
 //Presented by KeJi
-//Date ： 2026-04-30
+//Date ： 2026-05-04
 
-use std::sync::Mutex;
 use libp2p::PeerId;
 use crate::orchestrator::slot::{SlotId, SlotValue};
-use crate::network::DataType;
-use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
+use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
+use crate::orchestrator::compiler::{SLOT_MODEL, SLOT_TENSOR_IO, SLOT_LAYER_START, SLOT_LAYER_END};
 use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
+use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
+use crate::network::DataType;
 use crate::storage::{StorageCapability, ChecksumAlgorithm};
+use crate::scheduler::Pipeline_Plan;
 use super::task_engine::StepResult;
 
 impl super::TaskEngine {
@@ -162,83 +164,207 @@ impl super::TaskEngine {
         }
     }
 
-    /// 处理 RequestPipeline 指令：请求远端 Peer 加入 Pipeline 并获取 Relay Job ID
+    // ─── Pipeline 编排网络指令 ──────────────────────────────────
+
+    /// 处理 EstablishStreams 指令：Phase 1 — 建立所有张量流连接
     ///
-    /// 1. 解析 PeerId
-    /// 2. 从槽位读取 model_file_id、device、layer_start、layer_end
-    /// 3. 构造 REQUEST_PIPELINE payload（携带 coordinator_job_id + 上述参数）
-    /// 4. 通过 send_data 发送，等待远端回复
-    /// 5. 解析 relay_job_id 存入 result 槽位
-    pub(super) async fn handle_request_pipeline(
-        &mut self,
-        peer: SlotId,
-        model: SlotId,
-        device: SlotId,
-        start: SlotId,
-        end: SlotId,
-        result: SlotId,
-    ) -> StepResult {
-        // 1. 解析 PeerId
-        let peer_id_str = match self.slots.get_string(peer) {
-            Ok(s) => s.clone(),
-            Err(e) => return StepResult::Abort(format!("RequestPipeline: peer slot error: {}", e)),
-        };
-        let peer_id: PeerId = match peer_id_str.parse() {
-            Ok(id) => id,
-            Err(e) => return StepResult::Abort(format!("RequestPipeline: invalid PeerId '{}': {}", peer_id_str, e)),
+    /// 1. 从 `plan` 槽位读取拓扑规划信息
+    /// 2. 若无 Worker（单机退化），跳过网络操作
+    /// 3. Coordinator 自身打开到第一个 Worker 的出站流 + handshake
+    /// 4. 注册出站到 tensor_switch
+    /// 5. 向所有 Worker 并发发送 `ESTABLISH_TENSOR_STREAM` 命令
+    /// 6. 等待所有 Worker 回复 OK
+    /// 7. 等待入站流就绪，创建 Tensor_IO_Endpoint
+    /// 8. 注入 SLOT_TENSOR_IO + 写入 Coordinator 层范围
+    /// 9. 将结果写入 `result` 槽位
+    pub(super) async fn handle_establish_streams(&mut self, plan_slot: SlotId, result: SlotId) -> StepResult {
+        // 1. 读取 Pipeline_Plan（clone — JoinWorkers 还需要读）
+        let plan: Pipeline_Plan = match self.slots.get_pipeline_plan(plan_slot) {
+            Ok(p) => p.clone(),
+            Err(e) => return StepResult::Abort(format!("EstablishStreams: plan slot error: {}", e)),
         };
 
-        // 2. 读取模型/设备/层范围参数
-        let model_file_id = match self.slots.get_string(model) {
-            Ok(s) => s.clone(),
-            Err(e) => return StepResult::Abort(format!("RequestPipeline: model slot error: {}", e)),
-        };
-        let device_str = match self.slots.get_string(device) {
-            Ok(s) => s.clone(),
-            Err(_) => "cpu".to_string(),
-        };
-        let layer_start = match self.slots.get_u64(start) {
-            Ok(v) => v,
-            Err(_) => 0,
-        };
-        let layer_end = match self.slots.get_u64(end) {
-            Ok(v) => v,
-            Err(_) => u64::MAX,
-        };
+        let inference_id = plan.inference_id;
 
-        // 3. 构造 payload：REQUEST_PIPELINE|coordinator_job_id|model_file_id|device|layer_start|layer_end
-        let coordinator_job_id = self.job_id.0;
-        let payload = format!(
-            "REQUEST_PIPELINE|{}|{}|{}|{}|{}",
-            coordinator_job_id, model_file_id, device_str, layer_start, layer_end
-        ).into_bytes();
-
-        // 4. 发送请求，等待响应
-        let response = match self.capabilities.network.send_data(peer_id, DataType::Command, payload).await {
-            Ok(r) => r,
-            Err(e) => return StepResult::Abort(format!("RequestPipeline: send_data failed: {}", e)),
-        };
-
-        // 5. 解析响应：期望 "OK|{relay_job_id}" 或 "REJECT|{reason}"
-        let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.starts_with("OK|") {
-            let relay_job_id_str = &response_str[3..];
-            match relay_job_id_str.parse::<u64>() {
-                Ok(relay_job_id) => {
-                    self.slots.set(result, SlotValue::U64(relay_job_id));
-                    StepResult::Continue
-                }
-                Err(e) => StepResult::Abort(format!(
-                    "RequestPipeline: invalid relay_job_id in response '{}': {}",
-                    response_str, e
-                )),
-            }
-        } else {
-            StepResult::Abort(format!("RequestPipeline: peer rejected: {}", response_str))
+        // 2. 单机退化：无 Worker，不需要张量流
+        if plan.workers.is_empty() {
+            // 写入 Coordinator 层范围
+            self.slots.set(SLOT_LAYER_START, SlotValue::U64(plan.coord_layer_start as u64));
+            self.slots.set(SLOT_LAYER_END, SlotValue::U64(plan.coord_layer_end as u64));
+            self.slots.set(result, SlotValue::String("ok_single_node".to_string()));
+            return StepResult::Continue;
         }
+
+        // 3. Coordinator 打开到第一个 Worker 的出站流 + handshake
+        let outbound_target = match plan.coord_outbound_target {
+            Some(target) => target,
+            None => return StepResult::Abort("EstablishStreams: coord_outbound_target is None but workers exist".to_string()),
+        };
+
+        let mut outbound_stream = match self.capabilities.network.open_tensor_stream(outbound_target).await {
+            Ok(s) => s,
+            Err(e) => return StepResult::Abort(format!("EstablishStreams: open_tensor_stream failed: {}", e)),
+        };
+
+        // 写入 handshake（inference_id）
+        if let Err(e) = Write_Tensor_Stream_Handshake(&mut outbound_stream, inference_id).await {
+            return StepResult::Abort(format!("EstablishStreams: handshake write failed: {}", e));
+        }
+
+        // 4. 注册出站到 tensor_switch
+        self.capabilities.tensor_switch.Register_Outbound(inference_id, outbound_stream).await;
+
+        // 5. 向所有 Worker 并发发送 ESTABLISH_TENSOR_STREAM 命令
+        for worker in &plan.workers {
+            let cmd = NetworkProtocol::Establish_Tensor_Stream {
+                inference_id,
+                target_peer_id: worker.outbound_target.to_string(),
+            };
+            let payload = Serialize_Network_Command(&cmd);
+
+            let response = match self.capabilities.network.send_data(
+                worker.peer_id,
+                DataType::Command,
+                payload,
+            ).await {
+                Ok(r) => r,
+                Err(e) => return StepResult::Abort(format!(
+                    "EstablishStreams: send to worker {} failed: {}",
+                    worker.peer_id, e
+                )),
+            };
+
+            // 检查回复
+            let reply_text = String::from_utf8_lossy(&response.payload);
+            if !reply_text.starts_with("OK") {
+                return StepResult::Abort(format!(
+                    "EstablishStreams: worker {} replied: {}",
+                    worker.peer_id, reply_text
+                ));
+            }
+        }
+
+        // 6. 等待入站流就绪，创建 Tensor_IO_Endpoint
+        //    入站流由最后一个 Worker (或唯一 Worker) 打开回 Coordinator，
+        //    Core 的 B3 分支 TensorStreamArrived 会调用 Register_Inbound。
+        //    这里轮询等待 Create_Endpoint 成功。
+        let rt_handle = tokio::runtime::Handle::current();
+        let job_id = self.job_id;
+
+        let max_attempts = 60; // 60 * 500ms = 30s 超时
+        let mut endpoint = None;
+
+        for _ in 0..max_attempts {
+            match self.capabilities.tensor_switch.Create_Endpoint(inference_id, rt_handle.clone(), job_id).await {
+                Ok((ep, _failure_rx)) => {
+                    endpoint = Some(ep);
+                    break;
+                }
+                Err(_) => {
+                    // 入站流尚未到达，等待 500ms 后重试
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        let ep = match endpoint {
+            Some(ep) => ep,
+            None => return StepResult::Abort(format!(
+                "EstablishStreams: timeout waiting for inbound stream (inference_id={})",
+                inference_id
+            )),
+        };
+
+        // 7. 注入 SLOT_TENSOR_IO
+        self.slots.set(SLOT_TENSOR_IO, SlotValue::TensorIo(std::sync::Mutex::new(Some(ep))));
+
+        // 8. 写入 Coordinator 层范围
+        self.slots.set(SLOT_LAYER_START, SlotValue::U64(plan.coord_layer_start as u64));
+        self.slots.set(SLOT_LAYER_END, SlotValue::U64(plan.coord_layer_end as u64));
+
+        // 9. 写结果
+        self.slots.set(result, SlotValue::String("ok".to_string()));
+        StepResult::Continue
     }
 
-    // NOTE: handle_open_tensor_stream, handle_take_inbound_stream,
-    // handle_take_outbound_stream, handle_build_tensor_io 已在 Phase 3 移除。
-    // 张量流连接现由 Core 在 spawn Job 之前完成（"先连接后启动"模式）。
+    /// 处理 JoinWorkers 指令：Phase 2 — 通知所有 Worker 加入流水线
+    ///
+    /// 1. 从 `plan` 槽位读取拓扑规划信息
+    /// 2. 从 SLOT_MODEL 读取模型文件 ID（假设所有节点持有完整模型）
+    /// 3. 向所有 Worker 并发发送 `JOIN_PIPELINE` 命令
+    /// 4. 等待所有 Worker 回复 OK（超时由 Network 层 request_response_timeout 控制）
+    /// 5. 将结果写入 `result` 槽位
+    pub(super) async fn handle_join_workers(&mut self, plan_slot: SlotId, result: SlotId) -> StepResult {
+        // 1. 读取 Pipeline_Plan
+        let plan: Pipeline_Plan = match self.slots.get_pipeline_plan(plan_slot) {
+            Ok(p) => p.clone(),
+            Err(e) => return StepResult::Abort(format!("JoinWorkers: plan slot error: {}", e)),
+        };
+
+        // 2. 单机退化：无 Worker
+        if plan.workers.is_empty() {
+            self.slots.set(result, SlotValue::String("ok_single_node".to_string()));
+            return StepResult::Continue;
+        }
+
+        // 3. 读取模型文件 ID（所有节点同一份完整模型）
+        let model_file_id = match self.slots.get_string(SLOT_MODEL) {
+            Ok(s) => s.clone(),
+            Err(e) => return StepResult::Abort(format!("JoinWorkers: model slot error: {}", e)),
+        };
+
+        // 4. 向所有 Worker 发送 JOIN_PIPELINE 命令
+        for worker in &plan.workers {
+            let cmd = NetworkProtocol::Join_Pipeline {
+                inference_id: plan.inference_id,
+                model_file_id: model_file_id.clone(),
+                device: worker.device.clone(),
+                layer_start: worker.layer_start,
+                layer_end: worker.layer_end,
+            };
+            let payload = Serialize_Network_Command(&cmd);
+
+            let response = match self.capabilities.network.send_data(
+                worker.peer_id,
+                DataType::Command,
+                payload,
+            ).await {
+                Ok(r) => r,
+                Err(e) => return StepResult::Abort(format!(
+                    "JoinWorkers: send to worker {} failed: {}",
+                    worker.peer_id, e
+                )),
+            };
+
+            // 检查回复
+            let reply_text = String::from_utf8_lossy(&response.payload);
+            if !reply_text.starts_with("OK") {
+                return StepResult::Abort(format!(
+                    "JoinWorkers: worker {} replied: {}",
+                    worker.peer_id, reply_text
+                ));
+            }
+        }
+
+        // 5. 全部成功
+        self.slots.set(result, SlotValue::String("ok".to_string()));
+        StepResult::Continue
+    }
+
+    /// 处理 TeardownPipeline 指令：补偿 — 清理流水线资源
+    ///
+    /// 1. 尝试从 `plan` 槽位读取拓扑规划信息（包含 inference_id）
+    ///    补偿执行时 plan 可能尚未写入（如果 PlanPipeline 就失败了），此时直接跳过
+    /// 2. 调用 `tensor_switch.Deregister_Pipeline(inference_id)` 清理张量流
+    /// 3. 返回 Continue（补偿指令永不 Abort）
+    pub(super) async fn handle_teardown_pipeline(&mut self, plan_slot: SlotId) -> StepResult {
+        // 尝试读取 plan — 补偿时可能尚未写入
+        if let Ok(plan) = self.slots.get_pipeline_plan(plan_slot) {
+            let inference_id = plan.inference_id;
+            // 清理 tensor_switch 中注册的张量流
+            self.capabilities.tensor_switch.Deregister_Pipeline(inference_id).await;
+        }
+        // 补偿指令永不 Abort，尽力清理即可
+        StepResult::Continue
+    }
 }

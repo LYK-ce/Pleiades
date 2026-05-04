@@ -61,7 +61,7 @@ use super::ml_thread_register::{
     TOKENID1, TOKENID2, TOKENID3,
     TENSOR1, TENSOR2,
     FLAG1, FLAG4,
-    META1, META2, META4, META5,
+    META1, META2, META4, META5, META6,
 };
 use crate::tensor_io::Tensor_IO_Endpoint;
 
@@ -672,12 +672,19 @@ fn Execute_Instruction(
                 Ok(input_tensor) => {
                     match Inference_With_Backend(&mut session.backend, &input_tensor, offset) {
                         Ok(output_tensor) => {
-                            session.register.Set_Tensor(TENSOR2, output_tensor);
-                            // 仅 Tokens 输入（Coordinator decode）递增 offset
-                            // Tensor 输入（Worker relay）不递增，offset 由 Receive 管理
-                            if matches!(input, Inference_Input::Tokens(_)) {
-                                session.register.Increment_Meta(META1, 1.0);
+                            // 根据输入类型递增 META1(offset)：
+                            // - Tokens 输入（Coordinator decode）：递增 1
+                            // - Tensor 输入（Worker relay）：递增 input_seq_len（自主管理 offset）
+                            match input {
+                                Inference_Input::Tokens(_) => {
+                                    session.register.Increment_Meta(META1, 1.0);
+                                }
+                                Inference_Input::Tensor(_) => {
+                                    let seq_len = input_tensor.dim(1).unwrap_or(1);
+                                    session.register.Increment_Meta(META1, seq_len as f64);
+                                }
                             }
+                            session.register.Set_Tensor(TENSOR2, output_tensor);
                         }
                         Err(e) => {
                             error!("Session [{}]: [Inference] 推理失败: {}", session.id, e);
@@ -795,8 +802,9 @@ fn Execute_Instruction(
                                 match Bytes_To_Tensor(&buffer, &Get_Device(&session.backend)) {
                                     Ok(tensor) => {
                                         session.register.Set_Tensor(TENSOR1, tensor);
-                                        // 将接收到的 offset 写入 META1（Worker 用此 offset 做推理）
-                                        session.register.Set_Meta(META1, offset as f64);
+                                        // 将接收到的 offset 存入 META6（仅供调试/日志）
+                                        // Worker 的 META1(offset) 由 Inference 指令自主管理，不被覆写
+                                        session.register.Set_Meta(META6, offset as f64);
                                     }
                                     Err(e) => {
                                         error!("Session [{}]: [Receive] 张量反序列化失败: {}", session.id, e);

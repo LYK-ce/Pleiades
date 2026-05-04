@@ -32,7 +32,7 @@ mod tests {
     use super::super::Capabilities;
     use crate::orchestrator::job::JobId;
     use crate::orchestrator::slot::{SlotId, SlotValue, ConstValue};
-    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
     use crate::tensor_io::Tensor_Port_Switch;
@@ -63,6 +63,7 @@ mod tests {
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
+            scheduler: Box::new(StubScheduler),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_switch: Arc::new(Tensor_Port_Switch::New()),

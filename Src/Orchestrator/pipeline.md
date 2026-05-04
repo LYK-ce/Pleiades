@@ -319,10 +319,11 @@ TensorStreamArrived → Read_Tensor_Stream_Handshake → inference_id
 
 ## 修改实施计划
 
-当前阶段目标：**仅实现 Worker 侧的 Network Command 处理**，为后续 Coordinator 编排逻辑准备基础。
-不实现 Coordinator 侧的用户命令（如 `UserCommand::StartPipeline`）和三阶段编排循环。
+### Phase 1：Worker 侧基础设施（已完成 ✅）
 
-### 实施步骤
+当前阶段目标：**仅实现 Worker 侧的 Network Command 处理**，为后续 Coordinator 编排逻辑准备基础。
+
+#### 实施步骤
 
 #### Step 1：新增 `inference_id.rs`
 
@@ -391,18 +392,206 @@ TensorStreamArrived → Read_Tensor_Stream_Handshake → inference_id
 
 这样新旧两种模式在过渡期内可以共存。
 
-### 不修改（本阶段）
-
-| 项目 | 原因 |
-|------|------|
-| `UserCommand` 枚举 | Coordinator 用户命令暂不实现 |
-| Core 三阶段编排循环 | 等 Worker 侧验证通过后再实现 |
-| 移除 `RequestPipeline` / `pending_distributed_jobs` / `route_pipeline_flow` | 保持旧路径可运行，待新路径验证后再清理 |
-| `compile_coordinator` 简化 | 依赖 Coordinator 编排逻辑，暂不改动 |
-
-### 验证方式
+#### 验证方式
 
 通过集成测试模拟 Coordinator → Worker 的命令流：
 1. 构造 `ESTABLISH_TENSOR_STREAM` payload → 发送给 Worker Core → 验证回复 OK + outbound 已注册
 2. 构造 `JOIN_PIPELINE` payload → 发送给 Worker Core → 验证回复 OK + Job 已 spawn
 3. 验证 `TensorStreamArrived` 事件能正确触发 `Register_Inbound`
+
+---
+
+### Phase 2：Coordinator 侧编排实现
+
+当前阶段目标：实现 **Coordinator 侧的完整 Pipeline 启动**流程，包括用户命令、compile_relay 补全、三阶段编排逻辑。
+
+#### Step 1：新增 `UserCommand::Pipeline`
+
+修改 `Src/Orchestrator/command.rs`：
+
+```rust
+/// 启动分布式流水线推理
+///
+/// Coordinator 自动完成：分析模型 → 查询可用节点 → 规划拓扑 → 分发模型 → 建立流水线。
+/// 用户只需提供模型路径，其余由编排逻辑自动处理。
+///
+/// 回复：`Ok(JobId)` Pipeline Job 已启动；`Err(String)` 任一阶段失败
+Pipeline {
+    model_path: String,
+    reply: oneshot::Sender<Result<JobId, String>>,
+}
+```
+
+同步修改：
+- `Src/TUI/command_panel.rs`：新增 `pipeline <model_path>` 解析
+- `Src/Orchestrator/core.rs`：`route_user` 新增 `UserCommand::Pipeline` 分支（`todo!()` 占位）
+
+#### Step 2：实现 `compile_relay`
+
+修改 `Src/Orchestrator/compiler.rs`：
+
+**签名简化**（移除无用参数）：
+
+```rust
+pub fn compile_relay(
+    &self,
+    _job_id: JobId,
+    model_file_id: String,
+    device: String,
+    layer_start: usize,
+    layer_end: usize,
+) -> Result<TaskProgram, CompilerError>
+```
+
+**生成的 TaskProgram**：
+
+```text
+正向序列：
+  Const(model_file_id) → SLOT_MODEL
+  Const(device) → SLOT_DEVICE
+  Const(layer_start) → SLOT_LAYER_START
+  Const(layer_end) → SLOT_LAYER_END
+  CreateSession { model, device, start, end, io, tensor_io: Some(SLOT_TENSOR_IO), result: SLOT_SESSION }
+  RunProgram { session: SLOT_SESSION, result: SLOT_RESULT }
+
+补偿序列：
+  ShutdownSession { session: SLOT_SESSION }
+```
+
+**RunProgram 提交的 ML 指令序列**（由 `Build_Relay_ML_Program()` 生成）：
+
+```rust
+fn Build_Relay_ML_Program() -> Vec<Instruction> {
+    vec![
+        Instruction::Loop(vec![
+            Instruction::Receive,
+            Instruction::BreakIf(FLAG1),
+            Instruction::Inference(Inference_Input::Tensor(TENSOR1)),
+            Instruction::Send,
+        ]),
+    ]
+}
+```
+
+Worker Relay 程序语义：接收上游张量 → 检查 EOF → 推理 → 发送到下游，循环直到 EOF。
+
+#### Step 3：Pipeline 编排指令（已完成 ✅，已精简）
+
+将编排逻辑建模为 **TaskInstruction**，由 TaskEngine 执行，保持架构一致性。
+Pipeline 编排 = 一个 Job（JobKind::Pipeline），享有 registry 管理、cancel 支持、compensation 自动清理。
+
+**最终保留的指令**（`Src/Orchestrator/instruction.rs`）：
+
+| 指令 | 用途 | handler |
+|------|------|---------|
+| `EstablishStreams { plan, result }` | Phase 1: Coordinator 自身建流 + 并发命令 Workers 建流 | `handler_network.rs` |
+| `JoinWorkers { plan, result }` | Phase 2: 并发通知 Workers 加入流水线 | `handler_network.rs` |
+| `TeardownPipeline { plan }` | 补偿: 清理已建立的资源 | `handler_network.rs` |
+
+**已移除的指令**：
+- `PlanPipeline` — Scheduler 尚未实现，在 compile_pipeline 中用 todo! 占位
+- `DistributeShards` — 模型分发是独立操作（用户先执行 `distribute` 命令）
+
+#### Step 4：实现 `compile_pipeline`
+
+修改 `Src/Orchestrator/compiler.rs`：
+
+**签名**：
+
+```rust
+pub fn compile_pipeline(
+    &self,
+    _job_id: JobId,
+    model_path: String,
+    device: String,
+) -> Result<TaskProgram, CompilerError>
+```
+
+**生成的 TaskProgram**：
+
+```text
+正向序列：
+  [TODO: Scheduler → 生成 plan 写入 SLOT_PLAN]
+       plan 包含: inference_id, Vec<(peer_id, start, end)>, coord_layer_start, coord_layer_end
+  EstablishStreams { plan: SLOT_PLAN, result: SLOT_STREAMS_RESULT }
+       1) Coordinator 自己先向下一跳节点打开出站流 + handshake + Register_Outbound
+       2) for 每个 Worker: send_request(ESTABLISH_TENSOR_STREAM)
+       3) 等待全部 OK
+       4) Create_Endpoint(inference_id) → 写入 SLOT_TENSOR_IO
+  JoinWorkers { plan: SLOT_PLAN, result: SLOT_WORKERS_RESULT }
+       for 每个 Worker: send_request(JOIN_PIPELINE), 等待全部 OK (超时 300s)
+  Const("coordinator") → SLOT_ML_PROGRAM_MODE
+  CreateSession { model, device, start, end, io, tensor_io: Some(SLOT_TENSOR_IO), result: SLOT_SESSION }
+  RunProgram { session: SLOT_SESSION, result: SLOT_RESULT }
+
+补偿序列：
+  TeardownPipeline { plan: SLOT_PLAN }
+  ShutdownSession { session: SLOT_SESSION }
+```
+
+**Core 中的调用**（替换当前 `todo!()` 占位）：
+
+```rust
+UserCommand::Pipeline { model_path, reply } => {
+    let job_id = JobId(generate_id());
+    let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
+    let program = match self.compiler.compile_pipeline(job_id, model_path, device) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = reply.send(Err(format!("编译失败: {:?}", e)));
+            return;
+        }
+    };
+    // Pipeline Job 需要 IO 通道（Coordinator 推理需要与前端交互）
+    if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+        let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
+        return;
+    }
+    match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+        Ok(io) => {
+            self.spawn_job(job_id, JobKind::Pipeline, program, Some(io));
+            let _ = reply.send(Ok(job_id));
+        }
+        Err(e) => {
+            let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
+        }
+    }
+}
+```
+
+Pipeline Job 由 TaskEngine 在独立的 `tokio::spawn` task 中执行（JobExecutor::run），
+不会阻塞 Core 的 select! 循环。各 handler 内部自由 await 网络操作。
+
+**RunProgram 提交的 ML 指令序列**（由 `Build_Coordinator_ML_Program()` 生成）：
+
+```text
+Input → Encode → Set(max_tokens) → Prefill(TOKENID3) → CopyMeta(META5→META1)
+→ Send → Receive → Sample(TENSOR1) → Decode → Output
+→ Loop [ BreakIf, Inference(TOKENID2), Send, Receive, Sample(TENSOR1), Decode, Output ]
+→ SendEOF → EndOutput
+```
+
+#### Step 5：逐步实现各 handler
+
+按顺序实现 `handler_network.rs` 中的 3 个 Pipeline handler 方法：
+
+| # | handler | 核心逻辑 |
+|---|---------|----------|
+| 1 | `handle_establish_streams` | Coordinator 自身建流 + 并发 `send_request(ESTABLISH_TENSOR_STREAM)` + Create_Endpoint |
+| 2 | `handle_join_workers` | 并发 `send_request(JOIN_PIPELINE)`，超时 300s |
+| 3 | `handle_teardown_pipeline` | `tensor_switch.Deregister_Pipeline` + 通知 Worker 清理 |
+
+#### Step 6：端到端验证
+
+多节点联调测试：Coordinator 节点执行 `pipeline <model_path>` → 自动完成全流程。
+
+### Phase 2 实施顺序
+
+| # | 步骤 | 状态 | 依赖 | 复杂度 |
+|---|------|------|------|--------|
+| 1 | UserCommand::Pipeline + TUI 解析 + Core todo | ✅ 完成 | 无 | 低 |
+| 2 | compile_relay 实现 + Core Join_Pipeline 签名适配 | ✅ 完成 | Step 1 | 中 |
+| 3 | Pipeline 编排指令精简（仅 Establish/Join/Teardown） | ✅ 完成 | Step 2 | 低 |
+| 4 | compile_pipeline 实现 + Core route_user 接入 | | Step 3 | 中 |
+| 5 | 逐步实现 handler_network 中 Pipeline handler | | Step 4 | 高 |
+| 6 | 端到端验证（多节点联调） | | Step 5 | 高 |

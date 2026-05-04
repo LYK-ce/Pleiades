@@ -13,6 +13,7 @@ mod task_engine;
 mod handler_data;
 mod handler_inference;
 mod handler_network;
+mod handler_scheduler;
 mod handler_control;
 use task_engine::{TaskEngine, StepResult};
 
@@ -168,7 +169,7 @@ mod executor_tests {
     use crate::orchestrator::job::{JobId, JobKind, JobResult};
     use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
     use crate::orchestrator::slot::{SlotId, ConstValue};
-    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager};
+    use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::storage::StorageManager;
     use crate::llm_io::LLM_IO_Broker;
     use crate::tensor_io::Tensor_Port_Switch;
@@ -201,6 +202,7 @@ mod executor_tests {
             ml_engine: Box::new(StubMLEngine),
             network: Box::new(StubNetwork),
             peer_manager: Box::new(StubPeerManager),
+            scheduler: Box::new(StubScheduler),
             event_bus: Arc::new(EventBus::New(16)),
             io_broker: Arc::new(LLM_IO_Broker::New()),
             tensor_switch: Arc::new(Tensor_Port_Switch::New()),
