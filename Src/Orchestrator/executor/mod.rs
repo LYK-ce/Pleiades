@@ -1,11 +1,11 @@
 // Presented by KeJi
-// Date ： 2026-04-23
+// Date ： 2026-05-09
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use super::job::{JobId, JobKind, JobState, LifecycleEvent};
-use super::slot::{SlotId, SlotValue};
+use super::slot::SlotValue;
 use super::compiler::SLOT_IO;
 use crate::llm_io::IoHandle;
 
@@ -15,9 +15,11 @@ mod handler_inference;
 mod handler_network;
 mod handler_scheduler;
 mod handler_control;
-use task_engine::{TaskEngine, StepResult};
 
-/// 从 instruction 模块导入 TaskProgram
+use super::orchestrator_vm::{Orchestrator_VM, OrchestratorInstruction};
+use crate::vm_base::StepResult;
+
+/// 从 instruction 模块导入 TaskProgram（后续迁移到 OrchestratorInstruction）
 pub use super::instruction::TaskProgram;
 
 use super::Capabilities;
@@ -30,16 +32,105 @@ pub struct JobExecutor {
     cancel: CancellationToken,
     capabilities: Arc<Capabilities>,
     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
-    task_engine: TaskEngine,
+    engine: Orchestrator_VM,
     state: JobState,
 }
 
+/// 将旧 TaskInstruction → 新 OrchestratorInstruction，同时转换 SlotId。
+fn convert_instruction(
+    inst: &super::instruction::TaskInstruction,
+    labels: &std::collections::HashMap<String, usize>,
+) -> OrchestratorInstruction {
+    use super::instruction::TaskInstruction;
+    use super::orchestrator_vm::to_vm_slot;
+    use crate::vm_base::{ConstValue, SlotId};
+
+    match inst {
+        TaskInstruction::Const { value, dst } => {
+            let cv = match value {
+                super::slot::ConstValue::Nil => ConstValue::Nil,
+                super::slot::ConstValue::Bool(b) => ConstValue::Bool(*b),
+                super::slot::ConstValue::U64(v) => ConstValue::U64(*v),
+                super::slot::ConstValue::String(s) => ConstValue::String(s.clone()),
+                super::slot::ConstValue::PathBuf(p) => ConstValue::PathBuf(p.clone()),
+                super::slot::ConstValue::Error(e) => ConstValue::Error(e.clone()),
+            };
+            OrchestratorInstruction::Const { value: cv, dst: to_vm_slot(*dst) }
+        }
+        TaskInstruction::Move { src, dst } => OrchestratorInstruction::Move {
+            src: to_vm_slot(*src),
+            dst: to_vm_slot(*dst),
+        },
+        TaskInstruction::CreateSession { model, device, start, end, io, tensor_io, result } => {
+            OrchestratorInstruction::CreateSession {
+                model: to_vm_slot(*model),
+                device: to_vm_slot(*device),
+                start: to_vm_slot(*start),
+                end: to_vm_slot(*end),
+                io: to_vm_slot(*io),
+                tensor_io: tensor_io.map(|s| to_vm_slot(s)),
+                result: to_vm_slot(*result),
+            }
+        }
+        TaskInstruction::ShutdownSession { session } => OrchestratorInstruction::ShutdownSession {
+            session: to_vm_slot(*session),
+        },
+        TaskInstruction::RunProgram { session, result } => OrchestratorInstruction::RunProgram {
+            session: to_vm_slot(*session),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::AnalyzeModel { model, result } => OrchestratorInstruction::AnalyzeModel {
+            model: to_vm_slot(*model),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::SplitModel { source, start, end, output } => OrchestratorInstruction::SplitModel {
+            source: to_vm_slot(*source),
+            start: to_vm_slot(*start),
+            end: to_vm_slot(*end),
+            output: to_vm_slot(*output),
+        },
+        TaskInstruction::SendFile { peer, file } => OrchestratorInstruction::SendFile {
+            peer: to_vm_slot(*peer),
+            file: to_vm_slot(*file),
+        },
+        TaskInstruction::ReceiveFile { stream, file_name, file_size, checksum, result } => OrchestratorInstruction::ReceiveFile {
+            stream: to_vm_slot(*stream),
+            file_name: to_vm_slot(*file_name),
+            file_size: to_vm_slot(*file_size),
+            checksum: to_vm_slot(*checksum),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::PlanPipeline { model_info, inference_id, result } => OrchestratorInstruction::PlanPipeline {
+            model_info: to_vm_slot(*model_info),
+            inference_id: to_vm_slot(*inference_id),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::EstablishStreams { plan, result } => OrchestratorInstruction::EstablishStreams {
+            plan: to_vm_slot(*plan),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::JoinWorkers { plan, result } => OrchestratorInstruction::JoinWorkers {
+            plan: to_vm_slot(*plan),
+            result: to_vm_slot(*result),
+        },
+        TaskInstruction::JumpIf { condition, label } => {
+            let target = *labels.get(label).expect(&format!("JumpIf: label '{}' not found", label));
+            OrchestratorInstruction::JumpIf {
+                condition: to_vm_slot(*condition),
+                target,
+            }
+        }
+        TaskInstruction::Abort { reason } => OrchestratorInstruction::Abort {
+            reason: reason.clone(),
+        },
+        TaskInstruction::TeardownPipeline { plan: _ } => {
+            // MVP: 无补偿链，跳过 TeardownPipeline
+            OrchestratorInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) }
+        }
+    }
+}
+
 impl JobExecutor {
-    /// 创建新的 JobExecutor 实例
-    ///
-    /// `io` 参数为 `Option<IoHandle>`：
-    /// - `Some(io)`: 推理类 Job（Run/Coordinator/Relay），IoHandle 注入到 `SLOT_IO`
-    /// - `None`: 非推理 Job（Send/Distribute/Receive），无需 ML I/O 通道
     pub fn new(
         job_id: JobId,
         kind: JobKind,
@@ -49,10 +140,12 @@ impl JobExecutor {
         io: Option<IoHandle>,
         lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     ) -> Self {
-        let mut task_engine = TaskEngine::new(job_id, Arc::clone(&capabilities));
-        // 仅当提供 IoHandle 时注入到约定槽位（推理类 Job 需要）
+        let mut engine = Orchestrator_VM::new(job_id, Arc::clone(&capabilities));
         if let Some(io) = io {
-            task_engine.slots.set(SLOT_IO, SlotValue::IoHandle(io));
+            engine.slots.set(
+                super::orchestrator_vm::to_vm_slot(SLOT_IO),
+                super::orchestrator_vm::OrchestratorSlotValue::IoHandle(io),
+            );
         }
         JobExecutor {
             job_id,
@@ -61,46 +154,51 @@ impl JobExecutor {
             cancel,
             capabilities,
             lifecycle_tx,
-            task_engine,
+            engine,
             state: JobState::Preparing,
         }
     }
 
-    /// 在 spawn 前向 SlotFile 注入额外的运行时资源
-    ///
-    /// 用于 Core 在创建 Executor 后、调用 `run()` 前注入不可通过 Const 指令表达的值
-    /// （如 `libp2p::Stream`），因为 Stream 不属于 `ConstValue` 子集。
-    ///
-    /// # 用法
-    /// ```ignore
-    /// let mut executor = JobExecutor::new(...);
-    /// executor.inject_slot(SLOT_RECEIVE_STREAM, SlotValue::Stream(Mutex::new(Some(stream))));
-    /// tokio::spawn(executor.run());
-    /// ```
-    pub fn inject_slot(&mut self, slot_id: SlotId, value: SlotValue) {
-        self.task_engine.slots.set(slot_id, value);
+    pub fn inject_slot(&mut self, slot_id: super::slot::SlotId, value: SlotValue) {
+        use super::slot::SlotValue::{IoHandle, Stream, TensorIo, ModelInfo, PipelinePlan};
+        use super::orchestrator_vm::{to_vm_slot, OrchestratorSlotValue};
+        let vm_slot = to_vm_slot(slot_id);
+        match value {
+            IoHandle(h) => { self.engine.slots.set(vm_slot, OrchestratorSlotValue::IoHandle(h)); }
+            Stream(s) => {
+                let inner = s.lock().unwrap().take();
+                self.engine.slots.set(vm_slot, OrchestratorSlotValue::Stream(std::sync::Mutex::new(inner)));
+            }
+            TensorIo(t) => {
+                let inner = t.lock().unwrap().take();
+                if let Some(ep) = inner {
+                    self.engine.slots.set(vm_slot, OrchestratorSlotValue::TensorIO(ep));
+                }
+            }
+            ModelInfo(m) => { self.engine.slots.set(vm_slot, OrchestratorSlotValue::ModelInfo(m)); }
+            PipelinePlan(p) => { self.engine.slots.set(vm_slot, OrchestratorSlotValue::PipelinePlan(p)); }
+            _ => { self.engine.vm.slots.set(vm_slot, convert_basic_slot(value)); }
+        }
     }
 
-    /// 主执行循环
     pub async fn run(mut self) {
-        self.task_engine.load(&self.program);
-        
-        // 记录退出原因
+        let instructions: Vec<OrchestratorInstruction> = self.program.instructions.iter()
+            .map(|inst| convert_instruction(inst, &self.program.labels))
+            .collect();
+        self.engine.load(instructions);
+
         let mut exit_reason = ExitReason::Success;
-        
+
         loop {
             tokio::select! {
                 biased;
 
                 _ = self.cancel.cancelled() => {
                     exit_reason = ExitReason::Cancelled;
-                    self.task_engine.enter_compensation().await;
-                    // 执行补偿序列
-                    self.run_compensation().await;
                     break;
                 }
-                
-                result = self.task_engine.step() => {
+
+                result = self.engine.step() => {
                     match result {
                         StepResult::Continue => continue,
                         StepResult::Ready => { self.state = JobState::Ready; }
@@ -108,23 +206,19 @@ impl JobExecutor {
                         StepResult::Abort(e) => {
                             self.report_error(&e).await;
                             exit_reason = ExitReason::Failed(e);
-                            self.task_engine.enter_compensation().await;
-                            // 执行补偿序列
-                            self.run_compensation().await;
                             break;
                         }
                     }
                 }
             }
         }
-        
-        // 根据退出原因发送对应的 LifecycleEvent
+
         let result = match exit_reason {
             ExitReason::Success => super::job::JobResult::Success,
             ExitReason::Cancelled => super::job::JobResult::Cancelled,
             ExitReason::Failed(e) => super::job::JobResult::Failed(e),
         };
-        
+
         let _ = self.lifecycle_tx.send(LifecycleEvent::Done {
             job_id: self.job_id,
             result,
@@ -132,28 +226,8 @@ impl JobExecutor {
         self.cleanup().await;
     }
 
-    /// 执行补偿序列直到完成
-    async fn run_compensation(&mut self) {
-        loop {
-            match self.task_engine.step().await {
-                StepResult::Done => break,
-                StepResult::Continue | StepResult::Ready => continue,
-                StepResult::Abort(_) => break, // 补偿序列中的 Abort 直接结束
-            }
-        }
-    }
-
-    /// 错误报告（占位符，测试用 Stub）
-    async fn report_error(&self, _error: &str) {
-        // 占位符：通过 UI Capability 报告错误
-        // 目前为空实现，支持测试
-    }
-
-    /// 清理资源（占位符，测试用 Stub）
-    async fn cleanup(&self) {
-        // 占位符：执行清理操作
-        // 目前为空实现，支持测试
-    }
+    async fn report_error(&self, _error: &str) {}
+    async fn cleanup(&self) {}
 }
 
 /// 执行退出原因枚举
@@ -161,6 +235,18 @@ enum ExitReason {
     Success,
     Cancelled,
     Failed(String),
+}
+
+fn convert_basic_slot(old: SlotValue) -> crate::vm_base::SlotValue {
+    match old {
+        SlotValue::Nil => crate::vm_base::SlotValue::Nil,
+        SlotValue::Bool(b) => crate::vm_base::SlotValue::Bool(b),
+        SlotValue::U64(v) => crate::vm_base::SlotValue::U64(v),
+        SlotValue::String(s) => crate::vm_base::SlotValue::String(s),
+        SlotValue::PathBuf(p) => crate::vm_base::SlotValue::PathBuf(p),
+        SlotValue::Error(e) => crate::vm_base::SlotValue::Error(e),
+        _ => crate::vm_base::SlotValue::Nil,
+    }
 }
 
 #[cfg(test)]
@@ -181,8 +267,6 @@ mod executor_tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
-
-    // ---- Stub 实现 ----
 
     struct StubMLEngine;
     #[async_trait]
@@ -210,14 +294,12 @@ mod executor_tests {
         (caps, temp_dir)
     }
 
-    /// 创建 stub IoHandle 用于测试
     async fn stub_io_handle(caps: &Arc<Capabilities>, job_id: JobId) -> IoHandle {
         use crate::llm_io::LLM_IO_Capability;
         caps.io_broker.Allocate(job_id).await.unwrap();
         caps.io_broker.Take_ML_Side(job_id).await.unwrap()
     }
 
-    // ---- TC-01: 正向执行自然结束 ----
     #[tokio::test]
     async fn tc01_forward_execution_success() {
         let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<LifecycleEvent>(16);
@@ -227,7 +309,6 @@ mod executor_tests {
         let program = TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) },
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(1) },
             ],
             compensation: vec![],
             labels: HashMap::new(),
@@ -236,19 +317,9 @@ mod executor_tests {
         let job_id = JobId(1);
         let io = stub_io_handle(&caps, job_id).await;
 
-        let executor = JobExecutor::new(
-            job_id,
-            JobKind::Run,
-            program,
-            cancel,
-            caps,
-            Some(io),
-            lifecycle_tx,
-        );
-
+        let executor = JobExecutor::new(job_id, JobKind::Run, program, cancel, caps, Some(io), lifecycle_tx);
         tokio::spawn(executor.run());
 
-        // 验证收到 Success 结果
         let event = lifecycle_rx.recv().await.expect("应收到 LifecycleEvent");
         match event {
             LifecycleEvent::Done { job_id, result } => {
@@ -258,40 +329,26 @@ mod executor_tests {
         }
     }
 
-    // ---- TC-02: Abort 触发补偿链 ----
     #[tokio::test]
-    async fn tc02_abort_triggers_compensation() {
+    async fn tc02_abort_triggers_failed() {
         let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<LifecycleEvent>(16);
         let cancel = CancellationToken::new();
         let (caps, _temp_dir) = stub_capabilities().await;
 
         let program = TaskProgram {
             instructions: vec![
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) },
                 TaskInstruction::Abort { reason: "test failure".to_string() },
             ],
-            compensation: vec![
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(10) },
-            ],
+            compensation: vec![],
             labels: HashMap::new(),
         };
 
         let job_id = JobId(2);
         let io = stub_io_handle(&caps, job_id).await;
 
-        let executor = JobExecutor::new(
-            job_id,
-            JobKind::Run,
-            program,
-            cancel,
-            caps,
-            Some(io),
-            lifecycle_tx,
-        );
-
+        let executor = JobExecutor::new(job_id, JobKind::Run, program, cancel, caps, Some(io), lifecycle_tx);
         tokio::spawn(executor.run());
 
-        // 验证收到 Failed 结果
         let event = lifecycle_rx.recv().await.expect("应收到 LifecycleEvent");
         match event {
             LifecycleEvent::Done { job_id, result } => {
@@ -301,53 +358,30 @@ mod executor_tests {
         }
     }
 
-    // ---- TC-03: Cancel 信号中断 ----
     #[tokio::test]
     async fn tc03_cancel_signal_interrupts() {
         let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<LifecycleEvent>(16);
         let cancel = CancellationToken::new();
         let (caps, _temp_dir) = stub_capabilities().await;
 
-        // 使用 ≥5 条空壳指令
         let program = TaskProgram {
             instructions: vec![
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(0) },
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(1) },
                 TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(2) },
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(3) },
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(4) },
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(5) },
             ],
-            compensation: vec![
-                TaskInstruction::Const { value: ConstValue::Nil, dst: SlotId(10) },
-            ],
+            compensation: vec![],
             labels: HashMap::new(),
         };
 
         let job_id = JobId(3);
         let io = stub_io_handle(&caps, job_id).await;
 
-        let executor = JobExecutor::new(
-            job_id,
-            JobKind::Run,
-            program,
-            cancel.clone(),
-            caps,
-            Some(io),
-            lifecycle_tx,
-        );
-
-        // 在启动执行器之前发送 cancel 信号
-        // select! 的 biased 模式会在第一次轮询时优先捕获 cancel
+        let executor = JobExecutor::new(job_id, JobKind::Run, program, cancel.clone(), caps, Some(io), lifecycle_tx);
         cancel.cancel();
-
-        // 启动执行器
         let handle = tokio::spawn(executor.run());
-
-        // 等待执行器完成
         let _ = handle.await;
 
-        // 验证收到 Cancelled 结果
         let event = lifecycle_rx.recv().await.expect("应收到 LifecycleEvent");
         match event {
             LifecycleEvent::Done { job_id, result } => {

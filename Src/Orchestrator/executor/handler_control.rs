@@ -4,7 +4,7 @@
 use crate::orchestrator::slot::SlotId;
 use super::task_engine::StepResult;
 
-impl super::TaskEngine {
+impl super::task_engine::TaskEngine {
     /// 处理 JumpIf 指令：从 condition 槽位读取布尔值，为真时跳转到 label 对应的指令索引
     ///
     /// - 为真：通过 self.program.labels.get(label) 查找目标索引，覆盖 self.ip = target

@@ -39,6 +39,9 @@ impl Orchestrator_VM {
     }
 
     pub async fn step(&mut self) -> StepResult {
+        if self.vm.ip >= self.program.len() {
+            return StepResult::Done;
+        }
         let inst = &self.program[self.vm.ip];
         self.vm.ip += 1;
         match inst {
@@ -79,6 +82,7 @@ impl Orchestrator_VM {
             OrchestratorInstruction::JoinWorkers { plan, result } => {
                 self.handle_join_workers(*plan, *result).await
             }
+            OrchestratorInstruction::Abort { reason } => StepResult::Abort(reason.clone()),
         }
     }
 }

@@ -8,7 +8,7 @@
 use libp2p::PeerId;
 use crate::vm_base::{StepResult, SlotId};
 use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
-use crate::orchestrator::compiler::{SLOT_MODEL, SLOT_LAYER_START, SLOT_LAYER_END};
+use crate::orchestrator::compiler::{SLOT_MODEL, SLOT_TENSOR_IO, SLOT_LAYER_START, SLOT_LAYER_END};
 use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
 use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::network::DataType;
@@ -207,13 +207,18 @@ impl Orchestrator_VM {
             }
         }
 
-        let _ep = match endpoint {
+        let ep = match endpoint {
             Some(ep) => ep,
             None => return StepResult::Abort(format!(
                 "EstablishStreams: timeout waiting for inbound stream (inference_id={})",
                 inference_id
             )),
         };
+
+        self.slots.set(
+            to_vm_slot(SLOT_TENSOR_IO),
+            OrchestratorSlotValue::TensorIO(ep),
+        );
 
         self.vm.slots.set(to_vm_slot(SLOT_LAYER_START), crate::vm_base::SlotValue::U64(plan.coord_layer_start as u64));
         self.vm.slots.set(to_vm_slot(SLOT_LAYER_END), crate::vm_base::SlotValue::U64(plan.coord_layer_end as u64));

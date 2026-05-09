@@ -5,7 +5,7 @@ use crate::orchestrator::slot::{SlotId, SlotValue};
 use crate::scheduler::Scheduler_Input;
 use super::task_engine::StepResult;
 
-impl super::TaskEngine {
+impl super::task_engine::TaskEngine {
     /// 处理 PlanPipeline 指令：规划 Pipeline 拓扑
     ///
     /// 1. 从 `model_info` 槽位读取 Model_Info

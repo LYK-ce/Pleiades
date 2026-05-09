@@ -9,7 +9,7 @@ use crate::ml_engine::capability::ML_Session_Config;
 use crate::ml_engine::ml_thread_engine_instruction::Pipeline_Params;
 use super::task_engine::StepResult;
 
-impl super::TaskEngine {
+impl super::task_engine::TaskEngine {
     /// 处理 CreateSession 指令
     ///
     /// 1. 从 `model` 槽位 `get_string` 获取模型路径（作为 `model_file_id`）

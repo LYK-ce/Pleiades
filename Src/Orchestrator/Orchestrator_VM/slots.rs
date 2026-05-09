@@ -12,6 +12,7 @@ use crate::scheduler::Pipeline_Plan;
 use crate::tensor_io::Tensor_IO_Endpoint;
 use crate::vm_base::SlotId;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Phase 2 ML Session 句柄的占位符。
 /// 后续替换为实际的 Session 句柄类型。
@@ -22,7 +23,7 @@ pub struct SessionHandle;
 pub enum OrchestratorSlotValue {
     IoHandle(IoHandle),
     SessionHandle(SessionHandle),
-    Stream(libp2p::Stream),
+    Stream(Mutex<Option<libp2p::Stream>>),
     TensorIO(Tensor_IO_Endpoint),
     PipelinePlan(Pipeline_Plan),
     ModelInfo(Model_Info),
@@ -48,6 +49,14 @@ impl OrchestratorSlots {
         self.slots.remove(&slot)
     }
 
+    /// 设置 Stream 槽位。
+    pub fn set_stream(&mut self, slot: SlotId, stream: libp2p::Stream) {
+        self.set(
+            slot,
+            OrchestratorSlotValue::Stream(Mutex::new(Some(stream))),
+        );
+    }
+
     // ─── 类型化 take ──────────────────────────────────────
 
     pub fn take_io_handle(&mut self, slot: SlotId) -> Option<IoHandle> {
@@ -66,7 +75,7 @@ impl OrchestratorSlots {
 
     pub fn take_stream(&mut self, slot: SlotId) -> Option<libp2p::Stream> {
         match self.take(slot) {
-            Some(OrchestratorSlotValue::Stream(s)) => Some(s),
+            Some(OrchestratorSlotValue::Stream(m)) => m.into_inner().unwrap(),
             _ => None,
         }
     }

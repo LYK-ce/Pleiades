@@ -12,7 +12,7 @@ use crate::storage::{StorageCapability, ChecksumAlgorithm};
 use crate::scheduler::Pipeline_Plan;
 use super::task_engine::StepResult;
 
-impl super::TaskEngine {
+impl super::task_engine::TaskEngine {
     /// 处理 SendFile 指令：将本地文件通过 in-band header 方案发送到远端 Peer
     ///
     /// 单阶段 Stream 协议（与张量流同构）：

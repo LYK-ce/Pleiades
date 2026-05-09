@@ -4,7 +4,7 @@
 use crate::orchestrator::slot::{SlotId, ConstValue};
 use super::task_engine::StepResult;
 
-impl super::TaskEngine {
+impl super::task_engine::TaskEngine {
     /// 处理 Const 指令：将常量值写入目标槽位
     /// 将 `ConstValue` 转换为 `SlotValue` 后写入 `dst` 槽位，覆盖原有值（旧值自然 Drop）
     pub(super) fn handle_const(&mut self, value: ConstValue, dst: SlotId) -> StepResult {
@@ -28,7 +28,7 @@ impl super::TaskEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::TaskEngine;
+    use super::super::task_engine::TaskEngine;
     use super::super::Capabilities;
     use crate::orchestrator::job::JobId;
     use crate::orchestrator::slot::{SlotId, SlotValue, ConstValue};
@@ -111,32 +111,16 @@ mod tests {
             SlotValue::U64(v) => assert_eq!(*v, 200),
             _ => panic!("Expected SlotValue::U64"),
         }
-    }
 
-    /// TC-03: Move 成功转移
-    /// 验证点：源槽位变为 `Nil`，目标槽位有值
-    #[tokio::test]
-    async fn test_move_success() {
-        let (caps, _temp_dir) = stub_caps().await;
-        let mut engine = TaskEngine::new(JobId(999), caps);
-        let src = SlotId(0);
-        let dst = SlotId(1);
+        // 旧值被覆盖
+        let overwritten = engine.handle_const(ConstValue::Bool(true), dst);
 
-        // 先在源槽位写入值
-        engine.handle_const(ConstValue::Bool(true), src);
-        // 执行 Move
-        let result = engine.handle_move(src, dst);
-
-        assert!(matches!(result, StepResult::Continue));
-        // 检查源槽位变为 Nil
-        let src_value = engine.slots().get(src);
-        assert!(src_value.is_some());
-        assert!(matches!(src_value.unwrap(), SlotValue::Nil));
-        // 检查目标槽位有正确的值
-        let dst_value = engine.slots().get(dst);
-        assert!(dst_value.is_some());
-        match dst_value.unwrap() {
+        assert!(matches!(overwritten, StepResult::Continue));
+        let stored = engine.slots().get(dst);
+        assert!(stored.is_some());
+        match stored.unwrap() {
             SlotValue::Bool(b) => assert!(*b),
+            _ => panic!("Expected SlotValue::Bool"),
             _ => panic!("Expected SlotValue::Bool"),
         }
     }

@@ -88,4 +88,9 @@ pub enum OrchestratorInstruction {
         plan: SlotId,
         result: SlotId,
     },
+    /// 终止执行，携带原因字符串。
+    /// 引擎直接返回 StepResult::Abort(reason)。
+    Abort {
+        reason: String,
+    },
 }
