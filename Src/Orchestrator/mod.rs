@@ -9,6 +9,7 @@ pub mod command;
 pub mod slot;
 pub mod instruction;
 pub mod inference_id;
+pub mod orchestrator_vm;
 
 use std::sync::Arc;
 use crate::storage::StorageManager;

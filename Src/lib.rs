@@ -16,8 +16,10 @@
 //! - scheduler: 分布式流水线拓扑调度模块
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
+//! - vm: 虚拟机执行骨架模块
 
-#[path = "Config/mod.rs"]
+#[path = "Vm_Base/mod.rs"]
+pub mod vm_base;
 pub mod config;
 
 #[path = "Network/mod.rs"]
