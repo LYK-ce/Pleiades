@@ -1,0 +1,317 @@
+**命令式模型加载与动态分片推理架构设计文档**
+
+## 1. 核心概念
+
+### 1.1 命令式 vs 声明式加载
+
+| 模式 | 特征 | 类比 | 适用场景 |
+|------|------|------|---------|
+| **声明式** | 启动时确定拓扑，运行时固定 | 建筑蓝图，施工后不可变 | 静态集群、固定硬件 |
+| **命令式** | 运行时动态实例化，按需加载 | 游戏关卡，随玩家进度动态加载 | 弹性伸缩、异构设备、故障迁移 |
+
+### 1.2 核心隐喻：游戏关卡系统
+- **调度器** = 关卡管理器（决定加载哪一层）
+- **模型实例** = 房间实例（动态创建/销毁）
+- **Hidden States** = 玩家状态（在节点间传递）
+- **权重加载** = 资源动态加载（从 GGUF 文件按需读取）
+
+## 2. 系统架构
+
+### 2.1 组件关系
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     调度器 (Scheduler)                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ 拓扑决策引擎  │  │ 负载监控器    │  │ 指令分发器        │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
+└─────────┼────────────────┼──────────────────┼────────────┘
+          │                │                  │
+          ▼                ▼                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      计算节点集群                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   Node 0     │  │   Node 1     │  │   Node 2     │      │
+│  │ [Layers 0-3] │  │ [Layers 4-7] │  │ [Layers 8-11]│      │
+│  │  + Embedding │  │              │  │ + LM Head    │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 指令协议
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadCommand {
+    pub shard_id: usize,              // 节点标识
+    pub layer_range: Range<usize>,    // 层范围，如 4..8
+    pub role: ShardRole,              // 功能角色
+    pub priority: u8,                 // 优先级（用于抢占）
+}
+
+pub enum ShardRole {
+    First,    // 包含 Embedding，接收 input_ids
+    Middle,   // 纯 Transformer 层，接收 hidden_states
+    Last,     // 包含 Norm + LM Head，输出 logits
+}
+```
+
+## 3. 核心实现机制
+
+### 3.1 动态实例化工厂
+
+```rust
+pub struct ModelInstance {
+    pub layers: Vec<DecoderLayer>,
+    pub embedding: Option<Embedding>,
+    pub norm: Option<RmsNorm>,
+    pub lm_head: Option<Linear>,
+    pub device: Device,
+    pub loaded_range: Range<usize>,  // 记录当前加载的层范围
+}
+
+/// 命令式实例化入口
+impl ModelInstance {
+    pub fn instantiate(
+        gguf: &gguf_file::Content,
+        cmd: &LoadCommand,
+        device: &Device,
+    ) -> Result<Self> {
+        // 1. 按需加载指定层（如第4、5、6、7层）
+        let layers: Vec<_> = cmd.layer_range
+            .clone()
+            .map(|i| load_layer(gguf, i, device))
+            .collect::<Result<Vec<_>>>()?;
+        
+        // 2. 根据角色动态附加组件
+        let (emb, norm, head) = match cmd.role {
+            ShardRole::First => (
+                Some(load_embedding(gguf, device)?),
+                None,
+                None,
+            ),
+            ShardRole::Middle => (None, None, None),
+            ShardRole::Last => (
+                None,
+                Some(load_norm(gguf, device)?),
+                Some(load_lm_head(gguf, device)?),
+            ),
+        };
+        
+        Ok(Self {
+            layers,
+            embedding: emb,
+            norm,
+            lm_head: head,
+            device: device.clone(),
+            loaded_range: cmd.layer_range.clone(),
+        })
+    }
+}
+```
+
+### 3.2 运行时热插拔（Hot-Swap）
+
+```rust
+pub struct ComputeNode {
+    pub current_instance: Option<ModelInstance>,
+    pub command_rx: Receiver<LoadCommand>,
+    pub state_tx: Sender<ShardState>,
+}
+
+impl ComputeNode {
+    /// 主循环：监听指令并动态调整
+    pub async fn run(&mut self) {
+        while let Some(cmd) = self.command_rx.recv().await {
+            match cmd {
+                LoadCommand::Load(new_config) => {
+                    // 1. 优雅卸载（Graceful Shutdown）
+                    if let Some(old) = self.current_instance.take() {
+                        self.drain_requests().await;  // 等待进行中的请求完成
+                        drop(old);                    // 释放显存
+                        tokio::task::yield_now().await; // 强制垃圾回收
+                    }
+                    
+                    // 2. 动态实例化新配置
+                    let instance = ModelInstance::instantiate(
+                        &self.gguf_content,
+                        &new_config,
+                        &self.device
+                    ).expect("实例化失败");
+                    
+                    self.current_instance = Some(instance);
+                    self.state_tx.send(ShardState::Ready).await.ok();
+                },
+                LoadCommand::Unload => {
+                    self.current_instance = None;
+                    self.state_tx.send(ShardState::Idle).await.ok();
+                }
+            }
+        }
+    }
+}
+```
+
+### 3.3 流水线数据流
+
+```rust
+/// 跨节点前向传播（Pipeline Parallel）
+pub async fn pipeline_forward(
+    &self,
+    input: Tensor,
+    routing_table: &RoutingTable,
+) -> Result<Tensor> {
+    let mut hidden = input;
+    let mut current_node = 0;
+    
+    loop {
+        let shard = self.get_shard(current_node)?;
+        
+        // 本地计算
+        hidden = shard.forward(hidden).await?;
+        
+        // 检查是否还有下游节点
+        match routing_table.get_next(current_node) {
+            Some(next_id) => {
+                // 序列化并通过网络传输
+                let bytes = serialize_tensor(&hidden)?;
+                hidden = self.send_to_node(next_id, bytes).await?;
+                current_node = next_id;
+            },
+            None => break, // 到达尾节点，返回结果
+        }
+    }
+    
+    Ok(hidden)
+}
+```
+
+## 4. 高级特性
+
+### 4.1 弹性伸缩（Auto-Scaling）
+
+```rust
+/// 基于负载动态重新分片
+pub async fn rebalance(&mut self, metrics: ClusterMetrics) {
+    // 检测到 Node 1 显存压力 > 90%
+    if metrics.node(1).memory_pressure > 0.9 {
+        // 策略：将 Node 1 的层 6-7 迁移到 Node 2
+        let new_plan = ShardingPlan::new()
+            .assign(0, 0..4, Device::Cuda(0))      // Node 0 不变
+            .assign(1, 4..6, Device::Cuda(1))      // Node 1 减少为 2 层
+            .assign(2, 6..12, Device::Cuda(2));    // Node 2 增加为 6 层
+        
+        // 执行迁移（带状态保持）
+        self.migrate_with_state(new_plan).await;
+    }
+}
+```
+
+### 4.2 故障转移（Failover）
+
+```rust
+/// 节点故障时的快速恢复
+pub async fn handle_node_failure(&mut self, failed_node: usize) {
+    // 1. 将其层数临时分配给备用节点
+    let failed_range = self.get_node_range(failed_node);
+    let backup_node = self.find_backup_node();
+    
+    // 2. 发送紧急加载指令（跳过权重加载，从共享存储读取）
+    backup_node.send(LoadCommand {
+        shard_id: backup_node.id,
+        layer_range: failed_range,
+        role: ShardRole::Middle,
+        priority: 255, // 最高优先级
+    }).await;
+    
+    // 3. 更新路由表，流量切换到备用节点
+    self.routing_table.redirect(failed_node, backup_node.id);
+}
+```
+
+## 5. 性能优化策略
+
+### 5.1 内存映射（Memory Mapping）
+
+```rust
+/// 使用 mmap 实现零拷贝加载
+pub fn load_with_mmap(gguf_path: &str, layer_range: Range<usize>) -> Result<ModelInstance> {
+    let file = std::fs::File::open(gguf_path)?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    
+    // 只映射指定层的权重，不加载整个文件
+    let layers: Vec<_> = layer_range
+        .map(|i| unsafe { 
+            // 从 mmap 偏移量直接创建张量视图
+            let ptr = mmap.as_ptr().add(offset_of_layer(i));
+            DecoderLayer::from_raw_ptr(ptr)
+        })
+        .collect();
+    
+    Ok(ModelInstance { layers, ... })
+}
+```
+
+### 5.2 流水线气泡消除
+
+```rust
+/// 连续批处理（Continuous Batching）减少空闲
+pub struct PipelineBatch {
+    pub requests: Vec<Request>,
+    pub micro_batches: usize,  // 将 batch 拆分为微批次填充流水线
+}
+
+impl PipelineBatch {
+    pub fn schedule(&self) -> Vec<PipelineStage> {
+        // 将不同请求的不同层交错执行，保持所有节点忙碌
+        (0..self.micro_batches)
+            .flat_map(|i| self.create_stage(i))
+            .collect()
+    }
+}
+```
+
+## 6. 最佳实践
+
+### 6.1 部署模式建议
+
+| 场景 | 推荐配置 | 说明 |
+|------|---------|------|
+| **同构集群** (4×A100) | 均匀切分，静态分配 | 每节点 3 层，固定运行 |
+| **异构集群** (A100+RTX4090+CPU) | 动态加权，按需加载 | A100 加载 8 层，4090 加载 3 层，CPU 加载 1 层 |
+| **边缘设备** (嵌入式) | 单层卸载，逐层加载 | 内存只容纳 1 层，计算完卸载再加载下一层 |
+| **高可用生产** | 主备模式，热备节点 | 备用节点保持空载，故障时秒级接管 |
+
+### 6.2 配置示例
+
+```yaml
+# config.yaml
+cluster:
+  mode: "imperative"  # 命令式模式
+  
+sharding_policy:
+  strategy: "dynamic"
+  min_layers_per_shard: 1
+  max_layers_per_shard: 12
+  
+  # 资源感知策略
+  resource_aware:
+    memory_weight: 0.7    # 显存占70%决策权重
+    compute_weight: 0.3   # 算力占30%
+    
+runtime:
+  enable_hot_swap: true
+  graceful_shutdown_timeout: 30s  # 等待进行中的请求
+  state_checkpoint_interval: 100  # 每100个token检查点KV-Cache
+```
+
+## 7. 总结
+
+命令式模型加载将 LLM 推理从**静态架构**转变为**动态资源调度**，核心优势：
+
+1. **弹性**：根据实时负载动态调整分片策略
+2. **异构支持**：充分利用不同能力的设备（高端GPU+低端GPU+CPU）
+3. **高可用**：支持运行时故障转移和零停机维护
+4. **资源优化**：按需加载权重，避免静态分配造成的资源浪费
+
+**适用边界**：适合需要高可用、弹性伸缩的多节点 LLM 服务；单卡或固定拓扑场景下优势不明显，反而增加复杂度。
