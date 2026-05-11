@@ -7,10 +7,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
 use crate::vm_base::{StepResult, SlotId};
 use crate::ml_engine::capability::ML_Session_Config;
 use crate::ml_engine::pipeline::Pipeline_Params;
-use crate::orchestrator::program_selector::ProgramSelector;
+use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
+use crate::orchestrator::program_selector::{
+    ProgramSelector, SLOT_HIDDEN_DIM, SLOT_MODEL, SLOT_DEVICE,
+};
 
 use super::engine::Orchestrator_VM;
 
@@ -69,8 +73,12 @@ impl Orchestrator_VM {
         };
 
         match self.capabilities.ml_engine.Create_Session(config, io_handle).await {
-            Ok(_model_info) => {
+            Ok(model_info) => {
                 self.vm.slots.set(result, crate::vm_base::SlotValue::String(session_id));
+                self.vm.slots.set(
+                    SLOT_HIDDEN_DIM,
+                    crate::vm_base::SlotValue::U64(model_info.embedding_length as u64),
+                );
                 StepResult::Continue
             }
             Err(e) => StepResult::Abort(format!("CreateSession failed: {}", e)),
@@ -98,15 +106,15 @@ impl Orchestrator_VM {
             .map(|s| s.clone())
             .unwrap_or_else(|_| "run".to_string());
         let program = match mode.as_str() {
-            "relay" => match ProgramSelector::load_ml_program_vm("relay", &params) {
+            "relay" => match ProgramSelector::load_ml_program_vm("relay", &params, &HashMap::new()) {
                 Ok(p) => p,
                 Err(e) => return StepResult::Abort(format!("load relay ml program failed: {}", e)),
             },
-            "coordinator" => match ProgramSelector::load_ml_program_vm("coordinator", &params) {
+            "coordinator" => match ProgramSelector::load_ml_program_vm("coordinator", &params, &HashMap::new()) {
                 Ok(p) => p,
                 Err(e) => return StepResult::Abort(format!("load coordinator ml program failed: {}", e)),
             },
-            _ => match ProgramSelector::load_ml_program_vm("run", &params) {
+            _ => match ProgramSelector::load_ml_program_vm("run", &params, &HashMap::new()) {
                 Ok(p) => p,
                 Err(e) => return StepResult::Abort(format!("load run ml program failed: {}", e)),
             },
@@ -126,6 +134,93 @@ impl Orchestrator_VM {
             }
             Err(e) => StepResult::Abort(format!("RunProgram failed: {}", e)),
         }
+    }
+
+    pub async fn handle_profile(&mut self, session: SlotId, result: SlotId) -> StepResult {
+        let hidden_dim = match self.vm.slots.get_u64(SLOT_HIDDEN_DIM) {
+            Ok(dim) => dim as usize,
+            Err(e) => return StepResult::Abort(format!("Profile: hidden_dim 未设置: {}", e)),
+        };
+
+        let params = Pipeline_Params::default();
+        let mut vars = HashMap::new();
+        vars.insert("hidden_dim".to_string(), hidden_dim.to_string());
+        let program = match ProgramSelector::load_ml_program_vm("profile", &params, &vars) {
+            Ok(p) => p,
+            Err(e) => return StepResult::Abort(format!("Profile: 加载程序失败: {}", e)),
+        };
+
+        let session_id = match self.vm.slots.get_string(session) {
+            Ok(id) => id.clone(),
+            Err(e) => return StepResult::Abort(format!("Profile: session_id 为空: {}", e)),
+        };
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let local_duration = match self.capabilities.ml_engine.Run_Program_VM(
+            &session_id,
+            program,
+            params,
+            cancel_flag,
+        ).await {
+            Ok(pipeline_result) => {
+                let d = pipeline_result.duration;
+                self.vm.slots.set(
+                    result,
+                    crate::vm_base::SlotValue::F64(d.as_secs_f64()),
+                );
+                d
+            }
+            Err(e) => return StepResult::Abort(format!("Profile: 执行失败: {:?}", e)),
+        };
+
+        // 向所有 peer 广播 Profile_Request
+        let model_id = self.vm.slots.get_string(SLOT_MODEL)
+            .unwrap_or(&"unknown".to_string()).clone();
+        let device = self.vm.slots.get_string(SLOT_DEVICE)
+            .unwrap_or(&"cpu".to_string()).clone();
+        let cmd = NetworkProtocol::Profile_Request {
+            model_id: model_id.clone(),
+            layer_count: 5,
+            device: device.clone(),
+        };
+        let payload = Serialize_Network_Command(&cmd);
+
+        match self.capabilities.peer_manager.List_Peers().await {
+            Ok(peers) => {
+                for peer in &peers {
+                    match self.capabilities.network.send_data(
+                        peer.peer_id,
+                        crate::network::DataType::Command,
+                        payload.clone(),
+                    ).await {
+                        Ok(response) => {
+                            let text = String::from_utf8_lossy(&response.payload);
+                            if text.starts_with("OK|") {
+                                if let Ok(micros) = text[3..].trim().parse::<u64>() {
+                                    let d = std::time::Duration::from_micros(micros);
+                                    if let Ok(mut info) = self.capabilities.peer_manager.Get_Peer(&peer.peer_id).await {
+                                        let mut cap = info.capability.take().unwrap_or_default();
+                                        cap.set_layer_time(model_id.clone(), d);
+                                        let _ = self.capabilities.peer_manager.Update_Capability(&peer.peer_id, Some(cap)).await;
+                                    }
+                                    tracing::info!("Profile: {} → {:?}", peer.peer_id, d);
+                                }
+                            } else {
+                                tracing::warn!("Profile: {} replied FAIL: {}", peer.peer_id, text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Profile: send to {} failed: {}", peer.peer_id, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Profile: 获取 peer 列表失败: {}", e);
+            }
+        }
+
+        StepResult::Continue
     }
 
     pub async fn handle_analyze_model(&mut self, model: SlotId, result: SlotId) -> StepResult {

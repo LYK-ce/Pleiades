@@ -53,6 +53,7 @@ pub struct Pipeline_Result {
 pub struct Model_Info {
     pub architecture: String,
     pub num_layers: usize,
+    pub embedding_length: usize,
     pub has_input_head: bool,
     pub has_output_head: bool,
     pub has_tokenizer: bool,

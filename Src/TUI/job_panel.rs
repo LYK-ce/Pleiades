@@ -12,11 +12,11 @@
 #![allow(non_snake_case)]
 
 use ratatui::{
-    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph},
+    Frame,
 };
 
 use super::app::{App, Job_State, Transfer_Direction};
@@ -49,7 +49,15 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
             layer_range,
             phase,
         } => {
-            Render_Inference(frame, area, model_name, *device_count, layer_range, phase, &app.device);
+            Render_Inference(
+                frame,
+                area,
+                model_name,
+                *device_count,
+                layer_range,
+                phase,
+                &app.device,
+            );
         }
     }
 }
@@ -59,15 +67,31 @@ fn Render_Idle(frame: &mut Frame, area: Rect, device: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" ⚙️ Job ")
-        .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let device_color = if device == "cuda" { Color::Green } else { Color::Cyan };
+    let device_color = if device == "cuda" {
+        Color::Green
+    } else {
+        Color::Cyan
+    };
     let text = Paragraph::new(Line::from(vec![
-        Span::styled("  状态: 空闲 │ 设备: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(device.to_uppercase(), Style::default().fg(device_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  状态: 空闲 │ 设备: ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            device.to_uppercase(),
+            Style::default()
+                .fg(device_color)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]))
-        .block(block);
+    .block(block);
 
     frame.render_widget(text, area);
 }
@@ -102,10 +126,7 @@ fn Render_File_Transfer(
     let mb_sent = sent as f64 / 1_048_576.0;
     let mb_total = total as f64 / 1_048_576.0;
 
-    let title = format!(
-        " ⚙️ Job: {} {} → {} ",
-        icon, file_name, peer_short
-    );
+    let title = format!(" ⚙️ Job: {} {} → {} ", icon, file_name, peer_short);
 
     let label = format!("{:.1}/{:.1} MB ({}%)", mb_sent, mb_total, pct);
 
@@ -114,7 +135,11 @@ fn Render_File_Transfer(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
@@ -137,7 +162,11 @@ fn Render_Inference(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" ⚙️ Job ")
-        .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(Color::DarkGray));
 
     let device_upper = device.to_uppercase();

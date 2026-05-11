@@ -71,8 +71,17 @@ impl Core {
                 match self.capabilities.peer_manager.List_Peers().await {
                     Ok(peers) => {
                         let peer_strs: Vec<String> = peers.iter().map(|p| {
-                            format!("{} [{:?}] lat={:?}ms bw={:?}Mbps",
-                                p.peer_id, p.status, p.latency_ms, p.bandwidth_mbps)
+                            let mut s = format!("{} [{:?}] lat={:?}ms bw={:?}Mbps",
+                                p.peer_id, p.status, p.latency_ms, p.bandwidth_mbps);
+                            if let Some(ref cap) = p.capability {
+                                if !cap.layer_time.is_empty() {
+                                    s.push_str(" layer:");
+                                    for (model, d) in &cap.layer_time {
+                                        s.push_str(&format!(" {}:{:.2}ms", model, d.as_secs_f64() * 1000.0));
+                                    }
+                                }
+                            }
+                            s
                         }).collect();
                         let _ = reply.send(Ok(peer_strs));
                     }
@@ -197,6 +206,59 @@ impl Core {
                             kind: JobKind::Pipeline,
                             cancel,
                             inference_id: Some(inference_id),
+                        });
+                        let _ = reply.send(Ok(job_id));
+                    }
+                Err(e) => {
+                        let _ = reply.send(Err(format!("IO Take_ML_Side 失败: {}", e)));
+                    }
+                }
+            }
+            UserCommand::Profile { model_id, reply } => {
+                let job_id = JobId(generate_id());
+                let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
+
+                let mut vars = HashMap::new();
+                vars.insert("model_path".to_string(), model_id.clone());
+                vars.insert("device".to_string(), device);
+                vars.insert("layer_start".to_string(), "1".to_string());
+                vars.insert("layer_end".to_string(), "5".to_string());
+                let program = match ProgramSelector::select(JobKind::Profile, job_id, vars) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
+                        return;
+                    }
+                };
+
+                self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
+                    job_id: job_id.0,
+                    kind: format!("{:?}", JobKind::Profile),
+                    model_name: model_id.clone(),
+                });
+
+                // Profile 不需要文本 IO，但 CreateSession 要求 IO 槽位存在
+                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+                    let _ = reply.send(Err(format!("IO 分配失败: {}", e)));
+                    return;
+                }
+                match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+                    Ok(io) => {
+                        let cancel = CancellationToken::new();
+                        let executor = JobExecutor::new(
+                            job_id,
+                            JobKind::Profile,
+                            program,
+                            cancel.clone(),
+                            self.capabilities.clone(),
+                            Some(io),
+                            self.lifecycle_tx.clone(),
+                        );
+                        tokio::spawn(executor.run());
+                        self.registry.insert(job_id, JobHandle {
+                            kind: JobKind::Profile,
+                            cancel,
+                            inference_id: None,
                         });
                         let _ = reply.send(Ok(job_id));
                     }

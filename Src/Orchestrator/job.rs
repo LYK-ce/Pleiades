@@ -20,6 +20,8 @@ pub enum JobKind {
     Send,
     /// 三阶段分布式流水线编排（Coordinator 侧）
     Pipeline,
+    /// 模型性能 Profile
+    Profile,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,8 +42,5 @@ pub enum JobResult {
 
 #[derive(Debug)]
 pub enum LifecycleEvent {
-    Done {
-        job_id: JobId,
-        result: JobResult,
-    },
+    Done { job_id: JobId, result: JobResult },
 }

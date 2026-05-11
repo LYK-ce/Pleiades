@@ -73,6 +73,7 @@ pub const SLOT_INFERENCE_ID: SlotId = SlotId(300);
 pub const SLOT_PLAN: SlotId = SlotId(301);
 pub const SLOT_STREAMS_RESULT: SlotId = SlotId(302);
 pub const SLOT_WORKERS_RESULT: SlotId = SlotId(303);
+pub const SLOT_HIDDEN_DIM: SlotId = SlotId(304);
 
 // ─── 编译期嵌入所有模板 ─────────────────────────────────────
 // 文件内容编译进二进制，无需运行时文件 IO，也无需分发 programs/ 目录。
@@ -83,9 +84,11 @@ const RELAY_TMPL: &str = include_str!("../../programs/orchestrator/Relay.tmpl");
 const PIPELINE_TMPL: &str = include_str!("../../programs/orchestrator/Pipeline.tmpl");
 const SEND_TMPL: &str = include_str!("../../programs/orchestrator/Send.tmpl");
 const RECEIVE_TMPL: &str = include_str!("../../programs/orchestrator/ReceiveFile.tmpl");
+const PROFILE_TMPL: &str = include_str!("../../programs/orchestrator/Profile.tmpl");
 const ML_RUN_TMPL: &str = include_str!("../../programs/ml/run.tmpl");
 const ML_RELAY_TMPL: &str = include_str!("../../programs/ml/relay.tmpl");
 const ML_COORDINATOR_TMPL: &str = include_str!("../../programs/ml/coordinator.tmpl");
+const ML_PROFILE_TMPL: &str = include_str!("../../programs/ml/profile.tmpl");
 
 // ─── 错误类型 ──────────────────────────────────────────────
 
@@ -204,6 +207,8 @@ struct RawMLInstruction {
     #[serde(default)]
     value: Option<toml::Value>,
     #[serde(default)]
+    shape_slots: Option<Vec<String>>,
+    #[serde(default)]
     delta: Option<f64>,
     #[serde(default)]
     target: Option<usize>,
@@ -248,6 +253,7 @@ fn resolve_slot(name: &str, vars: &HashMap<String, String>) -> Result<SlotId, Se
         "SLOT_PLAN" => 301,
         "SLOT_STREAMS_RESULT" => 302,
         "SLOT_WORKERS_RESULT" => 303,
+        "SLOT_HIDDEN_DIM" => 304,
         _ => return Err(SelectorError::UnknownSlot(name.to_string())),
     };
     Ok(SlotId(id))
@@ -345,6 +351,7 @@ fn resolve_ml_const_value(
     raw_value: &Option<toml::Value>,
     value_type: &str,
     params: &Pipeline_Params,
+    vars: &HashMap<String, String>,
 ) -> Result<ConstValue, SelectorError> {
     match raw_value {
         Some(toml::Value::Integer(i)) => match value_type {
@@ -373,7 +380,14 @@ fn resolve_ml_const_value(
             let value = if s == "$max_tokens" {
                 params.max_tokens.to_string()
             } else if s.starts_with('$') {
-                return Err(SelectorError::MissingVariable(s[1..].to_string()));
+                let var_name = &s[1..];
+                vars.get(var_name).cloned().unwrap_or_else(|| {
+                    // 回退到 params 中查找
+                    match var_name {
+                        "max_tokens" => params.max_tokens.to_string(),
+                        _ => s.clone(),
+                    }
+                })
             } else {
                 s.clone()
             };
@@ -412,6 +426,7 @@ impl ProgramSelector {
             JobKind::Run => RUN_TMPL,
             JobKind::Relay => RELAY_TMPL,
             JobKind::Pipeline => PIPELINE_TMPL,
+            JobKind::Profile => PROFILE_TMPL,
             JobKind::Send => SEND_TMPL,
             JobKind::Receive => RECEIVE_TMPL,
             _ => return Err(SelectorError::UnsupportedKind(kind)),
@@ -533,6 +548,11 @@ impl ProgramSelector {
                 let result = resolve_slot(raw.result.as_deref().unwrap_or(""), vars)?;
                 Ok(OrchestratorInstruction::JoinWorkers { plan, result })
             }
+            "Profile" => {
+                let session = resolve_slot(raw.session.as_deref().unwrap_or(""), vars)?;
+                let result = resolve_slot(raw.result.as_deref().unwrap_or(""), vars)?;
+                Ok(OrchestratorInstruction::Profile { session, result })
+            }
             "Abort" => Ok(OrchestratorInstruction::Abort {
                 reason: raw.value.as_deref().unwrap_or("unknown").to_string(),
             }),
@@ -547,18 +567,20 @@ impl ProgramSelector {
     pub fn load_ml_program_vm(
         mode: &str,
         params: &Pipeline_Params,
+        vars: &HashMap<String, String>,
     ) -> Result<Vec<MlInst>, SelectorError> {
         let tmpl_text = match mode {
             "run" => ML_RUN_TMPL,
             "relay" => ML_RELAY_TMPL,
             "coordinator" => ML_COORDINATOR_TMPL,
+            "profile" => ML_PROFILE_TMPL,
             _ => return Err(SelectorError::UnsupportedKind(JobKind::Run)),
         };
         let template: RawMLTemplate =
             toml::from_str(tmpl_text).map_err(|e| SelectorError::TomlParse(e.to_string()))?;
         let mut instructions = Vec::new();
         for raw in &template.instructions {
-            instructions.push(Self::convert_ml_instruction_vm(raw, params)?);
+            instructions.push(Self::convert_ml_instruction_vm(raw, params, vars)?);
         }
         Ok(instructions)
     }
@@ -566,6 +588,7 @@ impl ProgramSelector {
     fn convert_ml_instruction_vm(
         raw: &RawMLInstruction,
         params: &Pipeline_Params,
+        vars: &HashMap<String, String>,
     ) -> Result<MlInst, SelectorError> {
         match raw.inst_type.as_str() {
             "Input" => Ok(MlInst::Input),
@@ -580,7 +603,7 @@ impl ProgramSelector {
                 let value_type = raw.value_type.as_deref().unwrap_or("String");
                 let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
                 Ok(MlInst::Const {
-                    value: resolve_ml_const_value(&raw.value, value_type, params)?,
+                    value: resolve_ml_const_value(&raw.value, value_type, params, vars)?,
                     dst,
                 })
             }
@@ -615,6 +638,26 @@ impl ProgramSelector {
                         .unwrap_or("TENSOR2"),
                 )?;
                 Ok(MlInst::Sample { tensor_slot })
+            }
+            "FillTensor" => {
+                let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
+                let value = raw
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(1.0f64) as f32;
+                let shape_slots: Vec<SlotId> = raw
+                    .shape_slots
+                    .as_ref()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .map(|s| resolve_ml_slot(s))
+                    .collect::<Result<_, _>>()?;
+                Ok(MlInst::FillTensor {
+                    dst,
+                    shape_slots,
+                    value,
+                })
             }
             "Inference" => {
                 let input_type = raw.input_type.as_deref().unwrap_or("Tokens");
@@ -784,7 +827,7 @@ mod tests {
     #[test]
     fn load_ml_run_vm_template() {
         let params = Pipeline_Params::default();
-        let prog = ProgramSelector::load_ml_program_vm("run", &params).unwrap();
+        let prog = ProgramSelector::load_ml_program_vm("run", &params, &HashMap::new()).unwrap();
         assert_eq!(prog.len(), 16);
         // 前两条是 Input, Encode
         assert!(matches!(&prog[0], MlInst::Input));
@@ -823,7 +866,7 @@ mod tests {
     #[test]
     fn load_ml_relay_vm_template() {
         let params = Pipeline_Params::default();
-        let prog = ProgramSelector::load_ml_program_vm("relay", &params).unwrap();
+        let prog = ProgramSelector::load_ml_program_vm("relay", &params, &HashMap::new()).unwrap();
         assert_eq!(prog.len(), 7);
         // JumpIf at 0, Receive at 1, JumpIf at 2, Inference at 3, Send at 4, Jump at 5, SendEOF at 6
         if let MlInst::JumpIf { target, .. } = &prog[0] {
@@ -837,7 +880,8 @@ mod tests {
     #[test]
     fn load_ml_coordinator_vm_template() {
         let params = Pipeline_Params::default();
-        let prog = ProgramSelector::load_ml_program_vm("coordinator", &params).unwrap();
+        let prog =
+            ProgramSelector::load_ml_program_vm("coordinator", &params, &HashMap::new()).unwrap();
         assert_eq!(prog.len(), 21);
         assert!(matches!(&prog[0], MlInst::Input));
         // JumpIf at index 11 targets index 19

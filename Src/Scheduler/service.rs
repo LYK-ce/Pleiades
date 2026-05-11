@@ -14,6 +14,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
 use async_trait::async_trait;
 use super::capability::{
     Scheduler_Capability, Scheduler_Input, Scheduler_Error,
@@ -138,6 +139,7 @@ mod tests {
         Model_Info {
             architecture: "test".to_string(),
             num_layers,
+            embedding_length: 1024,
             has_input_head: true,
             has_output_head: true,
             has_tokenizer: true,
@@ -152,6 +154,7 @@ mod tests {
             memory_mb: 8192,
             compute_score: 1.0,
             supported_models: vec![],
+            layer_time: HashMap::new(),
         });
         peer
     }

@@ -1,8 +1,8 @@
 //Presented by KeJi
 //Date ： 2026-04-29
 
-use tokio::sync::oneshot;
 use super::job::JobId;
+use tokio::sync::oneshot;
 
 // ============================================================
 // UserCommand — 用户侧命令
@@ -30,9 +30,7 @@ pub enum UserCommand {
     /// 请求优雅退出
     ///
     /// 回复：`()` 确认已进入关闭流程
-    Quit {
-        reply: oneshot::Sender<()>,
-    },
+    Quit { reply: oneshot::Sender<()> },
     /// 查询当前节点列表
     ///
     /// 回复：`Ok(Vec<String>)` 节点列表；`Err(String)` 查询失败
@@ -84,6 +82,13 @@ pub enum UserCommand {
         model_path: String,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
+    /// Profile 指定模型的单层推理耗时
+    ///
+    /// 回复：`Ok(JobId)` Profile Job 已启动；`Err(String)` 启动失败
+    Profile {
+        model_id: String,
+        reply: oneshot::Sender<Result<JobId, String>>,
+    },
 }
 
 // ============================================================
@@ -131,6 +136,16 @@ pub enum NetworkProtocol {
         /// 模型层范围 — 结束层
         layer_end: usize,
     },
+
+    /// Profile 请求（Phase 1）
+    ///
+    /// 格式: `PROFILE|{model_id}|{layer_count}|{device}`
+    /// 回复: `OK|{duration_micros}` 或 `FAIL|model not found`
+    Profile_Request {
+        model_id: String,
+        layer_count: u32,
+        device: String,
+    },
 }
 
 /// 反序列化: payload bytes → NetworkProtocol
@@ -139,8 +154,7 @@ pub enum NetworkProtocol {
 /// - `"ESTABLISH_TENSOR_STREAM|{inference_id}|{target_peer_id}"`
 /// - `"JOIN_PIPELINE|{inference_id}|{model_file_id}|{device}|{layer_start}|{layer_end}"`
 pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> {
-    let text = std::str::from_utf8(payload)
-        .map_err(|e| format!("payload 非 UTF-8: {}", e))?;
+    let text = std::str::from_utf8(payload).map_err(|e| format!("payload 非 UTF-8: {}", e))?;
     let parts: Vec<&str> = text.split('|').collect();
 
     if parts.is_empty() {
@@ -155,7 +169,8 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                     parts.len()
                 ));
             }
-            let inference_id = parts[1].parse::<u64>()
+            let inference_id = parts[1]
+                .parse::<u64>()
                 .map_err(|e| format!("inference_id 解析失败: {}", e))?;
             let target_peer_id = parts[2].to_string();
             Ok(NetworkProtocol::Establish_Tensor_Stream {
@@ -170,13 +185,16 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                     parts.len()
                 ));
             }
-            let inference_id = parts[1].parse::<u64>()
+            let inference_id = parts[1]
+                .parse::<u64>()
                 .map_err(|e| format!("inference_id 解析失败: {}", e))?;
             let model_file_id = parts[2].to_string();
             let device = parts[3].to_string();
-            let layer_start = parts[4].parse::<usize>()
+            let layer_start = parts[4]
+                .parse::<usize>()
                 .map_err(|e| format!("layer_start 解析失败: {}", e))?;
-            let layer_end = parts[5].parse::<usize>()
+            let layer_end = parts[5]
+                .parse::<usize>()
                 .map_err(|e| format!("layer_end 解析失败: {}", e))?;
             Ok(NetworkProtocol::Join_Pipeline {
                 inference_id,
@@ -184,6 +202,50 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                 device,
                 layer_start,
                 layer_end,
+            })
+        }
+        "JOIN_PIPELINE" => {
+            if parts.len() != 6 {
+                return Err(format!(
+                    "JOIN_PIPELINE 格式错误: 需要 6 个字段, 实际 {}. 格式: JOIN_PIPELINE|inference_id|model_file_id|device|layer_start|layer_end",
+                    parts.len()
+                ));
+            }
+            let inference_id = parts[1]
+                .parse::<u64>()
+                .map_err(|e| format!("inference_id 解析失败: {}", e))?;
+            let model_file_id = parts[2].to_string();
+            let device = parts[3].to_string();
+            let layer_start = parts[4]
+                .parse::<usize>()
+                .map_err(|e| format!("layer_start 解析失败: {}", e))?;
+            let layer_end = parts[5]
+                .parse::<usize>()
+                .map_err(|e| format!("layer_end 解析失败: {}", e))?;
+            Ok(NetworkProtocol::Join_Pipeline {
+                inference_id,
+                model_file_id,
+                device,
+                layer_start,
+                layer_end,
+            })
+        }
+        "PROFILE" => {
+            if parts.len() != 4 {
+                return Err(format!(
+                    "PROFILE 格式错误: 需要 4 个字段, 实际 {}. 格式: PROFILE|model_id|layer_count|device",
+                    parts.len()
+                ));
+            }
+            let model_id = parts[1].to_string();
+            let layer_count = parts[2]
+                .parse::<u32>()
+                .map_err(|e| format!("layer_count 解析失败: {}", e))?;
+            let device = parts[3].to_string();
+            Ok(NetworkProtocol::Profile_Request {
+                model_id,
+                layer_count,
+                device,
             })
         }
         unknown => Err(format!("未知命令前缀: '{}'", unknown)),
@@ -212,6 +274,11 @@ pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
             "JOIN_PIPELINE|{}|{}|{}|{}|{}",
             inference_id, model_file_id, device, layer_start, layer_end
         ),
+        NetworkProtocol::Profile_Request {
+            model_id,
+            layer_count,
+            device,
+        } => format!("PROFILE|{}|{}|{}", model_id, layer_count, device),
     };
     text.into_bytes()
 }
@@ -334,5 +401,4 @@ mod command_tests {
             _ => panic!("expected Join_Pipeline"),
         }
     }
-
 }

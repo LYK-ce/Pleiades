@@ -9,11 +9,11 @@
 #![allow(non_snake_case)]
 
 use ratatui::{
-    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
+    Frame,
 };
 
 use super::app::App;
@@ -30,17 +30,19 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" 📡 Network ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(Color::DarkGray));
 
     if app.peers.is_empty() {
         // 无节点时显示提示
-        let items = vec![
-            ListItem::new(Line::from(Span::styled(
-                "  等待节点连接...",
-                Style::default().fg(Color::DarkGray),
-            ))),
-        ];
+        let items = vec![ListItem::new(Line::from(Span::styled(
+            "  等待节点连接...",
+            Style::default().fg(Color::DarkGray),
+        )))];
         let list = List::new(items).block(block);
         frame.render_widget(list, area);
         return;
@@ -59,7 +61,11 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
 
             // 截断 PeerId 显示（取前 8 位 + 后 4 位）
             let display_id = Truncate_Peer_Id(&peer.peer_id);
-            let status = if peer.connected { "已连接" } else { "已断开" };
+            let status = if peer.connected {
+                "已连接"
+            } else {
+                "已断开"
+            };
 
             let line = Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),

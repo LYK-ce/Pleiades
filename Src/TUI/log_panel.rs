@@ -9,11 +9,11 @@
 #![allow(non_snake_case)]
 
 use ratatui::{
-    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
+    Frame,
 };
 
 use super::app::App;
@@ -31,14 +31,20 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" 📋 Log ")
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(Color::DarkGray));
 
     // 构建带样式的行
-    let lines: Vec<Line> = app.logs
+    let lines: Vec<Line> = app
+        .logs
         .iter()
         .map(|log| {
-            let style = if log.contains("[错误]") || log.contains("ERROR") || log.contains("失败") {
+            let style = if log.contains("[错误]") || log.contains("ERROR") || log.contains("失败")
+            {
                 Style::default().fg(Color::Red)
             } else if log.contains("✓") || log.contains("完成") {
                 Style::default().fg(Color::Green)

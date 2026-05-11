@@ -82,6 +82,9 @@ impl Orchestrator_VM {
             OrchestratorInstruction::JoinWorkers { plan, result } => {
                 self.handle_join_workers(*plan, *result).await
             }
+            OrchestratorInstruction::Profile { session, result } => {
+                self.handle_profile(*session, *result).await
+            }
             OrchestratorInstruction::Abort { reason } => StepResult::Abort(reason.clone()),
         }
     }

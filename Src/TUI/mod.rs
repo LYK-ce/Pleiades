@@ -33,25 +33,28 @@
 #![allow(non_snake_case)]
 
 pub mod app;
+pub mod command_panel;
+pub mod job_panel;
 pub mod log_panel;
 pub mod network_panel;
-pub mod job_panel;
-pub mod command_panel;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
+    Frame,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use app::{App, View_Mode, Job_State, Command_Output, Transfer_Direction, InputFocus};
+use app::{App, Command_Output, InputFocus, Job_State, Transfer_Direction, View_Mode};
 
 use crate::event_bus::Bus_Event;
 use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability};
@@ -71,7 +74,11 @@ use crate::orchestrator::job::JobId;
 /// - `event_rx`: 从 EventBus::Subscribe() 获得的 broadcast Receiver
 /// - `user_cmd_tx`: 发送用户命令给 Orchestrator Core
 /// - `io_broker`: IO Broker 共享引用，用于 Take_Frontend 获取推理会话端点
-pub fn TUI_Loop(mut event_rx: broadcast::Receiver<Bus_Event>, user_cmd_tx: mpsc::Sender<UserCommand>, io_broker: Arc<LLM_IO_Broker>) {
+pub fn TUI_Loop(
+    mut event_rx: broadcast::Receiver<Bus_Event>,
+    user_cmd_tx: mpsc::Sender<UserCommand>,
+    io_broker: Arc<LLM_IO_Broker>,
+) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
 
@@ -247,7 +254,11 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
                 tokens, tok_per_sec, total_secs
             ));
         }
-        Bus_Event::Job_Created { job_id, kind, model_name } => {
+        Bus_Event::Job_Created {
+            job_id,
+            kind,
+            model_name,
+        } => {
             let msg = if model_name.is_empty() {
                 format!("Job #{} 已创建 [{}]", job_id, kind)
             } else {
@@ -258,7 +269,11 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
         Bus_Event::Job_State_Changed { job_id, phase } => {
             app.Add_Log(format!("Job #{} 阶段: {}", job_id, phase));
             // 更新 Inference 阶段（如果当前 Job 是推理类型）
-            if let Job_State::Inference { phase: ref mut current_phase, .. } = app.job {
+            if let Job_State::Inference {
+                phase: ref mut current_phase,
+                ..
+            } = app.job
+            {
                 *current_phase = phase;
             }
         }
@@ -283,7 +298,13 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
 // ============================================================
 
 /// 处理键盘事件
-fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, user_cmd_tx: &mpsc::Sender<UserCommand>, io_broker: &Arc<LLM_IO_Broker>) {
+fn Handle_Key_Event(
+    app: &mut App,
+    key_code: KeyCode,
+    modifiers: KeyModifiers,
+    user_cmd_tx: &mpsc::Sender<UserCommand>,
+    io_broker: &Arc<LLM_IO_Broker>,
+) {
     // Ctrl+C: 强制退出
     if modifiers.contains(KeyModifiers::CONTROL) && key_code == KeyCode::Char('c') {
         app.should_quit = true;
@@ -296,33 +317,27 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, u
             app.Toggle_Focus();
         }
         // 回车: 根据焦点分发
-        KeyCode::Enter => {
-            match app.focus {
-                InputFocus::Command => {
-                    let input = app.Take_Input();
-                    if !input.is_empty() {
-                        Handle_Command_Input(app, &input, user_cmd_tx, io_broker);
-                    }
-                }
-                InputFocus::Prompt => {
-                    Handle_Prompt_Submit(app);
+        KeyCode::Enter => match app.focus {
+            InputFocus::Command => {
+                let input = app.Take_Input();
+                if !input.is_empty() {
+                    Handle_Command_Input(app, &input, user_cmd_tx, io_broker);
                 }
             }
-        }
+            InputFocus::Prompt => {
+                Handle_Prompt_Submit(app);
+            }
+        },
         // Esc: 清空当前焦点输入
-        KeyCode::Esc => {
-            match app.focus {
-                InputFocus::Command => app.Clear_Input(),
-                InputFocus::Prompt => app.Prompt_Clear(),
-            }
-        }
+        KeyCode::Esc => match app.focus {
+            InputFocus::Command => app.Clear_Input(),
+            InputFocus::Prompt => app.Prompt_Clear(),
+        },
         // Backspace: 删除当前焦点字符
-        KeyCode::Backspace => {
-            match app.focus {
-                InputFocus::Command => app.Delete_Char(),
-                InputFocus::Prompt => app.Prompt_Delete_Char(),
-            }
-        }
+        KeyCode::Backspace => match app.focus {
+            InputFocus::Command => app.Delete_Char(),
+            InputFocus::Prompt => app.Prompt_Delete_Char(),
+        },
         // ↑: 根据修饰键决定滚动目标
         KeyCode::Up => {
             if modifiers.contains(KeyModifiers::CONTROL) {
@@ -352,12 +367,10 @@ fn Handle_Key_Event(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers, u
             }
         }
         // 普通字符输入: 路由到当前焦点
-        KeyCode::Char(c) => {
-            match app.focus {
-                InputFocus::Command => app.Input_Char(c),
-                InputFocus::Prompt => app.Prompt_Input_Char(c),
-            }
-        }
+        KeyCode::Char(c) => match app.focus {
+            InputFocus::Command => app.Input_Char(c),
+            InputFocus::Prompt => app.Prompt_Input_Char(c),
+        },
         _ => {}
     }
 }
@@ -380,7 +393,14 @@ fn Handle_Prompt_Submit(app: &mut App) {
 
         match frontend.input_tx.blocking_send(prompt.clone()) {
             Ok(()) => {
-                app.Add_Log(format!("已发送 Prompt: {}...", if prompt.len() > 20 { &prompt[..20] } else { &prompt }));
+                app.Add_Log(format!(
+                    "已发送 Prompt: {}...",
+                    if prompt.len() > 20 {
+                        &prompt[..20]
+                    } else {
+                        &prompt
+                    }
+                ));
             }
             Err(_) => {
                 app.Add_Log("[错误] Prompt 发送失败（会话可能已关闭）".to_string());
@@ -402,7 +422,8 @@ fn Handle_Prompt_Submit(app: &mut App) {
 /// 根据鼠标位置判断光标所在面板，将滚轮事件路由到对应的滚动方法。
 fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u16) {
     let in_log = row >= app.log_area.y && row < app.log_area.y + app.log_area.height;
-    let in_command = row >= app.command_area.y && row < app.command_area.y + app.command_area.height;
+    let in_command =
+        row >= app.command_area.y && row < app.command_area.y + app.command_area.height;
 
     match kind {
         MouseEventKind::ScrollUp => {
@@ -428,7 +449,12 @@ fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u1
 // ============================================================
 
 /// 处理用户输入的命令，通过 user_cmd_tx 发送 UserCommand 给 Orchestrator Core
-fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<UserCommand>, io_broker: &Arc<LLM_IO_Broker>) {
+fn Handle_Command_Input(
+    app: &mut App,
+    input: &str,
+    user_cmd_tx: &mpsc::Sender<UserCommand>,
+    io_broker: &Arc<LLM_IO_Broker>,
+) {
     let trimmed = input.trim();
 
     // ---- 本地命令（不发给 Core） ----
@@ -460,7 +486,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             "  clear                    - 清空日志",
             "  quit / exit              - 退出",
             "  help                     - 显示此帮助",
-        ].join("\n");
+        ]
+        .join("\n");
         app.command_output.completed = true;
         return;
     }
@@ -475,7 +502,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         let model_path_str = trimmed.strip_prefix("run ").unwrap_or("").trim();
 
         if model_path_str.is_empty() {
-            app.command_output.output_text = "错误: 缺少 model_path 参数\n用法: run <model_path>".to_string();
+            app.command_output.output_text =
+                "错误: 缺少 model_path 参数\n用法: run <model_path>".to_string();
             app.command_output.completed = true;
             return;
         }
@@ -506,12 +534,14 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
                     Ok(frontend) => {
                         app.active_frontend = Some(frontend);
                         app.active_job_id = Some(job_id);
-                        app.command_output.output_text = "会话已建立，请在 Prompt 框输入内容".to_string();
+                        app.command_output.output_text =
+                            "会话已建立，请在 Prompt 框输入内容".to_string();
                         app.Add_Log(format!("IoFrontend 获取成功, Job #{}", job_id.0));
                     }
                     Err(e) => {
                         app.Add_Log(format!("[错误] 获取前端通道失败: {}", e));
-                        app.command_output.output_text = format!("会话创建成功但通道获取失败: {}", e);
+                        app.command_output.output_text =
+                            format!("会话创建成功但通道获取失败: {}", e);
                         app.command_output.completed = true;
                     }
                 }
@@ -535,7 +565,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         let job_id = match id_str.parse::<u64>() {
             Ok(id) => JobId(id),
             Err(_) => {
-                app.command_output.output_text = format!("错误: 无效的 Job ID '{}'\n用法: cancel <job_id>", id_str);
+                app.command_output.output_text =
+                    format!("错误: 无效的 Job ID '{}'\n用法: cancel <job_id>", id_str);
                 app.command_output.completed = true;
                 return;
             }
@@ -576,9 +607,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
 
     if trimmed == "display-peer" || trimmed == "dp" {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::DisplayPeer {
-            reply: reply_tx,
-        };
+        let cmd = UserCommand::DisplayPeer { reply: reply_tx };
 
         app.Add_Log("执行命令: display-peer".to_string());
 
@@ -612,9 +641,14 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     // ---- set-device <cpu/cuda> ----
 
     if trimmed.starts_with("set-device ") {
-        let device_str = trimmed.strip_prefix("set-device ").unwrap_or("").trim().to_lowercase();
+        let device_str = trimmed
+            .strip_prefix("set-device ")
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         if device_str != "cpu" && device_str != "cuda" {
-            app.command_output.output_text = format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
+            app.command_output.output_text =
+                format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
             app.command_output.completed = true;
             return;
         }
@@ -635,7 +669,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
 
         match reply_rx.blocking_recv() {
             Ok(Ok(())) => {
-                app.command_output.output_text = format!("设备已切换为: {}", device_str.to_uppercase());
+                app.command_output.output_text =
+                    format!("设备已切换为: {}", device_str.to_uppercase());
                 app.command_output.completed = true;
             }
             Ok(Err(e)) => {
@@ -654,9 +689,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
 
     if trimmed == "ls" {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::List {
-            reply: reply_tx,
-        };
+        let cmd = UserCommand::List { reply: reply_tx };
 
         app.Add_Log("执行命令: ls".to_string());
 
@@ -694,10 +727,16 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     // ---- send <file> <peer> ----
 
     if trimmed.starts_with("send ") {
-        let args: Vec<&str> = trimmed.strip_prefix("send ").unwrap_or("").trim().split_whitespace().collect();
+        let args: Vec<&str> = trimmed
+            .strip_prefix("send ")
+            .unwrap_or("")
+            .trim()
+            .split_whitespace()
+            .collect();
 
         if args.len() != 2 {
-            app.command_output.output_text = "错误: 参数不正确\n用法: send <file> <peer_id>".to_string();
+            app.command_output.output_text =
+                "错误: 参数不正确\n用法: send <file> <peer_id>".to_string();
             app.command_output.completed = true;
             return;
         }
@@ -722,7 +761,10 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
 
         match reply_rx.blocking_recv() {
             Ok(Ok(job_id)) => {
-                app.command_output.output_text = format!("发送 Job #{} 已创建 ({} → {})", job_id.0, file_path, peer_id);
+                app.command_output.output_text = format!(
+                    "发送 Job #{} 已创建 ({} → {})",
+                    job_id.0, file_path, peer_id
+                );
                 app.command_output.completed = true;
             }
             Ok(Err(e)) => {
@@ -740,10 +782,16 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     // ---- distribute <model_path> <peer_id:start-end> ... ----
 
     if trimmed.starts_with("distribute ") {
-        let args: Vec<&str> = trimmed.strip_prefix("distribute ").unwrap_or("").trim().split_whitespace().collect();
+        let args: Vec<&str> = trimmed
+            .strip_prefix("distribute ")
+            .unwrap_or("")
+            .trim()
+            .split_whitespace()
+            .collect();
 
         if args.len() < 2 {
-            app.command_output.output_text = "错误: 参数不足\n用法: distribute <model_path> <peer_id:start-end> ...".to_string();
+            app.command_output.output_text =
+                "错误: 参数不足\n用法: distribute <model_path> <peer_id:start-end> ...".to_string();
             app.command_output.completed = true;
             return;
         }
@@ -755,7 +803,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             match Parse_Peer_Assignment(arg) {
                 Ok(assignment) => peers.push(assignment),
                 Err(e) => {
-                    app.command_output.output_text = format!("错误: 解析 '{}' 失败: {}\n格式: peer_id:start-end", arg, e);
+                    app.command_output.output_text =
+                        format!("错误: 解析 '{}' 失败: {}\n格式: peer_id:start-end", arg, e);
                     app.command_output.completed = true;
                     return;
                 }
@@ -800,7 +849,8 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         let model_path_str = trimmed.strip_prefix("pipeline ").unwrap_or("").trim();
 
         if model_path_str.is_empty() {
-            app.command_output.output_text = "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
+            app.command_output.output_text =
+                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
             app.command_output.completed = true;
             return;
         }
@@ -830,12 +880,14 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
                     Ok(frontend) => {
                         app.active_frontend = Some(frontend);
                         app.active_job_id = Some(job_id);
-                        app.command_output.output_text = "流水线已建立，请在 Prompt 框输入内容".to_string();
+                        app.command_output.output_text =
+                            "流水线已建立，请在 Prompt 框输入内容".to_string();
                         app.Add_Log(format!("IoFrontend 获取成功, Pipeline Job #{}", job_id.0));
                     }
                     Err(e) => {
                         app.Add_Log(format!("[错误] 获取前端通道失败: {}", e));
-                        app.command_output.output_text = format!("流水线建立成功但通道获取失败: {}", e);
+                        app.command_output.output_text =
+                            format!("流水线建立成功但通道获取失败: {}", e);
                         app.command_output.completed = true;
                     }
                 }
@@ -846,6 +898,53 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             }
             Err(_) => {
                 app.command_output.output_text = "Orchestrator 未响应".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    if trimmed.starts_with("profile ") {
+        let model_id = trimmed[8..].trim();
+        if model_id.is_empty() {
+            app.command_output.output_text =
+                "错误: 缺少 model_id 参数\n用法: profile <model_id>".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let cmd = UserCommand::Profile {
+            model_id: model_id.to_string(),
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行命令: profile {}", model_id));
+        app.command_output.output_text = "启动 Profile 中...".to_string();
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.Add_Log(format!("Profile Job #{} 已创建", job_id.0));
+                app.command_output.output_text = format!(
+                    "Profile Job #{} 执行中...\n模型: {}\n层数: 5",
+                    job_id.0, model_id
+                );
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.Add_Log(format!("Profile 启动失败: {}", e));
+                app.command_output.output_text = format!("Profile 启动失败: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.Add_Log("[错误] reply 通道已关闭".to_string());
+                app.command_output.output_text = "错误: reply 通道已关闭".to_string();
                 app.command_output.completed = true;
             }
         }
@@ -874,9 +973,11 @@ fn Parse_Peer_Assignment(arg: &str) -> Result<(String, usize, usize), String> {
         return Err("层范围格式错误，应为 start-end".to_string());
     }
 
-    let start = range_parts[0].parse::<usize>()
+    let start = range_parts[0]
+        .parse::<usize>()
         .map_err(|e| format!("start 解析失败: {}", e))?;
-    let end = range_parts[1].parse::<usize>()
+    let end = range_parts[1]
+        .parse::<usize>()
         .map_err(|e| format!("end 解析失败: {}", e))?;
 
     Ok((peer_id, start, end))
@@ -892,21 +993,18 @@ fn Render(frame: &mut Frame, app: &mut App) {
 
     // 5 行布局：Log+Network | Job | Command Output | Prompt 输入 | 命令输入
     let constraints = vec![
-        Constraint::Min(6),       // Log + Network（自适应填满）
-        Constraint::Length(3),    // Job（固定 3 行）
-        Constraint::Length(8),    // Command Output（固定 8 行，推理输出）
-        Constraint::Length(3),    // Prompt 输入栏（固定 3 行）
-        Constraint::Length(3),    // 命令输入栏（固定 3 行，最底部）
+        Constraint::Min(6),    // Log + Network（自适应填满）
+        Constraint::Length(3), // Job（固定 3 行）
+        Constraint::Length(8), // Command Output（固定 8 行，推理输出）
+        Constraint::Length(3), // Prompt 输入栏（固定 3 行）
+        Constraint::Length(3), // 命令输入栏（固定 3 行，最底部）
     ];
 
     let rows = Layout::vertical(constraints).split(area);
 
     // Row 0: Log (70%) + Network (30%)
-    let top = Layout::horizontal([
-        Constraint::Percentage(70),
-        Constraint::Percentage(30),
-    ])
-    .split(rows[0]);
+    let top =
+        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).split(rows[0]);
 
     // 记录面板区域，供鼠标滚轮事件命中检测
     app.log_area = top[0];
@@ -949,8 +1047,16 @@ fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
 
     if has_session {
         let input_text = Line::from(vec![
-            Span::styled("Prompt> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(app.prompt_buffer.as_str(), Style::default().fg(Color::White)),
+            Span::styled(
+                "Prompt> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                app.prompt_buffer.as_str(),
+                Style::default().fg(Color::White),
+            ),
         ]);
         let paragraph = Paragraph::new(input_text).block(block);
         frame.render_widget(paragraph, area);
@@ -966,7 +1072,10 @@ fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         let hint_text = Line::from(vec![
             Span::styled("Prompt> ", Style::default().fg(Color::DarkGray)),
-            Span::styled("无活跃会话 (先执行 run <model>)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "无活跃会话 (先执行 run <model>)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         let paragraph = Paragraph::new(hint_text).block(block);
         frame.render_widget(paragraph, area);
@@ -988,7 +1097,12 @@ fn Render_Input(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(border_color));
 
     let input_text = Line::from(vec![
-        Span::styled("pleiades> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "pleiades> ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(app.input_buffer.as_str(), Style::default().fg(Color::White)),
     ]);
 

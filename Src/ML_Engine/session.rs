@@ -185,6 +185,7 @@ pub fn Session_Thread(
     let model_info = Model_Info {
         architecture: gguf_model.arch_info.architecture.clone(),
         num_layers: gguf_model.arch_info.num_layers,
+        embedding_length: gguf_model.arch_info.embedding_length,
         has_input_head: gguf_model.has_input_head,
         has_output_head: gguf_model.has_output_head,
         has_tokenizer: gguf_model.tokenizer.is_some(),

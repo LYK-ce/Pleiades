@@ -9,9 +9,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use ratatui::layout::Rect;
 use crate::llm_io::IoFrontend;
 use crate::orchestrator::job::JobId;
+use ratatui::layout::Rect;
 
 // ============================================================
 // 视图模式

@@ -7,6 +7,8 @@
 //! 解析 `NetworkProtocol` 并分发到对应处理逻辑。
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -21,6 +23,8 @@ use crate::network::{InboundRequest, DataType};
 use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::event_bus::Bus_Event;
 use crate::llm_io::LLM_IO_Capability;
+use crate::ml_engine::capability::ML_Session_Config;
+use crate::ml_engine::pipeline::Pipeline_Params;
 
 impl Core {
     /// 处理 B2 入站请求（Request-Response 协议，仅 Command）
@@ -31,6 +35,7 @@ impl Core {
     pub(super) async fn handle_inbound_request(&mut self, req: InboundRequest) {
         match req.data_type {
             DataType::Command => {
+                info!("B2: 收到 Command from {}, request_id={}, size={}", req.peer, req.request_id, req.payload.len());
                 self.handle_network_command(req).await;
             }
             _ => {
@@ -238,6 +243,96 @@ impl Core {
 
                 // 5. 回复 OK
                 let response = "OK".to_string();
+                if let Err(e) = self.capabilities.network.send_response(
+                    req.request_id, DataType::Command, response.into_bytes()
+                ).await {
+                    warn!("send_response 失败: {}", e);
+                }
+            }
+            NetworkProtocol::Profile_Request {
+                model_id,
+                layer_count,
+                device,
+            } => {
+                info!("Profile_Request from {}, model={}, layers={}", req.peer, model_id, layer_count);
+
+                let session_id = format!("profile-{}", generate_id());
+                let config = ML_Session_Config {
+                    session_id: session_id.clone(),
+                    model_file_id: model_id.clone(),
+                    layer_start: 1,
+                    layer_end: layer_count as usize,
+                    device: device.clone(),
+                    tensor_io: None,
+                };
+                // 使用 io_broker 创建占位 IO 通道
+                let job_id = JobId(generate_id());
+                if let Err(e) = self.capabilities.io_broker.Allocate(job_id).await {
+                    let response = format!("FAIL|io allocate: {}", e);
+                    let _ = self.capabilities.network.send_response(
+                        req.request_id, DataType::Command, response.into_bytes()
+                    ).await;
+                    return;
+                }
+                let io_handle = match self.capabilities.io_broker.Take_ML_Side(job_id).await {
+                    Ok(io) => io,
+                    Err(e) => {
+                        let response = format!("FAIL|io take: {}", e);
+                        let _ = self.capabilities.network.send_response(
+                            req.request_id, DataType::Command, response.into_bytes()
+                        ).await;
+                        return;
+                    }
+                };
+
+                let model_info = match self.capabilities.ml_engine.Create_Session(config, io_handle).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        let response = format!("FAIL|session creation: {:?}", e);
+                        let _ = self.capabilities.network.send_response(
+                            req.request_id, DataType::Command, response.into_bytes()
+                        ).await;
+                        return;
+                    }
+                };
+
+                let hidden_dim = model_info.embedding_length;
+                let mut vars = HashMap::new();
+                vars.insert("hidden_dim".to_string(), hidden_dim.to_string());
+                let params = Pipeline_Params::default();
+                let program = match ProgramSelector::load_ml_program_vm("profile", &params, &vars) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = self.capabilities.ml_engine.Shutdown_Session(&session_id).await;
+                        let response = format!("FAIL|load program: {:?}", e);
+                        let _ = self.capabilities.network.send_response(
+                            req.request_id, DataType::Command, response.into_bytes()
+                        ).await;
+                        return;
+                    }
+                };
+
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                let result = match self.capabilities.ml_engine.Run_Program_VM(
+                    &session_id,
+                    program,
+                    params,
+                    cancel_flag,
+                ).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = self.capabilities.ml_engine.Shutdown_Session(&session_id).await;
+                        let response = format!("FAIL|profile execution: {:?}", e);
+                        let _ = self.capabilities.network.send_response(
+                            req.request_id, DataType::Command, response.into_bytes()
+                        ).await;
+                        return;
+                    }
+                };
+
+                let _ = self.capabilities.ml_engine.Shutdown_Session(&session_id).await;
+
+                let response = format!("OK|{}", result.duration.as_micros());
                 if let Err(e) = self.capabilities.network.send_response(
                     req.request_id, DataType::Command, response.into_bytes()
                 ).await {

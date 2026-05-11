@@ -1,0 +1,40 @@
+[meta]
+kind = "Profile"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$model_path"
+dst = "SLOT_MODEL"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$device"
+dst = "SLOT_DEVICE"
+
+[[instructions]]
+type = "Const"
+value_type = "U64"
+value = "$layer_start"
+dst = "SLOT_LAYER_START"
+
+[[instructions]]
+type = "Const"
+value_type = "U64"
+value = "$layer_end"
+dst = "SLOT_LAYER_END"
+
+[[instructions]]
+type = "CreateSession"
+model = "SLOT_MODEL"
+device = "SLOT_DEVICE"
+start = "SLOT_LAYER_START"
+end = "SLOT_LAYER_END"
+io = "SLOT_IO"
+result = "SLOT_SESSION"
+
+[[instructions]]
+type = "Profile"
+session = "SLOT_SESSION"
+result = "SLOT_RESULT"

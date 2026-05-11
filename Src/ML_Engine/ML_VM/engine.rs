@@ -184,6 +184,11 @@ impl<'a> ML_VM<'a> {
             MlInstruction::Send => self.handle_send(),
             MlInstruction::Receive => self.handle_receive(),
             MlInstruction::SendEOF => self.handle_send_eof(),
+            MlInstruction::FillTensor {
+                dst,
+                shape_slots,
+                value,
+            } => self.handle_fill_tensor(dst, shape_slots, value),
         }
     }
 
@@ -427,6 +432,25 @@ impl<'a> ML_VM<'a> {
             }
             None => StepResult::Abort("SendEOF: tensor_io 不可用".into()),
         }
+    }
+
+    fn handle_fill_tensor(
+        &mut self,
+        dst: SlotId,
+        shape_slots: Vec<SlotId>,
+        value: f32,
+    ) -> StepResult {
+        let shape: Vec<usize> = shape_slots
+            .iter()
+            .map(|s| self.vm.slots.get_f64(*s).unwrap_or(1.0) as usize)
+            .collect();
+        let device = self.backend.device.clone();
+        let tensor = match Tensor::full(value, &shape[..], &device) {
+            Ok(t) => t,
+            Err(e) => return StepResult::Abort(format!("FillTensor: 创建失败: {}", e)),
+        };
+        self.ml_slots.set_tensor(dst, tensor);
+        StepResult::Continue
     }
 
     // ============================================================

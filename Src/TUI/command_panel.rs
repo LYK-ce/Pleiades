@@ -10,11 +10,11 @@
 #![allow(non_snake_case)]
 
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarState, Wrap},
+    Frame,
 };
 
 use super::app::App;
@@ -59,7 +59,11 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" 💬 Command ")
-        .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(Color::DarkGray));
 
     // 将面板内部分为两部分：输出文本 + 底部状态行
@@ -71,8 +75,8 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let chunks = Layout::vertical([
-        Constraint::Min(1),       // 输出文本
-        Constraint::Length(1),    // 状态行
+        Constraint::Min(1),    // 输出文本
+        Constraint::Length(1), // 状态行
     ])
     .split(inner);
 
@@ -110,11 +114,7 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &mut App) {
             .position(app.command_scroll)
             .viewport_content_length(visible_height);
         let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight);
-        frame.render_stateful_widget(
-            scrollbar,
-            chunks[0],
-            &mut scrollbar_state,
-        );
+        frame.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
     }
 
     // 渲染状态行

@@ -6,24 +6,32 @@
 //! 包含节点状态、能力描述和节点信息等核心数据结构。
 
 use libp2p::{Multiaddr, PeerId};
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// 节点状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerStatus {
-    Connected,     // 已连接，空闲
-    Busy,          // 已连接，忙碌（执行推理任务）
-    Connecting,    // 连接建立中
-    Disconnected,  // 已断开连接
+    Connected,    // 已连接，空闲
+    Busy,         // 已连接，忙碌（执行推理任务）
+    Connecting,   // 连接建立中
+    Disconnected, // 已断开连接
 }
 
 /// 节点能力描述
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerCapability {
-    pub has_gpu: bool,           // 是否有GPU
-    pub memory_mb: u64,          // 内存大小（MB）
-    pub compute_score: f32,      // 计算能力评分
-    pub supported_models: Vec<String>, // 支持的模型类型
+    pub has_gpu: bool,                         // 是否有GPU
+    pub memory_mb: u64,                        // 内存大小（MB）
+    pub compute_score: f32,                    // 计算能力评分
+    pub supported_models: Vec<String>,         // 支持的模型类型
+    pub layer_time: HashMap<String, Duration>, // 模型单层耗时
+}
+
+impl Default for PeerCapability {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PeerCapability {
@@ -34,6 +42,7 @@ impl PeerCapability {
             memory_mb: 0,
             compute_score: 0.0,
             supported_models: Vec::new(),
+            layer_time: HashMap::new(),
         }
     }
 
@@ -44,20 +53,26 @@ impl PeerCapability {
             memory_mb,
             compute_score,
             supported_models: Vec::new(),
+            layer_time: HashMap::new(),
         }
+    }
+
+    /// 更新指定模型的单层耗时
+    pub fn set_layer_time(&mut self, model_id: String, duration: Duration) {
+        self.layer_time.insert(model_id, duration);
     }
 }
 
 /// 节点详细信息
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerInfo {
-    pub peer_id: PeerId,                 // 节点ID
-    pub addresses: Vec<Multiaddr>,       // 地址列表
-    pub latency_ms: Option<u64>,         // 最后一次ping延迟
-    pub bandwidth_mbps: Option<u64>,     // 带宽（Mbps），可选
-    pub connected_at: Instant,           // 连接建立时间
-    pub last_active: Instant,            // 最后活跃时间
-    pub status: PeerStatus,              // 节点状态
+    pub peer_id: PeerId,                    // 节点ID
+    pub addresses: Vec<Multiaddr>,          // 地址列表
+    pub latency_ms: Option<u64>,            // 最后一次ping延迟
+    pub bandwidth_mbps: Option<u64>,        // 带宽（Mbps），可选
+    pub connected_at: Instant,              // 连接建立时间
+    pub last_active: Instant,               // 最后活跃时间
+    pub status: PeerStatus,                 // 节点状态
     pub capability: Option<PeerCapability>, // 节点能力（可选）
 }
 
@@ -110,7 +125,11 @@ impl PeerInfo {
 
     /// Query Profile 查询节点能力、延迟和带宽，返回能力描述、延迟信息和带宽信息，因为这三者作为节点分配依据，往往需要一起查询
     pub fn query_profile(&self) -> (Option<&PeerCapability>, Option<u64>, Option<u64>) {
-        (self.capability.as_ref(), self.latency_ms, self.bandwidth_mbps)
+        (
+            self.capability.as_ref(),
+            self.latency_ms,
+            self.bandwidth_mbps,
+        )
     }
 
     /// Is_Timeout 检查节点是否超时，参数为超时时间（秒），返回布尔值

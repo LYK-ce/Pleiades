@@ -12,3 +12,5 @@
    完成
 7. 根据ml_vm_design.md，实现phase 4
    完成
+8. 根据profiler_design.md，实现phase 1 2 3 4
+   完成

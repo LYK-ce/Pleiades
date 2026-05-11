@@ -79,6 +79,13 @@ pub enum MlInstruction {
     Send,
     Receive,
     SendEOF,
+
+    // ─── Profile ───────────────────────────────────────────
+    FillTensor {
+        dst: SlotId,
+        shape_slots: Vec<SlotId>,
+        value: f32,
+    },
 }
 
 #[cfg(test)]

@@ -280,6 +280,7 @@ impl ML_Engine_Capability for ML_Engine_Service {
         let model_info = Model_Info {
             architecture: arch_info.architecture.clone(),
             num_layers: arch_info.num_layers,
+            embedding_length: arch_info.embedding_length,
             has_input_head: !arch_info.is_split || arch_info.split_start == 0,
             has_output_head: !arch_info.is_split
                 || arch_info.split_end == arch_info.num_layers + 1,
