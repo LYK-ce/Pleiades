@@ -1,0 +1,62 @@
+[meta]
+kind = "Pipeline"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$model_path"
+dst = "SLOT_MODEL"
+
+[[instructions]]
+type = "Const"
+value_type = "U64"
+value = "$inference_id"
+dst = "SLOT_INFERENCE_ID"
+
+[[instructions]]
+type = "AnalyzeModel"
+model = "SLOT_MODEL"
+result = "SLOT_MODEL_INFO"
+
+[[instructions]]
+type = "PlanPipeline"
+model_info = "SLOT_MODEL_INFO"
+inference_id = "SLOT_INFERENCE_ID"
+result = "SLOT_PLAN"
+
+[[instructions]]
+type = "EstablishStreams"
+plan = "SLOT_PLAN"
+result = "SLOT_STREAMS_RESULT"
+
+[[instructions]]
+type = "JoinWorkers"
+plan = "SLOT_PLAN"
+result = "SLOT_WORKERS_RESULT"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$device"
+dst = "SLOT_DEVICE"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "coordinator"
+dst = "SLOT_ML_PROGRAM_MODE"
+
+[[instructions]]
+type = "CreateSession"
+model = "SLOT_MODEL"
+device = "SLOT_DEVICE"
+start = "SLOT_LAYER_START"
+end = "SLOT_LAYER_END"
+io = "SLOT_IO"
+tensor_io = "SLOT_TENSOR_IO"
+result = "SLOT_SESSION"
+
+[[instructions]]
+type = "RunProgram"
+session = "SLOT_SESSION"
+result = "SLOT_RESULT"

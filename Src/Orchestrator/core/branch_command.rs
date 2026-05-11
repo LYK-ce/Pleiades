@@ -6,16 +6,17 @@
 //! 处理来自 Network 的 `InboundRequest`（仅 Command 类型），
 //! 解析 `NetworkProtocol` 并分发到对应处理逻辑。
 
-use std::sync::Mutex;
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{Core, generate_id, JobHandle};
 use crate::orchestrator::job::{JobId, JobKind};
 use crate::orchestrator::command::{NetworkProtocol, Parse_Network_Command};
-use crate::orchestrator::executor::JobExecutor;
-use crate::orchestrator::compiler::SLOT_TENSOR_IO;
-use crate::orchestrator::slot::SlotValue;
+use crate::orchestrator::core::job_executor::JobExecutor;
+use crate::orchestrator::program_selector::ProgramSelector;
+use crate::orchestrator::program_selector::SLOT_TENSOR_IO;
+use crate::orchestrator::orchestrator_vm::OrchestratorSlotValue;
 use crate::network::{InboundRequest, DataType};
 use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::event_bus::Bus_Event;
@@ -164,13 +165,12 @@ impl Core {
                 };
 
                 // 2. 编译 Relay 程序
-                let program = match self.compiler.compile_relay(
-                    job_id,
-                    model_file_id,
-                    device,
-                    layer_start,
-                    layer_end,
-                ) {
+                let mut vars = HashMap::new();
+                vars.insert("model_path".to_string(), model_file_id.clone());
+                vars.insert("device".to_string(), device.clone());
+                vars.insert("layer_start".to_string(), layer_start.to_string());
+                vars.insert("layer_end".to_string(), layer_end.to_string());
+                let program = match ProgramSelector::select(JobKind::Relay, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {
                         self.capabilities.tensor_switch.Deregister_Pipeline(inference_id).await;
@@ -229,7 +229,7 @@ impl Core {
                 // 预注入 Tensor_IO_Endpoint 到约定槽位
                 executor.inject_slot(
                     SLOT_TENSOR_IO,
-                    SlotValue::TensorIo(Mutex::new(Some(endpoint))),
+                    OrchestratorSlotValue::TensorIO(endpoint),
                 );
                 tokio::spawn(executor.run());
                 self.registry.insert(job_id, JobHandle { kind: JobKind::Relay, cancel, inference_id: Some(inference_id) });

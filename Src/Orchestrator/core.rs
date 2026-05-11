@@ -5,6 +5,7 @@ mod branch_user;
 mod branch_command;
 mod branch_stream;
 mod branch_lifecycle;
+mod job_executor;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,14 +15,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use super::job::{JobId, JobKind, LifecycleEvent};
 use super::command::UserCommand;
-use super::executor::JobExecutor;
-use super::compiler::Compiler;
+use self::job_executor::JobExecutor;
+use super::program_selector::ProgramSelector;
 use super::Capabilities;
 use crate::llm_io::IoHandle;
 use crate::network::{Network_Inbound_Event, InboundRequest};
 use crate::event_bus::Bus_Event;
-
-/// 生命周期通道缓冲大小
+use super::orchestrator_vm::OrchestratorInstruction;
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
 
 /// Portal 错误类型
@@ -59,7 +59,7 @@ pub struct Core {
     shutting_down: bool,
 
     // --- 路由工具 ---
-    compiler: Arc<Compiler>,
+    selector: Arc<ProgramSelector>,
     capabilities: Arc<Capabilities>,
     config_path: PathBuf,
 
@@ -86,7 +86,7 @@ impl Core {
     /// lifecycle 通道由 Core 内部创建，不需要外部传入。
     /// JobExecutor 通过 lifecycle_tx 的克隆向 Core 报告生命周期事件。
     pub fn new(
-        compiler: Arc<Compiler>,
+        selector: Arc<ProgramSelector>,
         capabilities: Arc<Capabilities>,
         config_path: PathBuf,
         user_cmd_rx: mpsc::Receiver<UserCommand>,
@@ -97,7 +97,7 @@ impl Core {
         Core {
             registry: HashMap::new(),
             shutting_down: false,
-            compiler,
+            selector,
             capabilities,
             config_path,
             user_cmd_rx,
@@ -141,7 +141,7 @@ impl Core {
 
     /// 将已编译的程序 spawn 为独立的 Job 任务。
     /// 职责单一：仅负责创建 Executor 并注册到 registry。
-    fn spawn_job(&mut self, job_id: JobId, kind: JobKind, program: super::instruction::TaskProgram, io: Option<IoHandle>) {
+    fn spawn_job(&mut self, job_id: JobId, kind: JobKind, instructions: Vec<OrchestratorInstruction>, io: Option<IoHandle>) {
         // 发布 Job 创建事件
         self.capabilities.event_bus.Publish(Bus_Event::Job_Created {
             job_id: job_id.0,
@@ -155,7 +155,7 @@ impl Core {
         let executor = JobExecutor::new(
             job_id,
             kind,
-            program,
+            instructions,
             cancel.clone(),
             self.capabilities.clone(),
             io,
@@ -192,9 +192,9 @@ fn generate_id() -> u64 {
 mod core_tests {
     use super::*;
     use crate::orchestrator::job::{JobId, JobKind, JobResult};
-    use crate::orchestrator::instruction::{TaskInstruction, TaskProgram};
-    use crate::orchestrator::slot::{SlotId, ConstValue};
     use crate::orchestrator::Capabilities;
+    use crate::orchestrator::orchestrator_vm::OrchestratorInstruction;
+    use crate::vm_base::{ConstValue, SlotId};
     use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::network::{Network_Inbound_Event, InboundRequest};
     use crate::storage::StorageManager;
@@ -204,7 +204,6 @@ mod core_tests {
     use crate::ml_engine::capability::{ML_Engine_Capability, ML_Engine_Error, ML_Session_Config};
     use crate::ml_engine::ml_thread_engine_instruction::{Instruction, Pipeline_Params, Pipeline_Result, Model_Info};
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
@@ -247,7 +246,7 @@ mod core_tests {
         let (_net_inbound_tx, net_inbound_rx) = mpsc::channel::<Network_Inbound_Event>(16);
         // 测试用 config_path 指向 temp_dir 内的虚拟路径（SetDevice 测试不实际写盘）
         let config_path = temp_dir.path().join("config.toml");
-        let core = Core::new(Arc::new(Compiler), caps, config_path, user_rx, inbound_rx, net_inbound_rx);
+        let core = Core::new(Arc::new(ProgramSelector), caps, config_path, user_rx, inbound_rx, net_inbound_rx);
         (core, temp_dir)
     }
 
@@ -263,20 +262,16 @@ mod core_tests {
     async fn test_spawn_simple_job_success() {
         let (mut core, _temp_dir) = create_test_core().await;
         let job_id = JobId(1001);
-        let program = TaskProgram {
-            instructions: vec![
-                TaskInstruction::Const {
+        let instructions = vec![
+                OrchestratorInstruction::Const {
                     value: ConstValue::U64(42),
                     dst: SlotId(0),
                 },
-            ],
-            compensation: vec![],
-            labels: HashMap::new(),
-        };
+            ];
         let io = stub_io_handle(&core.capabilities.io_broker, job_id).await;
 
         // spawn job
-        core.spawn_job(job_id, JobKind::Run, program, Some(io));
+        core.spawn_job(job_id, JobKind::Run, instructions, Some(io));
 
         // 验证 registry 已注册
         assert!(core.registry.contains_key(&job_id));
@@ -308,18 +303,14 @@ mod core_tests {
     async fn test_spawn_abort_job_failed() {
         let (mut core, _temp_dir) = create_test_core().await;
         let job_id = JobId(1002);
-        let program = TaskProgram {
-            instructions: vec![
-                TaskInstruction::Abort {
+        let instructions = vec![
+                OrchestratorInstruction::Abort {
                     reason: "test abort reason".to_string(),
                 },
-            ],
-            compensation: vec![],
-            labels: HashMap::new(),
-        };
+            ];
         let io = stub_io_handle(&core.capabilities.io_broker, job_id).await;
 
-        core.spawn_job(job_id, JobKind::Run, program, Some(io));
+        core.spawn_job(job_id, JobKind::Run, instructions, Some(io));
 
         let event = timeout(Duration::from_secs(2), core.lifecycle_rx.recv())
             .await
@@ -351,18 +342,14 @@ mod core_tests {
         let job_ids = vec![JobId(1004), JobId(1005), JobId(1006)];
 
         for &jid in &job_ids {
-            let program = TaskProgram {
-                instructions: vec![
-                    TaskInstruction::Const {
+            let instructions = vec![
+                    OrchestratorInstruction::Const {
                         value: ConstValue::String(format!("job-{}", jid.0)),
                         dst: SlotId(0),
                     },
-                ],
-                compensation: vec![],
-                labels: HashMap::new(),
-            };
+                ];
             let io = stub_io_handle(&core.capabilities.io_broker, jid).await;
-            core.spawn_job(jid, JobKind::Run, program, Some(io));
+            core.spawn_job(jid, JobKind::Run, instructions, Some(io));
         }
 
         // 验证全部注册

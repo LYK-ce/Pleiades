@@ -1,0 +1,19 @@
+[meta]
+kind = "Send"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$file_path"
+dst = "SLOT_SEND_FILE"
+
+[[instructions]]
+type = "Const"
+value_type = "String"
+value = "$peer_id"
+dst = "SLOT_SEND_PEER"
+
+[[instructions]]
+type = "SendFile"
+peer = "SLOT_SEND_PEER"
+file = "SLOT_SEND_FILE"

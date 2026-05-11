@@ -8,7 +8,7 @@
 use libp2p::PeerId;
 use crate::vm_base::{StepResult, SlotId};
 use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
-use crate::orchestrator::compiler::{SLOT_MODEL, SLOT_TENSOR_IO, SLOT_LAYER_START, SLOT_LAYER_END};
+use crate::orchestrator::program_selector::{SLOT_MODEL, SLOT_TENSOR_IO, SLOT_LAYER_START, SLOT_LAYER_END};
 use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
 use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::network::DataType;
@@ -17,7 +17,6 @@ use crate::scheduler::Pipeline_Plan;
 
 use super::engine::Orchestrator_VM;
 use super::slots::OrchestratorSlotValue;
-use super::to_vm_slot;
 
 impl Orchestrator_VM {
     pub async fn handle_send_file(&mut self, peer: SlotId, file: SlotId) -> StepResult {
@@ -141,8 +140,8 @@ impl Orchestrator_VM {
         let inference_id = plan.inference_id;
 
         if plan.workers.is_empty() {
-            self.vm.slots.set(to_vm_slot(SLOT_LAYER_START), crate::vm_base::SlotValue::U64(plan.coord_layer_start as u64));
-            self.vm.slots.set(to_vm_slot(SLOT_LAYER_END), crate::vm_base::SlotValue::U64(plan.coord_layer_end as u64));
+            self.vm.slots.set(SLOT_LAYER_START, crate::vm_base::SlotValue::U64(plan.coord_layer_start as u64));
+            self.vm.slots.set(SLOT_LAYER_END, crate::vm_base::SlotValue::U64(plan.coord_layer_end as u64));
             self.vm.slots.set(result, crate::vm_base::SlotValue::String("ok_single_node".to_string()));
             return StepResult::Continue;
         }
@@ -216,12 +215,12 @@ impl Orchestrator_VM {
         };
 
         self.slots.set(
-            to_vm_slot(SLOT_TENSOR_IO),
+            SLOT_TENSOR_IO,
             OrchestratorSlotValue::TensorIO(ep),
         );
 
-        self.vm.slots.set(to_vm_slot(SLOT_LAYER_START), crate::vm_base::SlotValue::U64(plan.coord_layer_start as u64));
-        self.vm.slots.set(to_vm_slot(SLOT_LAYER_END), crate::vm_base::SlotValue::U64(plan.coord_layer_end as u64));
+        self.vm.slots.set(SLOT_LAYER_START, crate::vm_base::SlotValue::U64(plan.coord_layer_start as u64));
+        self.vm.slots.set(SLOT_LAYER_END, crate::vm_base::SlotValue::U64(plan.coord_layer_end as u64));
         self.vm.slots.set(result, crate::vm_base::SlotValue::String("ok".to_string()));
         StepResult::Continue
     }
@@ -237,7 +236,7 @@ impl Orchestrator_VM {
             return StepResult::Continue;
         }
 
-        let model_file_id = match self.vm.slots.get_string(to_vm_slot(SLOT_MODEL)) {
+        let model_file_id = match self.vm.slots.get_string(SLOT_MODEL) {
             Ok(s) => s.clone(),
             Err(e) => return StepResult::Abort(format!("JoinWorkers: model slot error: {}", e)),
         };

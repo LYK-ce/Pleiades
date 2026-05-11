@@ -7,14 +7,16 @@
 //! - FileStreamArrived: 读取 in-band header → 检查空间 → ACK → compile 接收作业 → spawn Job
 //! - TensorStreamArrived: 读取 handshake → Register_Inbound 到 Pipeline entries
 
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{Core, generate_id, JobHandle};
 use crate::orchestrator::job::{JobId, JobKind};
-use crate::orchestrator::executor::JobExecutor;
-use crate::orchestrator::compiler::SLOT_RECEIVE_STREAM;
-use crate::orchestrator::slot::SlotValue;
+use crate::orchestrator::core::job_executor::JobExecutor;
+use crate::orchestrator::program_selector::ProgramSelector;
+use crate::orchestrator::program_selector::SLOT_RECEIVE_STREAM;
+use crate::orchestrator::orchestrator_vm::OrchestratorSlotValue;
 use crate::network::Network_Inbound_Event;
 use crate::network::tensor_stream_protocol::Read_Tensor_Stream_Handshake;
 use crate::network::stream_protocol::{Read_File_Stream_Header, Write_File_Stream_Ack};
@@ -62,9 +64,11 @@ impl Core {
 
                 // 4. compile ReceiveFile Job
                 let job_id = JobId(generate_id());
-                let program = match self.compiler.compile_receive_file(
-                    job_id, file_name.clone(), file_size, checksum,
-                ) {
+                let mut vars = HashMap::new();
+                vars.insert("file_name".to_string(), file_name.clone());
+                vars.insert("file_size".to_string(), file_size.to_string());
+                vars.insert("checksum".to_string(), checksum.clone());
+                let program = match ProgramSelector::select(JobKind::Receive, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {
                         warn!("B3/File: 编译 ReceiveFile 失败 from {}: {:?}", peer, e);
@@ -86,7 +90,7 @@ impl Core {
                 );
                 executor.inject_slot(
                     SLOT_RECEIVE_STREAM,
-                    SlotValue::Stream(std::sync::Mutex::new(Some(stream))),
+                    OrchestratorSlotValue::Stream(std::sync::Mutex::new(Some(stream))),
                 );
 
                 // 7. 发布 Job 创建事件 + spawn + 注册

@@ -1,0 +1,60 @@
+[[instructions]]
+type = "Input"
+
+[[instructions]]
+type = "Encode"
+
+[[instructions]]
+type = "Set"
+target_type = "Meta"
+target_reg = "META2"
+target_value = "$max_tokens"
+
+[[instructions]]
+type = "Set"
+target_type = "Flag"
+target_reg = "FLAG1"
+target_value = false
+
+[[instructions]]
+type = "Prefill"
+input = "TOKENID3"
+
+[[instructions]]
+type = "CopyMeta"
+src = "META5"
+dst = "META1"
+
+[[instructions]]
+type = "Sample"
+tensor_reg = "TENSOR2"
+
+[[instructions]]
+type = "Decode"
+
+[[instructions]]
+type = "Output"
+
+[[instructions]]
+type = "Loop"
+
+[[instructions.body]]
+type = "BreakIf"
+
+[[instructions.body]]
+type = "Inference"
+input_type = "Tokens"
+input = "TOKENID2"
+
+[[instructions.body]]
+type = "Sample"
+tensor_reg = "TENSOR2"
+
+[[instructions.body]]
+type = "Decode"
+
+[[instructions.body]]
+type = "Output"
+
+[[instructions]]
+type = "EndOutput"

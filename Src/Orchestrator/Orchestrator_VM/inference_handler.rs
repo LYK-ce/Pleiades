@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use crate::vm_base::{StepResult, SlotId};
 use crate::ml_engine::capability::ML_Session_Config;
 use crate::ml_engine::ml_thread_engine_instruction::Pipeline_Params;
-use crate::orchestrator::compiler::Compiler;
+use crate::orchestrator::program_selector::ProgramSelector;
 
 use super::engine::Orchestrator_VM;
 
@@ -94,13 +94,22 @@ impl Orchestrator_VM {
         };
 
         let params = Pipeline_Params::default();
-        let mode = self.vm.slots.get_string(super::to_vm_slot(crate::orchestrator::compiler::SLOT_ML_PROGRAM_MODE))
+        let mode = self.vm.slots.get_string(crate::orchestrator::program_selector::SLOT_ML_PROGRAM_MODE)
             .map(|s| s.clone())
             .unwrap_or_else(|_| "run".to_string());
         let program = match mode.as_str() {
-            "relay" => Compiler::build_relay_ml_program(),
-            "coordinator" => Compiler::build_coordinator_ml_program(&params),
-            _ => Compiler::build_run_ml_program(&params),
+            "relay" => match ProgramSelector::load_ml_program("relay", &params) {
+                Ok(p) => p,
+                Err(e) => return StepResult::Abort(format!("load relay ml program failed: {}", e)),
+            },
+            "coordinator" => match ProgramSelector::load_ml_program("coordinator", &params) {
+                Ok(p) => p,
+                Err(e) => return StepResult::Abort(format!("load coordinator ml program failed: {}", e)),
+            },
+            _ => match ProgramSelector::load_ml_program("run", &params) {
+                Ok(p) => p,
+                Err(e) => return StepResult::Abort(format!("load run ml program failed: {}", e)),
+            },
         };
 
         let cancel_flag = Arc::new(AtomicBool::new(false));

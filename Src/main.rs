@@ -40,7 +40,7 @@ use pleiades::tensor_io::Tensor_Port_Switch;
 use pleiades::scheduler::Scheduler_Service;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
-use pleiades::orchestrator::compiler::Compiler;
+use pleiades::orchestrator::program_selector::ProgramSelector;
 use pleiades::orchestrator::command::UserCommand;
 use pleiades::tui::TUI_Loop;
 
@@ -196,10 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 13. 用户命令通道 (TUI → Core)
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
 
-    // 14. 创建 Compiler + Core
-    let compiler = Arc::new(Compiler);
+    // 14. 创建 Core
     let core = Core::new(
-        compiler,
+        Arc::new(ProgramSelector),
         capabilities,
         config_path,
         user_cmd_rx,

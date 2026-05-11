@@ -3,11 +3,8 @@
 
 pub mod core;
 pub mod job;
-pub mod compiler;
-pub mod executor;
+pub mod program_selector;
 pub mod command;
-pub mod slot;
-pub mod instruction;
 pub mod inference_id;
 pub mod orchestrator_vm;
 

@@ -1,0 +1,79 @@
+#Presented by KeJi
+#Date: 2026-04-14
+
+# Rust编译输出
+/target/
+**/*.rs.bk
+
+# Cargo.lock (对于库项目，通常不提交，但对于应用程序应该提交)
+# Cargo.lock
+
+# 调试信息
+*.pdb
+*.dSYM/
+*.so
+*.dylib
+
+# 环境变量文件
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 日志文件
+/logs/
+Log/
+pleiades.log.*
+
+# 运行时数据
+*.pid
+*.seed
+*.pid.lock
+
+# 覆盖率输出
+*.gcda
+*.gcno
+/coverage/
+
+# 敏感配置（含私钥）
+.config/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 测试输出
+/test-output/
+
+# 大文件
+*.gguf
+*.pgguf
+*.onnx
+*.npz
+
+# 可执行文件
+*.exe
+*.dll
+
+# 临时备份文件
+bak*.md
+nul
+
+# 临时文件
+/tmp/
+/temp/
+
+# 特定于本项目的忽略项
+Pleiades_Workspace/
+Test_Environment_1/
+Test_Environment_2/
+Test_Environment_3/
+相关工作/

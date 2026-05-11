@@ -5,13 +5,15 @@
 //!
 //! 处理来自 TUI / CLI 的 `UserCommand`，编译并 spawn 对应的 Job。
 
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{Core, generate_id, JobHandle};
 use crate::orchestrator::job::{JobId, JobKind};
 use crate::orchestrator::command::UserCommand;
-use crate::orchestrator::executor::JobExecutor;
+use crate::orchestrator::core::job_executor::JobExecutor;
+use crate::orchestrator::program_selector::ProgramSelector;
 use crate::orchestrator::inference_id::Generate_Inference_Id;
 use crate::config::Update_Config;
 use crate::event_bus::Bus_Event;
@@ -27,9 +29,11 @@ impl Core {
             UserCommand::Run { model_path, reply } => {
                 let job_id = JobId(generate_id());
                 // 使用 Core 的 device_preference（空字符串时传 None，由 Compiler 默认 "cpu"）
-                let device = if self.device_preference.is_empty() { None } else { Some(self.device_preference.clone()) };
-                // 先编译，失败则回传错误
-                let program = match self.compiler.compile_run(job_id, model_path, device) {
+                let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
+                let mut vars = HashMap::new();
+                vars.insert("model_path".to_string(), model_path.clone());
+                vars.insert("device".to_string(), device.clone());
+                let program = match ProgramSelector::select(JobKind::Run, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = reply.send(Err(format!("编译失败: {:?}", e)));
@@ -98,24 +102,16 @@ impl Core {
                 // 4. 回复成功
                 let _ = reply.send(Ok(()));
             }
-            UserCommand::DistributeModel { model_path, peers, reply } => {
-                let job_id = JobId(generate_id());
-                // 编译分发作业
-                let program = match self.compiler.compile_distribute(job_id, model_path, peers) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = reply.send(Err(format!("编译失败: {:?}", e)));
-                        return;
-                    }
-                };
-                // Distribute Job 不使用 ML 推理，无需 IO 通道
-                self.spawn_job(job_id, JobKind::Distribute, program, None);
-                let _ = reply.send(Ok(job_id));
+            UserCommand::DistributeModel { model_path: _, peers: _, reply } => {
+                let _ = reply.send(Err("DistributeModel not yet implemented".to_string()));
             }
             UserCommand::Send { file_path, peer_id, reply } => {
                 let job_id = JobId(generate_id());
                 // 编译发送作业
-                let program = match self.compiler.compile_send(job_id, file_path, peer_id) {
+                let mut vars = HashMap::new();
+                vars.insert("file_path".to_string(), file_path.clone());
+                vars.insert("peer_id".to_string(), peer_id.clone());
+                let program = match ProgramSelector::select(JobKind::Send, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = reply.send(Err(format!("编译失败: {:?}", e)));
@@ -160,7 +156,11 @@ impl Core {
                 );
 
                 // 编译 Pipeline TaskProgram
-                let program = match self.compiler.compile_pipeline(job_id, inference_id, model_path, device) {
+                let mut vars = HashMap::new();
+                vars.insert("model_path".to_string(), model_path.clone());
+                vars.insert("inference_id".to_string(), inference_id.to_string());
+                vars.insert("device".to_string(), device.clone());
+                let program = match ProgramSelector::select(JobKind::Pipeline, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = reply.send(Err(format!("编译失败: {:?}", e)));
