@@ -69,7 +69,6 @@ pub use network::{
 };
 
 // ML_Engine模块类型导出
-pub use ml_engine::{RuntimeError};
 pub use ml_engine::{
     GGUF_Tensor_Packet, GGUF_Dtype, GGUF_Tensor_Error,
     GGUF_Tensor_Serialize, GGUF_Tensor_Deserialize,
@@ -82,17 +81,8 @@ pub use ml_engine::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
-// ML Service 层（独立函数 API，不再有 ML_Service_Handle）
-pub use ml_engine::{Create_Session, Split_Model, Analyze_Model};
-// 指令集
 pub use ml_engine::{
-    Instruction, Inference_Input, Set_Target,
     Pipeline_Params, Pipeline_Result, Model_Info,
-};
-// Session/Thread 引擎
-pub use ml_engine::{
-    Inference_Backend, Session, Session_Handle, Session_Config,
-    Session_Command, Session_Thread, Execute,
 };
 
 // PeerManagement模块类型导出

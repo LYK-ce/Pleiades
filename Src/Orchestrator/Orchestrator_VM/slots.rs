@@ -7,7 +7,7 @@
 //! 基础类型走 Vm.slots，领域类型走 OrchestratorSlots。
 
 use crate::llm_io::IoHandle;
-use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
+use crate::ml_engine::pipeline::Model_Info;
 use crate::scheduler::Pipeline_Plan;
 use crate::tensor_io::Tensor_IO_Endpoint;
 use crate::vm_base::SlotId;

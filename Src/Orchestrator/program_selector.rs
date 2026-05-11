@@ -13,12 +13,16 @@ use std::collections::HashMap;
 
 use super::job::{JobId, JobKind};
 use super::orchestrator_vm::OrchestratorInstruction;
-use crate::ml_engine::ml_thread_engine_instruction::{
-    Inference_Input, Instruction, Pipeline_Params, Set_Target,
+use crate::ml_engine::ml_vm::slots::{
+    SLOT_FLAG1 as SL_ML_FLAG1, SLOT_META1 as SL_ML_META1, SLOT_META2 as SL_ML_META2,
+    SLOT_META4 as SL_ML_META4, SLOT_META5 as SL_ML_META5, SLOT_META6 as SL_ML_META6,
+    SLOT_TENSOR1 as SL_ML_TENSOR1, SLOT_TENSOR2 as SL_ML_TENSOR2, SLOT_TEXT1 as SL_ML_TEXT1,
+    SLOT_TEXT2 as SL_ML_TEXT2, SLOT_TOKENS1 as SL_ML_TOKENS1, SLOT_TOKENS2 as SL_ML_TOKENS2,
+    SLOT_TOKENS3 as SL_ML_TOKENS3,
 };
-use crate::ml_engine::ml_thread_register::{
-    FLAG1, META1, META2, META5, TENSOR1, TENSOR2, TOKENID2, TOKENID3,
-};
+use crate::ml_engine::ml_vm::InferenceInputType as MlInputType;
+use crate::ml_engine::ml_vm::MlInstruction as MlInst;
+use crate::ml_engine::pipeline::Pipeline_Params;
 use crate::vm_base::{ConstValue, SlotId};
 
 // ─── 约定槽位常量 ─────────────────────────────────────────────
@@ -184,13 +188,25 @@ struct RawMLInstruction {
     #[serde(default)]
     tensor_reg: Option<String>,
     #[serde(default)]
+    tensor_slot: Option<String>,
+    #[serde(default)]
     input_type: Option<String>,
     #[serde(default)]
     input: Option<String>,
     #[serde(default)]
+    condition: Option<String>,
+    #[serde(default)]
     src: Option<String>,
     #[serde(default)]
     dst: Option<String>,
+    #[serde(default)]
+    value_type: Option<String>,
+    #[serde(default)]
+    value: Option<toml::Value>,
+    #[serde(default)]
+    delta: Option<f64>,
+    #[serde(default)]
+    target: Option<usize>,
     #[serde(default)]
     body: Option<Vec<RawMLInstruction>>,
 }
@@ -292,57 +308,92 @@ fn resolve_value(
     }
 }
 
-// ─── ML 寄存器名 → 寄存器常量 ──────────────────────────────
+// ─── ML 槽位名 → SlotId 查表 ─────────────────────────────
 
-fn resolve_token_reg(
-    name: &str,
-) -> Result<crate::ml_engine::ml_thread_register::Token_Reg, SelectorError> {
-    match name {
-        "TOKENID1" => Ok(crate::ml_engine::ml_thread_register::TOKENID1),
-        "TOKENID2" => Ok(TOKENID2),
-        "TOKENID3" => Ok(TOKENID3),
-        "TOKENID4" => Ok(crate::ml_engine::ml_thread_register::TOKENID4),
-        _ => Err(SelectorError::UnknownRegister(name.to_string())),
-    }
+fn resolve_ml_slot(name: &str) -> Result<SlotId, SelectorError> {
+    let id = match name {
+        "TEXT1" => SL_ML_TEXT1.0,
+        "TEXT2" => SL_ML_TEXT2.0,
+        "TEXT3" => 1002,
+        "TEXT4" => 1003,
+        "TOKENS1" => SL_ML_TOKENS1.0,
+        "TOKENS2" => SL_ML_TOKENS2.0,
+        "TOKENS3" => SL_ML_TOKENS3.0,
+        "TOKENS4" => 1013,
+        "TENSOR1" => SL_ML_TENSOR1.0,
+        "TENSOR2" => SL_ML_TENSOR2.0,
+        "TENSOR3" => 1022,
+        "TENSOR4" => 1023,
+        "FLAG1" => SL_ML_FLAG1.0,
+        "FLAG2" => 1031,
+        "FLAG3" => 1032,
+        "FLAG4" => 1033,
+        "META1" => SL_ML_META1.0,
+        "META2" => SL_ML_META2.0,
+        "META3" => 1042,
+        "META4" => SL_ML_META4.0,
+        "META5" => SL_ML_META5.0,
+        "META6" => SL_ML_META6.0,
+        "META7" => 1046,
+        "META8" => 1047,
+        _ => return Err(SelectorError::UnknownSlot(name.to_string())),
+    };
+    Ok(SlotId(id))
 }
 
-fn resolve_tensor_reg(
-    name: &str,
-) -> Result<crate::ml_engine::ml_thread_register::Tensor_Reg, SelectorError> {
-    match name {
-        "TENSOR1" => Ok(TENSOR1),
-        "TENSOR2" => Ok(TENSOR2),
-        "TENSOR3" => Ok(crate::ml_engine::ml_thread_register::TENSOR3),
-        "TENSOR4" => Ok(crate::ml_engine::ml_thread_register::TENSOR4),
-        _ => Err(SelectorError::UnknownRegister(name.to_string())),
-    }
-}
-
-fn resolve_flag_reg(
-    name: &str,
-) -> Result<crate::ml_engine::ml_thread_register::Flag_Reg, SelectorError> {
-    match name {
-        "FLAG1" => Ok(FLAG1),
-        "FLAG2" => Ok(crate::ml_engine::ml_thread_register::FLAG2),
-        "FLAG3" => Ok(crate::ml_engine::ml_thread_register::FLAG3),
-        "FLAG4" => Ok(crate::ml_engine::ml_thread_register::FLAG4),
-        _ => Err(SelectorError::UnknownRegister(name.to_string())),
-    }
-}
-
-fn resolve_meta_reg(
-    name: &str,
-) -> Result<crate::ml_engine::ml_thread_register::Meta_Reg, SelectorError> {
-    match name {
-        "META1" => Ok(META1),
-        "META2" => Ok(META2),
-        "META3" => Ok(crate::ml_engine::ml_thread_register::META3),
-        "META4" => Ok(crate::ml_engine::ml_thread_register::META4),
-        "META5" => Ok(META5),
-        "META6" => Ok(crate::ml_engine::ml_thread_register::META6),
-        "META7" => Ok(crate::ml_engine::ml_thread_register::META7),
-        "META8" => Ok(crate::ml_engine::ml_thread_register::META8),
-        _ => Err(SelectorError::UnknownRegister(name.to_string())),
+fn resolve_ml_const_value(
+    raw_value: &Option<toml::Value>,
+    value_type: &str,
+    params: &Pipeline_Params,
+) -> Result<ConstValue, SelectorError> {
+    match raw_value {
+        Some(toml::Value::Integer(i)) => match value_type {
+            "U64" => Ok(ConstValue::U64(*i as u64)),
+            "F64" => Ok(ConstValue::F64(*i as f64)),
+            _ => Err(SelectorError::UnsupportedValueType(format!(
+                "不支持的类型组合: {} + Integer",
+                value_type
+            ))),
+        },
+        Some(toml::Value::Float(f)) => match value_type {
+            "F64" => Ok(ConstValue::F64(*f)),
+            _ => Err(SelectorError::UnsupportedValueType(format!(
+                "不支持的类型组合: {} + Float",
+                value_type
+            ))),
+        },
+        Some(toml::Value::Boolean(b)) => match value_type {
+            "Bool" => Ok(ConstValue::Bool(*b)),
+            _ => Err(SelectorError::UnsupportedValueType(format!(
+                "不支持的类型组合: {} + Bool",
+                value_type
+            ))),
+        },
+        Some(toml::Value::String(s)) => {
+            let value = if s == "$max_tokens" {
+                params.max_tokens.to_string()
+            } else if s.starts_with('$') {
+                return Err(SelectorError::MissingVariable(s[1..].to_string()));
+            } else {
+                s.clone()
+            };
+            match value_type {
+                "F64" => Ok(ConstValue::F64(value.parse().map_err(|_| {
+                    SelectorError::UnsupportedValueType(format!("无法解析 F64: {}", value))
+                })?)),
+                "Bool" => Ok(ConstValue::Bool(value.parse().map_err(|_| {
+                    SelectorError::UnsupportedValueType(format!("无法解析 Bool: {}", value))
+                })?)),
+                "U64" => Ok(ConstValue::U64(value.parse().map_err(|_| {
+                    SelectorError::UnsupportedValueType(format!("无法解析 U64: {}", value))
+                })?)),
+                "String" => Ok(ConstValue::String(value)),
+                _ => Err(SelectorError::UnsupportedValueType(value_type.to_string())),
+            }
+        }
+        _ => Err(SelectorError::UnsupportedValueType(
+            "value 缺失或类型不支持".to_string(),
+        )),
     }
 }
 
@@ -488,86 +539,89 @@ impl ProgramSelector {
             _ => Err(SelectorError::UnknownInstructionType(raw.inst_type.clone())),
         }
     }
+}
 
-    /// 根据 ML mode 加载 ML 程序模板。
-    pub fn load_ml_program(
+// ─── ML 程序加载（VM 版）──────────────────────────────────────
+
+impl ProgramSelector {
+    pub fn load_ml_program_vm(
         mode: &str,
         params: &Pipeline_Params,
-    ) -> Result<Vec<Instruction>, SelectorError> {
+    ) -> Result<Vec<MlInst>, SelectorError> {
         let tmpl_text = match mode {
             "run" => ML_RUN_TMPL,
             "relay" => ML_RELAY_TMPL,
             "coordinator" => ML_COORDINATOR_TMPL,
             _ => return Err(SelectorError::UnsupportedKind(JobKind::Run)),
         };
-
-        // 按需解析：仅在 load_ml_program() 调用时做 TOML 反序列化
         let template: RawMLTemplate =
             toml::from_str(tmpl_text).map_err(|e| SelectorError::TomlParse(e.to_string()))?;
-
         let mut instructions = Vec::new();
         for raw in &template.instructions {
-            let inst = Self::convert_ml_instruction(raw, params)?;
-            instructions.push(inst);
+            instructions.push(Self::convert_ml_instruction_vm(raw, params)?);
         }
         Ok(instructions)
     }
 
-    fn convert_ml_instruction(
+    fn convert_ml_instruction_vm(
         raw: &RawMLInstruction,
         params: &Pipeline_Params,
-    ) -> Result<Instruction, SelectorError> {
+    ) -> Result<MlInst, SelectorError> {
         match raw.inst_type.as_str() {
-            "Input" => Ok(Instruction::Input),
-            "Encode" => Ok(Instruction::Encode),
-            "Decode" => Ok(Instruction::Decode),
-            "Output" => Ok(Instruction::Output),
-            "EndOutput" => Ok(Instruction::EndOutput),
-            "Send" => Ok(Instruction::Send),
-            "Receive" => Ok(Instruction::Receive),
-            "SendEOF" => Ok(Instruction::SendEOF),
-            "BreakIf" => Ok(Instruction::BreakIf),
-            "Set" => {
-                let target_type = raw.target_type.as_deref().unwrap_or("Meta");
-                let reg_name = raw.target_reg.as_deref().unwrap_or("");
-                let target = match target_type {
-                    "Meta" => {
-                        let value = resolve_ml_f64(&raw.target_value, params)?;
-                        Set_Target::Meta(resolve_meta_reg(reg_name)?, value)
-                    }
-                    "Flag" => {
-                        let value = resolve_ml_bool(&raw.target_value);
-                        Set_Target::Flag(resolve_flag_reg(reg_name)?, value)
-                    }
-                    _ => {
-                        return Err(SelectorError::UnsupportedValueType(format!(
-                            "unknown Set target_type: {}",
-                            target_type
-                        )))
-                    }
-                };
-                Ok(Instruction::Set { target })
+            "Input" => Ok(MlInst::Input),
+            "Encode" => Ok(MlInst::Encode),
+            "Decode" => Ok(MlInst::Decode),
+            "Output" => Ok(MlInst::Output),
+            "EndOutput" => Ok(MlInst::EndOutput),
+            "Send" => Ok(MlInst::Send),
+            "Receive" => Ok(MlInst::Receive),
+            "SendEOF" => Ok(MlInst::SendEOF),
+            "Const" => {
+                let value_type = raw.value_type.as_deref().unwrap_or("String");
+                let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
+                Ok(MlInst::Const {
+                    value: resolve_ml_const_value(&raw.value, value_type, params)?,
+                    dst,
+                })
             }
-            "CopyMeta" => {
-                let src = resolve_meta_reg(raw.src.as_deref().unwrap_or(""))?;
-                let dst = resolve_meta_reg(raw.dst.as_deref().unwrap_or(""))?;
-                Ok(Instruction::CopyMeta { src, dst })
+            "Move" => {
+                let src = resolve_ml_slot(raw.src.as_deref().unwrap_or(""))?;
+                let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
+                Ok(MlInst::Move { src, dst })
+            }
+            "Add" => {
+                let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
+                let delta = raw.delta.unwrap_or(0.0);
+                Ok(MlInst::Add { dst, delta })
+            }
+            "Jump" => {
+                let target = raw.target.unwrap_or(0);
+                Ok(MlInst::Jump { target })
+            }
+            "JumpIf" => {
+                let condition = resolve_ml_slot(raw.condition.as_deref().unwrap_or(""))?;
+                let target = raw.target.unwrap_or(0);
+                Ok(MlInst::JumpIf { condition, target })
             }
             "Prefill" => {
-                let input = resolve_token_reg(raw.input.as_deref().unwrap_or(""))?;
-                Ok(Instruction::Prefill { input })
+                let input = resolve_ml_slot(raw.input.as_deref().unwrap_or(""))?;
+                Ok(MlInst::Prefill { input })
             }
             "Sample" => {
-                let tensor_reg =
-                    resolve_tensor_reg(raw.tensor_reg.as_deref().unwrap_or("TENSOR2"))?;
-                Ok(Instruction::Sample { tensor_reg })
+                let tensor_slot = resolve_ml_slot(
+                    raw.tensor_slot
+                        .as_deref()
+                        .or(raw.tensor_reg.as_deref())
+                        .unwrap_or("TENSOR2"),
+                )?;
+                Ok(MlInst::Sample { tensor_slot })
             }
             "Inference" => {
                 let input_type = raw.input_type.as_deref().unwrap_or("Tokens");
-                let input_name = raw.input.as_deref().unwrap_or("TOKENID2");
-                let input = match input_type {
-                    "Tokens" => Inference_Input::Tokens(resolve_token_reg(input_name)?),
-                    "Tensor" => Inference_Input::Tensor(resolve_tensor_reg(input_name)?),
+                let input = resolve_ml_slot(raw.input.as_deref().unwrap_or(""))?;
+                let input_type = match input_type {
+                    "Tokens" => MlInputType::Tokens,
+                    "Tensor" => MlInputType::Tensor,
                     _ => {
                         return Err(SelectorError::UnsupportedValueType(format!(
                             "unknown Inference input_type: {}",
@@ -575,53 +629,10 @@ impl ProgramSelector {
                         )))
                     }
                 };
-                Ok(Instruction::Inference { input })
-            }
-            "Loop" => {
-                let body_raw = raw.body.as_ref().ok_or_else(|| {
-                    SelectorError::UnknownInstructionType("Loop 缺少 body 指令序列".to_string())
-                })?;
-                let mut body = Vec::new();
-                for raw_inst in body_raw {
-                    body.push(Self::convert_ml_instruction(raw_inst, params)?);
-                }
-                Ok(Instruction::Loop { body })
+                Ok(MlInst::Inference { input_type, input })
             }
             _ => Err(SelectorError::UnknownInstructionType(raw.inst_type.clone())),
         }
-    }
-}
-
-fn resolve_ml_f64(
-    value: &Option<toml::Value>,
-    params: &Pipeline_Params,
-) -> Result<f64, SelectorError> {
-    match value {
-        Some(toml::Value::String(s)) => {
-            if s == "$max_tokens" {
-                Ok(params.max_tokens as f64)
-            } else if s.starts_with('$') {
-                Err(SelectorError::MissingVariable(s[1..].to_string()))
-            } else {
-                s.parse::<f64>().map_err(|_| {
-                    SelectorError::UnsupportedValueType(format!("无法解析 f64: {}", s))
-                })
-            }
-        }
-        Some(toml::Value::Integer(i)) => Ok(*i as f64),
-        Some(toml::Value::Float(f)) => Ok(*f),
-        _ => Err(SelectorError::UnsupportedValueType(
-            "target_value 缺失或类型不支持".to_string(),
-        )),
-    }
-}
-
-fn resolve_ml_bool(value: &Option<toml::Value>) -> bool {
-    match value {
-        Some(toml::Value::Boolean(b)) => *b,
-        Some(toml::Value::String(s)) if s == "false" => false,
-        Some(toml::Value::String(s)) if s == "true" => true,
-        _ => false,
     }
 }
 
@@ -754,36 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn load_ml_run_template() {
-        let params = Pipeline_Params::default();
-        let program = ProgramSelector::load_ml_program("run", &params).unwrap();
-
-        assert_eq!(program.len(), 11);
-        assert!(matches!(program.last(), Some(Instruction::EndOutput)));
-    }
-
-    #[test]
-    fn load_ml_relay_template() {
-        let params = Pipeline_Params::default();
-        let program = ProgramSelector::load_ml_program("relay", &params).unwrap();
-
-        assert_eq!(program.len(), 2);
-        match &program[0] {
-            Instruction::Loop { body } => {
-                assert_eq!(body.len(), 4);
-            }
-            _ => panic!("expected Loop"),
-        }
-        assert!(matches!(&program[1], Instruction::SendEOF));
-    }
-
-    #[test]
-    fn load_ml_coordinator_template() {
-        let params = Pipeline_Params::default();
-        let program = ProgramSelector::load_ml_program("coordinator", &params).unwrap();
-
-        assert_eq!(program.len(), 14);
-        assert!(matches!(program.last(), Some(Instruction::EndOutput)));
+    fn invalid_variable_returns_error() {
+        let v = vars(&[]);
+        let result = ProgramSelector::select(crate::orchestrator::job::JobKind::Run, JobId(1), v);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -794,10 +779,74 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ─── load_ml_program_vm 测试 ───────────────────
+
     #[test]
-    fn invalid_variable_returns_error() {
-        let v = vars(&[]);
-        let result = ProgramSelector::select(crate::orchestrator::job::JobKind::Run, JobId(1), v);
-        assert!(result.is_err());
+    fn load_ml_run_vm_template() {
+        let params = Pipeline_Params::default();
+        let prog = ProgramSelector::load_ml_program_vm("run", &params).unwrap();
+        assert_eq!(prog.len(), 16);
+        // 前两条是 Input, Encode
+        assert!(matches!(&prog[0], MlInst::Input));
+        assert!(matches!(&prog[1], MlInst::Encode));
+        // Const META2 = $max_tokens (default 120)
+        if let MlInst::Const { value, dst } = &prog[2] {
+            assert_eq!(dst.0, 1041); // SLOT_META2
+            assert!(matches!(value, ConstValue::F64(120.0)));
+        } else {
+            panic!("expected Const");
+        }
+        // Const FLAG1 = false
+        if let MlInst::Const { value, dst } = &prog[3] {
+            assert_eq!(dst.0, 1030); // SLOT_FLAG1
+            assert!(matches!(value, ConstValue::Bool(false)));
+        } else {
+            panic!("expected Const");
+        }
+        // 最后是 EndOutput
+        assert!(matches!(&prog[15], MlInst::EndOutput));
+        // JumpIf at index 9 targets index 15
+        if let MlInst::JumpIf { condition, target } = &prog[9] {
+            assert_eq!(condition.0, 1030); // FLAG1
+            assert_eq!(*target, 15);
+        } else {
+            panic!("expected JumpIf");
+        }
+        // Jump at index 14 targets index 9 (loop back)
+        if let MlInst::Jump { target } = &prog[14] {
+            assert_eq!(*target, 9);
+        } else {
+            panic!("expected Jump");
+        }
+    }
+
+    #[test]
+    fn load_ml_relay_vm_template() {
+        let params = Pipeline_Params::default();
+        let prog = ProgramSelector::load_ml_program_vm("relay", &params).unwrap();
+        assert_eq!(prog.len(), 7);
+        // JumpIf at 0, Receive at 1, JumpIf at 2, Inference at 3, Send at 4, Jump at 5, SendEOF at 6
+        if let MlInst::JumpIf { target, .. } = &prog[0] {
+            assert_eq!(*target, 6);
+        } else {
+            panic!("expected JumpIf");
+        }
+        assert!(matches!(&prog[6], MlInst::SendEOF));
+    }
+
+    #[test]
+    fn load_ml_coordinator_vm_template() {
+        let params = Pipeline_Params::default();
+        let prog = ProgramSelector::load_ml_program_vm("coordinator", &params).unwrap();
+        assert_eq!(prog.len(), 21);
+        assert!(matches!(&prog[0], MlInst::Input));
+        // JumpIf at index 11 targets index 19
+        if let MlInst::JumpIf { target, .. } = &prog[11] {
+            assert_eq!(*target, 19);
+        } else {
+            panic!("expected JumpIf");
+        }
+        assert!(matches!(&prog[19], MlInst::SendEOF));
+        assert!(matches!(&prog[20], MlInst::EndOutput));
     }
 }

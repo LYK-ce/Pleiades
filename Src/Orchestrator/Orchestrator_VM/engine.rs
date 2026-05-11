@@ -97,7 +97,7 @@ mod tests {
     use crate::tensor_io::Tensor_Port_Switch;
     use crate::orchestrator::test_utils::{StubNetwork, StubPeerManager, StubScheduler};
     use crate::ml_engine::capability::ML_Engine_Capability;
-    use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
+    use crate::ml_engine::pipeline::Model_Info;
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;
 
@@ -106,7 +106,7 @@ mod tests {
     impl ML_Engine_Capability for StubMLEngine {
         async fn Create_Session(&self, _config: crate::ml_engine::capability::ML_Session_Config, _io: crate::llm_io::IoHandle) -> Result<Model_Info, crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
         async fn Shutdown_Session(&self, _session_id: &str) -> Result<(), crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
-        async fn Run_Program(&self, _session_id: &str, _program: Vec<crate::ml_engine::ml_thread_engine_instruction::Instruction>, _params: crate::ml_engine::ml_thread_engine_instruction::Pipeline_Params, _cancel: Arc<AtomicBool>) -> Result<crate::ml_engine::ml_thread_engine_instruction::Pipeline_Result, crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
+        async fn Run_Program_VM(&self, _session_id: &str, _program: Vec<crate::ml_engine::ml_vm::MlInstruction>, _params: crate::ml_engine::pipeline::Pipeline_Params, _cancel: Arc<AtomicBool>) -> Result<crate::ml_engine::pipeline::Pipeline_Result, crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
         async fn Analyze_Model(&self, _model_file_id: &str) -> Result<Model_Info, crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
         async fn Split_Model(&self, _source_file_id: &str, _start: usize, _end: usize, _output_file_id: &str) -> Result<(), crate::ml_engine::capability::ML_Engine_Error> { unimplemented!("stub") }
     }

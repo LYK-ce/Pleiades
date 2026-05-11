@@ -19,8 +19,9 @@ use async_trait::async_trait;
 
 use crate::llm_io::IoHandle;
 use crate::tensor_io::Tensor_IO_Endpoint;
-use super::ml_thread_engine_instruction::{
-    Instruction, Pipeline_Params, Pipeline_Result, Model_Info,
+use crate::ml_engine::ml_vm::MlInstruction;
+use super::pipeline::{
+    Pipeline_Params, Pipeline_Result, Model_Info,
 };
 
 // ─── 错误类型 ───────────────────────────────────────────────
@@ -140,18 +141,11 @@ pub trait ML_Engine_Capability: Send + Sync {
         session_id: &str,
     ) -> Result<(), ML_Engine_Error>;
 
-    /// 提交指令序列到指定 Session 执行
-    ///
-    /// 内部流程：
-    /// 1. 按 session_id 查 sessions 表，clone Handle（释放锁）
-    /// 2. 通过 Handle 发送 Run_Program 命令
-    /// 3. 等待 oneshot reply 获取 Pipeline_Result
-    ///
-    /// 执行期间，Session 线程会通过 io_handle 与前端交换文本。
-    async fn Run_Program(
+    /// 提交 VM 指令序列到指定 Session 执行
+    async fn Run_Program_VM(
         &self,
         session_id: &str,
-        program: Vec<Instruction>,
+        program: Vec<MlInstruction>,
         params: Pipeline_Params,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<Pipeline_Result, ML_Engine_Error>;

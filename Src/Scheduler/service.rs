@@ -132,7 +132,7 @@ mod tests {
     use super::*;
     use libp2p::PeerId;
     use crate::peer_management::{PeerInfo, PeerCapability};
-    use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
+    use crate::ml_engine::pipeline::Model_Info;
 
     fn make_model_info(num_layers: usize) -> Model_Info {
         Model_Info {

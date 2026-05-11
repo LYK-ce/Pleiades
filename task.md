@@ -1,4 +1,14 @@
-1. 在config.toml当中有[Runtime] deive = "cpu"
- 你现在重新给我实现runtime.rs里面的Init ONNX，根据config里面的这一条进行判断，用match的方式来选择设备。原来那种实现方案不要了
- 完成
-2. 根据runtime test.rs里最后添加的函数注释，补全对应内容
+1. 根据vm_design.md，实现VM模块
+   完成
+2. 根据orchestrator_vm_design.md实施步骤，实现对应模块
+   完成
+3. 根据orchestrator_vm_design.md的实施步骤，实现phase 2
+   完成
+4. 根据orchestrator_vm_design.md，实现Phase 3
+   完成
+5. 根据ml_vm_design.md，实现phase 1
+   完成
+6. 根据ml_vm_design.md，实现phase 2 + phase 3
+   完成
+7. 根据ml_vm_design.md，实现phase 4
+   完成

@@ -32,9 +32,10 @@ use crate::storage::StorageManager;
 use crate::storage::ReadGuard;
 use crate::storage::StorageCapability;
 use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model};
-use super::ml_thread_engine::{Session_Config, Session_Handle, Session_Thread};
-use super::ml_thread_engine_instruction::{
-    Instruction, Pipeline_Params, Pipeline_Result, Model_Info,
+use super::session::{Session_Config, Session_Handle, Session_Thread};
+use crate::ml_engine::ml_vm::MlInstruction;
+use super::pipeline::{
+    Pipeline_Params, Pipeline_Result, Model_Info,
 };
 use super::capability::{
     ML_Engine_Capability, ML_Engine_Error, ML_Session_Config,
@@ -207,20 +208,19 @@ impl ML_Engine_Capability for ML_Engine_Service {
         Ok(())
     }
 
-    async fn Run_Program(
+    async fn Run_Program_VM(
         &self,
         session_id: &str,
-        program: Vec<Instruction>,
+        program: Vec<MlInstruction>,
         params: Pipeline_Params,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<Pipeline_Result, ML_Engine_Error> {
         info!(
-            "ML_Engine_Service: Run_Program [{}] ({} 条指令)",
+            "ML_Engine_Service: Run_Program_VM [{}] ({} 条指令)",
             session_id,
             program.len()
         );
 
-        // Step 1: 按 session_id 查 sessions 表 → clone Session_Handle
         let handle = {
             let sessions = self.sessions.lock().await;
             let entry = sessions.get(session_id).ok_or_else(|| {
@@ -228,11 +228,9 @@ impl ML_Engine_Capability for ML_Engine_Service {
             })?;
             entry.handle.clone()
         };
-        // Step 2: 锁已释放（避免持锁等待推理完成）
 
-        // Step 3: 通过 Handle 提交指令序列
         let result = handle
-            .Run_Program(program, params, cancel_flag)
+            .Run_Program_VM(program, params, cancel_flag)
             .await
             .map_err(|e| {
                 ML_Engine_Error::ProgramFailed(format!(
@@ -241,7 +239,7 @@ impl ML_Engine_Capability for ML_Engine_Service {
             })?;
 
         info!(
-            "ML_Engine_Service: [{}] Program 执行完成 (steps={}, tokens={})",
+            "ML_Engine_Service: [{}] VM Program 执行完成 (steps={}, tokens={})",
             session_id, result.total_steps, result.generated_tokens.len()
         );
 
@@ -398,13 +396,14 @@ mod tests {
         }
     }
 
-    /// TC-03: Run_Program 不存在的 session 返回 SessionNotFound
+    /// TC-03: Run_Program_VM 不存在的 session 返回 SessionNotFound
     #[tokio::test]
     async fn test_run_program_nonexistent_session() {
+        use crate::ml_engine::ml_vm::MlInstruction;
         let (service, _tmp) = create_test_service().await;
         let cancel = Arc::new(AtomicBool::new(false));
         let result = service
-            .Run_Program("nonexistent", vec![], Pipeline_Params::default(), cancel)
+            .Run_Program_VM("nonexistent", vec![], Pipeline_Params::default(), cancel)
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {

@@ -17,49 +17,35 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::models::with_tracing::QMatMul;
+use candle_transformers::quantized_nn::RmsNorm;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::gguf_model_manager::{GGUF_Analyze, GGUF_Load_Layer, Model_Arch_Info};
-use super::gguf_models::{
-    Rotary_Embedding, Layer_Weights, Model_Weights,
-};
+use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding};
 
 // ============================================================
 // 数据结构定义
 // ============================================================
 
-/// 推理参数配置，由 runtime 上层进行配置
+/// 推理参数—仅保留模型元数据（运行时参数由 Pipeline_Params 提供）
 pub struct Inference_Config {
-    /// 生成最大 token 数
-    pub max_tokens: usize,
-    /// 采样温度（0.0 = greedy，越高越随机）
-    pub temperature: f64,
-    /// 随机种子
-    pub seed: u64,
-    /// EOS token ID（遇到此 token 停止生成），从 GGUF metadata 的 tokenizer.ggml.eos_token_id 自动获取
     pub eos_token: u32,
 }
 
 impl Default for Inference_Config {
     fn default() -> Self {
-        Self {
-            max_tokens: 600,
-            temperature: 0.8,
-            seed: 299792458,
-            eos_token: 151645, // 由 GGUF_Load_Model 从模型 metadata 中自动填充
-        }
+        Self { eos_token: 151645 }
     }
 }
 
 /// 组装好的 GGUF 模型，包含模型权重、tokenizer、推理配置以及架构信息
 ///
-/// 此结构体对 runtime 层提供统一的模型抽象：
+/// 此结构体对 ML_Engine 层提供统一的模型抽象：
 /// - 包含完整的模型权重（embedding + 所有层 + norm + lm_head）
 /// - 包含 tokenizer（如果 GGUF 文件中存在）
-/// - 包含 Inference_Config，由 runtime 上层配置
+/// - 包含 Inference_Config，由上层配置
 /// - tokenizer 作为独立 API 供外部组件调用，不耦合在推理过程中
 pub struct GGUF_Model {
     /// 组装好的模型权重（包含 embedding + 所有层 + norm + lm_head）
@@ -129,11 +115,7 @@ pub fn GGUF_Load_Model(
     let max_layer_index = arch_info.num_layers + 1; // N+1 = output 层
 
     if start > end {
-        anyhow::bail!(
-            "Invalid layer range: start ({}) > end ({})",
-            start,
-            end
-        );
+        anyhow::bail!("Invalid layer range: start ({}) > end ({})", start, end);
     }
 
     // 对于非 split 文件，将 end 钳位到 max_layer_index（支持 usize::MAX 作为 "全部加载" 哨兵）
@@ -242,14 +224,17 @@ pub fn GGUF_Load_Model(
             qt
         } else {
             // Weight tying: 使用 embedding 权重作为 lm_head
-            let mut embed_lw = GGUF_Load_Layer(model_path, 0, device)
-                .map_err(|e| anyhow::anyhow!("Failed to load embedding for lm_head fallback: {}", e))?;
+            let mut embed_lw = GGUF_Load_Layer(model_path, 0, device).map_err(|e| {
+                anyhow::anyhow!("Failed to load embedding for lm_head fallback: {}", e)
+            })?;
             embed_lw
                 .tensors
                 .remove("token_embd.weight")
-                .ok_or_else(|| anyhow::anyhow!(
-                    "output.weight not found and token_embd.weight fallback also failed"
-                ))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "output.weight not found and token_embd.weight fallback also failed"
+                    )
+                })?
         };
         let lm_head = QMatMul::from_weights(lm_head_qtensor.into())
             .map_err(|e| anyhow::anyhow!("Failed to build lm_head QMatMul: {}", e))?;
@@ -346,14 +331,10 @@ pub fn GGUF_Model_Inference(
 /// 编码后的 token IDs
 pub fn GGUF_Encode(model: &GGUF_Model, input: &str) -> Result<Vec<u32>> {
     let tokenizer = model.tokenizer.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Model does not have a tokenizer loaded. Cannot encode text."
-        )
+        anyhow::anyhow!("Model does not have a tokenizer loaded. Cannot encode text.")
     })?;
 
-    let format_prompt = format!(
-        "<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n"
-    );
+    let format_prompt = format!("<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n");
 
     let token_ids = tokenizer
         .encode(&format_prompt, true)
@@ -375,9 +356,7 @@ pub fn GGUF_Encode(model: &GGUF_Model, input: &str) -> Result<Vec<u32>> {
 /// 解码后的文本
 pub fn GGUF_Decode(model: &GGUF_Model, token_ids: &[u32]) -> Result<String> {
     let tokenizer = model.tokenizer.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Model does not have a tokenizer loaded. Cannot decode tokens."
-        )
+        anyhow::anyhow!("Model does not have a tokenizer loaded. Cannot decode tokens.")
     })?;
 
     // 移除末尾的 EOS token
@@ -394,4 +373,3 @@ pub fn GGUF_Decode(model: &GGUF_Model, token_ids: &[u32]) -> Result<String> {
 
     Ok(output_text)
 }
-

@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use libp2p::PeerId;
-use crate::ml_engine::ml_thread_engine_instruction::Model_Info;
+use crate::ml_engine::pipeline::Model_Info;
 use crate::peer_management::PeerInfo;
 
 // ─── 数据结构 ────────────────────────────────────────────────
