@@ -39,7 +39,7 @@ use pleiades::storage::StorageManager;
 use pleiades::ml_engine::ML_Engine_Service;
 use pleiades::llm_io::LLM_IO_Broker;
 use pleiades::tensor_io::Tensor_Port_Switch;
-use pleiades::scheduler::Scheduler_Service;
+use pleiades::scheduler::{Scheduler_Service, Scheduler_Strategy};
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::program_selector::ProgramSelector;
@@ -198,6 +198,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ══════════════════════════════════════════════════════
 
     // 12. 组装 Capabilities
+    let scheduler_strategy = config.Scheduler
+        .as_ref()
+        .and_then(|s| s.strategy.as_deref())
+        .map(|s| match s {
+            "weighted" => Scheduler_Strategy::Weighted,
+            _ => Scheduler_Strategy::Uniform,
+        })
+        .unwrap_or(Scheduler_Strategy::Uniform);
+    let scheduler_strategy_str = match scheduler_strategy {
+        Scheduler_Strategy::Weighted => "weighted",
+        Scheduler_Strategy::Uniform => "uniform",
+    };
     let scheduler = Scheduler_Service::New();
     let capabilities = Arc::new(Capabilities {
         storage,
@@ -221,6 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_cmd_rx,
         inbound_rx,
         net_event_rx,
+        scheduler_strategy_str.to_string(),
     );
 
     info!("Orchestrator Core 初始化完成");

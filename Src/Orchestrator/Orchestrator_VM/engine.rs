@@ -73,8 +73,8 @@ impl Orchestrator_VM {
             OrchestratorInstruction::ReceiveFile { stream, file_name, file_size, checksum, result } => {
                 self.handle_receive_file(*stream, *file_name, *file_size, *checksum, *result).await
             }
-            OrchestratorInstruction::PlanPipeline { model_info, inference_id, result } => {
-                self.handle_plan_pipeline(*model_info, *inference_id, *result).await
+            OrchestratorInstruction::PlanPipeline { model_info, inference_id, strategy, result } => {
+                self.handle_plan_pipeline(*model_info, *inference_id, *strategy, *result).await
             }
             OrchestratorInstruction::EstablishStreams { plan, result } => {
                 self.handle_establish_streams(*plan, *result).await

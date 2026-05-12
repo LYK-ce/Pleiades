@@ -155,7 +155,7 @@ impl Core {
                     }
                 }
             }
-            UserCommand::Pipeline { model_path, reply } => {
+            UserCommand::Pipeline { model_path, strategy, reply } => {
                 // Phase 0: 生成全局唯一 inference_id + 规划拓扑
                 let local_peer_id = self.capabilities.network.get_local_peer_id();
                 let inference_id = Generate_Inference_Id(&local_peer_id);
@@ -163,8 +163,8 @@ impl Core {
                 let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
 
                 info!(
-                    "UserCommand::Pipeline: inference_id={}, job_id={:?}, model={}, device={}",
-                    inference_id, job_id, model_path, device
+                    "UserCommand::Pipeline: inference_id={}, job_id={:?}, model={}, device={}, strategy={:?}",
+                    inference_id, job_id, model_path, device, strategy
                 );
 
                 // 编译 Pipeline TaskProgram
@@ -172,6 +172,11 @@ impl Core {
                 vars.insert("model_path".to_string(), model_path.clone());
                 vars.insert("inference_id".to_string(), inference_id.to_string());
                 vars.insert("device".to_string(), device.clone());
+                if let Some(ref s) = strategy {
+                    vars.insert("strategy".to_string(), s.clone());
+                } else {
+                    vars.insert("strategy".to_string(), self.scheduler_strategy_preference.clone());
+                }
                 let program = match ProgramSelector::select(JobKind::Pipeline, job_id, vars) {
                     Ok(p) => p,
                     Err(e) => {

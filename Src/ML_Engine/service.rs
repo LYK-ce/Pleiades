@@ -31,7 +31,7 @@ use crate::llm_io::IoHandle;
 use crate::storage::StorageManager;
 use crate::storage::ReadGuard;
 use crate::storage::StorageCapability;
-use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model};
+use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model, Model_Arch_Info};
 use super::session::{Session_Config, Session_Handle, Session_Thread};
 use crate::ml_engine::ml_vm::MlInstruction;
 use super::pipeline::{
@@ -277,6 +277,7 @@ impl ML_Engine_Capability for ML_Engine_Service {
         })?;
 
         // Step 3: 转换 Model_Arch_Info → Model_Info
+        let layer_sizes_bytes = build_layer_sizes_for_analyze(&arch_info);
         let model_info = Model_Info {
             architecture: arch_info.architecture.clone(),
             num_layers: arch_info.num_layers,
@@ -286,6 +287,11 @@ impl ML_Engine_Capability for ML_Engine_Service {
                 || arch_info.split_end == arch_info.num_layers + 1,
             has_tokenizer: false, // Analyze 不加载 tokenizer
             eos_token_id: arch_info.eos_token_id,
+            layer_sizes_bytes,
+            num_kv_heads: arch_info.head_count_kv,
+            head_dim: arch_info.head_dim,
+            context_length: arch_info.context_length,
+            vocab_size: arch_info.vocab_size,
         };
 
         info!(
@@ -358,6 +364,32 @@ impl ML_Engine_Capability for ML_Engine_Service {
         // Guards 在此处 drop → 锁释放
         Ok(())
     }
+}
+
+/// 从 Model_Arch_Info 构建 layer_sizes_bytes 数组
+fn build_layer_sizes_for_analyze(arch_info: &Model_Arch_Info) -> Vec<usize> {
+    let num_layers = arch_info.num_layers;
+    let mut sizes = vec![0usize; num_layers + 2];
+
+    for t in &arch_info.non_layer_tensors {
+        if t.name == "token_embd.weight" {
+            sizes[0] += t.size_bytes;
+        }
+    }
+
+    for layer in &arch_info.layers {
+        if layer.layer_index < num_layers {
+            sizes[layer.layer_index + 1] = layer.total_size_bytes;
+        }
+    }
+
+    for t in &arch_info.non_layer_tensors {
+        if t.name == "output_norm.weight" || t.name == "output.weight" {
+            sizes[num_layers + 1] += t.size_bytes;
+        }
+    }
+
+    sizes
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────

@@ -78,6 +78,8 @@ pub struct Core {
 
     // --- SetDevice ---
     device_preference: String,
+    // --- Scheduler ---
+    scheduler_strategy_preference: String,
 }
 
 impl Core {
@@ -92,6 +94,7 @@ impl Core {
         user_cmd_rx: mpsc::Receiver<UserCommand>,
         inbound_rx: mpsc::Receiver<InboundRequest>,
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
+        scheduler_strategy: String,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
         Core {
@@ -106,6 +109,7 @@ impl Core {
             lifecycle_tx,
             lifecycle_rx,
             device_preference: String::new(),
+        scheduler_strategy_preference: scheduler_strategy,
         }
     }
 
@@ -246,7 +250,7 @@ mod core_tests {
         let (_net_inbound_tx, net_inbound_rx) = mpsc::channel::<Network_Inbound_Event>(16);
         // 测试用 config_path 指向 temp_dir 内的虚拟路径（SetDevice 测试不实际写盘）
         let config_path = temp_dir.path().join("config.toml");
-        let core = Core::new(Arc::new(ProgramSelector), caps, config_path, user_rx, inbound_rx, net_inbound_rx);
+        let core = Core::new(Arc::new(ProgramSelector), caps, config_path, user_rx, inbound_rx, net_inbound_rx, "uniform".to_string());
         (core, temp_dir)
     }
 

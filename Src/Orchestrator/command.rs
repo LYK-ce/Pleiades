@@ -75,11 +75,12 @@ pub enum UserCommand {
     /// 启动分布式流水线推理
     ///
     /// Coordinator 自动完成：分析模型 → 查询可用节点 → 规划拓扑 → 分发模型 → 建立流水线。
-    /// 用户只需提供模型路径，其余由编排逻辑自动处理。
+    /// 支持可选策略参数：`uniform`（默认）/ `weighted`。
     ///
     /// 回复：`Ok(JobId)` Pipeline Job 已启动；`Err(String)` 任一阶段失败
     Pipeline {
         model_path: String,
+        strategy: Option<String>,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
     /// Profile 指定模型的单层推理耗时

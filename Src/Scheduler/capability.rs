@@ -16,12 +16,27 @@ use crate::peer_management::PeerInfo;
 
 // ─── 数据结构 ────────────────────────────────────────────────
 
+/// 调度策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheduler_Strategy {
+    /// 均匀分配（默认）
+    Uniform,
+    /// 综合成本加权分配
+    Weighted,
+}
+
 /// Scheduler 输入（由 PlanPipeline handler 组装）
 pub struct Scheduler_Input {
+    /// 调度策略
+    pub strategy: Scheduler_Strategy,
     /// 模型分析结果（层数、架构等）— 来自 AnalyzeModel 指令
     pub model_info: Model_Info,
+    /// 模型标识（用于查找 layer_time[model_id]）— 来自 Profile 使用的文件路径
+    pub model_id: String,
     /// 可用节点列表（空闲 + 已连接的）— 来自 PeerManager.Get_Idle_Peers()
     pub available_peers: Vec<PeerInfo>,
+    /// Coordinator 的完整节点信息（含 Profile 数据）— 来自 PeerManager.Get_Peer(local)
+    pub coordinator_info: PeerInfo,
     /// Coordinator 自己的 PeerId — 来自 Network.get_local_peer_id()
     pub local_peer_id: PeerId,
     /// 全局唯一推理 ID — 由 Core 在 route_user 中预生成
@@ -65,6 +80,17 @@ pub struct Worker_Assignment {
 pub enum Scheduler_Error {
     #[error("模型层数为 0")]
     Zero_Layers,
+    #[error("Coordinator 自身内存不足：需要 {required_bytes} bytes, 可用 {available_bytes} bytes")]
+    Coordinator_Memory_Insufficient {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
+    #[error("所有节点被排除（内存均不足 1 层或无 profile 数据）")]
+    No_Eligible_Peers,
+    #[error("总内存不足：全模型需要 {total_required_bytes} bytes，各节点已到可用内存上限")]
+    Insufficient_Memory {
+        total_required_bytes: u64,
+    },
 }
 
 // ─── Trait 定义 ──────────────────────────────────────────────

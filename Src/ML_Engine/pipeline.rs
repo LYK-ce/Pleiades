@@ -59,4 +59,19 @@ pub struct Model_Info {
     pub has_output_head: bool,
     pub has_tokenizer: bool,
     pub eos_token_id: u32,
+    /// 每层 GGUF 文件中的 tensor 字节数（量化存储大小）
+    /// 索引规则（GGUF 层编号）：
+    ///   layer_sizes[0]         = embedding 层 (token_embd.weight)
+    ///   layer_sizes[1..=N]     = transformer blocks (blk.0 ~ blk.N-1)
+    ///   layer_sizes[N+1]       = output 层 (output_norm + output)
+    /// 数组长度 = num_layers + 2
+    pub layer_sizes_bytes: Vec<usize>,
+    /// KV attention head 数量（用于 KV Cache 估算）
+    pub num_kv_heads: usize,
+    /// 每个 attention head 的维度
+    pub head_dim: usize,
+    /// 最大上下文长度（保留供后续使用）
+    pub context_length: usize,
+    /// 词表大小（用于估算 embedding 层反量化后的内存）
+    pub vocab_size: usize,
 }

@@ -53,7 +53,8 @@ pub fn Ensure_Identity(config_dir: &Path) -> Result<Keypair, Box<dyn std::error:
         // 确保目录存在
         std::fs::create_dir_all(config_dir)?;
         // 保存到文件
-        let encoded = keypair.to_protobuf_encoding()
+        let encoded = keypair
+            .to_protobuf_encoding()
             .map_err(|e| format!("密钥对编码失败: {}", e))?;
         std::fs::write(&keypair_path, &encoded)?;
         info!("已生成并保存新的节点密钥对: {}", keypair_path.display());

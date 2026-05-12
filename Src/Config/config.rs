@@ -24,6 +24,7 @@ pub struct Pleiades_Config {
     pub Network: Option<Network_Config>,
     pub Runtime: Option<Runtime_Config>,
     pub Storage: Option<Storage_Config>,
+    pub Scheduler: Option<Scheduler_Config>,
 }
 
 /// [Log] 段配置
@@ -39,11 +40,11 @@ pub struct Network_Config {
     pub LAN: Option<bool>,
     pub WAN: Option<bool>,
     pub Transport_Protocol: Option<String>,
-    pub cleanup_interval: Option<u64>,    // 清理间隔（秒），默认300
-    pub timeout_interval: Option<u64>,    // 超时间隔（秒），默认300
-    pub heartbeat_interval: Option<u64>,  // 心跳间隔（秒），默认60
-    pub heartbeat_timeout: Option<u64>,   // 心跳超时（秒），默认10
-    pub request_response_timeout: Option<u64>,  // Request-Response 协议超时（秒），默认300
+    pub cleanup_interval: Option<u64>,   // 清理间隔（秒），默认300
+    pub timeout_interval: Option<u64>,   // 超时间隔（秒），默认300
+    pub heartbeat_interval: Option<u64>, // 心跳间隔（秒），默认60
+    pub heartbeat_timeout: Option<u64>,  // 心跳超时（秒），默认10
+    pub request_response_timeout: Option<u64>, // Request-Response 协议超时（秒），默认300
 }
 
 /// [Runtime] 段配置
@@ -63,6 +64,13 @@ pub struct Storage_Config {
     pub workspace_dir: Option<String>,
     /// 存储配额（单位：GB），0 表示不限制
     pub quota_gb: Option<u64>,
+}
+
+/// [Scheduler] 段配置
+#[derive(Debug, Deserialize)]
+pub struct Scheduler_Config {
+    /// 策略: "uniform" 或 "weighted"，默认 "uniform"
+    pub strategy: Option<String>,
 }
 
 /// 读取并解析 config.toml 配置文件
@@ -92,10 +100,7 @@ pub fn Ensure_Config() -> Result<(Pleiades_Config, PathBuf), Box<dyn std::error:
 
         // 写入默认配置文件
         fs::write(&config_path, DEFAULT_CONFIG)?;
-        eprintln!(
-            "[Info] 已生成默认配置文件: {}/{}",
-            CONFIG_DIR, CONFIG_FILE
-        );
+        eprintln!("[Info] 已生成默认配置文件: {}/{}", CONFIG_DIR, CONFIG_FILE);
     }
 
     let config = Read_Config(&config_path)?;

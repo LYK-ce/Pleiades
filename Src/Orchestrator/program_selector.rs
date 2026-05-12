@@ -75,6 +75,7 @@ pub const SLOT_STREAMS_RESULT: SlotId = SlotId(302);
 pub const SLOT_WORKERS_RESULT: SlotId = SlotId(303);
 pub const SLOT_HIDDEN_DIM: SlotId = SlotId(304);
 pub const SLOT_PROFILE_MEMORY: SlotId = SlotId(305);
+pub const SLOT_SCHEDULER_STRATEGY: SlotId = SlotId(306);
 pub const SLOT_TIMER_RESULT: SlotId = SlotId(1049);
 
 // ─── 编译期嵌入所有模板 ─────────────────────────────────────
@@ -172,6 +173,8 @@ struct RawOrchInstruction {
     inference_id: Option<String>,
     #[serde(default)]
     plan: Option<String>,
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +261,7 @@ fn resolve_slot(name: &str, vars: &HashMap<String, String>) -> Result<SlotId, Se
         "SLOT_STREAMS_RESULT" => 302,
         "SLOT_WORKERS_RESULT" => 303,
         "SLOT_HIDDEN_DIM" => 304,
+        "SLOT_SCHEDULER_STRATEGY" => 306,
         _ => return Err(SelectorError::UnknownSlot(name.to_string())),
     };
     Ok(SlotId(id))
@@ -537,10 +541,12 @@ impl ProgramSelector {
             "PlanPipeline" => {
                 let model_info = resolve_slot(raw.model_info.as_deref().unwrap_or(""), vars)?;
                 let inference_id = resolve_slot(raw.inference_id.as_deref().unwrap_or(""), vars)?;
+                let strategy = resolve_slot(raw.strategy.as_deref().unwrap_or(""), vars)?;
                 let result = resolve_slot(raw.result.as_deref().unwrap_or(""), vars)?;
                 Ok(OrchestratorInstruction::PlanPipeline {
                     model_info,
                     inference_id,
+                    strategy,
                     result,
                 })
             }
@@ -755,21 +761,24 @@ mod tests {
             ("model_path", "model.gguf"),
             ("inference_id", "42"),
             ("device", "cuda"),
+            ("strategy", "uniform"),
         ]);
         let instructions =
             ProgramSelector::select(crate::orchestrator::job::JobKind::Pipeline, JobId(3), v)
                 .unwrap();
 
-        assert_eq!(instructions.len(), 10);
+        assert_eq!(instructions.len(), 11);
 
-        match &instructions[3] {
+        match &instructions[4] {
             OI::PlanPipeline {
                 model_info,
                 inference_id,
+                strategy,
                 result,
             } => {
                 assert_eq!(model_info.0, 13);
                 assert_eq!(inference_id.0, 300);
+                assert_eq!(strategy.0, 306);
                 assert_eq!(result.0, 301);
             }
             _ => panic!("expected PlanPipeline"),

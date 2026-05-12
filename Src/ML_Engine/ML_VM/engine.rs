@@ -323,6 +323,11 @@ impl<'a> ML_VM<'a> {
                     return StepResult::Abort(format!("Inference: sync 失败: {}", e));
                 }
                 self.ml_slots.set_tensor(SLOT_TENSOR2, output_tensor);
+                tracing::info!(
+                    "[Inference] 完成, seq_len_before={}, offset={}",
+                    seq_len_before,
+                    offset
+                );
                 let increment = match input_type {
                     InferenceInputType::Tokens => 1.0,
                     InferenceInputType::Tensor => seq_len_before as f64,
@@ -403,6 +408,7 @@ impl<'a> ML_VM<'a> {
             Err(e) => return StepResult::Abort(format!("Send: 序列化失败: {}", e)),
         };
         let offset = self.vm.slots.get_f64(SLOT_META1).unwrap_or(0.0) as u64;
+        tracing::info!("[Send] 开始发送, offset={}, bytes={}", offset, bytes.len());
         match self.tensor_io.as_mut() {
             Some(tio) => {
                 if let Err(e) = tio.Send(offset, &bytes) {
@@ -415,6 +421,7 @@ impl<'a> ML_VM<'a> {
     }
 
     fn handle_receive(&mut self) -> StepResult {
+        tracing::info!("[Receive] 开始接收...");
         match self.tensor_io.as_mut() {
             Some(tio) => match tio.Receive() {
                 Ok(offset) => {

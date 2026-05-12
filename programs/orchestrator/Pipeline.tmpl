@@ -14,6 +14,12 @@ value = "$inference_id"
 dst = "SLOT_INFERENCE_ID"
 
 [[instructions]]
+type = "Const"
+value_type = "String"
+value = "$strategy"
+dst = "SLOT_SCHEDULER_STRATEGY"
+
+[[instructions]]
 type = "AnalyzeModel"
 model = "SLOT_MODEL"
 result = "SLOT_MODEL_INFO"
@@ -22,6 +28,7 @@ result = "SLOT_MODEL_INFO"
 type = "PlanPipeline"
 model_info = "SLOT_MODEL_INFO"
 inference_id = "SLOT_INFERENCE_ID"
+strategy = "SLOT_SCHEDULER_STRATEGY"
 result = "SLOT_PLAN"
 
 [[instructions]]

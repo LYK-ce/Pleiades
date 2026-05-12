@@ -27,6 +27,7 @@ use tracing::{info, warn};
 use super::gguf_model::{
     GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model,
 };
+use super::gguf_model_manager::Model_Arch_Info;
 use super::pipeline::{
     Model_Info, Pipeline_Params, Pipeline_Result,
 };
@@ -128,6 +129,40 @@ impl Session_Handle {
 }
 
 // ============================================================
+// 辅助函数
+// ============================================================
+
+/// 从 Model_Arch_Info 构建 layer_sizes_bytes 数组
+/// 索引: 0=embedding, 1..=N=blocks, N+1=output
+fn build_layer_sizes(arch_info: &Model_Arch_Info) -> Vec<usize> {
+    let num_layers = arch_info.num_layers;
+    let mut sizes = vec![0usize; num_layers + 2];
+
+    // embedding 层 (layer 0)
+    for t in &arch_info.non_layer_tensors {
+        if t.name == "token_embd.weight" {
+            sizes[0] += t.size_bytes;
+        }
+    }
+
+    // transformer blocks (layer 1..=N)
+    for layer in &arch_info.layers {
+        if layer.layer_index < num_layers {
+            sizes[layer.layer_index + 1] = layer.total_size_bytes;
+        }
+    }
+
+    // output 层 (layer N+1)
+    for t in &arch_info.non_layer_tensors {
+        if t.name == "output_norm.weight" || t.name == "output.weight" {
+            sizes[num_layers + 1] += t.size_bytes;
+        }
+    }
+
+    sizes
+}
+
+// ============================================================
 // Session_Thread（线程入口）
 // ============================================================
 
@@ -190,6 +225,11 @@ pub fn Session_Thread(
         has_output_head: gguf_model.has_output_head,
         has_tokenizer: gguf_model.tokenizer.is_some(),
         eos_token_id: gguf_model.arch_info.eos_token_id,
+        layer_sizes_bytes: build_layer_sizes(&gguf_model.arch_info),
+        num_kv_heads: gguf_model.arch_info.head_count_kv,
+        head_dim: gguf_model.arch_info.head_dim,
+        context_length: gguf_model.arch_info.context_length,
+        vocab_size: gguf_model.arch_info.vocab_size,
     };
 
     info!(

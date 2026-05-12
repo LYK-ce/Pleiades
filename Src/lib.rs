@@ -99,7 +99,7 @@ pub use tensor_io::{
 };
 
 // Scheduler模块类型导出
-pub use scheduler::{Scheduler_Capability, Scheduler_Error, Scheduler_Input, Pipeline_Plan, Worker_Assignment, Scheduler_Service};
+pub use scheduler::{Scheduler_Capability, Scheduler_Strategy, Scheduler_Error, Scheduler_Input, Pipeline_Plan, Worker_Assignment, Scheduler_Service, Scheduler_Weighted};
 
 // EventBus模块类型导出
 pub use event_bus::{EventBus, Bus_Event};

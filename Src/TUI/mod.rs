@@ -843,26 +843,41 @@ fn Handle_Command_Input(
         return;
     }
 
-    // ---- pipeline <model_path> ----
+    // ---- pipeline <model_path> [strategy] ----
 
     if trimmed.starts_with("pipeline ") {
-        let model_path_str = trimmed.strip_prefix("pipeline ").unwrap_or("").trim();
+        let args: Vec<&str> = trimmed
+            .strip_prefix("pipeline ")
+            .unwrap_or("")
+            .trim()
+            .split_whitespace()
+            .collect();
+        let model_path_str = args.first().copied().unwrap_or("");
 
         if model_path_str.is_empty() {
             app.command_output.output_text =
-                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
+                "错误: 缺少 model_path 参数\n用法: pipeline <model_path> [uniform|weighted]"
+                    .to_string();
             app.command_output.completed = true;
             return;
         }
 
+        let strategy = args.get(1).map(|s| s.to_string());
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::Pipeline {
             model_path: model_path_str.to_string(),
+            strategy,
             reply: reply_tx,
         };
 
-        app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
-        app.command_output.output_text = "启动分布式流水线推理中...".to_string();
+        let strategy_label = args.get(1).copied().unwrap_or("default");
+        app.Add_Log(format!(
+            "执行命令: pipeline {} [{}]",
+            model_path_str, strategy_label
+        ));
+        app.command_output.output_text =
+            format!("启动分布式流水线推理中 (策略: {})...", strategy_label);
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());

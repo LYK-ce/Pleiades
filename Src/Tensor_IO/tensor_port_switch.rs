@@ -43,7 +43,7 @@ use crate::orchestrator::job::JobId;
 // ─── 常量 ───────────────────────────────────────────────────
 
 /// I/O 超时时间（防止 stream 断开时长时间持锁）
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Tensor_Buffer 初始容量（64KB，Decode 阶段足够）
 const BUFFER_INITIAL_CAPACITY: usize = 64 * 1024;

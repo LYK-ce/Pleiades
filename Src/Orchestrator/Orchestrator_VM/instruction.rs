@@ -76,6 +76,7 @@ pub enum OrchestratorInstruction {
     PlanPipeline {
         model_info: SlotId,
         inference_id: SlotId,
+        strategy: SlotId,
         result: SlotId,
     },
 

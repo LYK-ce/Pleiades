@@ -6,15 +6,17 @@
 //! PlanPipeline
 
 use crate::vm_base::{StepResult, SlotId};
-use crate::scheduler::Scheduler_Input;
+use crate::scheduler::{Scheduler_Input, Scheduler_Strategy};
 use super::engine::Orchestrator_VM;
 use super::slots::OrchestratorSlotValue;
+use crate::orchestrator::program_selector::SLOT_MODEL;
 
 impl Orchestrator_VM {
     pub async fn handle_plan_pipeline(
         &mut self,
         model_info_slot: SlotId,
         inference_id_slot: SlotId,
+        strategy_slot: SlotId,
         result: SlotId,
     ) -> StepResult {
         let model_info = match self.slots.get_model_info(model_info_slot) {
@@ -34,9 +36,28 @@ impl Orchestrator_VM {
 
         let local_peer_id = self.capabilities.network.get_local_peer_id();
 
+        let model_id = self.vm.slots.get_string(SLOT_MODEL)
+            .unwrap_or(&"unknown".to_string())
+            .clone();
+
+        let coordinator_info = match self.capabilities.peer_manager.Get_Peer(&local_peer_id).await {
+            Ok(info) => info,
+            Err(e) => return StepResult::Abort(format!("PlanPipeline: get coordinator info error: {}", e)),
+        };
+
+        let strategy = self.vm.slots.get_string(strategy_slot)
+            .map(|s| match s.as_str() {
+                "weighted" => Scheduler_Strategy::Weighted,
+                _ => Scheduler_Strategy::Uniform,
+            })
+            .unwrap_or(Scheduler_Strategy::Uniform);
+
         let input = Scheduler_Input {
+            strategy,
             model_info,
+            model_id,
             available_peers,
+            coordinator_info,
             local_peer_id,
             inference_id,
         };
