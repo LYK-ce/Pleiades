@@ -18,3 +18,11 @@
     完成
 10. Profile 增加带宽测试 — Network_Capability::test_bandwidth + handle_profile 并发测试
     完成
+11. Profile 改用 inference_duration — Pipeline_Result 新增纯推理耗时字段
+    完成
+12. handle_run_program 发布 Inference_Completed — 计算 tok/s 通知 TUI
+    完成
+13. Vm_Base 新增 Timer + Sub 指令 — 通用计时和槽间差值功能
+    完成
+14. run/coordinator 模板加入 Timer/Sub — Prefill后→EndOutput前精确计时
+    完成

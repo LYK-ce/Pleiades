@@ -7,6 +7,8 @@
 //! 包含 5 条公共指令的 handler 实现。领域指令由 ML Engine / Orchestrator
 //! 在自己的执行循环中 match 处理。
 
+use std::time::SystemTime;
+
 use super::slot::{ConstValue, SlotFile, SlotId, SlotValue};
 
 // ============================================================
@@ -32,6 +34,8 @@ pub enum BaseInstruction {
     Const { value: ConstValue, dst: SlotId },
     Move { src: SlotId, dst: SlotId },
     Add { dst: SlotId, delta: f64 },
+    Sub { src: SlotId, dst: SlotId },
+    Timer { slot: SlotId },
     Jump { target: usize },
     JumpIf { condition: SlotId, target: usize },
 }
@@ -65,6 +69,8 @@ impl Vm {
             BaseInstruction::Const { value, dst } => self.handle_const(value.clone(), *dst),
             BaseInstruction::Move { src, dst } => self.handle_move(*src, *dst),
             BaseInstruction::Add { dst, delta } => self.handle_add(*dst, *delta),
+            BaseInstruction::Sub { src, dst } => self.handle_sub(*src, *dst),
+            BaseInstruction::Timer { slot } => self.handle_timer(*slot),
             BaseInstruction::Jump { target } => self.handle_jump(*target),
             BaseInstruction::JumpIf { condition, target } => {
                 self.handle_jump_if(*condition, *target)
@@ -102,6 +108,27 @@ impl Vm {
             }
             Err(e) => StepResult::Abort(format!("Add: {}", e)),
         }
+    }
+
+    /// Sub: dst = dst - src（仅对 F64 槽位有效，读 src 不取走）。
+    pub fn handle_sub(&mut self, src: SlotId, dst: SlotId) -> StepResult {
+        match (self.slots.get_f64(src), self.slots.get_f64(dst)) {
+            (Ok(s), Ok(d)) => {
+                self.slots.set(dst, SlotValue::F64(d - s));
+                StepResult::Continue
+            }
+            (Err(e), _) | (_, Err(e)) => StepResult::Abort(format!("Sub: {}", e)),
+        }
+    }
+
+    /// Timer: 将当前时间戳（Unix 秒）写入目标槽位。
+    pub fn handle_timer(&mut self, slot: SlotId) -> StepResult {
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        self.slots.set(slot, SlotValue::F64(secs));
+        StepResult::Continue
     }
 
     /// Jump: 无条件跳转到 target。
@@ -366,5 +393,55 @@ mod tests {
         assert_eq!(vm.slots.get_u64(SlotId(2)).unwrap(), 1);
         assert!(matches!(vm.slots.get(SlotId(0)), Some(SlotValue::Nil)));
         assert!(matches!(vm.slots.get(SlotId(1)), Some(SlotValue::Nil)));
+    }
+
+    // ─── Sub ─────────────────────────────────────────────────
+
+    #[test]
+    fn sub_basic() {
+        let mut vm = setup_vm();
+        vm.handle_const(ConstValue::F64(3.0), SlotId(0));
+        vm.handle_const(ConstValue::F64(10.0), SlotId(1));
+        let r = vm.handle_sub(SlotId(0), SlotId(1)); // dst - src = 10.0 - 3.0
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(vm.slots.get_f64(SlotId(1)).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn sub_src_unchanged() {
+        let mut vm = setup_vm();
+        vm.handle_const(ConstValue::F64(3.0), SlotId(0));
+        vm.handle_const(ConstValue::F64(10.0), SlotId(1));
+        vm.handle_sub(SlotId(0), SlotId(1));
+        assert_eq!(vm.slots.get_f64(SlotId(0)).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn sub_on_empty_slot_aborts() {
+        let mut vm = setup_vm();
+        let r = vm.handle_sub(SlotId(0), SlotId(1));
+        assert!(matches!(r, StepResult::Abort(_)));
+    }
+
+    // ─── Timer ───────────────────────────────────────────────
+
+    #[test]
+    fn timer_writes_timestamp() {
+        let mut vm = setup_vm();
+        let r = vm.handle_timer(SlotId(0));
+        assert_eq!(r, StepResult::Continue);
+        assert!(vm.slots.get_f64(SlotId(0)).is_ok());
+    }
+
+    #[test]
+    fn timer_sub_chain_measures_duration() {
+        let mut vm = setup_vm();
+        vm.handle_timer(SlotId(0));
+        // 用 Sub 自身验证时间戳差值为正
+        vm.handle_timer(SlotId(1));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        vm.handle_timer(SlotId(2));
+        vm.handle_sub(SlotId(1), SlotId(2)); // t2 - t1
+        assert!(vm.slots.get_f64(SlotId(2)).unwrap() > 0.0);
     }
 }

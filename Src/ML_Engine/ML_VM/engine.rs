@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use candle_core::Tensor;
@@ -47,6 +47,7 @@ pub struct ML_VM<'a> {
     pub temperature: f64,
     rng_state: u64,
     eos_token_id: u32,
+    inference_duration: Duration,
 }
 
 impl<'a> ML_VM<'a> {
@@ -66,6 +67,7 @@ impl<'a> ML_VM<'a> {
             temperature: 0.8,
             rng_state: 299792458,
             eos_token_id,
+            inference_duration: Duration::ZERO,
         }
     }
 
@@ -89,6 +91,7 @@ impl<'a> ML_VM<'a> {
     fn reset_state(&mut self) {
         self.vm = Vm::new();
         self.ml_slots.reset_all();
+        self.inference_duration = Duration::ZERO;
         for i in 0..4u32 {
             self.vm.slots.set(SlotId(1030 + i), SlotValue::Bool(false));
         }
@@ -144,6 +147,7 @@ impl<'a> ML_VM<'a> {
                 .unwrap_or_default(),
             model_info: None,
             duration: start.elapsed(),
+            inference_duration: self.inference_duration,
             total_steps: self.vm.slots.get_f64(SLOT_META4).unwrap_or(0.0) as usize,
         };
         Ok(result)
@@ -170,13 +174,18 @@ impl<'a> ML_VM<'a> {
             MlInstruction::JumpIf { condition, target } => {
                 self.vm.handle_jump_if(condition, target)
             }
+            MlInstruction::Sub { src, dst } => self.vm.handle_sub(src, dst),
+            MlInstruction::Timer { slot } => self.vm.handle_timer(slot),
 
             MlInstruction::Input => self.handle_input(),
             MlInstruction::Encode => self.handle_encode(),
             MlInstruction::Decode => self.handle_decode(),
             MlInstruction::Prefill { input } => self.handle_prefill(input),
             MlInstruction::Inference { input_type, input } => {
-                self.handle_inference(input_type, input)
+                let t0 = Instant::now();
+                let r = self.handle_inference(input_type, input);
+                self.inference_duration += t0.elapsed();
+                r
             }
             MlInstruction::Sample { tensor_slot } => self.handle_sample(tensor_slot),
             MlInstruction::Output => self.handle_output(),

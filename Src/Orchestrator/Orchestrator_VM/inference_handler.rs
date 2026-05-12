@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::collections::HashMap;
 use crate::vm_base::{StepResult, SlotId};
+use crate::event_bus::Bus_Event;
 use crate::ml_engine::capability::ML_Session_Config;
 use crate::ml_engine::pipeline::Pipeline_Params;
 use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
 use crate::orchestrator::program_selector::{
-    ProgramSelector, SLOT_HIDDEN_DIM, SLOT_MODEL, SLOT_DEVICE,
+    ProgramSelector, SLOT_HIDDEN_DIM, SLOT_MODEL, SLOT_DEVICE, SLOT_TIMER_RESULT,
 };
 
 use super::engine::Orchestrator_VM;
@@ -128,7 +129,18 @@ impl Orchestrator_VM {
             params,
             cancel_flag,
         ).await {
-            Ok(_pipeline_result) => {
+            Ok(pipeline_result) => {
+                let tokens = pipeline_result.generated_tokens.len();
+                let total_secs = self.vm.slots.get_f64(SLOT_TIMER_RESULT)
+                    .unwrap_or_else(|_| pipeline_result.inference_duration.as_secs_f64());
+                let tok_per_sec = if total_secs > 0.0 { tokens as f64 / total_secs } else { 0.0 };
+                self.capabilities.event_bus.Publish(Bus_Event::Inference_Completed {
+                    job_id: self.job_id.0,
+                    text: pipeline_result.result_text,
+                    tokens,
+                    tok_per_sec,
+                    total_secs,
+                });
                 self.vm.slots.set(result, crate::vm_base::SlotValue::String("done".to_string()));
                 StepResult::Continue
             }
@@ -163,7 +175,7 @@ impl Orchestrator_VM {
             cancel_flag,
         ).await {
             Ok(pipeline_result) => {
-                let d = pipeline_result.duration;
+                let d = pipeline_result.inference_duration;
                 self.vm.slots.set(
                     result,
                     crate::vm_base::SlotValue::F64(d.as_secs_f64()),

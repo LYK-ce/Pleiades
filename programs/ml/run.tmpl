@@ -25,6 +25,11 @@ type = "Move"
 src = "META5"
 dst = "META1"
 
+# 开始计时（生成阶段）
+[[instructions]]
+type = "Timer"
+slot = "META9"
+
 [[instructions]]
 type = "Sample"
 tensor_slot = "TENSOR2"
@@ -39,7 +44,7 @@ type = "Output"
 [[instructions]]
 type = "JumpIf"
 condition = "FLAG1"
-target = 15
+target = 16
 
 [[instructions]]
 type = "Inference"
@@ -58,7 +63,17 @@ type = "Output"
 
 [[instructions]]
 type = "Jump"
-target = 9
+target = 10
+
+# 停止计时，计算差值
+[[instructions]]
+type = "Timer"
+slot = "META10"
+
+[[instructions]]
+type = "Sub"
+src = "META9"
+dst = "META10"
 
 [[instructions]]
 type = "EndOutput"

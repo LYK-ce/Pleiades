@@ -49,6 +49,13 @@ pub enum MlInstruction {
         condition: SlotId,
         target: usize,
     },
+    Sub {
+        src: SlotId,
+        dst: SlotId,
+    },
+    Timer {
+        slot: SlotId,
+    },
 
     // ─── 数据输入 ──────────────────────────────────────────
     Input,

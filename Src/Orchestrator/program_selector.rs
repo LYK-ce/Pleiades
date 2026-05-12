@@ -74,6 +74,7 @@ pub const SLOT_PLAN: SlotId = SlotId(301);
 pub const SLOT_STREAMS_RESULT: SlotId = SlotId(302);
 pub const SLOT_WORKERS_RESULT: SlotId = SlotId(303);
 pub const SLOT_HIDDEN_DIM: SlotId = SlotId(304);
+pub const SLOT_TIMER_RESULT: SlotId = SlotId(1049);
 
 // ─── 编译期嵌入所有模板 ─────────────────────────────────────
 // 文件内容编译进二进制，无需运行时文件 IO，也无需分发 programs/ 目录。
@@ -202,6 +203,8 @@ struct RawMLInstruction {
     src: Option<String>,
     #[serde(default)]
     dst: Option<String>,
+    #[serde(default)]
+    slot: Option<String>,
     #[serde(default)]
     value_type: Option<String>,
     #[serde(default)]
@@ -342,6 +345,8 @@ fn resolve_ml_slot(name: &str) -> Result<SlotId, SelectorError> {
         "META6" => SL_ML_META6.0,
         "META7" => 1046,
         "META8" => 1047,
+        "META9" => 1048,
+        "META10" => 1049,
         _ => return Err(SelectorError::UnknownSlot(name.to_string())),
     };
     Ok(SlotId(id))
@@ -626,6 +631,15 @@ impl ProgramSelector {
                 let target = raw.target.unwrap_or(0);
                 Ok(MlInst::JumpIf { condition, target })
             }
+            "Sub" => {
+                let src = resolve_ml_slot(raw.src.as_deref().unwrap_or(""))?;
+                let dst = resolve_ml_slot(raw.dst.as_deref().unwrap_or(""))?;
+                Ok(MlInst::Sub { src, dst })
+            }
+            "Timer" => {
+                let slot = resolve_ml_slot(raw.slot.as_deref().unwrap_or(""))?;
+                Ok(MlInst::Timer { slot })
+            }
             "Prefill" => {
                 let input = resolve_ml_slot(raw.input.as_deref().unwrap_or(""))?;
                 Ok(MlInst::Prefill { input })
@@ -828,7 +842,7 @@ mod tests {
     fn load_ml_run_vm_template() {
         let params = Pipeline_Params::default();
         let prog = ProgramSelector::load_ml_program_vm("run", &params, &HashMap::new()).unwrap();
-        assert_eq!(prog.len(), 16);
+        assert_eq!(prog.len(), 19);
         // 前两条是 Input, Encode
         assert!(matches!(&prog[0], MlInst::Input));
         assert!(matches!(&prog[1], MlInst::Encode));
@@ -847,17 +861,17 @@ mod tests {
             panic!("expected Const");
         }
         // 最后是 EndOutput
-        assert!(matches!(&prog[15], MlInst::EndOutput));
-        // JumpIf at index 9 targets index 15
-        if let MlInst::JumpIf { condition, target } = &prog[9] {
+        assert!(matches!(&prog[18], MlInst::EndOutput));
+        // JumpIf at index 10 targets index 16 (Timer)
+        if let MlInst::JumpIf { condition, target } = &prog[10] {
             assert_eq!(condition.0, 1030); // FLAG1
-            assert_eq!(*target, 15);
+            assert_eq!(*target, 16);
         } else {
             panic!("expected JumpIf");
         }
-        // Jump at index 14 targets index 9 (loop back)
-        if let MlInst::Jump { target } = &prog[14] {
-            assert_eq!(*target, 9);
+        // Jump at index 15 targets index 10 (loop back)
+        if let MlInst::Jump { target } = &prog[15] {
+            assert_eq!(*target, 10);
         } else {
             panic!("expected Jump");
         }
@@ -882,15 +896,15 @@ mod tests {
         let params = Pipeline_Params::default();
         let prog =
             ProgramSelector::load_ml_program_vm("coordinator", &params, &HashMap::new()).unwrap();
-        assert_eq!(prog.len(), 21);
+        assert_eq!(prog.len(), 24);
         assert!(matches!(&prog[0], MlInst::Input));
-        // JumpIf at index 11 targets index 19
-        if let MlInst::JumpIf { target, .. } = &prog[11] {
-            assert_eq!(*target, 19);
+        // JumpIf at index 12 targets index 20 (SendEOF)
+        if let MlInst::JumpIf { target, .. } = &prog[12] {
+            assert_eq!(*target, 20);
         } else {
             panic!("expected JumpIf");
         }
-        assert!(matches!(&prog[19], MlInst::SendEOF));
-        assert!(matches!(&prog[20], MlInst::EndOutput));
+        assert!(matches!(&prog[20], MlInst::SendEOF));
+        assert!(matches!(&prog[23], MlInst::EndOutput));
     }
 }

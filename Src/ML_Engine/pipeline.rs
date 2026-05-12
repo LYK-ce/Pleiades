@@ -42,6 +42,7 @@ pub struct Pipeline_Result {
     pub prompt_tokens: Vec<u32>,
     pub model_info: Option<Model_Info>,
     pub duration: Duration,
+    pub inference_duration: Duration,
     pub total_steps: usize,
 }
 

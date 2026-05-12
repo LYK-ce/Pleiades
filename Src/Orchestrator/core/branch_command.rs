@@ -332,7 +332,7 @@ impl Core {
 
                 let _ = self.capabilities.ml_engine.Shutdown_Session(&session_id).await;
 
-                let response = format!("OK|{}", result.duration.as_micros());
+                let response = format!("OK|{}", result.inference_duration.as_micros());
                 if let Err(e) = self.capabilities.network.send_response(
                     req.request_id, DataType::Command, response.into_bytes()
                 ).await {
