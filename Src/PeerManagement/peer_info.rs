@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 /// 节点状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerStatus {
+    Local,        // 本地协调节点
     Connected,    // 已连接，空闲
     Busy,         // 已连接，忙碌（执行推理任务）
     Connecting,   // 连接建立中

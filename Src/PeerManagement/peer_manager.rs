@@ -8,24 +8,24 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use libp2p::PeerId;
 use tokio::sync::RwLock;
-use tokio::time;
 
 use super::peer_info::{PeerInfo, PeerStatus, PeerCapability};
 
 /// 节点管理器（使用读写锁保护）
 pub struct PeerManager {
-    peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>, // 核心存储
+    peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
+    local_peer_id: PeerId,
 }
 
 impl PeerManager {
     /// 创建一个新的节点管理器
-    pub fn new() -> Self {
+    pub fn new(local_peer_id: PeerId) -> Self {
         Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
+            local_peer_id,
         }
     }
 
@@ -35,8 +35,11 @@ impl PeerManager {
         peers.insert(peer_info.peer_id, peer_info);
     }
 
-    /// 移除节点
+    /// 移除节点（自动保护本地节点）
     pub async fn remove_peer(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+        if *peer_id == self.local_peer_id {
+            return None;
+        }
         let mut peers = self.peers.write().await;
         peers.remove(peer_id)
     }
@@ -53,8 +56,14 @@ impl PeerManager {
         peers.values().cloned().collect()
     }
 
-    /// 更新节点状态
+    /// 更新节点状态（本地节点仅允许 Local/Connected/Busy）
     pub async fn update_status(&self, peer_id: &PeerId, status: PeerStatus) -> bool {
+        if *peer_id == self.local_peer_id {
+            match status {
+                PeerStatus::Local | PeerStatus::Connected | PeerStatus::Busy => {}
+                _ => return false,
+            }
+        }
         let mut peers = self.peers.write().await;
         if let Some(peer_info) = peers.get_mut(peer_id) {
             peer_info.update_status(status);
@@ -97,20 +106,20 @@ impl PeerManager {
         }
     }
 
-    /// 获取空闲节点列表（状态为Connected）
+    /// 获取空闲节点列表（仅含远程 Connected 节点，排除 Local）
     pub async fn get_idle_peers(&self) -> Vec<PeerInfo> {
         let peers = self.peers.read().await;
         peers.values()
-            .filter(|p| p.query_status() == PeerStatus::Connected)
+            .filter(|p| p.status == PeerStatus::Connected)
             .cloned()
             .collect()
     }
 
-    /// 获取忙碌节点列表（状态为Busy）
+    /// 获取忙碌节点列表（仅含远程 Busy 节点，排除 Local）
     pub async fn get_busy_peers(&self) -> Vec<PeerInfo> {
         let peers = self.peers.read().await;
         peers.values()
-            .filter(|p| p.query_status() == PeerStatus::Busy)
+            .filter(|p| p.status == PeerStatus::Busy)
             .cloned()
             .collect()
     }
@@ -127,17 +136,12 @@ impl PeerManager {
         peers.is_empty()
     }
 
-    /// 清理超时节点（内部实现）
-    async fn cleanup_timeout_peers_internal(peers: &Arc<RwLock<HashMap<PeerId, PeerInfo>>>, timeout_secs: u64) {
-        let mut peers_write = peers.write().await;
-        peers_write.retain(|_, peer_info| !peer_info.is_timeout(timeout_secs));
-    }
-
-    /// 清理超时节点（公开接口）
+    /// 清理超时节点（自动保护本地节点）
     pub async fn cleanup_timeout_peers(&self, timeout_secs: u64) -> usize {
         let mut peers = self.peers.write().await;
         let before_count = peers.len();
-        peers.retain(|_, peer_info| !peer_info.is_timeout(timeout_secs));
+        let local_id = self.local_peer_id;
+        peers.retain(|id, peer_info| *id == local_id || !peer_info.is_timeout(timeout_secs));
         before_count - peers.len()
     }
 
@@ -153,15 +157,16 @@ impl PeerManager {
         peers.contains_key(peer_id)
     }
 
-    /// 清空所有节点
+    /// 清空所有节点（自动保留本地节点）
     pub async fn clear(&self) {
         let mut peers = self.peers.write().await;
-        peers.clear();
+        let local_id = self.local_peer_id;
+        peers.retain(|id, _| *id == local_id);
     }
 }
 
 impl Default for PeerManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(PeerId::random())
     }
 }

@@ -14,3 +14,7 @@
    完成
 8. 根据profiler_design.md，实现phase 1 2 3 4
    完成
+9. 根据peer_manager_design.md，实现peer manager的全部修改工作
+    完成
+10. Profile 增加带宽测试 — Network_Capability::test_bandwidth + handle_profile 并发测试
+    完成

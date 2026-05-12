@@ -83,7 +83,7 @@ async fn Spawn_Node() -> (
         listen_port: port,
         ..Default::default()
     };
-    let (manager, peer_capability) = create_peer_management();
+    let (manager, peer_capability) = create_peer_management(peer_id);
     let event_bus = Arc::new(EventBus::New(1024));
 
     let (mut service, handle, inbound_rx, _capability, event_rx) =

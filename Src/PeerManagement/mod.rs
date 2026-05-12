@@ -17,6 +17,8 @@ mod peer_manager;
 mod peer_handle;
 pub mod capability;
 
+use libp2p::PeerId;
+
 // 导出 peer_info 模块中的公共类型
 pub use peer_info::{PeerInfo, PeerStatus, PeerCapability};
 // 导出 peer_manager 模块中的公共类型
@@ -31,10 +33,13 @@ pub use capability::{Peer_Management_Capability, Peer_Management_Error};
 /// 该函数返回节点管理器和对应的 Capability trait object，
 /// 用于在系统中集成节点管理功能。
 ///
+/// # 参数
+/// - `local_peer_id` — 本地节点 ID，由调用方从 Network keypair 生成
+///
 /// # 返回值
-/// - `(Arc<PeerManager>, Box<dyn Peer_Management_Capability>)` - 管理器和 Capability 的元组
-pub fn create_peer_management() -> (std::sync::Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
-    let manager = std::sync::Arc::new(PeerManager::new());
+/// - `(Arc<PeerManager>, Box<dyn Peer_Management_Capability>)` — 管理器和 Capability 的元组
+pub fn create_peer_management(local_peer_id: PeerId) -> (std::sync::Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
+    let manager = std::sync::Arc::new(PeerManager::new(local_peer_id));
     let handle = PeerHandle::new(manager.clone());
     (manager, Box::new(handle))
 }

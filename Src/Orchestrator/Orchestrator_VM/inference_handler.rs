@@ -173,9 +173,18 @@ impl Orchestrator_VM {
             Err(e) => return StepResult::Abort(format!("Profile: 执行失败: {:?}", e)),
         };
 
-        // 向所有 peer 广播 Profile_Request
+        // 将本机 Profile 结果写入 PeerManager（自己）
         let model_id = self.vm.slots.get_string(SLOT_MODEL)
             .unwrap_or(&"unknown".to_string()).clone();
+        let local_peer_id = self.capabilities.network.get_local_peer_id();
+        if let Ok(mut info) = self.capabilities.peer_manager.Get_Peer(&local_peer_id).await {
+            let mut cap = info.capability.take().unwrap_or_default();
+            cap.set_layer_time(model_id.clone(), local_duration);
+            let _ = self.capabilities.peer_manager.Update_Capability(&local_peer_id, Some(cap)).await;
+            tracing::info!("Profile: local → {:?}", local_duration);
+        }
+
+        // 向所有 peer 广播 Profile_Request
         let device = self.vm.slots.get_string(SLOT_DEVICE)
             .unwrap_or(&"cpu".to_string()).clone();
         let cmd = NetworkProtocol::Profile_Request {
@@ -188,29 +197,48 @@ impl Orchestrator_VM {
         match self.capabilities.peer_manager.List_Peers().await {
             Ok(peers) => {
                 for peer in &peers {
-                    match self.capabilities.network.send_data(
-                        peer.peer_id,
-                        crate::network::DataType::Command,
-                        payload.clone(),
-                    ).await {
-                        Ok(response) => {
-                            let text = String::from_utf8_lossy(&response.payload);
-                            if text.starts_with("OK|") {
-                                if let Ok(micros) = text[3..].trim().parse::<u64>() {
-                                    let d = std::time::Duration::from_micros(micros);
-                                    if let Ok(mut info) = self.capabilities.peer_manager.Get_Peer(&peer.peer_id).await {
-                                        let mut cap = info.capability.take().unwrap_or_default();
-                                        cap.set_layer_time(model_id.clone(), d);
-                                        let _ = self.capabilities.peer_manager.Update_Capability(&peer.peer_id, Some(cap)).await;
+                    let pid = peer.peer_id;
+                    let caps = self.capabilities.clone();
+                    let pld = payload.clone();
+                    let mid = model_id.clone();
+
+                    let profile_fut = caps.network.send_data(pid, crate::network::DataType::Command, pld);
+                    let bw_fut = caps.network.test_bandwidth(pid);
+                    let (profile_result, bw_result) = tokio::join!(profile_fut, bw_fut);
+
+                    // 更新 layer_time
+                    if let Ok(mut info) = self.capabilities.peer_manager.Get_Peer(&pid).await {
+                        let mut cap = info.capability.take().unwrap_or_default();
+
+                        match profile_result {
+                            Ok(response) => {
+                                let text = String::from_utf8_lossy(&response.payload);
+                                if text.starts_with("OK|") {
+                                    if let Ok(micros) = text[3..].trim().parse::<u64>() {
+                                        let d = std::time::Duration::from_micros(micros);
+                                        cap.set_layer_time(mid.clone(), d);
+                                        tracing::info!("Profile: {} → {:?}", pid, d);
                                     }
-                                    tracing::info!("Profile: {} → {:?}", peer.peer_id, d);
+                                } else {
+                                    tracing::warn!("Profile: {} replied FAIL: {}", pid, text);
                                 }
-                            } else {
-                                tracing::warn!("Profile: {} replied FAIL: {}", peer.peer_id, text);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Profile: send to {} failed: {}", pid, e);
                             }
                         }
+
+                        let _ = self.capabilities.peer_manager.Update_Capability(&pid, Some(cap)).await;
+                    }
+
+                    // 更新带宽
+                    match bw_result {
+                        Ok(bw) => {
+                            tracing::info!("Bandwidth: {} → {} Mbps", pid, bw);
+                            let _ = self.capabilities.peer_manager.Update_Bandwidth(&pid, Some(bw)).await;
+                        }
                         Err(e) => {
-                            tracing::warn!("Profile: send to {} failed: {}", peer.peer_id, e);
+                            tracing::warn!("Bandwidth: test to {} failed: {:?}", pid, e);
                         }
                     }
                 }

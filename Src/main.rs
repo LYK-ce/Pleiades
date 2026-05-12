@@ -25,13 +25,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
+use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::info;
 
 use pleiades::config::{Ensure_Config, Ensure_Identity};
 use pleiades::event_bus::EventBus;
-use pleiades::peer_management::{create_peer_management, PeerHandle};
+use pleiades::peer_management::{create_peer_management, PeerHandle, PeerInfo, PeerStatus, PeerCapability};
 use pleiades::network::{NetworkConfig, Network_Service};
 use pleiades::storage::StorageManager;
 use pleiades::ml_engine::ML_Engine_Service;
@@ -117,10 +119,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_bus = Arc::new(EventBus::New(1024));
 
     // 6. PeerManagement — 节点管理
-    //    PeerHandle 实现了 Clone，内部持有 Arc<PeerManager>，
-    //    两个 Capability 实例共享同一个 PeerManager。
-    let (peer_manager_arc, peer_capability_for_network) = create_peer_management();
-    let peer_capability_for_caps = Box::new(PeerHandle::new(peer_manager_arc));
+    //    从 keypair 生成 local_peer_id，注册本地节点到 PeerManager
+    let local_peer_id = PeerId::from(keypair.public());
+    let (peer_manager_arc, peer_capability_for_network) = create_peer_management(local_peer_id);
+
+    // 注册本地节点
+    let now = Instant::now();
+    let self_info = PeerInfo {
+        peer_id: local_peer_id,
+        addresses: vec![],
+        latency_ms: None,
+        bandwidth_mbps: None,
+        connected_at: now,
+        last_active: now,
+        status: PeerStatus::Local,
+        capability: Some(PeerCapability::new()),
+    };
+    peer_manager_arc.upsert_peer(self_info).await;
+
+    let peer_capability_for_caps = Box::new(PeerHandle::new(peer_manager_arc.clone()));
 
     // 7. Storage — 存储管理器（工作目录即为 Storage 根目录）
     //    Arc 共享给 ML_Engine_Service 和 Capabilities

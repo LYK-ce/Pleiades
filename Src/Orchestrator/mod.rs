@@ -56,6 +56,7 @@ pub(crate) mod test_utils {
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn get_record(&self, _key: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         fn get_local_peer_id(&self) -> libp2p::PeerId { libp2p::PeerId::random() }
+        async fn test_bandwidth(&self, _peer: libp2p::PeerId) -> Result<u64, Network_Error> { Ok(0) }
     }
 
     /// Peer_Management_Capability 的空桩实现（用于不实际调用节点管理的单元测试）

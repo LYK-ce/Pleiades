@@ -29,7 +29,7 @@ fn make_peer(peer_id: PeerId) -> PeerInfo {
 /// → update_status Busy → get_idle 验证 → remove 5 → count = 15
 #[tokio::test]
 async fn tc01_bulk_peer_crud() {
-    let (_manager, handle) = create_peer_management();
+    let (_manager, handle) = create_peer_management(PeerId::random());
     let mut peer_ids: Vec<PeerId> = Vec::new();
 
     // 1. add 20 个节点
@@ -85,7 +85,7 @@ async fn tc01_bulk_peer_crud() {
 /// add 5 → sleep → 仅 Update_Heartbeat 3 个 → Cleanup_Timeout_Peers(1) → 清除 2 → count = 3
 #[tokio::test]
 async fn tc02_heartbeat_and_timeout_cleanup() {
-    let (_manager, handle) = create_peer_management();
+    let (_manager, handle) = create_peer_management(PeerId::random());
     let mut peer_ids: Vec<PeerId> = Vec::new();
 
     // 1. add 5 个节点
@@ -138,7 +138,7 @@ async fn tc02_heartbeat_and_timeout_cleanup() {
 #[tokio::test]
 async fn tc03_concurrent_safety() {
     // 使用 PeerHandle 直接构造，因为需要 Clone + Arc 来在多任务间共享
-    let manager = Arc::new(PeerManager::new());
+    let manager = Arc::new(PeerManager::new(PeerId::random()));
     let handle = PeerHandle::new(manager.clone());
     let handle = Arc::new(handle);
     let task_count = 10usize;
@@ -202,7 +202,7 @@ async fn tc03_concurrent_safety() {
 /// → Update_Bandwidth → 验证
 #[tokio::test]
 async fn tc04_capability_and_bandwidth_update() {
-    let (_manager, handle) = create_peer_management();
+    let (_manager, handle) = create_peer_management(PeerId::random());
     let peer_id = PeerId::random();
     handle.Add_Peer(make_peer(peer_id)).await.unwrap();
 
@@ -252,7 +252,7 @@ async fn tc04_capability_and_bandwidth_update() {
 /// 空 manager → Get_Peer = Err → list = empty → Remove_Peer = Err → Count = 0
 #[tokio::test]
 async fn tc05_empty_manager_operations() {
-    let (_manager, handle) = create_peer_management();
+    let (_manager, handle) = create_peer_management(PeerId::random());
     let fake_peer_id = PeerId::random();
 
     // 1. Count = 0 (替代 is_empty)
@@ -290,7 +290,7 @@ async fn tc05_empty_manager_operations() {
 /// 两个 handle 操作同一 manager → 数据一致
 #[tokio::test]
 async fn tc06_peer_handle_shared() {
-    let manager = Arc::new(PeerManager::new());
+    let manager = Arc::new(PeerManager::new(PeerId::random()));
     let handle_1 = PeerHandle::new(manager.clone());
     let handle_2 = PeerHandle::new(manager.clone());
 

@@ -263,6 +263,22 @@ pub trait Network_Capability: Send + Sync {
     ///
     /// Coordinator 编排 Pipeline 时需要 local PeerId 生成全局唯一 inference_id。
     fn get_local_peer_id(&self) -> PeerId;
+
+    // ========================================
+    // 带宽测试
+    // ========================================
+
+    /// 测试与指定节点之间的带宽（Mbps）
+    ///
+    /// 发送 1MB / 10MB / 50MB 数据包，取最大值。
+    /// 内部使用 `DataType::BandwidthTest`，对端 Network_Service 自动回显。
+    ///
+    /// # 参数
+    /// - `peer`: 目标节点 ID
+    ///
+    /// # 返回
+    /// 带宽值（Mbps）
+    async fn test_bandwidth(&self, peer: PeerId) -> Result<u64, Network_Error>;
 }
 
 // ===== 入站事件枚举 =====
@@ -460,6 +476,39 @@ impl Network_Capability for Network_Service_Capability {
 
     fn get_local_peer_id(&self) -> PeerId {
         self.node_handle.Get_Local_Peer_Id()
+    }
+
+    // ========================================
+    // 带宽测试
+    // ========================================
+
+    async fn test_bandwidth(&self, peer: PeerId) -> Result<u64, Network_Error> {
+        let test_sizes = [1_000_000u64, 10_000_000, 50_000_000];
+        let mut max_bandwidth = 0u64;
+        let mut has_success = false;
+
+        for &size in &test_sizes {
+            let payload = size.to_le_bytes().to_vec();
+            let start = std::time::Instant::now();
+            match self.send_data(peer, DataType::BandwidthTest, payload).await {
+                Ok(response) => {
+                    if response.payload.len() != size as usize {
+                        continue;
+                    }
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let bandwidth = (size as f64 * 8.0) / (elapsed * 1_000_000.0);
+                    max_bandwidth = max_bandwidth.max(bandwidth as u64);
+                    has_success = true;
+                }
+                Err(_) => {}
+            }
+        }
+
+        if has_success {
+            Ok(max_bandwidth)
+        } else {
+            Err(Network_Error::Timeout("bandwidth test: all sizes failed".into()))
+        }
     }
 }
 
