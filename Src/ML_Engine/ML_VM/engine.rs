@@ -130,6 +130,13 @@ impl<'a> ML_VM<'a> {
 
         self.execute(program, cancel_flag)?;
 
+        // 若模板使用了 Timer/Sub 写入 META10，用它覆盖 inference_duration（排除 warmup）
+        if let Ok(timer_secs) = self.vm.slots.get_f64(SlotId(1049)) {
+            if timer_secs > 0.0 {
+                self.inference_duration = Duration::from_secs_f64(timer_secs);
+            }
+        }
+
         let result = Pipeline_Result {
             result_text: self
                 .vm
@@ -311,6 +318,10 @@ impl<'a> ML_VM<'a> {
 
         match GGUF_Model_Inference(self.backend, &input_tensor, offset) {
             Ok(output_tensor) => {
+                // 确保 GPU/CPU 计算完成后再存储结果
+                if let Err(e) = self.backend.device.synchronize() {
+                    return StepResult::Abort(format!("Inference: sync 失败: {}", e));
+                }
                 self.ml_slots.set_tensor(SLOT_TENSOR2, output_tensor);
                 let increment = match input_type {
                     InferenceInputType::Tokens => 1.0,

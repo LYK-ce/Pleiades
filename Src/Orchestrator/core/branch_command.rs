@@ -252,9 +252,12 @@ impl Core {
             NetworkProtocol::Profile_Request {
                 model_id,
                 layer_count,
-                device,
+                ..
             } => {
                 info!("Profile_Request from {}, model={}, layers={}", req.peer, model_id, layer_count);
+
+                // 使用本节点的设备偏好，而非请求方指定的设备
+                let device = if self.device_preference.is_empty() { "cpu".to_string() } else { self.device_preference.clone() };
 
                 let session_id = format!("profile-{}", generate_id());
                 let config = ML_Session_Config {
@@ -284,6 +287,8 @@ impl Core {
                         return;
                     }
                 };
+
+                let free_mem = crate::orchestrator::query_free_memory_mb(&device);
 
                 let model_info = match self.capabilities.ml_engine.Create_Session(config, io_handle).await {
                     Ok(info) => info,
@@ -332,7 +337,7 @@ impl Core {
 
                 let _ = self.capabilities.ml_engine.Shutdown_Session(&session_id).await;
 
-                let response = format!("OK|{}", result.inference_duration.as_micros());
+                let response = format!("OK|{}|{}", result.inference_duration.as_micros(), free_mem);
                 if let Err(e) = self.capabilities.network.send_response(
                     req.request_id, DataType::Command, response.into_bytes()
                 ).await {

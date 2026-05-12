@@ -97,3 +97,39 @@ pub(crate) mod test_utils {
         }
     }
 }
+
+// ============================================================
+// Profile 内存查询
+// ============================================================
+
+/// 查询系统空闲内存（DRAM），返回 MB。
+fn query_system_memory_mb() -> u64 {
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_memory();
+    sys.available_memory() / 1024 / 1024
+}
+
+/// 查询 CUDA 空闲显存（VRAM），返回 MB。
+fn query_cuda_memory_mb() -> u64 {
+    let nvml = match nvml_wrapper::Nvml::init() {
+        Ok(nvml) => nvml,
+        Err(_) => return 0,
+    };
+    let dev = match nvml.device_by_index(0) {
+        Ok(dev) => dev,
+        Err(_) => return 0,
+    };
+    match dev.memory_info() {
+        Ok(info) => info.free / 1024 / 1024,
+        Err(_) => 0,
+    }
+}
+
+/// 按设备查询空闲内存，返回 MB。
+pub(crate) fn query_free_memory_mb(device: &str) -> u64 {
+    if device.to_lowercase() == "cuda" {
+        query_cuda_memory_mb()
+    } else {
+        query_system_memory_mb()
+    }
+}

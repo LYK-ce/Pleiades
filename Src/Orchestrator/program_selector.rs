@@ -74,6 +74,7 @@ pub const SLOT_PLAN: SlotId = SlotId(301);
 pub const SLOT_STREAMS_RESULT: SlotId = SlotId(302);
 pub const SLOT_WORKERS_RESULT: SlotId = SlotId(303);
 pub const SLOT_HIDDEN_DIM: SlotId = SlotId(304);
+pub const SLOT_PROFILE_MEMORY: SlotId = SlotId(305);
 pub const SLOT_TIMER_RESULT: SlotId = SlotId(1049);
 
 // ─── 编译期嵌入所有模板 ─────────────────────────────────────

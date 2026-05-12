@@ -15,7 +15,9 @@ use crate::ml_engine::pipeline::Pipeline_Params;
 use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
 use crate::orchestrator::program_selector::{
     ProgramSelector, SLOT_HIDDEN_DIM, SLOT_MODEL, SLOT_DEVICE, SLOT_TIMER_RESULT,
+    SLOT_PROFILE_MEMORY,
 };
+use crate::orchestrator::query_free_memory_mb;
 
 use super::engine::Orchestrator_VM;
 
@@ -62,6 +64,10 @@ impl Orchestrator_VM {
             },
             None => None,
         };
+
+        // 模型加载前查询剩余内存
+        let free_mem = query_free_memory_mb(&device_str);
+        self.vm.slots.set(SLOT_PROFILE_MEMORY, crate::vm_base::SlotValue::U64(free_mem));
 
         let session_id = format!("job-{}", self.job_id.0);
         let config = ML_Session_Config {
@@ -188,12 +194,14 @@ impl Orchestrator_VM {
         // 将本机 Profile 结果写入 PeerManager（自己）
         let model_id = self.vm.slots.get_string(SLOT_MODEL)
             .unwrap_or(&"unknown".to_string()).clone();
+        let free_memory = self.vm.slots.get_u64(SLOT_PROFILE_MEMORY).unwrap_or(0);
         let local_peer_id = self.capabilities.network.get_local_peer_id();
         if let Ok(mut info) = self.capabilities.peer_manager.Get_Peer(&local_peer_id).await {
             let mut cap = info.capability.take().unwrap_or_default();
             cap.set_layer_time(model_id.clone(), local_duration);
+            cap.memory_mb = free_memory;
             let _ = self.capabilities.peer_manager.Update_Capability(&local_peer_id, Some(cap)).await;
-            tracing::info!("Profile: local → {:?}", local_duration);
+            tracing::info!("Profile: local → {:?}, free_mem={}MB", local_duration, free_memory);
         }
 
         // 向所有 peer 广播 Profile_Request
@@ -226,10 +234,20 @@ impl Orchestrator_VM {
                             Ok(response) => {
                                 let text = String::from_utf8_lossy(&response.payload);
                                 if text.starts_with("OK|") {
-                                    if let Ok(micros) = text[3..].trim().parse::<u64>() {
-                                        let d = std::time::Duration::from_micros(micros);
-                                        cap.set_layer_time(mid.clone(), d);
-                                        tracing::info!("Profile: {} → {:?}", pid, d);
+                                    let parts: Vec<&str> = text[3..].trim().split('|').collect();
+                                    if let Some(first) = parts.first() {
+                                        if let Ok(micros) = first.parse::<u64>() {
+                                            let d = std::time::Duration::from_micros(micros);
+                                            cap.set_layer_time(mid.clone(), d);
+                                            tracing::info!("Profile: {} → {:?}", pid, d);
+                                        }
+                                    }
+                                    // 解析可选的 memory_mb
+                                    if parts.len() >= 2 {
+                                        if let Ok(mem) = parts[1].parse::<u64>() {
+                                            cap.memory_mb = mem;
+                                            tracing::info!("Profile: {} → {}MB free", pid, mem);
+                                        }
                                     }
                                 } else {
                                     tracing::warn!("Profile: {} replied FAIL: {}", pid, text);

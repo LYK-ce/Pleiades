@@ -25,7 +25,47 @@ dst = "TENSOR1"
 shape_slots = ["META7", "META8", "META3"]
 value = 1.0
 
+# Warmup: 多次推理驱散 GPU 驱动/页表/内存冷启动
 [[instructions]]
 type = "Inference"
 input_type = "Tensor"
 input = "TENSOR1"
+
+[[instructions]]
+type = "Inference"
+input_type = "Tensor"
+input = "TENSOR1"
+
+[[instructions]]
+type = "Inference"
+input_type = "Tensor"
+input = "TENSOR1"
+
+[[instructions]]
+type = "Inference"
+input_type = "Tensor"
+input = "TENSOR1"
+
+[[instructions]]
+type = "Inference"
+input_type = "Tensor"
+input = "TENSOR1"
+
+# 实际测量
+[[instructions]]
+type = "Timer"
+slot = "META9"
+
+[[instructions]]
+type = "Inference"
+input_type = "Tensor"
+input = "TENSOR1"
+
+[[instructions]]
+type = "Timer"
+slot = "META10"
+
+[[instructions]]
+type = "Sub"
+src = "META9"
+dst = "META10"

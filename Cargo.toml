@@ -77,6 +77,10 @@ shimmytok = "0.7"
 # P2P网络流
 libp2p-stream = "0.4.0-alpha"
 
+# 系统信息查询（Profile 内存）
+sysinfo = "0.33"
+nvml-wrapper = "0.11"
+
 # 存储模块所需
 blake3 = "1.5"
 sha2 = "0.10"

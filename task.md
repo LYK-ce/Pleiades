@@ -26,3 +26,5 @@
     完成
 14. run/coordinator 模板加入 Timer/Sub — Prefill后→EndOutput前精确计时
     完成
+15. Profile 内存查询 — 模型加载前查剩余内存，写入 PeerCapability
+    完成

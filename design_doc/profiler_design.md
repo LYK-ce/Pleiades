@@ -558,3 +558,60 @@ Orchestrator                          ML_Engine_Service               Session_Th
 17. `Src/PeerManagement/*` — `PeerCapability.layer_time` + `update_capability`
 18. `Src/Network/*` — `ProfileRequest`/`ProfileResponse`
 19. `cargo test` 全量验证
+
+## 14. Profile 内存查询
+
+### 14.1 背景
+
+Profile 除了测试节点推理性能（layer_time），还需记录节点剩余可用内存，供 Scheduler 后续做资源感知的层划分。剩余内存是模型加载前的空闲值——Profile 完成后模型会被卸载。
+
+### 14.2 查询顺序
+
+```
+查询剩余内存 → Create_Session（加载模型） → Run_Program_VM（测 layer_time） → Shutdown_Session（卸载）
+```
+
+**先查内存，再加载模型**，确保拿到真实空闲内存，避免模型加载后的占用干扰结果。
+
+### 14.3 按设备查询
+
+`handle_profile` 中 `device` 参数已从模板传入（SLOT_DEVICE），按设备分发：
+
+| 设备 | 查询内容 | 库 |
+|------|---------|-----|
+| CPU | 系统 DRAM 空闲内存 | `sysinfo` crate → `System::available_memory()` |
+| CUDA | GPU VRAM 空闲内存 | `cudarc` crate → `driver::result::mem_get_info()` |
+
+```rust
+// handle_profile 中的调用位置（Create_Session 之前）
+let device = self.vm.slots.get_string(SLOT_DEVICE)?.to_lowercase();
+let free_memory_mb = match device.as_str() {
+    "cuda" => query_cuda_memory()?,
+    _      => query_system_memory(),
+};
+```
+
+### 14.4 数据流
+
+**本机 Profile**：
+```
+查询内存 → free_memory_mb → 写入 PeerCapability.memory_mb（Update_Capability）
+```
+
+**远程 Profile**：
+```
+ProfileRequest → 远端查询内存 → ProfileResponse "OK|{layer_time}|{memory_mb}"
+→ 请求方解析 → 写入 PeerCapability.memory_mb + PeerInfo.bandwidth_mbps
+```
+
+PeerCapability 已有 `memory_mb: u64` 字段，无需新增。
+
+### 14.5 实施计划
+
+| 步骤 | 文件 | 改动 |
+|------|------|------|
+| 1 | `Cargo.toml` | 新增 `sysinfo`、`cudarc` 依赖 |
+| 2 | `Src/Orchestrator/Orchestrator_VM/inference_handler.rs` | `handle_profile` 中 Create_Session 前查询内存，写入 PeerCapability |
+| 3 | `Src/Orchestrator/core/branch_command.rs` | Profile_Request handler 返回格式扩展 `OK|{layer_time}|{memory_mb}` |
+| 4 | `Src/Orchestrator/Orchestrator_VM/inference_handler.rs` | peer 回包解析增加 memory_mb，写入 PeerCapability |
+| 5 | `cargo test` | 全量验证

@@ -74,6 +74,9 @@ impl Core {
                             let mut s = format!("{} [{:?}] lat={:?}ms bw={:?}Mbps",
                                 p.peer_id, p.status, p.latency_ms, p.bandwidth_mbps);
                             if let Some(ref cap) = p.capability {
+                                if cap.memory_mb > 0 {
+                                    s.push_str(&format!(" mem={}MB", cap.memory_mb));
+                                }
                                 if !cap.layer_time.is_empty() {
                                     s.push_str(" layer:");
                                     for (model, d) in &cap.layer_time {
