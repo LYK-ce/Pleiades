@@ -720,7 +720,7 @@ mod tests {
         let instructions =
             ProgramSelector::select(crate::orchestrator::job::JobKind::Run, JobId(1), v).unwrap();
 
-        assert_eq!(instructions.len(), 6);
+        assert_eq!(instructions.len(), 7);
 
         match &instructions[0] {
             OI::Const { value, dst } => {
@@ -745,7 +745,7 @@ mod tests {
         let instructions =
             ProgramSelector::select(crate::orchestrator::job::JobKind::Relay, JobId(2), v).unwrap();
 
-        assert_eq!(instructions.len(), 7);
+        assert_eq!(instructions.len(), 8);
         match &instructions[5] {
             OI::CreateSession { tensor_io, .. } => {
                 assert!(tensor_io.is_some());
@@ -767,7 +767,7 @@ mod tests {
             ProgramSelector::select(crate::orchestrator::job::JobKind::Pipeline, JobId(3), v)
                 .unwrap();
 
-        assert_eq!(instructions.len(), 11);
+        assert_eq!(instructions.len(), 12);
 
         match &instructions[4] {
             OI::PlanPipeline {

@@ -213,10 +213,10 @@ end
 
 ```toml
 [dependencies]
-mlua = { version = "0.10", features = ["vendored-lua", "async"] }
+mlua = { version = "0.12.0-rc.1", features = ["lua54", "vendored", "async"] }
 ```
 
-`vendored-lua`：静态编译 Lua 5.4，无需目标机安装 Lua。增量约 300KB。
+`vendored`：静态编译 Lua 5.4，无需目标机安装 Lua。增量约 300KB。
 
 ### 5.2 沙箱配置
 
@@ -498,7 +498,7 @@ UserCommand::Reload { reply } => {
 
 ### Phase 1：mlua 基础设施（最低可行）
 
-1. `Cargo.toml` 添加 `mlua = { version = "0.10", features = ["vendored-lua", "async"] }`
+1. `Cargo.toml` 添加 `mlua = { version = "0.12.0-rc.1", features = ["lua54", "vendored", "async"] }`
 2. 新建 `Src/Lua/` 模块：`sandbox.rs` + `registry.rs` + `capability_binding.rs`
 3. 实现 `sandbox()` + `ProgramRegistry::scan()`
 4. 注册 3 个示范能力函数（`get_available_peers` + `analyze_model` + `plan_uniform`）
