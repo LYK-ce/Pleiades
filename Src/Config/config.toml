@@ -48,3 +48,8 @@ quota_gb = 0
 [Scheduler]
 # 调度策略: uniform / weighted
 strategy = "uniform"
+
+
+[Session]
+# 最大并发对话槽位数
+max_slots = 4

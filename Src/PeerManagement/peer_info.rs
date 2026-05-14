@@ -1,139 +1,181 @@
 //Presented by KeJi
-//Date : 2026-04-15
+//Date : 2026-05-13
 
 //! 节点信息数据结构定义模块
 //!
-//! 包含节点状态、能力描述和节点信息等核心数据结构。
+//! 包含节点信息、模型持有描述和动态性能画像等核心数据结构。
+//!
+//! ## 数据结构
+//! - `SupportedModel` — 节点持有的模型描述（id + file_name + layer_bitmap）
+//! - `PeerProfile` — 动态性能画像（延迟/带宽/内存/单层耗时）
+//! - `PeerInfo` — 节点完整信息（身份元信息 + PeerProfile + SupportedModel 列表）
 
 use libp2p::{Multiaddr, PeerId};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// 节点状态枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PeerStatus {
-    Local,        // 本地协调节点
-    Connected,    // 已连接，空闲
-    Busy,         // 已连接，忙碌（执行推理任务）
-    Connecting,   // 连接建立中
-    Disconnected, // 已断开连接
-}
-
-/// 节点能力描述
+/// 节点持有的模型描述
+///
+/// 调度时依据此结构决定模型分配：
+/// - `id` 用于跨节点匹配同一模型
+/// - `layer_bitmap` 用于判断节点持有模型的哪些层
 #[derive(Debug, Clone, PartialEq)]
-pub struct PeerCapability {
-    pub has_gpu: bool,                         // 是否有GPU
-    pub memory_mb: u64,                        // 内存大小（MB）
-    pub compute_score: f32,                    // 计算能力评分
-    pub supported_models: Vec<String>,         // 支持的模型类型
-    pub layer_time: HashMap<String, Duration>, // 模型单层耗时
+pub struct SupportedModel {
+    /// 模型唯一标识 — xxhash64(content) → u64
+    pub id: u64,
+    /// 存储文件名（Storage file_id）
+    pub file_name: String,
+    /// 256 位层位图，bit N = 1 表示持有第 N 层
+    pub layer_bitmap: [u8; 32],
 }
 
-impl Default for PeerCapability {
+impl SupportedModel {
+    /// 创建持有完整模型（全部层）的描述
+    pub fn full(id: u64, file_name: String) -> Self {
+        Self {
+            id,
+            file_name,
+            layer_bitmap: [0xFF; 32],
+        }
+    }
+
+    /// 创建持有模型分片的描述，仅指定层范围的位为 1
+    pub fn shard(id: u64, file_name: String, layer_start: usize, layer_end: usize) -> Self {
+        let mut bitmap = [0u8; 32];
+        for layer in layer_start..layer_end {
+            let byte_idx = layer / 8;
+            let bit_idx = layer % 8;
+            if byte_idx < 32 {
+                bitmap[byte_idx] |= 1 << bit_idx;
+            }
+        }
+        Self {
+            id,
+            file_name,
+            layer_bitmap: bitmap,
+        }
+    }
+
+    /// 检查是否持有指定层范围的全部层
+    pub fn has_layer_range(&self, start: usize, end: usize) -> bool {
+        for layer in start..end {
+            let byte_idx = layer / 8;
+            let bit_idx = layer % 8;
+            if byte_idx >= 32 || (self.layer_bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 返回位图中为 1 的层数
+    pub fn layer_count(&self) -> usize {
+        self.layer_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum()
+    }
+}
+
+/// 节点动态性能画像
+///
+/// 运行时频繁更新。`Update_Profile` 方法接收此结构，
+/// 字段为 `None` 时跳过不更新，`Some(v)` 时更新为 v。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerProfile {
+    /// 最后 ping 延迟（毫秒）
+    pub latency_ms: Option<u64>,
+    /// 带宽（Mbps）
+    pub bandwidth_mbps: Option<u64>,
+    /// 空闲内存（MB），随运行变化
+    pub memory_mb: Option<u64>,
+    /// 模型单层耗时（model_id → Duration）
+    pub layer_time: Option<HashMap<String, Duration>>,
+}
+
+impl Default for PeerProfile {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PeerCapability {
-    /// 创建一个默认的节点能力描述
-    pub fn new() -> Self {
         Self {
-            has_gpu: false,
-            memory_mb: 0,
-            compute_score: 0.0,
-            supported_models: Vec::new(),
-            layer_time: HashMap::new(),
+            latency_ms: None,
+            bandwidth_mbps: None,
+            memory_mb: None,
+            layer_time: None,
         }
-    }
-
-    /// 创建一个具有GPU能力的节点能力描述
-    pub fn with_gpu(memory_mb: u64, compute_score: f32) -> Self {
-        Self {
-            has_gpu: true,
-            memory_mb,
-            compute_score,
-            supported_models: Vec::new(),
-            layer_time: HashMap::new(),
-        }
-    }
-
-    /// 更新指定模型的单层耗时
-    pub fn set_layer_time(&mut self, model_id: String, duration: Duration) {
-        self.layer_time.insert(model_id, duration);
     }
 }
 
 /// 节点详细信息
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerInfo {
-    pub peer_id: PeerId,                    // 节点ID
-    pub addresses: Vec<Multiaddr>,          // 地址列表
-    pub latency_ms: Option<u64>,            // 最后一次ping延迟
-    pub bandwidth_mbps: Option<u64>,        // 带宽（Mbps），可选
-    pub connected_at: Instant,              // 连接建立时间
-    pub last_active: Instant,               // 最后活跃时间
-    pub status: PeerStatus,                 // 节点状态
-    pub capability: Option<PeerCapability>, // 节点能力（可选）
+    /// 节点 ID
+    pub peer_id: PeerId,
+    /// 地址列表
+    pub addresses: Vec<Multiaddr>,
+    /// 是否为本地节点
+    pub local: bool,
+    /// 连接建立时间
+    pub connected_at: Instant,
+    /// 最后活跃时间
+    pub last_active: Instant,
+    /// 动态性能画像
+    pub profile: PeerProfile,
+    /// 持有的模型列表
+    pub supported_models: Vec<SupportedModel>,
 }
 
 impl PeerInfo {
-    /// 创建一个新的节点信息
+    /// 创建一个新的远程节点信息
     pub fn new(peer_id: PeerId, addresses: Vec<Multiaddr>) -> Self {
         let now = Instant::now();
         Self {
             peer_id,
             addresses,
-            latency_ms: None,
-            bandwidth_mbps: None,
+            local: false,
             connected_at: now,
             last_active: now,
-            status: PeerStatus::Connected,
-            capability: None,
+            profile: PeerProfile::default(),
+            supported_models: Vec::new(),
         }
     }
 
-    /// Update Status 更新节点状态，仅在节点的状态发生变化的时候才会发出状态变化通知，然后调用此方法更改状态
-    pub fn update_status(&mut self, status: PeerStatus) {
-        self.status = status;
-        self.last_active = Instant::now();
-    }
-
-    /// Update Heartbeat 心跳更新，更新内容包括最后活跃事件和延迟信息
-    pub fn update_heartbeat(&mut self, latency_ms: Option<u64>) {
-        self.last_active = Instant::now();
-        if let Some(latency) = latency_ms {
-            self.latency_ms = Some(latency);
+    /// 创建本地节点信息
+    pub fn new_local(peer_id: PeerId) -> Self {
+        let now = Instant::now();
+        Self {
+            peer_id,
+            addresses: Vec::new(),
+            local: true,
+            connected_at: now,
+            last_active: now,
+            profile: PeerProfile::default(),
+            supported_models: Vec::new(),
         }
     }
 
-    /// Update Capability 更新节点能力，参数为新的能力描述
-    pub fn update_capability(&mut self, capability: Option<PeerCapability>) {
-        self.capability = capability;
+    /// Update Profile 更新性能画像，字段为 None 时跳过
+    pub fn update_profile(&mut self, profile: PeerProfile) {
+        if let Some(v) = profile.latency_ms {
+            self.profile.latency_ms = Some(v);
+        }
+        if let Some(v) = profile.bandwidth_mbps {
+            self.profile.bandwidth_mbps = Some(v);
+        }
+        if let Some(v) = profile.memory_mb {
+            self.profile.memory_mb = Some(v);
+        }
+        if let Some(v) = profile.layer_time {
+            self.profile.layer_time = Some(v);
+        }
         self.last_active = Instant::now();
     }
 
-    /// Update Bandwidth 更新节点带宽信息
-    pub fn update_bandwidth(&mut self, bandwidth_mbps: Option<u64>) {
-        self.bandwidth_mbps = bandwidth_mbps;
+    /// Update Supported Models 更新持有的模型列表
+    pub fn update_supported_models(&mut self, models: Vec<SupportedModel>) {
+        self.supported_models = models;
         self.last_active = Instant::now();
     }
 
-    /// Query Status 查询节点状态，仅返回status
-    pub fn query_status(&self) -> PeerStatus {
-        self.status
-    }
-
-    /// Query Profile 查询节点能力、延迟和带宽，返回能力描述、延迟信息和带宽信息，因为这三者作为节点分配依据，往往需要一起查询
-    pub fn query_profile(&self) -> (Option<&PeerCapability>, Option<u64>, Option<u64>) {
-        (
-            self.capability.as_ref(),
-            self.latency_ms,
-            self.bandwidth_mbps,
-        )
-    }
-
-    /// Is_Timeout 检查节点是否超时，参数为超时时间（秒），返回布尔值
+    /// Is Timeout 检查节点是否超时
     pub fn is_timeout(&self, timeout_secs: u64) -> bool {
         let elapsed = self.last_active.elapsed().as_secs();
         elapsed >= timeout_secs

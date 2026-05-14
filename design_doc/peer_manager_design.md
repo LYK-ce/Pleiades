@@ -1,202 +1,295 @@
-# PeerManager 本地节点纳入方案
+# PeerManager 设计文档
 
-## 1. 背景
+Presented by KeJi
+Date ： 2026-05-13
 
-当前 PeerManager 仅管理**远程**对等节点，本地节点（Coordinator）不包含在内。`local_peer_id` 由 `Network_Service` 单独持有，通过 `get_local_peer_id()` 查询。
+## 1. 模块概述
 
-Scheduler 目前分为两条数据来源：
-- `peer_manager.Get_Idle_Peers()` → 远程 Worker 列表
-- `network.get_local_peer_id()` → 协调者身份
+`PeerManagement` 模块负责管理 Pleiades 分布式推理网络中**相关节点及其资源信息**。它不管理连接生命周期，不维护状态机，不参与调度决策——只做一个纯粹的**节点资源目录**。
 
-**引入 Profile 功能后**，需要将本机 Profile 测得的 `layer_time` 与远程节点的 `layer_time` 统一写入同一存储，以便 Scheduler 后续通过单一接口查询所有节点的性能数据来做层划分。
+### 核心定义
 
-当前假设 Profile 回调只写远程节点，本机耗时无处存放；Scheduler 需同时从 PeerManager 和另一个渠道获取 `layer_time`，不够统一。
+> **PeerManager = 相关节点资源目录。**
+> 存在即在线，存在即相关。不在 map 里的节点，要么不知道，要么不关心。
+> mDNS 场景存全部在线节点，WAN 场景存直接协作节点，定义统一，只是"相关"的范围不同。
 
-## 2. 目标
+### 模块结构
 
-将本地节点注册到 PeerManager 中，实现：
+```
+PeerManagement/
+├── peer_info.rs        ← 数据结构定义（PeerInfo, SupportedModel, PeerProfile）
+├── capability.rs       ← Trait 定义（Peer_Management_Capability + 错误类型）
+├── peer_manager.rs     ← 核心实现（Arc<RwLock<HashMap<PeerId, PeerInfo>>>）
+├── peer_handle.rs      ← Thin wrapper，impl trait，提供 Clone
+└── mod.rs              ← 模块入口 + create_peer_management() 工厂函数
+```
 
-1. **统一存储** — 所有节点（含本地）的能力数据存放在 PeerManager 的同一个 HashMap 中
-2. **自动保护** — 本地节点不被意外的移除、清理、断连操作删除
-3. **Scheduler 统一读取** — 后续 Scheduler 改造时，可从 PeerManager 统一获取所有节点的 `layer_time` 做层划分
+### 调用关系
 
-## 3. 设计
+```
+Orchestrator / Network / Lua
+         │
+         ▼
+  Box<dyn Peer_Management_Capability>    ← capability.rs (trait)
+         │
+         ▼
+       PeerHandle                        ← peer_handle.rs (thin wrapper, Clone)
+         │
+         ▼
+       PeerManager                       ← peer_manager.rs (Arc<RwLock<HashMap>>)
+         │
+         ▼
+  PeerInfo / SupportedModel / PeerProfile ← peer_info.rs (数据结构)
+```
 
-### 3.1 PeerStatus 新增 `Local` 变体
+---
 
-`Src/PeerManagement/peer_info.rs`
+## 2. 数据结构
+
+### 2.1 PeerInfo
+
+节点完整信息，由身份元信息和动态性能画像两层组成。
+
+```
+PeerInfo
+├── 第一层：连接/身份元信息（创建时确定，极少变化）
+│   ├── peer_id: PeerId              — libp2p 节点 ID
+│   ├── addresses: Vec<Multiaddr>    — 网络地址列表
+│   ├── local: bool                  — 是否为本地节点（替代旧 Status::Local）
+│   ├── connected_at: Instant        — 连接建立时间
+│   ├── last_active: Instant         — 最后活跃时间
+│   └── supported_models: Vec<SupportedModel> — 持有的模型列表
+│
+└── 第二层：动态性能画像（运行时频繁更新）
+    └── profile: PeerProfile
+        ├── latency_ms: Option<u64>           — 最后 ping 延迟
+        ├── bandwidth_mbps: Option<u64>       — 带宽
+        ├── memory_mb: Option<u64>            — 空闲内存（动态）
+        └── layer_time: HashMap<String, Duration> — 模型单层耗时
+```
+
+**字段变迁**（与旧版对比）：
+
+| 旧字段 | 去留 | 说明 |
+|--------|------|------|
+| `local` | ✅ 新增 | 替代 Status::Local |
+| `status: PeerStatus` | ❌ 删除 | 不存在即离线，存在即在线 |
+| `latency_ms` | 移入 PeerProfile | 性能指标统一管理 |
+| `bandwidth_mbps` | 移入 PeerProfile | 同上 |
+| `capability: Option<PeerCapability>` | ❌ 删除 | 拆分为 PeerProfile + SupportedModel |
+| `compute_score: f32` | ❌ 删除 | 不需要 |
+| `has_gpu: bool` | ❌ 删除 | 不需要 |
+
+**已删除的类型**：`PeerStatus` 枚举、`PeerCapability` 结构体
+
+### 2.2 SupportedModel
+
+描述节点持有的模型。调度时依据此结构决定模型分配。
 
 ```rust
-pub enum PeerStatus {
-    Local,        // 新增：本地协调节点
-    Connected,    // 已连接，空闲
-    Busy,         // 已连接，忙碌（执行推理任务）
-    Connecting,   // 连接建立中
-    Disconnected, // 已断开连接
+struct SupportedModel {
+    /// 模型唯一标识 — xxhash64(content) → u64
+    /// 同一模型内容在所有节点上产生相同 id，跨节点可直接比对
+    id: u64,
+
+    /// 存储文件名（Storage file_id），便于日志和显示
+    file_name: String,
+
+    /// 256 位层位图
+    /// bit N = 1 表示该节点持有模型第 N 层
+    /// 全量持有: [0xFF; 32]（256 位全 1）
+    /// 分片持有: 仅对应位为 1
+    layer_bitmap: [u8; 32],
 }
 ```
 
-### 3.2 PeerManager 保存 `local_peer_id`
+**设计思想**：
 
-`Src/PeerManagement/peer_manager.rs`
+- **id（xxhash64）**：对模型文件内容计算 xxhash64 → u64。即使同名文件内容不同（微调版、不同量化版），id 也不同，不会误判为同一模型。与 Storage checksum 算法无关，统一使用 xxhash64。
+- **file_name**：人读名称。调度 id 匹配作为"硬匹配"，file_name 作为辅助信息。
+- **layer_bitmap（256 位）**：本质上替代了 `num_layers`。一个节点可以同时表示"我有模型 X 的全部层"（全 1）或"我有模型 X 的切片 10-19"（bit 10~19 = 1）。调度时用位图与运算判断节点是否满足分片需求：
+
+```rust
+// 找持有第 10-19 层的节点
+let mask = ((1u128 << 20) - 1) ^ ((1u128 << 10) - 1);
+peers.iter().filter(|p| {
+    p.supported_models.iter().any(|m| {
+        m.layer_has_range(10, 20) // 内部位图与运算
+    })
+})
+```
+
+### 2.3 PeerProfile
+
+节点动态性能画像，运行时频繁更新。`Update_Profile` 方法接收此结构，字段为 `None` 时跳过不更新，`Some(v)` 时更新为 v。
+
+```rust
+struct PeerProfile {
+    latency_ms: Option<u64>,                         // None ← 跳过不更新
+    bandwidth_mbps: Option<u64>,                     // None ← 跳过不更新
+    memory_mb: Option<u64>,                          // None ← 跳过不更新
+    layer_time: Option<HashMap<String, Duration>>,   // None ← 跳过不更新
+}
+```
+
+更新来源：
+- 心跳 → `latency_ms`
+- 带宽测试 → `bandwidth_mbps`
+- 内存查询 → `memory_mb`
+- 推理 Profiling → `layer_time`
+
+---
+
+## 3. Trait 定义
+
+### 3.1 Peer_Management_Capability
+
+```rust
+pub trait Peer_Management_Capability: Send + Sync {
+    // 查询
+    async fn Get_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error>;
+    async fn Get_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;
+    async fn Contains_Peer(&self, peer_id: &PeerId) -> Result<bool, Peer_Management_Error>;
+    async fn Count(&self) -> Result<usize, Peer_Management_Error>;
+    async fn Is_Empty(&self) -> Result<bool, Peer_Management_Error>;
+
+    // 变更
+    async fn Upsert_Peer(&self, peer_info: PeerInfo);
+    async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;
+    async fn Update_Profile(&self, peer_id: &PeerId, profile: PeerProfile) -> Result<(), Peer_Management_Error>;
+    async fn Update_Supported_Models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> Result<(), Peer_Management_Error>;
+    async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error>;
+    async fn Clear(&self) -> Result<(), Peer_Management_Error>;
+}
+```
+
+### 3.2 与旧版 trait 变更对照
+
+| 旧方法 | 新方法 | 变更 |
+|--------|--------|------|
+| `List_Peers` | `Get_Peers` | 重命名，统一 Get 前缀 |
+| `Get_Peer` | — | 不变 |
+| `Contains_Peer` | — | 不变 |
+| `Count` | — | 不变 |
+| `Get_All_Peer_Ids` | ❌ 删除 | `Get_Peers().iter().map(\|p\| p.peer_id)` 可替代 |
+| `Get_Idle_Peers` | ❌ 删除 | 概念随 PeerStatus 删除 |
+| `Get_Busy_Peers` | ❌ 删除 | 概念随 PeerStatus 删除 |
+| `Add_Peer` | `Upsert_Peer` | 重命名，去掉 Result |
+| `Remove_Peer` | — | 不变 |
+| `Update_Status` | ❌ 删除 | PeerStatus 已删除 |
+| `Update_Heartbeat` | ❌ 删除 | 合并入 Update_Profile |
+| `Update_Capability` | ❌ 删除 | 拆分为 Update_Profile + Update_Supported_Models |
+| `Update_Bandwidth` | ❌ 删除 | 合并入 Update_Profile |
+| `Cleanup_Timeout_Peers` | — | 不变 |
+| `Clear` | — | 不变 |
+| — | `Is_Empty` | 新增（PeerManager 已有实现，未暴露） |
+| — | `Update_Profile` | 新增，替代 Heartbeat/Capability/Bandwidth |
+| — | `Update_Supported_Models` | 新增 |
+
+### 3.3 Peer_Management_Error
+
+```rust
+pub enum Peer_Management_Error {
+    PeerNotFound(String),
+    Timeout,
+    Internal(String),
+}
+```
+
+---
+
+## 4. 核心实现
+
+### 4.1 PeerManager
 
 ```rust
 pub struct PeerManager {
     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
-    local_peer_id: PeerId,  // 新增：本地节点 ID
+    // local_peer_id 字段已移除，本地节点通过 PeerInfo.local 判断
 }
 ```
 
-构造方式变更——从 `Network_Service` 获取 `local_peer_id` 后传入：
-
+**构造器**：
 ```rust
-impl PeerManager {
-    pub fn new(local_peer_id: PeerId) -> Self {
-        Self {
-            peers: Arc::new(RwLock::new(HashMap::new())),
-            local_peer_id,
-        }
+pub fn new(local_peer_id: PeerId) -> Self {
+    let mut peers = HashMap::new();
+    peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id));
+    Self {
+        peers: Arc::new(RwLock::new(peers)),
     }
 }
 ```
+构造时自动创建本地 `PeerInfo` 并插入 map。外部不再需要手动注册。
 
-### 3.3 初始化时注册自己
+**锁方案**：`tokio::sync::RwLock<HashMap>`。心跳等高频写操作存在全局锁竞争风险（见 §7）。
 
-`Src/main.rs`（或 `create_peer_management` 工厂函数）
+### 4.2 保护规则
 
-`local_peer_id` 在 `Network_Service::Init` 中由 `PeerId::from(keypair.public())` 生成。需要提前生成，传入 `PeerManager::new`，然后立即注册自己。
+所有删除/清理操作保护 `local == true` 的节点：
 
-```rust
-// main.rs 初始化顺序调整
-let local_peer_id = PeerId::from(keypair.public());  // 提前生成
+| 方法 | 保护规则 |
+|------|----------|
+| `remove_peer` | 返回 `None` 如果目标 `local == true` |
+| `cleanup_timeout_peers` | `retain` 保留 `info.local == true` |
+| `clear` | `retain` 保留 `info.local == true` |
 
-let peer_manager_arc = Arc::new(PeerManager::new(local_peer_id));
-// 注册本地节点
-let self_info = PeerInfo {
-    peer_id: local_peer_id,
-    addresses: vec![],
-    latency_ms: None,
-    bandwidth_mbps: None,
-    connected_at: Instant::now(),
-    last_active: Instant::now(),
-    status: PeerStatus::Local,
-    capability: Some(PeerCapability::new()),  // 初始能力为空，Profile 后填充
-};
-peer_manager_arc.upsert_peer(self_info).await;
-```
-
-### 3.4 本地节点自动保护
-
-在以下危险操作中内置 `local_peer_id` 检查，不依赖调用方自行过滤：
-
-| 方法 | 改动 |
-|------|------|
-| `remove_peer` | `peer_id == self.local_peer_id` 时拒绝，返回 `None` |
-| `clear` | `retain` 保留 `local_peer_id`，不清空自身 |
-| `cleanup_timeout_peers` | `retain` 中额外判断 `peer_id != self.local_peer_id`，不检查自身超时 |
-| `update_status` | `peer_id == self.local_peer_id` 时拒绝变更为 `Disconnected`/`Connecting`，仅允许 `Local`/`Connected`/`Busy` |
+### 4.3 PeerHandle
 
 ```rust
-/// 移除节点（自动保护本地节点）
-pub async fn remove_peer(&self, peer_id: &PeerId) -> Option<PeerInfo> {
-    if *peer_id == self.local_peer_id {
-        warn!("拒绝移除本地节点");
-        return None;
-    }
-    let mut peers = self.peers.write().await;
-    peers.remove(peer_id)
+#[derive(Clone)]
+pub struct PeerHandle {
+    inner: Arc<PeerManager>,
 }
 ```
 
-### 3.5 查询类方法过滤本地节点
+Thin wrapper。存在的理由：`PeerHandle: Clone` + `impl Peer_Management_Capability`，允许多个调用方各自持有 `Box<dyn Peer_Management_Capability>` 指向同一 `Arc<PeerManager>`。
 
-`get_idle_peers` 和 `get_busy_peers` 供 Scheduler 选取 Worker 使用，应排除 `Local` 状态的节点：
+---
+
+## 5. 工厂函数
 
 ```rust
-/// 获取空闲节点列表（排除 Local，仅含远程 Connected 节点）
-pub async fn get_idle_peers(&self) -> Vec<PeerInfo> {
-    let peers = self.peers.read().await;
-    peers.values()
-        .filter(|p| p.status == PeerStatus::Connected)
-        .cloned()
-        .collect()
-}
-
-/// 获取忙碌节点列表（排除 Local，仅含远程 Busy 节点）
-pub async fn get_busy_peers(&self) -> Vec<PeerInfo> {
-    let peers = self.peers.read().await;
-    peers.values()
-        .filter(|p| p.status == PeerStatus::Busy)
-        .cloned()
-        .collect()
+/// 创建节点管理系统
+/// 返回 (Arc<PeerManager>, Box<dyn Peer_Management_Capability>)
+/// - Arc<PeerManager>：给 main.rs 直接操作（如后续分片注册）
+/// - Box<dyn Peer_Management_Capability>：给 Network
+pub fn create_peer_management(local_peer_id: PeerId) -> (Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
+    let manager = Arc::new(PeerManager::new(local_peer_id));
+    let handle = PeerHandle::new(manager.clone());
+    (manager, Box::new(handle))
 }
 ```
 
-`get_all_peers` / `count` / `get_all_peer_ids` / `is_empty` 保持返回所有节点（含本地），用于 `DisplayPeer` 等展示场景。
+本地 `PeerInfo` 已在 `PeerManager::new()` 内自动创建，调用方无需手动注册。
 
-### 3.6 Scheduler 适配
+---
 
-`Src/Scheduler/service.rs` 当前逻辑：
+## 6. Lua 绑定设计
 
-```rust
-let node_count = workers.len() + 1; // +1 for Coordinator
+Rust 内部按分层存储，Lua 绑定层扁平化输出：
+
+```lua
+-- 扁平化后的 Lua 访问
+p.peer_id         -- PeerInfo.peer_id
+p.local           -- PeerInfo.local
+p.memory_mb       -- profile.memory_mb
+p.latency_ms      -- profile.latency_ms
+p.bandwidth_mbps  -- profile.bandwidth_mbps
+p.supported_models -- { {id=..., file_name=..., bitmap={...}}, ... }
 ```
 
-`workers` 来自 `Get_Idle_Peers`，已自动排除本地节点。Coordinator 的 `layer_time` 将通过 `input.coord_layer_time` 传入（后续改造）。**当前调度逻辑不需要结构性改动**。
+`caps:get_available_peers()` → 内部调用 `Get_Peers()` → 逐字段展平为 Lua table。
 
-后续 Scheduler 改造时，可新增类似 `get_all_peer_layer_times(model_id)` 的方法统一读取所有节点的能力。
+---
 
-### 3.7 Network_Service 适配
+## 7. 已知风险
 
-`Network_Service` 不需要改动 `Remove_Peer` / `Update_Status(Disconnected)` 等危险操作的调用方代码——PeerManager 内部已经自动保护本地节点。
+### 7.1 心跳全局写锁竞争
 
-唯一可能的变化：`Stop` 命令中 `Clear()` 调用。当前 `Clear()` 会保留本地节点，Stop 后本地节点仍然存在，程序退出无所谓。如果未来有动态重启网络的需求，`Clear()` 保留本地节点是正确的行为。
+`Update_Profile`（原 `update_heartbeat`）高频调用时，每次需要获取 `RwLock<HashMap>` 全局写锁。多节点场景下，心跳更新可能阻塞读操作（`Get_Peer`, `Get_Peers`, `Count` 等）。
 
-### 3.8 PeerCapability trait 不变
+- **影响范围**：Network 心跳 → Orchestrator/Scheduler 查询 + Lua 调用链路
+- **当前状态**：沿用现有 `tokio::sync::RwLock<HashMap>` 方案
+- **备用方案**：`DashMap` 分片锁（引入新依赖，同步锁与 tokio 上下文不完美匹配）
 
-`Peer_Management_Capability` trait 的方法签名不变，本地节点的保护由 `PeerManager` 内部完成，对调用方透明。
-
-## 4. 完整修改清单
-
-| 序号 | 文件 | 改动 |
-|------|------|------|
-| 1 | `Src/PeerManagement/peer_info.rs` | `PeerStatus` 新增 `Local` 变体 |
-| 2 | `Src/PeerManagement/peer_manager.rs` | 新增 `local_peer_id` 字段；`new` 接受 `local_peer_id` 参数；`remove_peer` / `clear` / `cleanup_timeout_peers` / `update_status` 四方法内置本地保护；`get_idle_peers` / `get_busy_peers` 按状态字段精确匹配排除 Local |
-| 3 | `Src/PeerManagement/mod.rs` | `create_peer_management` 工厂函数接受 `local_peer_id` 参数，构造后注册自己 |
-| 4 | `Src/main.rs` | 提前生成 `local_peer_id`，传入工厂函数 |
-| 5 | `Src/Scheduler/service.rs` | 无需改动（`Get_Idle_Peers` 已排除本地） |
-| 6 | `Src/Network/network_service.rs` | 无需改动（保护内置于 PeerManager） |
-| 7 | `Src/Orchestrator/Orchestrator_VM/scheduler_handler.rs` | 无需改动 |
-| 8 | `Src/Orchestrator/core/branch_user.rs` | 无需改动（`List_Peers` 返回含本地的列表，自然展示） |
-| 9 | 测试代码 | `PeerManager::new()` 调用需传入 `PeerId::random()` 作为测试用的 `local_peer_id` |
-
-## 5. 不影响的部分
-
-| 组件 | 说明 |
-|------|------|
-| `PeerCapability` 结构体 | 不变 |
-| `PeerInfo` 结构体 | 不变 |
-| `PeerHandle` | 不变（透传） |
-| `Peer_Management_Capability` trait | 方法签名不变 |
-| `Network_Service` 事件处理 | `Add_Peer`/`Remove_Peer` 调用方代码不变 |
-| `Orchestrator_VM` 指令 | 不变 |
-| TUI | 不直接依赖 PeerManager，不变 |
-| Profile 设计 | 回调中写入 `layer_time` 的方式不变，本地节点和远程节点统一通过 `update_capability` 写入 |
-
-## 6. 实施步骤
-
-### Step 1 — 数据结构层
-1. `peer_info.rs` — `PeerStatus` 新增 `Local`
-2. `peer_manager.rs` — 新增 `local_peer_id` + 四种保护 + 查询过滤
-3. `peer_manager.rs` — `new()` 签名变更
-
-### Step 2 — 初始化层
-4. `mod.rs` — `create_peer_management` 接受 `local_peer_id`，注册本地节点
-5. `main.rs` — 提前生成 `local_peer_id`，传入
-
-### Step 3 — 测试适配
-6. 所有测试中 `PeerManager::new()` / `create_peer_management()` 调用适配
-
-### Step 4 — 验证
-7. `cargo test --lib peer_management` 验证
-8. `cargo test` 全量回归
+详见 `design_doc/potential_risk.md`

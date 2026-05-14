@@ -25,6 +25,7 @@ pub struct Pleiades_Config {
     pub Runtime: Option<Runtime_Config>,
     pub Storage: Option<Storage_Config>,
     pub Scheduler: Option<Scheduler_Config>,
+    pub Session: Option<Session_Config>,
 }
 
 /// [Log] 段配置
@@ -71,6 +72,13 @@ pub struct Storage_Config {
 pub struct Scheduler_Config {
     /// 策略: "uniform" 或 "weighted"，默认 "uniform"
     pub strategy: Option<String>,
+}
+
+/// [Session] 段配置
+#[derive(Debug, Deserialize)]
+pub struct Session_Config {
+    /// 最大并发对话槽位数，默认 4
+    pub max_slots: Option<usize>,
 }
 
 /// 读取并解析 config.toml 配置文件

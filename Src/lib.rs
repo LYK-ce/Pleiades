@@ -12,7 +12,7 @@
 //! - ml_engine: ML推理引擎模块
 //! - orchestrator: 编排器模块
 //! - storage: 存储管理模块
-//! - llm_io: LLM 文本交互通道模块
+//! - llm_io: LLM 文本交互通道模块（已升级为 session 模块）
 //! - scheduler: 分布式流水线拓扑调度模块
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
@@ -37,8 +37,8 @@ pub mod orchestrator;
 #[path = "Storage/mod.rs"]
 pub mod storage;
 
-#[path = "LLM_IO/mod.rs"]
-pub mod llm_io;
+#[path = "Session_Manager/mod.rs"]
+pub mod session;
 
 #[path = "Tensor_IO/mod.rs"]
 pub mod tensor_io;
@@ -92,8 +92,8 @@ pub use ml_engine::{
 pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, create_peer_management};
 pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
-// LLM_IO模块类型导出
-pub use llm_io::{LLM_IO_Capability, LLM_IO_Error, IoFrontend, IoHandle, LLM_IO_Broker};
+// Session模块类型导出（原 LLM_IO，已升级为 SessionManager）
+pub use session::{Session_Capability, Session_Error, IoFrontend, IoHandle, SessionManager, SessionInfo};
 
 // Tensor_IO模块类型导出
 pub use tensor_io::{

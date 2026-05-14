@@ -69,7 +69,6 @@ pub(crate) mod test_utils {
         async fn Contains_Peer(&self, _peer_id: &libp2p::PeerId) -> Result<bool, Peer_Management_Error> { Ok(false) }
         async fn Get_Idle_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(vec![]) }
         async fn Count(&self) -> Result<usize, Peer_Management_Error> { Ok(0) }
-        async fn Get_All_Peer_Ids(&self) -> Result<Vec<libp2p::PeerId>, Peer_Management_Error> { Ok(vec![]) }
         async fn Add_Peer(&self, _peer_info: PeerInfo) -> Result<(), Peer_Management_Error> { Ok(()) }
         async fn Remove_Peer(&self, _peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { Err(Peer_Management_Error::PeerNotFound("stub".to_string())) }
         async fn Update_Status(&self, _peer_id: &libp2p::PeerId, _status: PeerStatus) -> Result<(), Peer_Management_Error> { Ok(()) }

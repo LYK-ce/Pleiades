@@ -12,6 +12,6 @@ pub mod identity;
 
 pub use config::{
     Ensure_Config, Log_Config, Network_Config, Pleiades_Config, Read_Config, Runtime_Config,
-    Scheduler_Config, Storage_Config, Update_Config,
+    Scheduler_Config, Session_Config, Storage_Config, Update_Config,
 };
 pub use identity::Ensure_Identity;
