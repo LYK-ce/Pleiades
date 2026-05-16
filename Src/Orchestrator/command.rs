@@ -13,10 +13,25 @@ use tokio::sync::oneshot;
 /// 每个变体携带 `reply` 通道，Core 处理完命令后通过 reply 回传结果。
 /// 前端 `await` 回复即可获得处理结果（非 fire-and-forget）。
 pub enum UserCommand {
+    /// 执行 Lua 策略脚本（通用命令入口）
+    ///
+    /// `command` 对应 `programs/*.lua` 中声明的 `COMMAND` 值，
+    /// `params` 以 `HashMap<String, String>` 传递。
+    /// Core 通过 ProgramRegistry 查找对应脚本，调用 `execute(params, caps)`。
+    ///
+    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 失败原因
+    Execute {
+        command: String,
+        params: std::collections::HashMap<String, String>,
+        reply: oneshot::Sender<Result<JobId, String>>,
+    },
     /// 启动本地推理作业
+    ///
+    /// `script` 为 Lua 脚本路径（用户指定或内置），`model_path` 为模型文件路径。
     ///
     /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 编译或分配失败原因
     Run {
+        script: String,
         model_path: String,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
@@ -70,17 +85,6 @@ pub enum UserCommand {
     Send {
         file_path: String,
         peer_id: String,
-        reply: oneshot::Sender<Result<JobId, String>>,
-    },
-    /// 启动分布式流水线推理
-    ///
-    /// Coordinator 自动完成：分析模型 → 查询可用节点 → 规划拓扑 → 分发模型 → 建立流水线。
-    /// 支持可选策略参数：`uniform`（默认）/ `weighted`。
-    ///
-    /// 回复：`Ok(JobId)` Pipeline Job 已启动；`Err(String)` 任一阶段失败
-    Pipeline {
-        model_path: String,
-        strategy: Option<String>,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
     /// Profile 指定模型的单层推理耗时
@@ -177,32 +181,6 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
             Ok(NetworkProtocol::Establish_Tensor_Stream {
                 inference_id,
                 target_peer_id,
-            })
-        }
-        "JOIN_PIPELINE" => {
-            if parts.len() != 6 {
-                return Err(format!(
-                    "JOIN_PIPELINE 格式错误: 需要 6 个字段, 实际 {}. 格式: JOIN_PIPELINE|inference_id|model_file_id|device|layer_start|layer_end",
-                    parts.len()
-                ));
-            }
-            let inference_id = parts[1]
-                .parse::<u64>()
-                .map_err(|e| format!("inference_id 解析失败: {}", e))?;
-            let model_file_id = parts[2].to_string();
-            let device = parts[3].to_string();
-            let layer_start = parts[4]
-                .parse::<usize>()
-                .map_err(|e| format!("layer_start 解析失败: {}", e))?;
-            let layer_end = parts[5]
-                .parse::<usize>()
-                .map_err(|e| format!("layer_end 解析失败: {}", e))?;
-            Ok(NetworkProtocol::Join_Pipeline {
-                inference_id,
-                model_file_id,
-                device,
-                layer_start,
-                layer_end,
             })
         }
         "JOIN_PIPELINE" => {
