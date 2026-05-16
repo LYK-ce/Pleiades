@@ -83,9 +83,8 @@ pub use ml_engine::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
-pub use ml_engine::{
-    Pipeline_Params, Pipeline_Result, Model_Info,
-};
+pub use ml_engine::MlContext;
+pub use ml_engine::{analyze_model, split_model};
 
 // PeerManagement模块类型导出
 pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, create_peer_management};

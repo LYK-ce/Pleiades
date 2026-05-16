@@ -1,0 +1,1 @@
+ls -la ~/.ssh/id_ed25519 && export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && echo "SSH OK"

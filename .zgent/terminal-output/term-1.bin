@@ -1,0 +1,18 @@
+ls -la ~/.ssh/ 2>/dev/null || echo "NO_SSH_DIR"
+[?2004ltotal 9
+drwxr-xr-x 2 agent agent   6 May 15 07:52 [0m[01;34m.[0m
+drwx------ 5 agent agent  10 May 16 05:44 [01;34m..[0m
+-rw------- 1 agent agent 411 May 15 07:08 id_ed25519
+-rw-r--r-- 1 agent agent  98 May 15 07:08 id_ed25519.pub
+-rw------- 1 agent agent 828 May 15 07:52 known_hosts
+-rw-r--r-- 1 agent agent  92 May 15 07:52 known_hosts.old
+[?2004h[32m>[0m export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && echo "GIT_SSH_COMMAND set" && ssh -T git@github.com 2>&1
+GIT_SSH_COMMAND set
+Hi LYK-ce! You've successfully authenticated, but GitHub does not provide shell access.
+[?2004h[32m>[0m cd /workspace && git remote -v 2>/dev/null || echo "NO_GIT_REPO"
+[?2004lorigin	https://github.com/LYK-ce/Pleiades.git (fetch)
+origin	https://github.com/LYK-ce/Pleiades.git (push)
+[?2004h[32m>[0m cd /workspace && git remote set-url origin git@github.com:LYK-ce/Pleiades.git && git remote -v
+origin	git@github.com:LYK-ce/Pleiades.git (fetch)
+origin	git@github.com:LYK-ce/Pleiades.git (push)
+[?2004h[32m>[0m 

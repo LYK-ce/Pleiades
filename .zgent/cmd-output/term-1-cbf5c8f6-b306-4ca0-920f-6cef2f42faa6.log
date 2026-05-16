@@ -1,0 +1,8 @@
+ls -la ~/.ssh/ 2>/dev/null || echo "NO_SSH_DIR"
+total 9
+drwxr-xr-x 2 agent agent   6 May 15 07:52 .
+drwx------ 5 agent agent  10 May 16 05:44 ..
+-rw------- 1 agent agent 411 May 15 07:08 id_ed25519
+-rw-r--r-- 1 agent agent  98 May 15 07:08 id_ed25519.pub
+-rw------- 1 agent agent 828 May 15 07:52 known_hosts
+-rw-r--r-- 1 agent agent  92 May 15 07:52 known_hosts.old
