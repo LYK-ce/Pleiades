@@ -1,1 +1,4 @@
 ls -la ~/.ssh/id_ed25519 && export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && echo "SSH OK"
+-rw------- 1 agent agent 411 May 15 07:08 /home/agent/.ssh/id_ed25519
+SSH OK
+[?2004h[32m>[0m 

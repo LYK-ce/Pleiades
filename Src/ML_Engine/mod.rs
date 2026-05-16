@@ -38,5 +38,5 @@ pub use gguf_model::{
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
 
-pub use context::MlContext;
+pub use context::MlSession;
 pub use capability::{analyze_model, split_model};

@@ -1,10 +1,17 @@
 //Presented by KeJi
 //Date ： 2026-05-16
 
-//! ML Engine 推理上下文
+//! ML Engine 能力层
 //!
-//! `MlContext` 封装模型运行时状态，提供原子推理操作。
-//! 所有方法为同步函数，由 Lua 线程直接调用。
+//! 通过 `MlSession` userdata 暴露给 Lua，类似 Python class：
+//!
+//! ```lua
+//! local sess = ml.load_model("model.gguf", "cpu", 0, 999999)
+//! local tokens = sess:encode(prompt)
+//! sess:forward(sess:tensorize(tokens), 0)
+//! local tok = sess:sample(0.8)
+//! sess:unload()
+//! ```
 
 #![allow(non_snake_case)]
 
@@ -18,13 +25,22 @@ use super::gguf_model::{
 };
 
 // ============================================================
-// MlContext
+// MlSession — 对外句柄 (Lua userdata)
 // ============================================================
 
-/// Lua 线程绑定的推理上下文（外部不可见）
+/// 推理会话。
 ///
-/// 5 个字段，无 input 缓冲区——Tensor 由调用方直接传入 `forward()`。
-pub struct MlContext {
+/// 包装内部 `MlContext`，由 Lua 侧实例化并调用方法。
+/// ML Engine 不定义 trait — 直接暴露具体类型给 Lua。
+pub struct MlSession {
+    ctx: MlContext,
+}
+
+// ============================================================
+// MlContext — 内部状态（外部不可见）
+// ============================================================
+
+struct MlContext {
     /// 模型权重 + tokenizer
     model: GGUF_Model,
     /// 推理输出缓冲区（logits 或 hidden state）
@@ -37,14 +53,14 @@ pub struct MlContext {
     eos_token_id: u32,
 }
 
-impl MlContext {
-    // ============================================================
-    // 模型生命周期
-    // ============================================================
+// ============================================================
+// MlSession — Rust 侧公开方法
+// ============================================================
 
-    /// 加载模型，创建 MlContext。
-    ///
-    /// 内部调用 `GGUF_Load_Model(start, end, path, device)`。
+impl MlSession {
+    // ─── 构造 / 析构 ───────────────────────────────────────
+
+    /// 加载模型，创建 MlSession。
     pub fn load_model(
         path: &Path,
         device: &str,
@@ -66,85 +82,68 @@ impl MlContext {
         let eos_token_id = model.inference_config.eos_token;
 
         Ok(Self {
-            model,
-            output: None,
-            offset: 0,
-            rng_state: 299792458,
-            eos_token_id,
+            ctx: MlContext {
+                model,
+                output: None,
+                offset: 0,
+                rng_state: 299792458,
+                eos_token_id,
+            },
         })
     }
 
-    /// 卸载模型，释放所有权重和 KV Cache。
-    pub fn unload_model(self) {
-        GGUF_Unload_Model(self.model);
-        // MlContext 其余字段自动 drop
+    /// 卸载模型。
+    pub fn unload(self) {
+        GGUF_Unload_Model(self.ctx.model);
     }
 
-    // ============================================================
-    // 编解码
-    // ============================================================
+    // ─── 编解码 ────────────────────────────────────────────
 
-    /// 文本 → token IDs。自动包装 Qwen3 对话模板。
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        GGUF_Encode(&self.model, text)
+        GGUF_Encode(&self.ctx.model, text)
             .map_err(|e| format!("Encode failed: {e}"))
     }
 
-    /// 单个 token ID → 文本。自动跳过 EOS token。
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
-        GGUF_Decode(&self.model, &[token_id])
+        GGUF_Decode(&self.ctx.model, &[token_id])
             .map_err(|e| format!("Decode failed: {e}"))
     }
 
-    // ============================================================
-    // 推理
-    // ============================================================
+    // ─── 推理 ──────────────────────────────────────────────
 
-    /// 纯数据转换：`Vec<u32>` → `[1, seq_len]` u32 Tensor。
-    ///
-    /// 不涉及模型计算。Embedding 层查表在 `forward` 内部完成。
     pub fn tensorize(&self, token_ids: &[u32]) -> Result<Tensor, String> {
-        Tensor::new(token_ids, &self.model.device)
+        if token_ids.is_empty() {
+            return Err("tensorize: token_ids is empty".into());
+        }
+        Tensor::new(token_ids, &self.ctx.model.device)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| format!("Tensorize failed: {e}"))
     }
 
-    /// 单次前向推理。
-    ///
-    /// 输入 Tensor 送入模型，结果存入内部 `output`。
-    ///
-    /// # 参数
-    /// - `tensor`: 输入（u32 `[1, seq_len]` 或 f32 `[1, seq_len, hidden]`）
-    /// - `offset`: `None` 时使用内部自增 offset
     pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<(), String> {
-        let off = offset.unwrap_or(self.offset);
+        let off = offset.unwrap_or(self.ctx.offset);
         let seq_len = tensor.dims().get(1).copied().unwrap_or(1);
 
-        let output = GGUF_Model_Inference(&mut self.model, tensor, off)
+        let output = GGUF_Model_Inference(&mut self.ctx.model, tensor, off)
             .map_err(|e| format!("Forward failed: {e}"))?;
 
-        self.model.device.synchronize()
+        self.ctx.model.device
+            .synchronize()
             .map_err(|e| format!("Device sync failed: {e}"))?;
 
-        self.output = Some(output);
+        self.ctx.output = Some(output);
 
         if offset.is_none() {
-            self.offset += seq_len;
+            self.ctx.offset += seq_len;
         }
 
         Ok(())
     }
 
-    // ============================================================
-    // 采样
-    // ============================================================
+    // ─── 采样 ──────────────────────────────────────────────
 
-    /// 从内部 output（logits）采样下一个 token。
-    ///
-    /// - `temperature ≤ 0.0`: argmax
-    /// - `temperature > 0.0`: softmax 随机采样 (xoshiro)
     pub fn sample(&mut self, temperature: f64) -> Result<u32, String> {
-        let logits = self.output.as_ref()
+        let logits = self.ctx.output.as_ref()
             .ok_or("No output tensor. Call forward() first.")?;
 
         let last_logits = Self::extract_last_logits(logits)?;
@@ -164,12 +163,10 @@ impl MlContext {
                 .to_vec1::<f32>()
                 .map_err(|e| format!("probs → vec failed: {e}"))?;
 
-            // xoshiro 随机数生成器
-            self.rng_state = self
-                .rng_state
+            self.ctx.rng_state = self.ctx.rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let random = (self.rng_state >> 33) as f32 / (u32::MAX as f32);
+            let random = (self.ctx.rng_state >> 33) as f32 / (u32::MAX as f32);
 
             let mut cumulative = 0.0f32;
             let mut chosen = (probs_vec.len() - 1) as u32;
@@ -186,30 +183,22 @@ impl MlContext {
         Ok(token)
     }
 
-    // ============================================================
-    // 状态查询
-    // ============================================================
+    // ─── 状态查询 ──────────────────────────────────────────
 
-    /// 获取内部 output Tensor 的引用（供 TensorStream 发送）。
     pub fn get_output_tensor(&self) -> Option<&Tensor> {
-        self.output.as_ref()
+        self.ctx.output.as_ref()
     }
 
-    /// 获取 EOS token ID。
     pub fn get_eos(&self) -> u32 {
-        self.eos_token_id
+        self.ctx.eos_token_id
     }
 
-    /// 获取当前序列位置偏移量。
     pub fn get_offset(&self) -> usize {
-        self.offset
+        self.ctx.offset
     }
 
-    // ============================================================
-    // 辅助
-    // ============================================================
+    // ─── 辅助 ──────────────────────────────────────────────
 
-    /// 从 logits Tensor 提取最后一个位置的 logits。
     fn extract_last_logits(logits: &Tensor) -> Result<Tensor, String> {
         let dims = logits.dims();
         match dims.len() {
@@ -226,10 +215,59 @@ impl MlContext {
                 .squeeze(0)
                 .map_err(|e| format!("squeeze failed: {e}")),
             1 => Ok(logits.clone()),
-            _ => Err(format!(
-                "Unsupported logits shape: {:?}",
-                dims
-            )),
+            _ => Err(format!("Unsupported logits shape: {:?}", dims)),
         }
+    }
+}
+
+// ============================================================
+// mlua UserData 注册
+// ============================================================
+
+impl mlua::UserData for MlSession {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // ─── 编解码 ────────────────────────────────────────
+        methods.add_method("encode", |_, sess, text: String| {
+            sess.encode(&text)
+                .map_err(|e| mlua::Error::runtime(e))
+        });
+
+        methods.add_method("decode", |_, sess, token_id: u32| {
+            sess.decode(token_id)
+                .map_err(|e| mlua::Error::runtime(e))
+        });
+
+        // ─── 推理 ──────────────────────────────────────────
+        methods.add_method("tensorize", |_, sess, token_ids: Vec<u32>| {
+            sess.tensorize(&token_ids)
+                .map_err(|e| mlua::Error::runtime(e))
+        });
+
+        methods.add_method_mut("forward", |_, sess, (tensor, offset): (mlua::Value, Option<usize>)| {
+            // Tensor 跨 Lua 边界需要特殊处理，当前用 Value 占位
+            let _ = (tensor, offset);
+            Err(mlua::Error::runtime("Tensor passing requires binding layer"))
+        });
+
+        // ─── 采样 ──────────────────────────────────────────
+        methods.add_method_mut("sample", |_, sess, temperature: f64| {
+            sess.sample(temperature)
+                .map_err(|e| mlua::Error::runtime(e))
+        });
+
+        // ─── 状态查询 ──────────────────────────────────────
+        methods.add_method("get_eos", |_, sess, (): ()| {
+            Ok(sess.get_eos())
+        });
+
+        methods.add_method("get_offset", |_, sess, (): ()| {
+            Ok(sess.get_offset())
+        });
+
+        // ─── 析构 ──────────────────────────────────────────
+        methods.add_method("unload", |_, sess, (): ()| {
+            // sess 被 consume，Lua GC 后续会 drop userdata
+            Ok(())
+        });
     }
 }

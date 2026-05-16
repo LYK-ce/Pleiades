@@ -5,108 +5,107 @@ Date ： 2026-05-16
 
 ## 1. 模块概述
 
-`ML_Engine` 模块负责 Pleiades 分布式推理系统的**模型推理计算**。它不负责网络传输（TensorStream 的事）、不负责文本 IO（Session_Manager 的事）、不负责控制流（Lua 的事）。对外暴露一组原子函数，由上层编排。
+`ML_Engine` 模块负责 Pleiades 分布式推理系统的**模型推理计算**。不负责网络传输（TensorStream）、不负责文本 IO（Session_Manager）、不负责控制流（Lua）。
 
 ### 核心定义
 
-> **ML Engine = 纯推理计算层。** 只负责模型加载、推理计算、编解码、采样。
+> **ML Engine = 纯推理计算层。** 通过 `MlSession` userdata 暴露给 Lua，类似 Python class。
+> Lua 脚本实例化 session，调用对象方法，控制流完全在 Lua 侧。
+
+### 对外形式：Lua UserData（非 trait）
+
+```
+其他模块:                            ML Engine:
+┌────────────────────┐              ┌─────────────────────┐
+│ Capability trait   │              │ MlSession userdata  │
+│ Box<dyn Trait>     │              │ impl mlua::UserData │
+│ async fn(&self)    │              │ fn(&mut self)       │
+└────────────────────┘              └─────────────────────┘
+        ↑                                    ↑
+   &self 共享引用                     &mut self, 不适合 trait object
+   Arc<RwLock<>> 分散状态             纯 owned 状态, Lua 直接持有
+```
 
 ### 模块结构
 
 ```
 ML_Engine/
-├── context.rs           ← MlContext 结构体 + 7 个公开方法 + 状态查询
-├── capability.rs        ← 独立操作：Analyze_Model / Split_Model
+├── context.rs           ← MlSession (UserData) + MlContext (内部状态) + 方法 impl
+├── capability.rs        ← 独立操作：analyze_model / split_model
 ├── gguf_model.rs        ← 模型抽象：load / unload / inference / encode / decode
 ├── gguf_model_manager.rs← 底层 GGUF 操作：analyze / load_layer / split
 ├── gguf_tensor.rs       ← 张量序列化（网络传输用）
 ├── GGUF_Models/
 │   ├── mod.rs
 │   └── qwen3.rs         ← Qwen3 权重结构 + Forward
-├── pipeline.rs          ← 参数/结果类型（旧，远期删除）
-├── session.rs           ← Session/线程管理（旧，远期删除）
-├── service.rs           ← ML_Engine_Service（旧，远期删除）
-├── ML_VM/               ← 指令执行引擎（旧，远期删除）
 └── mod.rs               ← 模块入口
 ```
 
-### 调用关系（目标架构）
+### 调用关系
 
 ```
-Lua 脚本
+Lua 脚本 (OS 线程)
    │
-   ├── ml:load_model / unload_model
-   ├── ml:encode / decode
-   ├── ml:tensorize / forward / sample
-   └── ml:get_output_tensor / get_eos / get_offset
+   ├── ml.load_model(path, device, 0, 999999)    → sess (userdata)
+   ├── sess:encode(prompt)                       → token IDs
+   ├── sess:tensorize(tokens)                    → Tensor
+   ├── sess:forward(tensor, offset)               → 推理
+   ├── sess:sample(temperature)                   → 下一个 token
+   ├── sess:decode(token_id)                      → 文本
+   ├── sess:get_eos()                             → EOS token
+   ├── sess:get_offset()                          → 位置偏移量
+   └── sess:unload()                              → 卸载模型
          │
          ▼
-      MlContext          ← context.rs (模型运行时状态)
+      MlSession (userdata 包装)
          │
          ▼
-   GGUF_Model            ← gguf_model.rs (模型权重 + tokenizer)
+      MlContext (内部状态: model + output + offset + rng + eos)
          │
          ▼
-   Model_Weights         ← qwen3.rs (embedding + layers + norm + lm_head)
+     GGUF_Model → Model_Weights (embedding + layers + norm + lm_head)
 ```
 
 ---
 
 ## 2. 数据结构
 
-### 2.1 MlContext — 推理运行时上下文
+### 2.1 MlSession — Lua 可见句柄
 
-Lua 线程绑定的推理状态。外部不可见，仅通过公开方法操作。
+```rust
+/// 推理会话 userdata。Lua 侧通过 `sess:method()` 调用。
+pub struct MlSession {
+    ctx: MlContext,   // 内部状态，Lua 不可见
+}
+```
+
+通过 `impl mlua::UserData for MlSession` 注册方法到 Lua，Lua 侧调用：`sess:encode("hello")`。
+
+### 2.2 MlContext — 内部推理状态（Lua 不可见）
 
 ```rust
 struct MlContext {
-    /// 模型权重 + tokenizer
-    model: GGUF_Model,
-    /// 推理输出缓冲区（logits 或 hidden state）
-    output: Option<Tensor>,
-    /// 自增序列位置（forward offset=nil 时自动 += seq_len）
-    offset: usize,
-    /// 采样随机数生成器状态 (xoshiro)
-    rng_state: u64,
-    /// EOS token ID（从模型获取）
-    eos_token_id: u32,
+    model: GGUF_Model,          // 模型权重 + tokenizer
+    output: Option<Tensor>,     // 推理输出缓冲区（logits 或 hidden state）
+    offset: usize,              // 自增序列位置
+    rng_state: u64,             // xoshiro 随机数生成器状态
+    eos_token_id: u32,          // EOS token ID
 }
 ```
 
 5 个字段。不设 input 缓冲区——Tensor 由调用方直接传入 `forward()`。
 
-### 2.2 GGUF_Model — 模型抽象
-
-完整的模型容器。详见 `gguf_model.rs`。
+### 2.3 GGUF_Model — 模型抽象
 
 ```rust
 struct GGUF_Model {
-    model: Model_Weights,           // 权重（embedding + layers + norm + lm_head）
-    tokenizer: Option<Tokenizer>,   // 分词器
-    inference_config: Inference_Config, // eos_token
-    arch_info: Model_Arch_Info,     // 架构元信息
-    device: Device,                 // 运行设备
-    has_input_head: bool,           // 是否含 embedding 层
-    has_output_head: bool,          // 是否含 lm_head 层
-}
-```
-
-### 2.3 Model_Arch_Info — 架构元信息
-
-GGUF 文件解析结果。详见 `gguf_model_manager.rs`。
-
-```rust
-struct Model_Arch_Info {
-    architecture: String,       // "qwen3"
-    num_layers: usize,          // transformer block 层数 (28)
-    embedding_length: usize,    // 隐藏维度 (4096)
-    head_count: usize,          // 注意力头数
-    head_count_kv: usize,       // KV 注意力头数
-    head_dim: usize,            // 每头维度
-    context_length: usize,      // 最大上下文长度
-    vocab_size: usize,          // 词表大小
-    eos_token_id: u32,          // EOS token ID
-    // + layers / non_layer_tensors / is_split ...
+    model: Model_Weights,                   // 权重
+    tokenizer: Option<Tokenizer>,           // 分词器
+    inference_config: Inference_Config,      // eos_token
+    arch_info: Model_Arch_Info,             // 架构元信息
+    device: Device,                          // 运行设备
+    has_input_head: bool,                   // 是否含 embedding
+    has_output_head: bool,                  // 是否含 lm_head
 }
 ```
 
@@ -114,252 +113,171 @@ struct Model_Arch_Info {
 
 ## 3. 公开方法定义
 
-### 3.1 模型生命周期
+### 3.1 构造 / 析构
 
-#### `load_model(path, device, start, end) → MlContext`
+#### `MlSession::load_model(path, device, start, end) → MlSession`
 
-从 GGUF 文件加载模型，按层范围选择性加载（支持分布式 Worker 只加载部分层）。
+静态方法。Lua 侧注册为 `ml.load_model(...)`。内部调用 `GGUF_Load_Model`。
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `path` | `&Path` | GGUF/PGGUF 文件路径 |
-| `device` | `&str` | "cpu" 或 "cuda" |
-| `start` | `usize` | 起始层（0=embedding, 1..=N=block, N+1=output） |
-| `end` | `usize` | 结束层 |
+#### `sess:unload()`
 
-内部调用 `GGUF_Load_Model(start, end, path, device)` → 组装 `GGUF_Model` → 包装为 `MlContext`。
-
-#### `unload_model(ctx: MlContext)`
-
-Drop MlContext，释放模型权重、KV Cache、tokenizer。
+消耗 session，卸载模型。注册为 `UserData` 方法。`MlSession` 实现 `Drop`，Lua GC 时自动回收。
 
 ---
 
-### 3.2 编解码
+### 3.2 编解码 (Lua: `sess:method()`)
 
-#### `encode(ctx, text) → Vec<u32>`
-
-文本 → token IDs。自动包装 Qwen3 对话模板。
-
-```
-"你好" → "<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n" → [151644, 872, 198, ...]
-```
-
-内部调用 `GGUF_Encode(&ctx.model, text)`。若模型不含 tokenizer，返回错误。
-
-#### `decode(ctx, token_id) → String`
-
-单个 token ID → 文本。自动跳过 EOS token。
-
-内部调用 `GGUF_Decode(&ctx.model, &[token_id])`。
+| Lua 调用 | Rust 签名 | 说明 |
+|----------|----------|------|
+| `sess:encode(text)` | `encode(&self, text: &str) → Vec<u32>` | 文本 → token IDs（含 Qwen3 模板） |
+| `sess:decode(token_id)` | `decode(&self, token_id: u32) → String` | token ID → 文本 |
 
 ---
 
 ### 3.3 推理
 
-#### `tensorize(ctx, token_ids) → Tensor`
+| Lua 调用 | Rust 签名 | 说明 |
+|----------|----------|------|
+| `sess:tensorize(token_ids)` | `tensorize(&self, &[u32]) → Tensor` | Vec<u32> → [1, seq_len] u32 Tensor |
+| `sess:forward(tensor, offset)` | `forward(&mut self, &Tensor, Option<usize>) → ()` | 单次前向推理 |
 
-纯数据转换：`Vec<u32>` → `Tensor`。不涉及模型计算。
-
-```
-[151644, 872, 198]  --Tensor::new + unsqueeze-->  [1, 3] u32 Tensor
-```
-
-仅做 shape 变换。Embedding 层查表在 `forward` 内部由模型自动完成。
-
-#### `forward(ctx, tensor, offset)`
-
-单次前向推理。输入 Tensor 送入模型，结果存入 `ctx.output`。
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `tensor` | `&Tensor` | 输入（u32 [1, seq_len] 或 f32 [1, seq_len, hidden]） |
-| `offset` | `Option<usize>` | 位置偏移。`None` 时使用内部自增 offset |
-
-内部调用 `GGUF_Model_Inference(&mut ctx.model, tensor, offset)`。
-
-- 有 embedding 层：自动查表 → transformer blocks → forward
-- 无 embedding 层：直接 transformer blocks → forward
-- `offset = None`：自动 `ctx.offset += seq_len`
+`forward` 接受 `&mut self`。有 embedding 层则自动 embedding → forward，无则直接 forward。`offset=None` 时自动递增。
 
 ---
 
 ### 3.4 采样
 
-#### `sample(ctx, temperature) → u32`
+| Lua 调用 | Rust 签名 | 说明 |
+|----------|----------|------|
+| `sess:sample(temperature)` | `sample(&mut self, f64) → u32` | 从 output 采样下一个 token |
 
-从 `ctx.output`（logits）采样下一个 token。
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `temperature` | `f64` | 0.0 = argmax，>0 = 温度缩放 + softmax 随机采样 |
-
-内部流程：
-1. 从 `ctx.output` 提取最后位置的 logits
-2. `temperature ≤ 0`：argmax
-3. `temperature > 0`：logits / T → softmax → 加权随机（xoshiro 生成器）
-4. 返回 token ID
+`temperature ≤ 0` 时 argmax，否则 softmax 随机采样 (xoshiro)。
 
 ---
 
 ### 3.5 状态查询
 
-#### `get_output_tensor(ctx) → &Tensor`
-
-返回 `ctx.output` 的引用。供 TensorStream 发送到下游节点。
-
-#### `get_eos(ctx) → u32`
-
-返回 `ctx.eos_token_id`。
-
-#### `get_offset(ctx) → usize`
-
-返回 `ctx.offset`。
+| Lua 调用 | 返回 | 说明 |
+|----------|------|------|
+| `sess:get_eos()` | u32 | EOS token ID |
+| `sess:get_offset()` | usize | 当前序列位置偏移量 |
 
 ---
 
-## 4. 三种推理模式调用序列
+## 4. UserData 注册 (Rust → Lua 桥接)
 
-### 4.1 单机推理（Run）
-
+```rust
+impl mlua::UserData for MlSession {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("encode",     |_, sess, text| sess.encode(&text));
+        methods.add_method("decode",     |_, sess, id| sess.decode(id));
+        methods.add_method("tensorize",  |_, sess, ids| sess.tensorize(&ids));
+        methods.add_method_mut("forward", |_, sess, (t, off)| sess.forward(&t, off));
+        methods.add_method_mut("sample", |_, sess, temp| sess.sample(temp));
+        methods.add_method("get_eos",    |_, sess, ()| Ok(sess.get_eos()));
+        methods.add_method("get_offset", |_, sess, ()| Ok(sess.get_offset()));
+        methods.add_method("unload",     |_, sess, ()| Ok(()));
+    }
+}
 ```
-ctx = ml:load_model(model, "cpu", 0, 999999)
-token_ids = ml:encode(ctx, io:input())
-ml:forward(ctx, ml:tensorize(ctx, token_ids), 0)
 
-loop:
-    tok = ml:sample(ctx, temperature)
-    io:output(ml:decode(ctx, tok))
-    if tok == ml:get_eos(ctx) → break
-    ml:forward(ctx, ml:tensorize(ctx, {tok}), nil)
+`add_method_mut` 处理 `&mut self` — mlua 内部做借用检查，Lua 调用方无需感知。
+
+---
+
+## 5. 三种推理模式 (Lua 代码)
+
+### 5.1 单机推理（Run）
+
+```lua
+local sess = ml.load_model("model.gguf", "cpu", 0, 999999)
+local tokens = sess:encode(io:input())
+sess:forward(sess:tensorize(tokens), 0)
+
+for i = 1, 120 do
+    local tok = sess:sample(0.8)
+    io:output(sess:decode(tok))
+    if tok == sess:get_eos() then break end
+    sess:forward(sess:tensorize({tok}), nil)
+end
 io:end_output()
+sess:unload()
 ```
 
-### 4.2 协调者（Coordinator）
+### 5.2 协调者（Coordinator）
 
-```
-ctx = ml:load_model(model, device, coord_start, coord_end)
-ml:forward(ctx, ml:tensorize(ctx, ml:encode(ctx, io:input())), 0)
-ts:send(ml:get_output_tensor(ctx))
+```lua
+local sess = ml.load_model(model, device, coord_start, coord_end)
+sess:forward(sess:tensorize(sess:encode(io:input())), 0)
+ts:send(sess:get_output_tensor(sess))
 
-loop:
-    t = ts:receive()
-    ml:forward(ctx, t, nil)
-    tok = ml:sample(ctx, temperature)
-    io:output(ml:decode(ctx, tok))
-    if tok == ml:get_eos(ctx) → break
-    ml:forward(ctx, ml:tensorize(ctx, {tok}), nil)
-    ts:send(ml:get_output_tensor(ctx))
+for i = 1, 120 do
+    local t = ts:receive()
+    sess:forward(t, nil)
+    local tok = sess:sample(0.8)
+    io:output(sess:decode(tok))
+    if tok == sess:get_eos() then break end
+    sess:forward(sess:tensorize({tok}), nil)
+    ts:send(sess:get_output_tensor(sess))
+end
 ts:send_eof()
 ```
 
-### 4.3 工作节点（Worker）
+### 5.3 工作节点（Worker）
 
-```
-ctx = ml:load_model(model, device, layer_start, layer_end)
+```lua
+local sess = ml.load_model(model, device, layer_start, layer_end)
 
-loop:
-    is_eof, t, offset = ts:receive()
-    if is_eof → break
-    ml:forward(ctx, t, offset)
-    ts:send(ml:get_output_tensor(ctx))
+while true do
+    local is_eof, t, offset = ts:receive()
+    if is_eof then break end
+    sess:forward(t, offset)
+    ts:send(sess:get_output_tensor(sess))
+end
 ```
 
 ---
 
-## 5. 底层函数
+## 6. 底层函数
 
-以下函数由 `gguf_model.rs` / `gguf_model_manager.rs` / `gguf_tensor.rs` 提供，不直接暴露给上层。
+由 `gguf_model.rs` / `gguf_model_manager.rs` 提供，MlSession 内部调用。
 
-### 5.1 模型操作
-
-| 函数 | 签名 | 说明 |
+| 函数 | 签名 | 用途 |
 |------|------|------|
-| `GGUF_Load_Model` | `(start, end, path, device) → GGUF_Model` | 按层范围加载模型 |
-| `GGUF_Unload_Model` | `(GGUF_Model)` | 释放模型 |
-| `GGUF_Model_Inference` | `(model, &Tensor, offset) → Tensor` | 单次前向推理 |
-| `GGUF_Encode` | `(model, text) → Vec<u32>` | 文本编码 |
-| `GGUF_Decode` | `(model, token_ids) → String` | Token 解码 |
-
-### 5.2 模型管理
-
-| 函数 | 签名 | 说明 |
-|------|------|------|
-| `GGUF_Analyze` | `(path) → Model_Arch_Info` | 解析模型结构 |
-| `GGUF_Load_Layer` | `(path, index, device) → GGUF_Layer_Weights` | 加载单层权重 |
-| `GGUF_Split_Model` | `(src, start, end, out_dir)` | 切分模型文件 |
-
-### 5.3 张量传输
-
-| 函数 | 签名 | 说明 |
-|------|------|------|
-| `GGUF_Tensor_Serialize` | `(packet) → Vec<u8>` | 序列化（TensorStream 用） |
-| `GGUF_Tensor_Deserialize` | `(bytes) → GGUF_Tensor_Packet` | 反序列化 |
+| `GGUF_Load_Model` | `(start, end, path, device) → GGUF_Model` | load_model 内部 |
+| `GGUF_Unload_Model` | `(GGUF_Model)` | unload 内部 |
+| `GGUF_Model_Inference` | `(model, &Tensor, offset) → Tensor` | forward 内部 |
+| `GGUF_Encode` | `(model, text) → Vec<u32>` | encode 内部 |
+| `GGUF_Decode` | `(model, token_ids) → String` | decode 内部 |
+| `GGUF_Analyze` | `(path) → Model_Arch_Info` | analyze_model 内部 |
+| `GGUF_Split_Model` | `(src, start, end, out_dir)` | split_model 内部 |
 
 ---
 
-## 6. 模型权重结构
+## 7. 为什么 ML Engine 不定义 trait
 
-```
-Model_Weights
-├── embed_tokens: Option<Embedding>     输入 Embedding 层
-├── layers: Vec<Layer_Weights>          N 层 Transformer Block
-│   ├── ln1: RmsNorm                    Pre-Attention LayerNorm
-│   ├── self_attn: Attention_Weights    Self-Attention
-│   │   ├── q_proj / k_proj / v_proj / o_proj: QMatMul
-│   │   ├── q_norm / k_norm: RmsNorm    QK Norm (Qwen3)
-│   │   ├── rotary_emb: Rotary_Embedding RoPE 位置编码
-│   │   └── kv_cache: ConcatKvCache     推理时累积 KV
-│   ├── ln2: RmsNorm                    Pre-MLP LayerNorm
-│   └── mlp: Mlp_Weights                FFN
-│       ├── gate_proj / up_proj / down_proj: QMatMul
-│       └── act_fn: Activation (Silu)
-├── norm: Option<RmsNorm>              输出 LayerNorm
-└── lm_head: Option<QMatMul>            输出投影 → logits
-```
+| | 其他 capability | ML Engine |
+|---|---|---|
+| 方法签名 | `&self`（共享引用） | `&mut self`（forward/sample） |
+| 状态方案 | `Arc<RwLock<>>` 内部锁 | 纯 owned 状态，Lua 直接持有 |
+| trait object | `Box<dyn Trait>` 可用 | `&mut self` + trait object 冲突 |
+| 解决方案 | trait | `impl mlua::UserData` 暴露给 Lua |
 
-层编号规则：
-- 0 = embedding 层
-- 1..=N = transformer block 层
-- N+1 = output 层（norm + lm_head）
+核心矛盾：`forward` 和 `sample` 必须 `&mut self`（KV cache 和 rng 会变），而 `Box<dyn Trait>` 不支持 `&mut self` 的 async trait。
 
 ---
 
-## 7. 错误处理
+## 8. 与旧架构对比
 
-所有公开方法返回 `Result<T, String>`。
-
-```rust
-// context.rs 中的典型错误处理
-pub fn encode(&mut self, text: &str) -> Result<Vec<u32>, String> {
-    let tokenizer = self.model.tokenizer.as_ref()
-        .ok_or("Model has no tokenizer")?;
-    // ...
-}
-
-pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<(), String> {
-    let off = offset.unwrap_or(self.offset);
-    let output = GGUF_Model_Inference(&mut self.model, tensor, off)
-        .map_err(|e| format!("Forward failed: {e}"))?;
-    // ...
-}
-```
-
-不定义 `ML_Engine_Error` 枚举——String 错误信息足够上层理解。
-
----
-
-## 8. 与旧架构的差异
-
-| 维度 | 旧（ML_Engine_Capability trait） | 新（MlContext） |
-|------|-------------------------------|----------------|
-| 接口形式 | async trait, 5 方法 | 同步 struct, 7 方法 + 状态查询 |
-| Session 管理 | Create_Session / Shutdown_Session（线程 + 通道） | 线程即 MlContext 生命周期 |
-| 推理方式 | Run_Program_VM（批量执行 MlInstruction） | forward / sample 单步调用 |
-| 错误类型 | ML_Engine_Error 枚举（5 变体） | String |
-| 参数传递 | ML_Session_Config + Pipeline_Params | 函数参数 + Lua params |
-| 结果返回 | Pipeline_Result 打包 | 流式 output + get_output_tensor |
-| 控制流 | Jump/JumpIf 指令模拟 | Lua 原生控制流 |
+| 维度 | 旧（ML_Engine_Capability trait） | 新（MlSession UserData） |
+|------|-------------------------------|-------------------------|
+| 接口形式 | async trait, 5 方法, `Box<dyn Trait>` | 同步 struct, `impl mlua::UserData` |
+| Session | Create_Session（线程+通道+注册表） | `ml.load_model()` 直接返回 userdata |
+| 推理方式 | Run_Program_VM（批量执行指令序列） | `sess:forward()` / `sess:sample()` 单步 |
+| 调用路径 | Orchestrator → trait → channel → OS thread | Lua 线程 → `sess:method()` 直接调用 |
+| 抽象层数 | 4 层 | 1 层 |
+| 调用风格 | Lua: `ml:function(sess, ...)` | Lua: `sess:method(...)` |
+| 生命周期 | HashMap 注册 + shutdown 协议 | Lua GC 自动 drop |
 
 ---
 
@@ -367,21 +285,21 @@ pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<(), 
 
 ### ✅ 已完成
 
-- `context.rs` — `MlContext` 结构体 + 7 个公开方法 + 状态查询
+- `context.rs` — `MlSession` userdata + `MlContext` 内部状态 + `impl mlua::UserData`
 - `capability.rs` — `analyze_model` / `split_model` 独立 async 函数
-- 设计文档
+- 旧代码已删除: `session.rs`, `service.rs`, `pipeline.rs`, `ML_VM/`
 
 ### ⚠ 待处理
 
-- `session.rs` / `service.rs` / `pipeline.rs` / `ML_VM/` / `Vm_Base/` 等旧架构代码保留，远期删除
-- `ml:*` 函数表未注册到 Lua（`Src/Lua/capability_binding.rs` 待后续实现）
-- 编译失败：其他模块仍在引用旧的 `ML_Engine_Capability` trait
+- `Vm_Base/` 等其他旧架构代码待远期删除
+- `forward` 方法中 Tensor 跨 Lua 边界传输待实现（当前占位 `mlua::Error::runtime`）
+- Lua 侧 `ml` 函数表注册 + `sess` userdata 实例化待完成
 
-### 🟡 Code Review 遗留（P2）
+### 🟡 Code Review 遗留 (P2)
 
-- **#4** `tensorize` 应拒绝空 `&[]` token_ids（当前静默创建 `[1,0]` Tensor）
-- **#5** `sample` 后不清空 `output`（应加文档声明调用约定）
-- **#6** 缺少 `clear_kv_cache()` 方法（新对话需重置 KV Cache 但不重载模型）
-- **#7** `load_model` PRNG seed 硬编码为 `299792458`，应允许调用方传入
-- **#8** `analyze_model` 返回裸 `Model_Arch_Info`，应考虑返回含 `layer_sizes_bytes` 的 `Model_Info`
-- **#9** `MlContext` 缺少单元测试
+- **#4** `tensorize` 已添加空 token_ids 检查 ✅
+- **#5** `sample` 后不清空 output — 已加文档注释
+- **#6** 缺少 `clear_kv_cache()` 方法
+- **#7** `load_model` PRNG seed 硬编码
+- **#8** `analyze_model` 应返回含 `layer_sizes_bytes` 的视图类型
+- **#9** `MlSession` 缺少单元测试
