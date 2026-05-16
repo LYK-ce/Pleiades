@@ -9,7 +9,7 @@ use libp2p::PeerId;
 use crate::vm_base::{StepResult, SlotId};
 use crate::orchestrator::command::{NetworkProtocol, Serialize_Network_Command};
 use crate::orchestrator::program_selector::{SLOT_MODEL, SLOT_TENSOR_IO, SLOT_LAYER_START, SLOT_LAYER_END};
-use crate::network::stream_protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
+use crate::network::file_stream::protocol::{Write_File_Stream_Header, Read_File_Stream_Ack};
 use crate::network::tensor_stream_protocol::Write_Tensor_Stream_Handshake;
 use crate::network::DataType;
 use crate::storage::{StorageCapability, ChecksumAlgorithm};

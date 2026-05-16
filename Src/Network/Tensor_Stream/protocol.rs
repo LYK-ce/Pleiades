@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Date ： 2026-05-14
 
 //! 张量流式传输协议模块
 //!
@@ -8,7 +8,7 @@
 //! 本模块使用 libp2p::stream 提供的持久化双向流，
 //! 张量以 fire-and-forget 方式发送，无需等待 ACK。
 //!
-//! ## 帧格式
+//! ## 帧格式（占位，待多 batch 支持细化）
 //! +-------------------+--------------------+---------------------+
 //! |   Offset          |   Tensor Length    |   Raw Tensor Data   |
 //! |   8 bytes u64 LE  |   8 bytes u64 LE  |   Length bytes      |
@@ -22,10 +22,6 @@
 //!
 //! 发送方写入 [offset][length][data]，接收方读取 header 后精确读取 data。
 //! 使用长度前缀保证帧边界，支持 Prefill (~8MB) 和 Decode (~16KB) 不同大小的张量。
-//!
-//! ## 已迁移
-//! `Tensor_IO_Handle` 已被 `Tensor_IO_Endpoint`（`Src/Tensor_IO` 模块）替代。
-//! 本模块保留帧格式函数供 `Tensor_IO_Endpoint` 内部调用。
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -208,35 +204,36 @@ pub async fn Send_EOF(stream: &mut libp2p::Stream) -> io::Result<()> {
 }
 
 // ============================================================
-// Tensor Stream Handshake — 流建立时的 JobId 交换
+// Tensor Stream Handshake — 流建立时的 inference_id 交换
 // ============================================================
 
 /// 写入 Tensor Stream Handshake 帧（8 字节）
 ///
-/// 发起方在 open_tensor_stream 后调用，写入 target_job_id
-/// 供接收方 Core 读取并路由到正确的 Job。
+/// 发起方在 open_tensor_stream 后调用，写入 inference_id
+/// 供接收方 Network_Service 读取并路由到正确的 rendezvous。
 ///
 /// # 参数
 /// - `stream`: 已打开的出站流
-/// - `target_job_id`: 接收方的 JobId（u64）
+/// - `inference_id`: 推理会话全局唯一标识（u64）
 pub async fn Write_Tensor_Stream_Handshake(
     stream: &mut libp2p::Stream,
-    target_job_id: u64,
+    inference_id: u64,
 ) -> io::Result<()> {
-    stream.write_all(&target_job_id.to_le_bytes()).await?;
+    stream.write_all(&inference_id.to_le_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
 
 /// 读取 Tensor Stream Handshake 帧（8 字节）
 ///
-/// 接收方 Core 从入站流读取 target_job_id，用于路由到正确的 Job。
+/// 接收方 Network_Service 从入站流读取 inference_id，
+/// 用于 rendezvous 匹配。
 ///
 /// # 参数
 /// - `stream`: 入站流
 ///
 /// # 返回
-/// - target_job_id（u64）
+/// - inference_id（u64）
 pub async fn Read_Tensor_Stream_Handshake(
     stream: &mut libp2p::Stream,
 ) -> io::Result<u64> {

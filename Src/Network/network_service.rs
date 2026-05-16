@@ -51,8 +51,9 @@ use super::inbound_manager::Inbound_Manager;
 use super::outbound_manager::Outbound_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 use super::capability::{Network_Inbound_Event, Network_Service_Capability};
-use super::stream_protocol::FILE_STREAM_PROTOCOL;
-use super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL;
+use super::file_stream::protocol::FILE_STREAM_PROTOCOL;
+use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
+use super::tensor_stream::rendezvous::RendezvousMap;
 
 // 导入 PeerManagement 模块
 use crate::peer_management::{PeerInfo, PeerStatus, Peer_Management_Capability};
@@ -148,6 +149,11 @@ pub struct Network_Service {
     file_accept_control: stream::Control,
     /// 张量流控制句柄（用于 Start() 中 accept 入站张量流）
     tensor_accept_control: stream::Control,
+
+    // ===== Tensor Stream Rendezvous =====
+
+    /// 张量流双向匹配器（与 Network_Service_Capability 共享）
+    rendezvous: Arc<RendezvousMap>,
 }
 
 impl Network_Service {
@@ -259,11 +265,15 @@ impl Network_Service {
         // 7. 创建 NodeHandle（传入超时配置）
         let handle = NodeHandle::New(cmd_tx, local_peer_id, config.request_response_timeout);
 
+        // 7.1 创建 RendezvousMap（Network_Service 和 Capability 共享）
+        let rendezvous = Arc::new(RendezvousMap::new());
+
         // 8. 创建 Network_Service_Capability（用于 Orchestrator）
         let capability = Network_Service_Capability::New(
             handle.clone(),
             file_open_control,
             tensor_open_control,
+            rendezvous.clone(),
         );
 
         // 9. 创建 Network_Service 实例
@@ -279,6 +289,7 @@ impl Network_Service {
             orchestrator_event_tx,
             file_accept_control,
             tensor_accept_control,
+            rendezvous,
         };
 
         // 添加引导节点
@@ -347,15 +358,18 @@ impl Network_Service {
                         }
                     ).await;
                 }
-                // 处理入站张量流 → 转发给 Orchestrator
-                Some((peer_id, stream)) = incoming_tensor_streams.next() => {
-                    info!("收到入站张量流 from {}, 转发给 Orchestrator", peer_id);
-                    let _ = self.orchestrator_event_tx.send(
-                        Network_Inbound_Event::TensorStreamArrived {
-                            peer: peer_id,
-                            stream,
+                // 处理入站张量流 → 读 handshake → rendezvous 匹配
+                Some((peer_id, mut stream)) = incoming_tensor_streams.next() => {
+                    info!("收到入站张量流 from {}", peer_id);
+                    match super::tensor_stream::protocol::Read_Tensor_Stream_Handshake(&mut stream).await {
+                        Ok(inference_id) => {
+                            info!("张量流 handshake: inference_id={}", inference_id);
+                            self.rendezvous.insert_inbound(inference_id, stream);
                         }
-                    ).await;
+                        Err(e) => {
+                            warn!("张量流 handshake 读取失败 from {}: {}", peer_id, e);
+                        }
+                    }
                 }
             }
         }

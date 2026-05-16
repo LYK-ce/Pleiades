@@ -45,7 +45,7 @@
 ### 命令约定
 
 - **内置命令**（无前缀）：`ls` `display peer` `set device` `quit` `cancel` `reload` — 由 Core 直接调用能力接口，不走 Lua
-- **程序命令**（`/` 前缀）：`/pipeline` `/profile` `/hello` — 去 `programs/` 目录查找同名 `.lua` 脚本，创建一个 tokio task + Lua 实例来执行
+- **程序命令**：`run <script> <model>` — 创建 ML Thread，在其中加载并执行用户指定的 Lua 脚本，传入模型名；`/profile` `/hello` — 去 `programs/` 目录查找同名 `.lua` 脚本，创建一个 tokio task + Lua 实例来执行
 
 ## 2. 架构变更总览
 
@@ -213,4 +213,5 @@ Phase 3 之前，现有系统完全不受影响。Phase 4 才做删除。
 | 新旧路径行为不一致 | Phase 3 逐命令对比验证后再切换 |
 | `Lua` 实例非 Send | 每个 Job 独立创建 `Lua` 实例，在各自 tokio task 中运行，天然隔离 |
 
-
+协商协议
+冲突回退算法

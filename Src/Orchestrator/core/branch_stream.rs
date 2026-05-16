@@ -19,7 +19,7 @@ use crate::orchestrator::program_selector::SLOT_RECEIVE_STREAM;
 use crate::orchestrator::orchestrator_vm::OrchestratorSlotValue;
 use crate::network::Network_Inbound_Event;
 use crate::network::tensor_stream_protocol::Read_Tensor_Stream_Handshake;
-use crate::network::stream_protocol::{Read_File_Stream_Header, Write_File_Stream_Ack};
+use crate::network::file_stream::protocol::{Read_File_Stream_Header, Write_File_Stream_Ack};
 use crate::event_bus::Bus_Event;
 use crate::storage::StorageCapability;
 

@@ -1,12 +1,10 @@
 //Presented by KeJi
-//Date ： 2026-04-29
+//Date ： 2026-05-15
 
-//! 流式传输协议模块
+//! 文件流式传输协议
 //!
-//! 定义文件流式传输协议，用于大文件的分块传输。
-//! 与 data_protocol.rs 中的请求响应协议不同，
-//! 本模块使用 libp2p::stream 提供的原始双向流进行分块传输，
-//! 数据不需要全部加载到内存。
+//! 定义文件流式传输的 in-band header、ACK 握手和分块数据传输协议。
+//! 位于 `File_Stream` 子目录下，与 `Tensor_Stream` 对称。
 //!
 //! ## In-band Header 方案
 //!

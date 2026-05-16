@@ -14,6 +14,7 @@
 //! - storage: 存储管理模块
 //! - llm_io: LLM 文本交互通道模块（已升级为 session 模块）
 //! - scheduler: 分布式流水线拓扑调度模块
+//! - tensor_stream: 张量流子模块（Network 模块内部）
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
 //! - vm: 虚拟机执行骨架模块
@@ -40,9 +41,6 @@ pub mod storage;
 #[path = "Session_Manager/mod.rs"]
 pub mod session;
 
-#[path = "Tensor_IO/mod.rs"]
-pub mod tensor_io;
-
 #[path = "Scheduler/mod.rs"]
 pub mod scheduler;
 
@@ -64,8 +62,8 @@ pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
 pub use network::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
 pub use network::data_protocol;
-pub use network::stream_protocol;
-pub use network::tensor_stream_protocol;
+pub use network::file_stream::protocol;
+pub use network::tensor_stream;
 pub use network::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
     Tensor_Buffer,
@@ -95,11 +93,6 @@ pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 // Session模块类型导出（原 LLM_IO，已升级为 SessionManager）
 pub use session::{Session_Capability, Session_Error, IoFrontend, IoHandle, SessionManager, SessionInfo};
 
-// Tensor_IO模块类型导出
-pub use tensor_io::{
-    Tensor_Port_Switch, Tensor_IO_Endpoint,
-    Tensor_IO_Error, FailureReport,
-};
 
 // Scheduler模块类型导出
 pub use scheduler::{Scheduler_Capability, Scheduler_Strategy, Scheduler_Error, Scheduler_Input, Pipeline_Plan, Worker_Assignment, Scheduler_Service, Scheduler_Weighted};

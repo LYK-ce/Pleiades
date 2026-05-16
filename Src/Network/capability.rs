@@ -26,8 +26,8 @@ use std::path::Path;
 
 use super::data_protocol::{DataType, Network_Data};
 use super::node_handle::NodeHandle;
-use super::stream_protocol::{FILE_STREAM_PROTOCOL, Send_File_Data, Receive_File_Data};
-use super::tensor_stream_protocol::TENSOR_STREAM_PROTOCOL;
+use super::file_stream::protocol::{FILE_STREAM_PROTOCOL, Send_File_Data, Receive_File_Data};
+use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
 
 // ===== 错误类型 =====
 
@@ -217,26 +217,37 @@ pub trait Network_Capability: Send + Sync {
     ) -> Result<(), Network_Error>;
 
     // ========================================
-    // 张量流（直接操作 stream::Control）
+    // 张量流（直接操作 stream::Control + RendezvousMap）
     // ========================================
 
-    /// 打开到目标节点的张量流连接
+    /// 打开到目标节点的张量流（自动写入 handshake）
     ///
-    /// 返回 raw `libp2p::Stream`，由 ML Engine 的 `Tensor_IO_Handle` 持有。
+    /// 返回 raw `libp2p::Stream`，由 ML Thread Lua 持有。
     ///
     /// # 参数
     /// - `peer`: 目标节点 ID
+    /// - `inference_id`: 推理会话唯一标识，写入 handshake 供对端 rendezvous 匹配
     ///
     /// # 返回
-    /// 已打开的 `libp2p::Stream`
+    /// 已打开并完成 handshake 的 `libp2p::Stream`
+    async fn open_tensor_stream(
+        &self, peer: PeerId, inference_id: u64,
+    ) -> Result<libp2p::Stream, Network_Error>;
+
+    /// 等待对端发来的张量流（rendezvous 匹配）
     ///
-    /// # 用法
-    /// ```ignore
-    /// let outbound = network.open_tensor_stream(peer).await?;
-    /// // 入站 stream 由 Network_Inbound_Event::TensorStreamArrived 提供
-    /// let handle = Tensor_IO_Handle::New(inbound, outbound, rt);
-    /// ```
-    async fn open_tensor_stream(&self, peer: PeerId) -> Result<libp2p::Stream, Network_Error>;
+    /// 通过 RendezvousMap 匹配对端 open_tensor_stream 发来的入站流。
+    /// 内部 block_on oneshot，可指定超时时间。
+    ///
+    /// # 参数
+    /// - `inference_id`: 推理会话唯一标识
+    /// - `timeout_secs`: 超时秒数
+    ///
+    /// # 返回
+    /// 匹配到的入站 `libp2p::Stream`，或超时错误
+    async fn accept_tensor_stream(
+        &self, inference_id: u64, timeout_secs: u64,
+    ) -> Result<libp2p::Stream, Network_Error>;
 
     // ========================================
     // DHT（委托 NodeHandle）
@@ -337,6 +348,8 @@ pub struct Network_Service_Capability {
     file_stream_control: stream::Control,
     /// 张量流直接 open（不经过 Network_Service 事件循环）
     tensor_stream_control: stream::Control,
+    /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
+    tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
 }
 
 impl Network_Service_Capability {
@@ -346,15 +359,18 @@ impl Network_Service_Capability {
     /// - `node_handle`: NodeHandle（可 Clone，用于命令通道操作）
     /// - `file_stream_control`: 文件流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_stream_control`: 张量流的 stream::Control（由 Network_Service::Init 创建）
+    /// - `tensor_rendezvous`: RendezvousMap（与 Network_Service Event Loop 共享）
     pub fn New(
         node_handle: NodeHandle,
         file_stream_control: stream::Control,
         tensor_stream_control: stream::Control,
+        tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
     ) -> Self {
         Self {
             node_handle,
             file_stream_control,
             tensor_stream_control,
+            tensor_rendezvous,
         }
     }
 }
@@ -441,15 +457,36 @@ impl Network_Capability for Network_Service_Capability {
     }
 
     // ========================================
-    // 张量流（直接操作 stream::Control）
+    // 张量流（直接操作 stream::Control + RendezvousMap）
     // ========================================
 
-    async fn open_tensor_stream(&self, peer: PeerId) -> Result<libp2p::Stream, Network_Error> {
-        self.tensor_stream_control
+    async fn open_tensor_stream(
+        &self, peer: PeerId, inference_id: u64,
+    ) -> Result<libp2p::Stream, Network_Error> {
+        let mut stream = self.tensor_stream_control
             .clone()
             .open_stream(peer, StreamProtocol::new(TENSOR_STREAM_PROTOCOL))
             .await
-            .map_err(|e| Network_Error::StreamOpenFailed(format!("tensor stream: {}", e)))
+            .map_err(|e| Network_Error::StreamOpenFailed(format!("tensor stream: {}", e)))?;
+
+        super::tensor_stream::protocol::Write_Tensor_Stream_Handshake(&mut stream, inference_id)
+            .await
+            .map_err(|e| Network_Error::StreamIoError(format!("handshake: {}", e)))?;
+
+        Ok(stream)
+    }
+
+    async fn accept_tensor_stream(
+        &self, inference_id: u64, timeout_secs: u64,
+    ) -> Result<libp2p::Stream, Network_Error> {
+        let rx = self.tensor_rendezvous.register_accept(inference_id);
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(_)) => Err(Network_Error::StreamIoError("rendezvous sender dropped".into())),
+            Err(_) => Err(Network_Error::Timeout(format!(
+                "accept_tensor_stream timeout after {}s", timeout_secs
+            ))),
+        }
     }
 
     // ========================================

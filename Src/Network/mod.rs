@@ -16,7 +16,7 @@
 //! ### Capability trait（推荐）
 //! - `Network_Capability`: 统一 trait，覆盖请求-响应、连接管理、文件流、张量流、DHT
 //! - `Network_Service_Capability`: 基于 NodeHandle + stream::Control 的 Capability 实现
-//! - `Network_Inbound_Event`: 入站文件流/张量流事件，由 Network_Service 转发给 Orchestrator
+//! - `Network_Inbound_Event`: 入站文件流事件，由 Network_Service 转发给 Orchestrator（张量流已改为 rendezvous 匹配，不再转发）
 //!
 //! ### 底层操作（通过 NodeHandle）
 //! - `Send_Data`: 发送数据并等待确认（同步语义）
@@ -35,27 +35,28 @@ pub mod capability;
 pub mod network_service;
 pub mod node_handle;
 pub mod data_protocol;
-pub mod stream_protocol;
-pub mod tensor_stream_protocol;
+pub mod file_stream;
+pub mod tensor_stream;
 pub mod inbound_manager;
 pub mod outbound_manager;
-
 
 // 重新导出常用类型
 pub use capability::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
 pub use network_service::{NetworkConfig, Network_Service};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
 pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
-pub use stream_protocol::{
+pub use file_stream::{
     FILE_STREAM_PROTOCOL, CHUNK_SIZE,
     FILE_HEADER_ACCEPT, FILE_HEADER_REJECT,
     Write_File_Stream_Header, Read_File_Stream_Header,
     Write_File_Stream_Ack, Read_File_Stream_Ack,
     Send_File_Data, Receive_File_Data,
 };
-pub use tensor_stream_protocol::{
+pub use tensor_stream::protocol::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
     Tensor_Buffer,
     Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF,
     Write_Tensor_Stream_Handshake, Read_Tensor_Stream_Handshake,
 };
+pub use tensor_stream::rendezvous::RendezvousMap;
+
