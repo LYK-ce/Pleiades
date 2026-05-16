@@ -23,7 +23,7 @@ Date ： Current date
 # 工作流程
 在根目录下包含以下内容：
 1. task.md  此文件指定agent需要执行的任务，agent不得进行修改。
-2. Workbook目录 此目录中包含workbook文件，每个文件命名方式为workbook_year_month_day.md，每一天都有一个独立的workbook文件，用于agent记录工作进度，作为工作上下文，agent在完成每一项任务后必须记录必要信息和重要细节。若文件不存在，agent应创建一个。采用最高效,最精简的记录方式,无需考虑人类可读性。确保workbook.md若启动新的agent，其可快速切换至当前工作上下文，并基于现有的 workbook.md 文件继续工作。如果task.md当中的任务和workbook.md文件当中的任务有冲突，那么按照task.md中的要求进行任务。
+2. Workbook目录 此目录中包含workbook文件，每个文件命名方式为workbook_<task_name>.md，每一个任务都有一个独立的workbook文件，用于agent记录工作进度，作为工作上下文，agent在完成每一项任务后必须记录必要信息和重要细节。若文件不存在，agent应创建一个。采用最高效,最精简的记录方式,无需考虑人类可读性。确保workbook.md若启动新的agent，其可快速切换至当前工作上下文，并基于现有的 workbook.md 文件继续工作。如果task.md当中的任务和workbook.md文件当中的任务有冲突，那么按照task.md中的要求进行任务。
 3. problem.md 此文件用于总结并记录当前人类与agent讨论的问题。
 
 Agents 必须按照如下的工作流程进行工作
