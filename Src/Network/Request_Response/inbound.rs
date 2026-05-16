@@ -24,8 +24,8 @@ use libp2p::{
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
-use super::data_protocol::Network_Data;
-use super::node_handle::InboundRequest;
+use super::codec::Network_Data;
+use super::super::node_handle::InboundRequest;
 
 // ============================================================
 // Inbound_Manager

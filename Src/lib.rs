@@ -61,9 +61,10 @@ pub use network::{NetworkConfig, Network_Service, NodeCommand, NodeHandle};
 pub use network::{DataType, Network_Data};
 pub use network::InboundRequest;
 pub use network::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
-pub use network::data_protocol;
+pub use network::request_response;
 pub use network::file_stream::protocol;
 pub use network::tensor_stream;
+pub use network::bandwidth_stream;
 pub use network::{
     TENSOR_STREAM_PROTOCOL, TENSOR_EOF_OFFSET,
     Tensor_Buffer,

@@ -1,9 +1,9 @@
 //Presented by KeJi
 //Date ： 2026-04-08
 
-//! 网络协议定义模块
+//! Request-Response 编解码模块
 //!
-//! 统一数据协议（Data Protocol）：网络层只负责发送和接收字节流，
+//! TLV（Type-Length-Value）帧格式编解码器：网络层只负责发送和接收字节流，
 //! 不负责序列化/反序列化。采用 TLV（Type-Length-Value）帧格式。
 //!
 //! 帧格式:
@@ -38,8 +38,6 @@ pub enum DataType {
     File = 2,
     /// 信息通知（节点状态、能力描述等元信息交换）
     Info = 4,
-    /// 带宽测试消息
-    BandwidthTest = 5,
 }
 
 impl DataType {
@@ -50,7 +48,6 @@ impl DataType {
             1 => Ok(DataType::Data),
             2 => Ok(DataType::File),
             4 => Ok(DataType::Info),
-            5 => Ok(DataType::BandwidthTest),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown DataType: {}", v),

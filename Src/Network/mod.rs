@@ -9,7 +9,7 @@
 //! - 统一数据传输（命令/数据/文件通知）
 //! - 文件流传输（纯 raw data，元数据通过 Request-Response 协商）
 //! - 张量流传输（持久化 stream，用于 pipeline 推理）
-//! - DHT分布式存储
+//! - 带宽流传输（iperf 风格固定时长推流测速）
 //!
 //! ## 对 Orchestrator 暴露的接口
 //!
@@ -26,25 +26,25 @@
 //! - `InboundRequest`: 其他节点发来的数据请求
 //!
 //! ## 内部组件
-//! - `inbound_manager`: 入站请求与响应路由管理
-//! - `outbound_manager`: 出站响应路由管理
+//! - `request_response`: 请求-响应传输子系统（编解码、入站路由、出站路由）
 //!
 //! 网络层只负责发送和接收字节流，不负责序列化/反序列化。
 
 pub mod capability;
 pub mod network_service;
 pub mod node_handle;
-pub mod data_protocol;
+pub mod request_response;
 pub mod file_stream;
 pub mod tensor_stream;
-pub mod inbound_manager;
-pub mod outbound_manager;
+pub mod bandwidth_stream;
+mod command_handler;
+mod swarm_events;
 
 // 重新导出常用类型
 pub use capability::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
 pub use network_service::{NetworkConfig, Network_Service};
 pub use node_handle::{NodeCommand, NodeHandle, InboundRequest};
-pub use data_protocol::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
+pub use request_response::{DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL};
 pub use file_stream::{
     FILE_STREAM_PROTOCOL, CHUNK_SIZE,
     FILE_HEADER_ACCEPT, FILE_HEADER_REJECT,
@@ -59,4 +59,10 @@ pub use tensor_stream::protocol::{
     Write_Tensor_Stream_Handshake, Read_Tensor_Stream_Handshake,
 };
 pub use tensor_stream::rendezvous::RendezvousMap;
+pub use bandwidth_stream::{
+    BANDWIDTH_STREAM_PROTOCOL, DEFAULT_DURATION_SECS, MAX_DURATION_SECS,
+    Send_Bandwidth_Test, Receive_And_Count,
+    Write_Bandwidth_Result, Read_Bandwidth_Result,
+    Run_Bandwidth_Test,
+};
 

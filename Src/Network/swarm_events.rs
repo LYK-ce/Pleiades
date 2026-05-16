@@ -1,0 +1,247 @@
+//Presented by KeJi
+//Date ： 2026-05-16
+
+//! Swarm 事件处理器
+//!
+//! Network_Service 的 swarm 事件响应方法。
+
+use libp2p::{kad, mdns, ping, request_response, swarm::SwarmEvent, Multiaddr, PeerId};
+use tracing::{debug, error, info, warn};
+
+use super::network_service::{Network_Service, PleiadesNetworkBehaviourEvent};
+use super::request_response::{DataType, Network_Data};
+use crate::event_bus::Bus_Event;
+use crate::peer_management::PeerInfo;
+
+impl Network_Service {
+    /// 处理Swarm事件
+    /// 返回false表示应该退出循环
+    pub(super) async fn Handle_Swarm_Event(
+        &mut self,
+        event: SwarmEvent<PleiadesNetworkBehaviourEvent>,
+    ) -> bool {
+        match event {
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Mdns(event)) => {
+                self.Handle_Mdns_Event(event).await;
+            }
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Kademlia(event)) => {
+                self.Handle_Kademlia_Event(event).await;
+            }
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::RequestResponse(event)) => {
+                self.Handle_Request_Response_Event(event).await;
+            }
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                endpoint,
+                ..
+            } => {
+                info!("连接建立: {} via {:?}", peer_id, endpoint);
+                let peer_info = PeerInfo::new(
+                    peer_id,
+                    vec![endpoint.get_remote_address().clone()]
+                );
+                if let Err(e) = self.peer_handle.Add_Peer(peer_info).await {
+                    warn!("添加节点到 PeerManager 失败: {}", e);
+                }
+                self.event_bus.Publish(Bus_Event::Connection_Established {
+                    peer_id: peer_id.to_string(),
+                });
+            }
+            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                info!("连接断开: {} 原因: {:?}", peer_id, cause);
+                if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
+                    warn!("从 PeerManager 移除节点失败: {}", e);
+                }
+                self.event_bus.Publish(Bus_Event::Connection_Closed {
+                    peer_id: peer_id.to_string(),
+                });
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                info!("监听地址: {}/p2p/{}", address, self.local_peer_id);
+            }
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Ping(ping_event)) => {
+                self.Handle_Ping_Event(ping_event).await;
+            }
+            event => {
+                debug!("其他事件: {:?}", event);
+            }
+        }
+        true
+    }
+
+    /// 处理mDNS事件
+    ///
+    /// mDNS 发现/离开更新 Kademlia 路由表，
+    /// 并通过 EventBus 发布节点发现/离开事件通知 TUI 等消费者。
+    pub(super) async fn Handle_Mdns_Event(&mut self, event: mdns::Event) {
+        match event {
+            mdns::Event::Discovered(peers) => {
+                for (peer_id, addr) in peers {
+                    if peer_id != self.local_peer_id {
+                        info!("mDNS发现节点: {} at {}", peer_id, addr);
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr);
+                        self.event_bus.Publish(Bus_Event::Peer_Discovered {
+                            peer_id: peer_id.to_string(),
+                        });
+                    }
+                }
+            }
+            mdns::Event::Expired(peers) => {
+                for (peer_id, _addr) in peers {
+                    info!("节点离开: {}", peer_id);
+                    self.event_bus.Publish(Bus_Event::Peer_Left {
+                        peer_id: peer_id.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// 处理Kademlia事件
+    ///
+    /// DHT 结果不再通过 event_sender 通知上层。
+    /// 未来通过 orchestrator_event_tx 或 Capability oneshot 模式投递结果。
+    pub(super) async fn Handle_Kademlia_Event(&mut self, event: kad::Event) {
+        match event {
+            kad::Event::OutboundQueryProgressed { result, .. } => match result {
+                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))) => {
+                    info!("DHT记录查询成功: {:?}", peer_record.record.key);
+                }
+                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
+                    debug!("DHT记录查询完成，无更多记录");
+                }
+                kad::QueryResult::GetRecord(Err(e)) => {
+                    warn!("DHT记录查询失败: {:?}", e);
+                }
+                kad::QueryResult::PutRecord(Ok(_)) => {
+                    info!("DHT记录写入成功");
+                }
+                kad::QueryResult::PutRecord(Err(e)) => {
+                    error!("DHT记录写入失败: {:?}", e);
+                }
+                kad::QueryResult::Bootstrap(Ok(_)) => {
+                    info!("Kademlia引导成功");
+                }
+                kad::QueryResult::Bootstrap(Err(e)) => {
+                    warn!("Kademlia引导失败: {:?}", e);
+                }
+                _ => {}
+            },
+            kad::Event::RoutingUpdated { peer, .. } => {
+                debug!("路由表更新: {}", peer);
+            }
+            _ => {}
+        }
+    }
+
+    /// 处理请求响应事件
+    ///
+    /// - Request（入站）：按 DataType 预筛选分流
+    /// - Data / Info → Network 内部直接回复（不转发给 Orchestrator）
+    ///   - Command / File → 通过 inbound_manager 转发给 Orchestrator Core B5
+    /// - Response（出站回复）：通过 oneshot 路由回 Send_Data 调用方
+    /// - OutboundFailure：通知等待方发送失败
+    pub(super) async fn Handle_Request_Response_Event(
+        &mut self,
+        event: request_response::Event<Network_Data, Network_Data>,
+    ) {
+        match event {
+            request_response::Event::Message { peer, message, .. } => match message {
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    info!("收到数据请求 from {} | type={:?} | size={} bytes",
+                          peer, request.data_type, request.payload.len());
+
+                    match request.data_type {
+                        DataType::Data => {
+                            let response = Network_Data {
+                                data_type: DataType::Data,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm.behaviour_mut()
+                                .request_response.send_response(channel, response) {
+                                error!("Data 入站回复失败: {:?}", e);
+                            }
+                        }
+                        DataType::Info => {
+                            let response = Network_Data {
+                                data_type: DataType::Info,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm.behaviour_mut()
+                                .request_response.send_response(channel, response) {
+                                error!("Info 入站回复失败: {:?}", e);
+                            }
+                        }
+                        DataType::Command | DataType::File => {
+                            self.inbound_manager.Register_Inbound(peer, request, channel).await;
+                        }
+                    }
+                }
+                request_response::Message::Response { request_id, response, .. } => {
+                    debug!("收到响应 from {} | type={:?} | size={} bytes",
+                           peer, response.data_type, response.payload.len());
+                    self.outbound_manager.Route_Response(request_id, response);
+                }
+            },
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                error!("发送失败 to {}: {:?}", peer, error);
+                self.outbound_manager.Route_Failure(request_id, format!("Outbound failure: {:?}", error));
+            }
+            request_response::Event::InboundFailure {
+                peer,
+                error,
+                ..
+            } => {
+                error!("接收失败 from {}: {:?}", peer, error);
+            }
+            request_response::Event::ResponseSent { peer, .. } => {
+                debug!("响应已发送 to {}", peer);
+            }
+        }
+    }
+
+    /// 处理Ping心跳事件
+    ///
+    /// 心跳事件完全在Network层内部处理，不向上层发送事件。
+    /// - 成功收到Pong: 通过peer_handle更新延迟信息
+    /// - 超时: 通过peer_handle将节点状态设置为Disconnected
+    /// - 不支持/其他错误: 仅记录日志
+    pub(super) async fn Handle_Ping_Event(&mut self, event: ping::Event) {
+        let peer_id = event.peer;
+
+        match event.result {
+            Ok(rtt) => {
+                let latency_ms = rtt.as_millis() as u64;
+                info!("Ping成功: {} | RTT: {}ms", peer_id, latency_ms);
+
+                if let Err(e) = self.peer_handle.Update_Heartbeat(&peer_id, Some(latency_ms)).await {
+                    info!("更新节点心跳失败 ({}): {}", peer_id, e);
+                }
+            }
+            Err(ping::Failure::Timeout) => {
+                info!("Ping超时: {}", peer_id);
+
+                if let Err(e) = self.peer_handle.Update_Status(&peer_id,
+                    crate::peer_management::PeerStatus::Disconnected).await {
+                    info!("更新节点状态失败 ({}): {}", peer_id, e);
+                }
+            }
+            Err(ping::Failure::Unsupported) => {
+                info!("节点不支持Ping协议: {}", peer_id);
+            }
+            Err(ping::Failure::Other { error }) => {
+                info!("Ping错误 ({}): {}", peer_id, error);
+            }
+        }
+    }
+}

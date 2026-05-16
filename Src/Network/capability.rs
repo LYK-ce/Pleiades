@@ -24,10 +24,14 @@ use libp2p_stream as stream;
 use std::fmt;
 use std::path::Path;
 
-use super::data_protocol::{DataType, Network_Data};
+use super::request_response::codec::{DataType, Network_Data};
 use super::node_handle::NodeHandle;
 use super::file_stream::protocol::{FILE_STREAM_PROTOCOL, Send_File_Data, Receive_File_Data};
 use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
+use super::bandwidth_stream::protocol::{
+    BANDWIDTH_STREAM_PROTOCOL, DEFAULT_DURATION_SECS,
+    Run_Bandwidth_Test,
+};
 
 // ===== 错误类型 =====
 
@@ -281,8 +285,8 @@ pub trait Network_Capability: Send + Sync {
 
     /// 测试与指定节点之间的带宽（Mbps）
     ///
-    /// 发送 1MB / 10MB / 50MB 数据包，取最大值。
-    /// 内部使用 `DataType::BandwidthTest`，对端 Network_Service 自动回显。
+    /// iperf 风格固定时长推流测速，默认 3 秒。
+    /// 内部使用 `Bandwidth_Stream`，对端 Network_Service 自动计数并回传结果。
     ///
     /// # 参数
     /// - `peer`: 目标节点 ID
@@ -348,6 +352,8 @@ pub struct Network_Service_Capability {
     file_stream_control: stream::Control,
     /// 张量流直接 open（不经过 Network_Service 事件循环）
     tensor_stream_control: stream::Control,
+    /// 带宽测试流直接 open（不经过 Network_Service 事件循环）
+    bandwidth_stream_control: stream::Control,
     /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
     tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
 }
@@ -359,17 +365,20 @@ impl Network_Service_Capability {
     /// - `node_handle`: NodeHandle（可 Clone，用于命令通道操作）
     /// - `file_stream_control`: 文件流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_stream_control`: 张量流的 stream::Control（由 Network_Service::Init 创建）
+    /// - `bandwidth_stream_control`: 带宽测试流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_rendezvous`: RendezvousMap（与 Network_Service Event Loop 共享）
     pub fn New(
         node_handle: NodeHandle,
         file_stream_control: stream::Control,
         tensor_stream_control: stream::Control,
+        bandwidth_stream_control: stream::Control,
         tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
     ) -> Self {
         Self {
             node_handle,
             file_stream_control,
             tensor_stream_control,
+            bandwidth_stream_control,
             tensor_rendezvous,
         }
     }
@@ -520,32 +529,14 @@ impl Network_Capability for Network_Service_Capability {
     // ========================================
 
     async fn test_bandwidth(&self, peer: PeerId) -> Result<u64, Network_Error> {
-        let test_sizes = [1_000_000u64, 10_000_000, 50_000_000];
-        let mut max_bandwidth = 0u64;
-        let mut has_success = false;
+        let mut stream = self.bandwidth_stream_control
+            .clone()
+            .open_stream(peer, StreamProtocol::new(BANDWIDTH_STREAM_PROTOCOL))
+            .await
+            .map_err(|e| Network_Error::StreamOpenFailed(format!("带宽测试流打开失败: {}", e)))?;
 
-        for &size in &test_sizes {
-            let payload = size.to_le_bytes().to_vec();
-            let start = std::time::Instant::now();
-            match self.send_data(peer, DataType::BandwidthTest, payload).await {
-                Ok(response) => {
-                    if response.payload.len() != size as usize {
-                        continue;
-                    }
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let bandwidth = (size as f64 * 8.0) / (elapsed * 1_000_000.0);
-                    max_bandwidth = max_bandwidth.max(bandwidth as u64);
-                    has_success = true;
-                }
-                Err(_) => {}
-            }
-        }
-
-        if has_success {
-            Ok(max_bandwidth)
-        } else {
-            Err(Network_Error::Timeout("bandwidth test: all sizes failed".into()))
-        }
+        Run_Bandwidth_Test(&mut stream, DEFAULT_DURATION_SECS).await
+            .map_err(|e| Network_Error::StreamIoError(format!("带宽测试失败: {}", e)))
     }
 }
 

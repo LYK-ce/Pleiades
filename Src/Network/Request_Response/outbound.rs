@@ -11,12 +11,12 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
 use libp2p::request_response::OutboundRequestId;
+use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tracing::debug;
 
-use super::data_protocol::Network_Data;
+use super::codec::Network_Data;
 
 // ============================================================
 // Outbound_Manager

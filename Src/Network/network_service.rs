@@ -8,14 +8,15 @@
 //! - Network_Service: 网络服务实例，运行事件循环
 //! - NodeHandle: 对外暴露的API句柄（定义在 node_handle.rs）
 //! - NodeCommand: 外部命令枚举（定义在 node_handle.rs）
-//! - Inbound_Manager: 入站请求与响应路由管理器（定义在 inbound_manager.rs）
-//! - Outbound_Manager: 出站响应路由管理器（定义在 outbound_manager.rs）
+//! - Inbound_Manager: 入站请求与响应路由管理器（定义在 request_response/inbound.rs）
+//! - Outbound_Manager: 出站响应路由管理器（定义在 request_response/outbound.rs）
 //!
 //! 事件分流：
 //! - Response → 通过 oneshot 路由回 Send_Data 调用方
 //! - 入站 Request（DataType 预筛选）：
 //!   - Command / File → 通过 inbound_tx 转发给 Orchestrator Core B5
-//!   - BandwidthTest / Data / Info → Network 内部直接回复，不转发
+//!   - Data / Info → Network 内部直接回复，不转发
+//! - 入站带宽流 → Network 内部 Receive_And_Count + 回传结果
 //! - 入站文件流 → 通过 orchestrator_event_tx 转发给 Orchestrator
 //! - 入站张量流 → 通过 orchestrator_event_tx 转发给 Orchestrator
 //! - 连接/发现/Ping 事件 → Network 内部处理（PeerManager）
@@ -31,7 +32,7 @@ use libp2p::{
     noise,
     ping,
     request_response::{self, ProtocolSupport},
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{NetworkBehaviour},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use libp2p_stream as stream;
@@ -42,21 +43,24 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use futures::StreamExt;
 
-use crate::event_bus::{EventBus, Bus_Event};
+use crate::event_bus::EventBus;
 
-use super::data_protocol::{
+use super::request_response::{
     DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
+    Inbound_Manager, Outbound_Manager,
 };
-use super::inbound_manager::Inbound_Manager;
-use super::outbound_manager::Outbound_Manager;
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
 use super::capability::{Network_Inbound_Event, Network_Service_Capability};
 use super::file_stream::protocol::FILE_STREAM_PROTOCOL;
 use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
 use super::tensor_stream::rendezvous::RendezvousMap;
+use super::bandwidth_stream::protocol::{
+    BANDWIDTH_STREAM_PROTOCOL,
+    Receive_And_Count, Write_Bandwidth_Result,
+};
 
 // 导入 PeerManagement 模块
-use crate::peer_management::{PeerInfo, PeerStatus, Peer_Management_Capability};
+use crate::peer_management::Peer_Management_Capability;
 
 /// 网络配置
 #[derive(Debug, Clone)]
@@ -119,41 +123,44 @@ pub struct PleiadesNetworkBehaviour {
 #[allow(nonstandard_style)]
 pub struct Network_Service {
     /// Swarm实例
-    swarm: Swarm<PleiadesNetworkBehaviour>,
+    pub(crate) swarm: Swarm<PleiadesNetworkBehaviour>,
     /// 本地节点ID
-    local_peer_id: PeerId,
+    pub(crate) local_peer_id: PeerId,
     /// peer manager capability 持有的节点管理能力 trait object，我们通过它来管理节点信息表
-    peer_handle: Box<dyn Peer_Management_Capability>,
+    pub(crate) peer_handle: Box<dyn Peer_Management_Capability>,
     /// 命令接收器（接收外部命令）
-    cmd_rx: mpsc::Receiver<NodeCommand>,
+    pub(crate) cmd_rx: mpsc::Receiver<NodeCommand>,
     /// 配置
-    config: NetworkConfig,
+    pub(crate) config: NetworkConfig,
     /// 全局事件总线，用于发布网络层事件（节点发现/离开、连接建立/断开等）
-    event_bus: Arc<EventBus>,
+    pub(crate) event_bus: Arc<EventBus>,
 
     // ===== 组件化管理器 =====
 
     /// 入站请求管理器（负责入站请求分发、回复管理）
-    inbound_manager: Inbound_Manager,
+    pub(crate) inbound_manager: Inbound_Manager,
     /// 出站响应路由管理器（负责出站 Response 路由回调用方）
-    outbound_manager: Outbound_Manager,
+    pub(crate) outbound_manager: Outbound_Manager,
 
     // ===== Orchestrator 事件转发 =====
 
     /// 转发复杂入站事件（文件流、张量流）给 Orchestrator
-    orchestrator_event_tx: mpsc::Sender<Network_Inbound_Event>,
+    pub(crate) orchestrator_event_tx: mpsc::Sender<Network_Inbound_Event>,
 
     // ===== 流控制句柄（用于 accept 入站流） =====
 
     /// 文件流控制句柄（用于 Start() 中 accept 入站文件流）
-    file_accept_control: stream::Control,
+    pub(crate) file_accept_control: stream::Control,
     /// 张量流控制句柄（用于 Start() 中 accept 入站张量流）
-    tensor_accept_control: stream::Control,
+    pub(crate) tensor_accept_control: stream::Control,
+
+    /// 带宽测试流控制 — accept 入站测试流
+    pub(crate) bandwidth_accept_control: stream::Control,
 
     // ===== Tensor Stream Rendezvous =====
 
     /// 张量流双向匹配器（与 Network_Service_Capability 共享）
-    rendezvous: Arc<RendezvousMap>,
+    pub(crate) rendezvous: Arc<RendezvousMap>,
 }
 
 impl Network_Service {
@@ -257,6 +264,8 @@ impl Network_Service {
         let file_open_control = node_swarm.behaviour().stream.new_control();
         let tensor_accept_control = node_swarm.behaviour().stream.new_control();
         let tensor_open_control = node_swarm.behaviour().stream.new_control();
+        let bandwidth_accept_control = node_swarm.behaviour().stream.new_control();
+        let bandwidth_stream_control = node_swarm.behaviour().stream.new_control();
 
         // 6. 创建入站请求管理器和出站响应路由管理器
         let inbound_manager = Inbound_Manager::New(inbound_tx);
@@ -273,6 +282,7 @@ impl Network_Service {
             handle.clone(),
             file_open_control,
             tensor_open_control,
+            bandwidth_stream_control,
             rendezvous.clone(),
         );
 
@@ -289,6 +299,7 @@ impl Network_Service {
             orchestrator_event_tx,
             file_accept_control,
             tensor_accept_control,
+            bandwidth_accept_control,
             rendezvous,
         };
 
@@ -332,6 +343,10 @@ impl Network_Service {
             .accept(StreamProtocol::new(TENSOR_STREAM_PROTOCOL))
             .expect("张量流协议注册失败");
 
+        let mut incoming_bandwidth_streams = self.bandwidth_accept_control
+            .accept(StreamProtocol::new(BANDWIDTH_STREAM_PROTOCOL))
+            .expect("带宽测试流协议注册失败");
+
         // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
         info!("进入网络事件循环");
         loop {
@@ -371,529 +386,26 @@ impl Network_Service {
                         }
                     }
                 }
+                // 处理入站带宽测试流 — 接收方：仅计数，回传结果
+                Some((peer_id, mut stream)) = incoming_bandwidth_streams.next() => {
+                    info!("收到入站带宽测试流 from {}", peer_id);
+                    match Receive_And_Count(&mut stream).await {
+                        Ok(total_bytes) => {
+                            info!("带宽测试接收完成: from={}, total={} bytes", peer_id, total_bytes);
+                            if let Err(e) = Write_Bandwidth_Result(&mut stream, total_bytes).await {
+                                warn!("带宽测试结果回传失败 from {}: {}", peer_id, e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("带宽测试入站失败 from {}: {}", peer_id, e);
+                        }
+                    }
+                }
             }
         }
 
         info!("网络事件循环结束");
         Ok(())
-    }
-
-    /// 处理Swarm事件
-    /// 返回false表示应该退出循环
-    async fn Handle_Swarm_Event(&mut self, event: SwarmEvent<PleiadesNetworkBehaviourEvent>) -> bool {
-        match event {
-            // mDNS事件
-            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Mdns(event)) => {
-                self.Handle_Mdns_Event(event).await;
-            }
-
-            // Kademlia事件
-            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Kademlia(event)) => {
-                self.Handle_Kademlia_Event(event).await;
-            }
-
-            // 请求响应事件
-            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::RequestResponse(event)) => {
-                self.Handle_Request_Response_Event(event).await;
-            }
-
-            // 连接建立
-            SwarmEvent::ConnectionEstablished {
-                peer_id,
-                endpoint,
-                ..
-            } => {
-                info!("连接建立: {} via {:?}", peer_id, endpoint);
-                let peer_info = PeerInfo::new(
-                    peer_id,
-                    vec![endpoint.get_remote_address().clone()]
-                );
-                // 使用 peer_handle Capability 添加节点
-                if let Err(e) = self.peer_handle.Add_Peer(peer_info).await {
-                    warn!("添加节点到 PeerManager 失败: {}", e);
-                }
-                // 发布连接建立事件到 EventBus
-                self.event_bus.Publish(Bus_Event::Connection_Established {
-                    peer_id: peer_id.to_string(),
-                });
-            }
-
-            // 连接断开
-            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                info!("连接断开: {} 原因: {:?}", peer_id, cause);
-                // 使用 peer_handle Capability 移除节点
-                if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
-                    warn!("从 PeerManager 移除节点失败: {}", e);
-                }
-                // 发布连接断开事件到 EventBus
-                self.event_bus.Publish(Bus_Event::Connection_Closed {
-                    peer_id: peer_id.to_string(),
-                });
-            }
-
-            // 新监听地址
-            SwarmEvent::NewListenAddr { address, .. } => {
-                info!("监听地址: {}/p2p/{}", address, self.local_peer_id);
-            }
-
-            // Ping心跳事件
-            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Ping(ping_event)) => {
-                self.Handle_Ping_Event(ping_event).await;
-            }
-
-            // 其他事件
-            event => {
-                debug!("其他事件: {:?}", event);
-            }
-        }
-        true
-    }
-
-    /// 处理外部命令
-    /// 返回false表示应该退出循环
-    async fn Handle_Command(&mut self, cmd: NodeCommand) -> bool {
-        match cmd {
-            NodeCommand::SendData { peer, data_type, payload, response_tx } => {
-                info!("发送数据到 {} | type={:?} | size={} bytes", peer, data_type, payload.len());
-                let request = Network_Data { data_type, payload };
-                let outbound_id = self.swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_request(&peer, request);
-
-                // 如果调用方需要等待 Response，注册到 outbound_manager
-                if let Some(tx) = response_tx {
-                    self.outbound_manager.Register_Outbound(outbound_id, tx);
-                }
-            }
-            NodeCommand::PutRecord { key, value } => {
-                let record_key = kad::RecordKey::new(&key);
-                let record = kad::Record {
-                    key: record_key,
-                    value,
-                    publisher: Some(self.local_peer_id),
-                    expires: None,
-                };
-                if let Err(e) = self.swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .put_record(record, kad::Quorum::One) {
-                    error!("DHT写入失败: {:?}", e);
-                } else {
-                    info!("DHT写入: {:?}", key);
-                }
-            }
-            NodeCommand::GetRecord { key } => {
-                let record_key = kad::RecordKey::new(&key);
-                self.swarm.behaviour_mut().kademlia.get_record(record_key);
-                info!("DHT查询: {:?}", key);
-            }
-            NodeCommand::Dial { addr } => {
-                info!("尝试连接: {}", addr);
-                if let Err(e) = self.swarm.dial(addr) {
-                    error!("连接失败: {:?}", e);
-                }
-            }
-            NodeCommand::Disconnect { peer } => {
-                info!("断开连接: {}", peer);
-                let _ = self.swarm.disconnect_peer_id(peer);
-                // 使用 peer_handle Capability 移除节点
-                if let Err(e) = self.peer_handle.Remove_Peer(&peer).await {
-                    warn!("从 PeerManager 移除节点失败: {}", e);
-                }
-            }
-            NodeCommand::SendResponse { request_id, data_type, payload } => {
-                // 从 inbound_manager 取出 ResponseChannel
-                if let Some(channel) = self.inbound_manager.Take_Reply_Channel(request_id) {
-                    let response = Network_Data { data_type, payload };
-                    if let Err(e) = self.swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_response(channel, response) {
-                        error!("发送回复失败 (request_id={}): {:?}", request_id, e);
-                    } else {
-                        debug!("回复已发送 (request_id={})", request_id);
-                    }
-                }
-            }
-            NodeCommand::UpdateInfo { reply } => {
-                info!("开始批量带宽测试");
-                // 获取所有节点
-                let peers = match self.peer_handle.List_Peers().await {
-                    Ok(peers) => peers,
-                    Err(e) => {
-                        let _ = reply.send(Err(format!("获取节点列表失败: {}", e).into()));
-                        return true;
-                    }
-                };
-                
-                let total_count = peers.len();
-                let mut success_count = 0;
-                
-                // 串行逐个测试，避免并发干扰
-                for (index, peer_info) in peers.iter().enumerate() {
-                    let peer_id = peer_info.peer_id;
-                    info!("测试节点 {}/{}: {}", index + 1, total_count, peer_id);
-                    
-                    match self.Test_Bandwidth(&peer_id).await {
-                        Ok(bandwidth) => {
-                            info!("节点 {} 带宽测试成功: {} Mbps", peer_id, bandwidth);
-                            success_count += 1;
-                        }
-                        Err(e) => {
-                            info!("节点 {} 带宽测试失败: {}", peer_id, e);
-                        }
-                    }
-                }
-                
-                info!("批量带宽测试完成: 成功{}/{}", success_count, total_count);
-                let _ = reply.send(Ok((success_count, total_count)));
-            }
-            NodeCommand::Stop => {
-                info!("收到停止命令，准备退出");
-                // 关闭所有连接
-                match self.peer_handle.List_Peers().await {
-                    Ok(peer_infos) => {
-                        for peer_info in peer_infos {
-                            let _ = self.swarm.disconnect_peer_id(peer_info.peer_id);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("获取节点列表失败: {}", e);
-                    }
-                }
-                // 清空 peer_handle
-                if let Err(e) = self.peer_handle.Clear().await {
-                    warn!("清空 PeerManager 失败: {}", e);
-                }
-                // 清理所有 pending 状态
-                self.inbound_manager.Clear_All();
-                self.outbound_manager.Clear_All();
-                return false;
-            }
-        }
-        true
-    }
-
-    /// 处理mDNS事件
-    ///
-    /// mDNS 发现/离开更新 Kademlia 路由表，
-    /// 并通过 EventBus 发布节点发现/离开事件通知 TUI 等消费者。
-    async fn Handle_Mdns_Event(&mut self, event: mdns::Event) {
-        match event {
-            mdns::Event::Discovered(peers) => {
-                for (peer_id, addr) in peers {
-                    if peer_id != self.local_peer_id {
-                        info!("mDNS发现节点: {} at {}", peer_id, addr);
-                        // 添加到Kademlia
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr);
-                        // 发布节点发现事件到 EventBus
-                        self.event_bus.Publish(Bus_Event::Peer_Discovered {
-                            peer_id: peer_id.to_string(),
-                        });
-                    }
-                }
-            }
-            mdns::Event::Expired(peers) => {
-                for (peer_id, _addr) in peers {
-                    info!("节点离开: {}", peer_id);
-                    // 发布节点离开事件到 EventBus
-                    self.event_bus.Publish(Bus_Event::Peer_Left {
-                        peer_id: peer_id.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    /// 处理Kademlia事件
-    ///
-    /// DHT 结果不再通过 event_sender 通知上层。
-    /// 未来通过 orchestrator_event_tx 或 Capability oneshot 模式投递结果。
-    async fn Handle_Kademlia_Event(&mut self, event: kad::Event) {
-        match event {
-            kad::Event::OutboundQueryProgressed { result, .. } => match result {
-                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))) => {
-                    info!("DHT记录查询成功: {:?}", peer_record.record.key);
-                }
-                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
-                    debug!("DHT记录查询完成，无更多记录");
-                }
-                kad::QueryResult::GetRecord(Err(e)) => {
-                    warn!("DHT记录查询失败: {:?}", e);
-                }
-                kad::QueryResult::PutRecord(Ok(_)) => {
-                    info!("DHT记录写入成功");
-                }
-                kad::QueryResult::PutRecord(Err(e)) => {
-                    error!("DHT记录写入失败: {:?}", e);
-                }
-                kad::QueryResult::Bootstrap(Ok(_)) => {
-                    info!("Kademlia引导成功");
-                }
-                kad::QueryResult::Bootstrap(Err(e)) => {
-                    warn!("Kademlia引导失败: {:?}", e);
-                }
-                _ => {}
-            },
-            kad::Event::RoutingUpdated { peer, .. } => {
-                debug!("路由表更新: {}", peer);
-            }
-            _ => {}
-        }
-    }
-
-    /// 处理请求响应事件
-    ///
-    /// - Request（入站）：按 DataType 预筛选分流
-    ///   - BandwidthTest / Data / Info → Network 内部直接回复（不转发给 Orchestrator）
-    ///   - Command / File → 通过 inbound_manager 转发给 Orchestrator Core B5
-    /// - Response（出站回复）：通过 oneshot 路由回 Send_Data 调用方
-    /// - OutboundFailure：通知等待方发送失败
-    async fn Handle_Request_Response_Event(
-        &mut self,
-        event: request_response::Event<Network_Data, Network_Data>,
-    ) {
-        match event {
-            request_response::Event::Message { peer, message, .. } => match message {
-                // ===== 入站请求：按 DataType 预筛选分流 =====
-                request_response::Message::Request {
-                    request, channel, ..
-                } => {
-                    info!("收到数据请求 from {} | type={:?} | size={} bytes",
-                          peer, request.data_type, request.payload.len());
-
-                    match request.data_type {
-                        // ===== 网络层直接处理：纯网络测量，无业务语义 =====
-                        DataType::BandwidthTest => {
-                            self.Handle_Bandwidth_Test_Inbound(request.payload, channel);
-                        }
-                        // ===== 网络层直接处理：预留类型，直接回复 OK =====
-                        DataType::Data => {
-                            let response = Network_Data {
-                                data_type: DataType::Data,
-                                payload: b"OK".to_vec(),
-                            };
-                            if let Err(e) = self.swarm.behaviour_mut()
-                                .request_response.send_response(channel, response) {
-                                error!("Data 入站回复失败: {:?}", e);
-                            }
-                        }
-                        DataType::Info => {
-                            let response = Network_Data {
-                                data_type: DataType::Info,
-                                payload: b"OK".to_vec(),
-                            };
-                            if let Err(e) = self.swarm.behaviour_mut()
-                                .request_response.send_response(channel, response) {
-                                error!("Info 入站回复失败: {:?}", e);
-                            }
-                        }
-                        // ===== 需要 Orchestrator 业务决策：转发给 Core B5 =====
-                        DataType::Command | DataType::File => {
-                            self.inbound_manager.Register_Inbound(peer, request, channel).await;
-                        }
-                    }
-                }
-                // ===== 出站响应：通过 outbound_manager 路由回 Send_Data 调用方 =====
-                request_response::Message::Response { request_id, response, .. } => {
-                    debug!("收到响应 from {} | type={:?} | size={} bytes",
-                           peer, response.data_type, response.payload.len());
-
-                    self.outbound_manager.Route_Response(request_id, response);
-                }
-            },
-            request_response::Event::OutboundFailure {
-                peer,
-                request_id,
-                error,
-                ..
-            } => {
-                error!("发送失败 to {}: {:?}", peer, error);
-                self.outbound_manager.Route_Failure(request_id, format!("Outbound failure: {:?}", error));
-            }
-            request_response::Event::InboundFailure {
-                peer,
-                error,
-                ..
-            } => {
-                error!("接收失败 from {}: {:?}", peer, error);
-            }
-            request_response::Event::ResponseSent { peer, .. } => {
-                debug!("响应已发送 to {}", peer);
-            }
-        }
-    }
-
-    /// 处理入站带宽测试请求（Network 内部直接回复）
-    ///
-    /// 读取请求 payload 中的目标数据包大小（u64 小端字节序），
-    /// 创建等大的响应数据包（填充零）直接回复，不转发给 Orchestrator。
-    ///
-    /// 安全措施：设置 50MB 上限，防止恶意节点发送巨大 size 导致 OOM。
-    /// 50MB 与出站 `test_single_bandwidth()` 的最大测试包大小一致。
-    fn Handle_Bandwidth_Test_Inbound(
-        &mut self,
-        payload: Vec<u8>,
-        channel: request_response::ResponseChannel<Network_Data>,
-    ) {
-        const MAX_BANDWIDTH_TEST_SIZE: u64 = 50_000_000; // 50MB 上限
-
-        let response_payload = if payload.len() >= 8 {
-            let size = u64::from_le_bytes([
-                payload[0], payload[1], payload[2], payload[3],
-                payload[4], payload[5], payload[6], payload[7],
-            ]);
-            let capped_size = size.min(MAX_BANDWIDTH_TEST_SIZE);
-            if size != capped_size {
-                warn!("带宽测试请求大小超限: {}B, 截断到 {}B", size, capped_size);
-            }
-            vec![0u8; capped_size as usize]
-        } else {
-            warn!("带宽测试请求 payload 不足 8 字节: {}", payload.len());
-            vec![0u8; 8]
-        };
-
-        let response = Network_Data {
-            data_type: DataType::BandwidthTest,
-            payload: response_payload,
-        };
-
-        if let Err(e) = self.swarm.behaviour_mut()
-            .request_response.send_response(channel, response) {
-            error!("带宽测试回复失败: {:?}", e);
-        }
-    }
-
-    /// 处理Ping心跳事件
-    ///
-    /// 心跳事件完全在Network层内部处理，不向上层发送事件。
-    /// - 成功收到Pong: 通过peer_handle更新延迟信息
-    /// - 超时: 通过peer_handle将节点状态设置为Disconnected
-    /// - 不支持/其他错误: 仅记录日志
-    async fn Handle_Ping_Event(&mut self, event: ping::Event) {
-        let peer_id = event.peer;
-
-        match event.result {
-            // 成功收到 Pong，包含 RTT
-            Ok(rtt) => {
-                let latency_ms = rtt.as_millis() as u64;
-                info!("Ping成功: {} | RTT: {}ms", peer_id, latency_ms);
-
-                // 使用 peer_handle Capability 更新心跳延迟信息
-                if let Err(e) = self.peer_handle.Update_Heartbeat(&peer_id, Some(latency_ms)).await {
-                    info!("更新节点心跳失败 ({}): {}", peer_id, e);
-                }
-            }
-            // Ping 超时
-            Err(ping::Failure::Timeout) => {
-                info!("Ping超时: {}", peer_id);
-
-                // 将节点状态设置为 Disconnected
-                if let Err(e) = self.peer_handle.Update_Status(&peer_id, PeerStatus::Disconnected).await {
-                    info!("更新节点状态失败 ({}): {}", peer_id, e);
-                }
-            }
-            // 对方不支持 Ping 协议
-            Err(ping::Failure::Unsupported) => {
-                info!("节点不支持Ping协议: {}", peer_id);
-            }
-            // 其他错误
-            Err(ping::Failure::Other { error }) => {
-                info!("Ping错误 ({}): {}", peer_id, error);
-            }
-        }
-    }
-
-    /// 测试指定节点的带宽
-    /// 发送1M、10M、50M数据包，取最大值作为带宽结果
-    pub async fn Test_Bandwidth(&mut self, peer_id: &PeerId) -> Result<u64, Box<dyn Error + Send + Sync>> {
-        let test_sizes = [1_000_000, 10_000_000, 50_000_000]; // 1M, 10M, 50M
-        let mut max_bandwidth = 0u64;
-        let mut has_success = false;
-        
-        for &size in &test_sizes {
-            match self.test_single_bandwidth(peer_id, size).await {
-                Ok(bandwidth) => {
-                    info!("带宽测试成功: peer={}, size={}B, bandwidth={}Mbps",
-                          peer_id, size, bandwidth);
-                    max_bandwidth = max_bandwidth.max(bandwidth);
-                    has_success = true;
-                }
-                Err(e) => {
-                    info!("带宽测试失败: peer={}, size={}B, error={}",
-                          peer_id, size, e);
-                }
-            }
-        }
-        
-        if has_success {
-            // 更新PeerManager中的带宽信息
-            if let Err(e) = self.peer_handle.Update_Bandwidth(peer_id, Some(max_bandwidth)).await {
-                info!("更新带宽信息失败: peer={}, error={}", peer_id, e);
-            }
-            Ok(max_bandwidth)
-        } else {
-            Err("所有带宽测试均失败".into())
-        }
-    }
-
-    /// 测试单个数据包大小的带宽
-    async fn test_single_bandwidth(&mut self, peer_id: &PeerId, size_bytes: u64) -> Result<u64, Box<dyn Error + Send + Sync>> {
-        use tokio::sync::oneshot;
-        use std::time::Instant;
-        
-        // 1. 准备payload：size_bytes的小端字节序表示
-        let mut payload = Vec::with_capacity(8);
-        payload.extend_from_slice(&size_bytes.to_le_bytes());
-        
-        // 2. 创建oneshot channel用于接收响应
-        let (response_tx, response_rx) = oneshot::channel();
-        
-        // 3. 发送请求
-        let request = super::data_protocol::Network_Data {
-            data_type: super::data_protocol::DataType::BandwidthTest,
-            payload,
-        };
-        
-        let start_time = Instant::now();
-        let outbound_id = self.swarm
-            .behaviour_mut()
-            .request_response
-            .send_request(peer_id, request);
-        
-        // 4. 注册到outbound_manager等待响应
-        self.outbound_manager.Register_Outbound(outbound_id, response_tx);
-        
-        // 5. 等待响应，设置超时
-        let response_result = match tokio::time::timeout(Duration::from_secs(self.config.request_response_timeout), response_rx).await {
-            Ok(Ok(response_result)) => response_result,
-            Ok(Err(_)) => return Err("响应通道已关闭".into()),
-            Err(_) => return Err("带宽测试超时".into()),
-        };
-        
-        let end_time = Instant::now();
-        
-        // 6. 检查响应结果
-        let response = match response_result {
-            Ok(network_data) => network_data,
-            Err(e) => return Err(format!("带宽测试失败: {}", e).into()),
-        };
-        
-        // 7. 验证响应大小
-        if response.payload.len() != size_bytes as usize {
-            return Err(format!("响应大小不匹配: 期望{}B, 实际{}B",
-                size_bytes, response.payload.len()).into());
-        }
-        
-        // 8. 计算带宽 (Mbps)
-        let duration_secs = end_time.duration_since(start_time).as_secs_f64();
-        let bandwidth_mbps = (size_bytes as f64 * 8.0) / (duration_secs * 1_000_000.0);
-        
-        Ok(bandwidth_mbps as u64)
     }
 
     /// 获取本地节点ID

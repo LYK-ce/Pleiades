@@ -20,7 +20,7 @@ use std::error::Error;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-use super::data_protocol::{DataType, Network_Data};
+use super::request_response::codec::{DataType, Network_Data};
 
 // ===== 入站请求结构 =====
 
@@ -68,10 +68,6 @@ pub enum NodeCommand {
     Dial { addr: Multiaddr },
     /// 断开连接
     Disconnect { peer: PeerId },
-    /// 更新所有节点的带宽信息
-    UpdateInfo {
-        reply: oneshot::Sender<Result<(usize, usize), Box<dyn Error + Send + Sync>>>,
-    },
     /// 停止节点
     Stop,
 }
@@ -182,20 +178,6 @@ impl NodeHandle {
     pub async fn Disconnect(&self, peer: &PeerId) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.cmd_tx.send(NodeCommand::Disconnect { peer: *peer }).await?;
         Ok(())
-    }
-
-    /// 更新所有节点的带宽信息
-    ///
-    /// 对PeerManager中存储的所有peer进行带宽测试，逐个串行测试以避免网络干扰。
-    /// 返回成功测试的节点数量和总节点数量。
-    pub async fn Update_Info(&self) -> Result<(usize, usize), Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(NodeCommand::UpdateInfo {
-            reply: tx,
-        }).await?;
-        rx.await
-            .map_err(|_| "UpdateInfo reply channel closed")?
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })
     }
 
     /// 停止节点
