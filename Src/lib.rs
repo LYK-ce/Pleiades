@@ -16,10 +16,7 @@
 //! - tensor_stream: 张量流子模块（Network 模块内部）
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
-//! - vm: 虚拟机执行骨架模块
 
-#[path = "Vm_Base/mod.rs"]
-pub mod vm_base;
 #[path = "Config/mod.rs"]
 pub mod config;
 

@@ -1,12 +1,13 @@
 //Presented by KeJi
-//Date ： 2026-05-16
+//Date ： 2026-05-17
 
 //! ML Engine 能力层
 //!
 //! 通过 `MlSession` userdata 暴露给 Lua，类似 Python class：
 //!
 //! ```lua
-//! local sess = ml.load_model("model.gguf", "cpu", 0, 999999)
+//! local sess = ml.new("cpu")
+//! sess:load_model("model.gguf", 0, 999999)
 //! local tokens = sess:encode(prompt)
 //! sess:forward(sess:tensorize(tokens), 0)
 //! local tok = sess:sample(0.8)
@@ -28,10 +29,28 @@ use super::gguf_model::{
 // MlSession — 对外句柄 (Lua userdata)
 // ============================================================
 
-/// 推理会话。
+/// 推理会话。空壳构造 + 按需加载模型。
 ///
-/// 包装内部 `MlContext`，由 Lua 侧实例化并调用方法。
-/// ML Engine 不定义 trait — 直接暴露具体类型给 Lua。
+/// ```text
+///          ml.new("cpu")
+///             │
+///             ▼
+///    ┌─────────────────┐
+///    │ model = None     │  ← 空壳
+///    │ device = Cpu     │
+///    │ eos = default    │
+///    └───────┬─────────┘
+///            │ sess:load_model(path, 0, 40)
+///            ▼
+///    ┌─────────────────┐
+///    │ model = Some(..) │  ← 已加载
+///    └───────┬─────────┘
+///            │ sess:unload()
+///            ▼
+///    ┌─────────────────┐
+///    │ model = None     │  ← 回到空壳
+///    └─────────────────┘
+/// ```
 pub struct MlSession {
     ctx: MlContext,
 }
@@ -41,8 +60,8 @@ pub struct MlSession {
 // ============================================================
 
 struct MlContext {
-    /// 模型权重 + tokenizer
-    model: GGUF_Model,
+    /// 模型权重 + tokenizer（None = 空壳状态）
+    model: Option<GGUF_Model>,
     /// 推理输出缓冲区（logits 或 hidden state）
     output: Option<Tensor>,
     /// 自增序列位置（forward offset=None 时自动 += seq_len）
@@ -51,6 +70,8 @@ struct MlContext {
     rng_state: u64,
     /// EOS token ID
     eos_token_id: u32,
+    /// 运行设备
+    device: Device,
 }
 
 // ============================================================
@@ -60,13 +81,14 @@ struct MlContext {
 impl MlSession {
     // ─── 构造 / 析构 ───────────────────────────────────────
 
-    /// 加载模型，创建 MlSession。
-    pub fn load_model(
-        path: &Path,
-        device: &str,
-        start: usize,
-        end: usize,
-    ) -> Result<Self, String> {
+    /// 创建空壳 MlSession（不加载模型）。
+    ///
+    /// 空壳状态下可用方法：
+    /// - `tensorize()` — 纯数据转换，仅需 device
+    /// - `get_eos()` — 返回默认 EOS token
+    /// - `get_offset()` — 返回 0
+    /// - `load_model()` — 加载模型填充空壳
+    pub fn new(device: &str) -> Result<Self, String> {
         let device = match device.to_lowercase().as_str() {
             "cpu" => Device::Cpu,
             "cuda" => match Device::new_cuda(0) {
@@ -76,58 +98,99 @@ impl MlSession {
             other => return Err(format!("Unsupported device: '{other}'. Use 'cpu' or 'cuda'.")),
         };
 
-        let model = GGUF_Load_Model(start, end, path, &device)
-            .map_err(|e| format!("Failed to load model: {e}"))?;
-
-        let eos_token_id = model.inference_config.eos_token;
-
         Ok(Self {
             ctx: MlContext {
-                model,
+                model: None,
                 output: None,
                 offset: 0,
                 rng_state: 299792458,
-                eos_token_id,
+                eos_token_id: 151645, // Qwen3 默认 EOS
+                device,
             },
         })
     }
 
-    /// 卸载模型。
-    pub fn unload(self) {
-        GGUF_Unload_Model(self.ctx.model);
+    /// 加载模型到当前 session。
+    ///
+    /// 若已有模型，先卸载旧模型再加载新模型。
+    pub fn load_model(
+        &mut self,
+        path: &Path,
+        start: usize,
+        end: usize,
+    ) -> Result<(), String> {
+        // 先卸载已有模型
+        if self.ctx.model.is_some() {
+            self.unload();
+        }
+
+        let model = GGUF_Load_Model(start, end, path, &self.ctx.device)
+            .map_err(|e| format!("Failed to load model: {e}"))?;
+
+        self.ctx.eos_token_id = model.inference_config.eos_token;
+        self.ctx.model = Some(model);
+        self.ctx.offset = 0;
+
+        Ok(())
+    }
+
+    /// 卸载模型，回到空壳状态。
+    ///
+    /// 不消耗 self，session 可重复 load_model。
+    pub fn unload(&mut self) {
+        if let Some(model) = self.ctx.model.take() {
+            GGUF_Unload_Model(model);
+        }
+        self.ctx.output = None;
+        self.ctx.offset = 0;
+        self.ctx.eos_token_id = 151645;
+    }
+
+    /// 检查模型是否已加载。
+    pub fn has_model(&self) -> bool {
+        self.ctx.model.is_some()
     }
 
     // ─── 编解码 ────────────────────────────────────────────
 
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        GGUF_Encode(&self.ctx.model, text)
+        let model = self.ctx.model.as_ref()
+            .ok_or("encode: no model loaded. Call load_model() first.")?;
+        GGUF_Encode(model, text)
             .map_err(|e| format!("Encode failed: {e}"))
     }
 
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
-        GGUF_Decode(&self.ctx.model, &[token_id])
+        let model = self.ctx.model.as_ref()
+            .ok_or("decode: no model loaded. Call load_model() first.")?;
+        GGUF_Decode(model, &[token_id])
             .map_err(|e| format!("Decode failed: {e}"))
     }
 
     // ─── 推理 ──────────────────────────────────────────────
 
+    /// 纯数据转换：`Vec<u32>` → `Tensor[1, seq_len]`。
+    ///
+    /// 不依赖模型，空壳状态可用。
     pub fn tensorize(&self, token_ids: &[u32]) -> Result<Tensor, String> {
         if token_ids.is_empty() {
             return Err("tensorize: token_ids is empty".into());
         }
-        Tensor::new(token_ids, &self.ctx.model.device)
+        Tensor::new(token_ids, &self.ctx.device)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| format!("Tensorize failed: {e}"))
     }
 
     pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<(), String> {
+        let model = self.ctx.model.as_mut()
+            .ok_or("forward: no model loaded. Call load_model() first.")?;
         let off = offset.unwrap_or(self.ctx.offset);
         let seq_len = tensor.dims().get(1).copied().unwrap_or(1);
 
-        let output = GGUF_Model_Inference(&mut self.ctx.model, tensor, off)
+        let output = GGUF_Model_Inference(model, tensor, off)
             .map_err(|e| format!("Forward failed: {e}"))?;
 
-        self.ctx.model.device
+        self.ctx.device
             .synchronize()
             .map_err(|e| format!("Device sync failed: {e}"))?;
 
@@ -189,6 +252,7 @@ impl MlSession {
         self.ctx.output.as_ref()
     }
 
+    /// 返回 EOS token ID。空壳时返回默认值 151645。
     pub fn get_eos(&self) -> u32 {
         self.ctx.eos_token_id
     }
@@ -226,6 +290,21 @@ impl MlSession {
 
 impl mlua::UserData for MlSession {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // ─── 生命周期 ──────────────────────────────────────
+        methods.add_method_mut("load_model", |_, sess, (path, start, end): (String, usize, usize)| {
+            sess.load_model(std::path::Path::new(&path), start, end)
+                .map_err(|e| mlua::Error::runtime(e))
+        });
+
+        methods.add_method("has_model", |_, sess, (): ()| {
+            Ok(sess.has_model())
+        });
+
+        methods.add_method_mut("unload", |_, sess, (): ()| {
+            sess.unload();
+            Ok(())
+        });
+
         // ─── 编解码 ────────────────────────────────────────
         methods.add_method("encode", |_, sess, text: String| {
             sess.encode(&text)
@@ -238,14 +317,18 @@ impl mlua::UserData for MlSession {
         });
 
         // ─── 推理 ──────────────────────────────────────────
-        methods.add_method("tensorize", |_, sess, token_ids: Vec<u32>| {
-            let _ = sess.tensorize(&token_ids);
-            Err::<mlua::Value, _>(mlua::Error::runtime("Tensor passing requires binding layer"))
+        methods.add_method("tensorize", |lua, sess, token_ids: Vec<u32>| {
+            let t = sess.tensorize(&token_ids)
+                .map_err(|e| mlua::Error::runtime(e))?;
+            let dims = t.dims();
+            let result = lua.create_table()?;
+            for (i, &d) in dims.iter().enumerate() {
+                result.set(i + 1, d)?;
+            }
+            Ok(result)
         });
 
-        methods.add_method_mut("forward", |_, sess, (tensor, offset): (mlua::Value, Option<usize>)| {
-            // Tensor 跨 Lua 边界需要特殊处理，当前用 Value 占位
-            let _ = (tensor, offset);
+        methods.add_method_mut("forward", |_, _sess, (_tensor, _offset): (mlua::Value, Option<usize>)| {
             Err::<mlua::Value, _>(mlua::Error::runtime("Tensor passing requires binding layer"))
         });
 
@@ -263,11 +346,78 @@ impl mlua::UserData for MlSession {
         methods.add_method("get_offset", |_, sess, (): ()| {
             Ok(sess.get_offset())
         });
+    }
+}
 
-        // ─── 析构 ──────────────────────────────────────────
-        methods.add_method("unload", |_, sess, (): ()| {
-            // sess 被 consume，Lua GC 后续会 drop userdata
-            Ok(())
-        });
+// ============================================================
+// 测试
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── 空壳状态测试 ──────────────────────────────────────
+
+    #[test]
+    fn test_new_creates_empty_session() {
+        let sess = MlSession::new("cpu").expect("create empty session");
+        assert!(!sess.has_model());
+        assert_eq!(sess.get_eos(), 151645);
+        assert_eq!(sess.get_offset(), 0);
+    }
+
+    #[test]
+    fn test_tensorize_without_model() {
+        let sess = MlSession::new("cpu").expect("create empty session");
+        let t = sess.tensorize(&[1, 2, 3, 4, 5]).expect("tensorize");
+        let dims = t.dims();
+        assert_eq!(dims.len(), 2);
+        assert_eq!(dims[0], 1);  // batch
+        assert_eq!(dims[1], 5);  // seq_len
+    }
+
+    #[test]
+    fn test_tensorize_empty_input_errors() {
+        let sess = MlSession::new("cpu").expect("create empty session");
+        let result = sess.tensorize(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_encode_without_model_errors() {
+        let sess = MlSession::new("cpu").expect("create empty session");
+        let result = sess.encode("hello");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no model"));
+    }
+
+    #[test]
+    fn test_forward_without_model_errors() {
+        let mut sess = MlSession::new("cpu").expect("create empty session");
+        let t = sess.tensorize(&[1, 2, 3]).expect("tensorize");
+        let result = sess.forward(&t, Some(0));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no model"));
+    }
+
+    #[test]
+    fn test_unload_on_empty_session_is_noop() {
+        let mut sess = MlSession::new("cpu").expect("create empty session");
+        sess.unload(); // 不应 panic
+        assert!(!sess.has_model());
+    }
+
+    // ─── 生命周期测试 ──────────────────────────────────────
+
+    #[test]
+    fn test_unload_returns_to_empty_state() {
+        let mut sess = MlSession::new("cpu").expect("create empty session");
+        // 无法真正 load（需要 GGUF 文件），但 unload 应安全
+        sess.unload();
+        assert_eq!(sess.get_eos(), 151645);
+        assert_eq!(sess.get_offset(), 0);
+        assert!(!sess.has_model());
     }
 }

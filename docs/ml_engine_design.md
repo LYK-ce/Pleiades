@@ -1,7 +1,7 @@
 # ML Engine 设计文档
 
 Presented by KeJi
-Date ： 2026-05-16
+Date ： 2026-05-17
 
 ## 1. 模块概述
 
@@ -46,7 +46,8 @@ ML_Engine/
 ```
 Lua 脚本 (OS 线程)
    │
-   ├── ml.load_model(path, device, 0, 999999)    → sess (userdata)
+   ├── ml.new("cpu")                              → sess (空壳 userdata)
+   ├── sess:load_model(path, 0, 999999)            → 填充模型
    ├── sess:encode(prompt)                       → token IDs
    ├── sess:tensorize(tokens)                    → Tensor
    ├── sess:forward(tensor, offset)               → 推理
@@ -54,16 +55,42 @@ Lua 脚本 (OS 线程)
    ├── sess:decode(token_id)                      → 文本
    ├── sess:get_eos()                             → EOS token
    ├── sess:get_offset()                          → 位置偏移量
-   └── sess:unload()                              → 卸载模型
+   ├── sess:has_model()                           → 模型是否已加载
+   └── sess:unload()                              → 卸载模型，回到空壳
          │
          ▼
       MlSession (userdata 包装)
          │
          ▼
-      MlContext (内部状态: model + output + offset + rng + eos)
+      MlContext (内部状态: model(Option) + device + output + offset + rng + eos)
          │
          ▼
      GGUF_Model → Model_Weights (embedding + layers + norm + lm_head)
+```
+
+### 状态机
+
+```
+          ml.new("cpu")
+             │
+             ▼
+    ┌─────────────────┐
+    │ model = None     │  ← 空壳
+    │ device = Cpu     │
+    │ eos = 151645     │
+    └───────┬─────────┘
+            │ sess:load_model(path, 0, 40)
+            ▼
+    ┌─────────────────┐
+    │ model = Some(..) │  ← 已加载
+    │ eos = model.eos  │
+    └───────┬─────────┘
+            │ sess:unload()
+            ▼
+    ┌─────────────────┐
+    │ model = None     │  ← 回到空壳（可重新 load）
+    │ eos = 151645     │
+    └─────────────────┘
 ```
 
 ---
@@ -75,25 +102,26 @@ Lua 脚本 (OS 线程)
 ```rust
 /// 推理会话 userdata。Lua 侧通过 `sess:method()` 调用。
 pub struct MlSession {
-    ctx: MlContext,   // 内部状态，Lua 不可见
+    ctx: MlContext,   // 内部状态（含状态机），Lua 不可见
 }
 ```
 
-通过 `impl mlua::UserData for MlSession` 注册方法到 Lua，Lua 侧调用：`sess:encode("hello")`。
+MlSession 是状态机：空壳创建 → load_model → 推理 → unload → 空壳。通过 `impl mlua::UserData` 注册方法到 Lua。
 
 ### 2.2 MlContext — 内部推理状态（Lua 不可见）
 
 ```rust
 struct MlContext {
-    model: GGUF_Model,          // 模型权重 + tokenizer
+    model: Option<GGUF_Model>,  // 模型权重 + tokenizer（None = 空壳）
     output: Option<Tensor>,     // 推理输出缓冲区（logits 或 hidden state）
     offset: usize,              // 自增序列位置
     rng_state: u64,             // xoshiro 随机数生成器状态
     eos_token_id: u32,          // EOS token ID
+    device: Device,             // 运行设备
 }
 ```
 
-5 个字段。不设 input 缓冲区——Tensor 由调用方直接传入 `forward()`。
+6 个字段。`model` 为 `Option`，空壳时为 `None`。`device` 在 `new()` 时确定，不随模型变化。不设 input 缓冲区——Tensor 由调用方直接传入 `forward()`。
 
 ### 2.3 GGUF_Model — 模型抽象
 
@@ -115,13 +143,31 @@ struct GGUF_Model {
 
 ### 3.1 构造 / 析构
 
-#### `MlSession::load_model(path, device, start, end) → MlSession`
+#### `ml.new(device) → MlSession`
 
-静态方法。Lua 侧注册为 `ml.load_model(...)`。内部调用 `GGUF_Load_Model`。
+创建空壳 MlSession，不加载模型。解析 device 字符串（"cpu"/"cuda"），初始化空 MlContext。
+
+Lua 侧通过 `ml` 函数表调用：`local sess = ml.new("cpu")`。
+
+空壳状态下可用：
+- `tensorize()` — 纯数据转换，仅需 device
+- `get_eos()` — 返回默认值 151645
+- `get_offset()` — 返回 0
+- `has_model()` — 返回 false
+
+#### `sess:load_model(path, start, end) → ()`
+
+实例方法。若已有模型则先卸载。内部调用 `GGUF_Load_Model`，将模型填入 `ctx.model`。
+
+Lua 侧：`sess:load_model("model.gguf", 0, 40)`。
 
 #### `sess:unload()`
 
-消耗 session，卸载模型。注册为 `UserData` 方法。`MlSession` 实现 `Drop`，Lua GC 时自动回收。
+实例方法。清空 `ctx.model`，释放模型资源，回到空壳状态。不消耗 self，可重复 `load_model`。
+
+#### `sess:has_model() → bool`
+
+检查模型是否已加载。
 
 ---
 
@@ -132,16 +178,20 @@ struct GGUF_Model {
 | `sess:encode(text)` | `encode(&self, text: &str) → Vec<u32>` | 文本 → token IDs（含 Qwen3 模板） |
 | `sess:decode(token_id)` | `decode(&self, token_id: u32) → String` | token ID → 文本 |
 
+> 编解码方法需要模型已加载（含 tokenizer），空壳时返回错误 `"no model loaded"`。
+
 ---
 
 ### 3.3 推理
 
 | Lua 调用 | Rust 签名 | 说明 |
 |----------|----------|------|
-| `sess:tensorize(token_ids)` | `tensorize(&self, &[u32]) → Tensor` | Vec<u32> → [1, seq_len] u32 Tensor |
-| `sess:forward(tensor, offset)` | `forward(&mut self, &Tensor, Option<usize>) → ()` | 单次前向推理 |
+| `sess:tensorize(token_ids)` | `tensorize(&self, &[u32]) → Tensor` | Vec<u32> → [1, seq_len] u32 Tensor，**空壳可用** |
+| `sess:forward(tensor, offset)` | `forward(&mut self, &Tensor, Option<usize>) → ()` | 单次前向推理，需要模型 |
 
 `forward` 接受 `&mut self`。有 embedding 层则自动 embedding → forward，无则直接 forward。`offset=None` 时自动递增。
+
+> `tensorize` 是纯数据转换，不依赖模型，空壳状态可直接使用。
 
 ---
 
@@ -159,7 +209,7 @@ struct GGUF_Model {
 
 | Lua 调用 | 返回 | 说明 |
 |----------|------|------|
-| `sess:get_eos()` | u32 | EOS token ID |
+| `sess:get_eos()` | u32 | EOS token ID（空壳=151645，加载后=模型值） |
 | `sess:get_offset()` | usize | 当前序列位置偏移量 |
 
 ---
@@ -169,6 +219,9 @@ struct GGUF_Model {
 ```rust
 impl mlua::UserData for MlSession {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut("load_model", |_, sess, (p,s,e)| sess.load_model(Path::new(&p), s, e));
+        methods.add_method("has_model", |_, sess, ()| Ok(sess.has_model()));
+        methods.add_method_mut("unload", |_, sess, ()| { sess.unload(); Ok(()) });
         methods.add_method("encode",     |_, sess, text| sess.encode(&text));
         methods.add_method("decode",     |_, sess, id| sess.decode(id));
         methods.add_method("tensorize",  |_, sess, ids| sess.tensorize(&ids));
@@ -176,12 +229,11 @@ impl mlua::UserData for MlSession {
         methods.add_method_mut("sample", |_, sess, temp| sess.sample(temp));
         methods.add_method("get_eos",    |_, sess, ()| Ok(sess.get_eos()));
         methods.add_method("get_offset", |_, sess, ()| Ok(sess.get_offset()));
-        methods.add_method("unload",     |_, sess, ()| Ok(()));
     }
 }
 ```
 
-`add_method_mut` 处理 `&mut self` — mlua 内部做借用检查，Lua 调用方无需感知。
+`load_model` 和 `unload` 使用 `add_method_mut`（需要 `&mut self`）。mlua 内部做借用检查，Lua 调用方无需感知。
 
 ---
 
@@ -190,7 +242,8 @@ impl mlua::UserData for MlSession {
 ### 5.1 单机推理（Run）
 
 ```lua
-local sess = ml.load_model("model.gguf", "cpu", 0, 999999)
+local sess = ml.new("cpu")
+sess:load_model("model.gguf", 0, 999999)
 local tokens = sess:encode(io:input())
 sess:forward(sess:tensorize(tokens), 0)
 
@@ -207,7 +260,8 @@ sess:unload()
 ### 5.2 协调者（Coordinator）
 
 ```lua
-local sess = ml.load_model(model, device, coord_start, coord_end)
+local sess = ml.new(device)
+sess:load_model(model, coord_start, coord_end)
 sess:forward(sess:tensorize(sess:encode(io:input())), 0)
 ts:send(sess:get_output_tensor(sess))
 
@@ -221,12 +275,14 @@ for i = 1, 120 do
     ts:send(sess:get_output_tensor(sess))
 end
 ts:send_eof()
+sess:unload()
 ```
 
 ### 5.3 工作节点（Worker）
 
 ```lua
-local sess = ml.load_model(model, device, layer_start, layer_end)
+local sess = ml.new(device)
+sess:load_model(model, layer_start, layer_end)
 
 while true do
     local is_eof, t, offset = ts:receive()
@@ -258,12 +314,12 @@ end
 
 | | 其他 capability | ML Engine |
 |---|---|---|
-| 方法签名 | `&self`（共享引用） | `&mut self`（forward/sample） |
+| 方法签名 | `&self`（共享引用） | `&mut self`（forward/sample/unload/load_model） |
 | 状态方案 | `Arc<RwLock<>>` 内部锁 | 纯 owned 状态，Lua 直接持有 |
 | trait object | `Box<dyn Trait>` 可用 | `&mut self` + trait object 冲突 |
 | 解决方案 | trait | `impl mlua::UserData` 暴露给 Lua |
 
-核心矛盾：`forward` 和 `sample` 必须 `&mut self`（KV cache 和 rng 会变），而 `Box<dyn Trait>` 不支持 `&mut self` 的 async trait。
+核心矛盾：`forward`、`sample`、`load_model`、`unload` 都需要 `&mut self`（状态会变），而 `Box<dyn Trait>` 不支持 `&mut self` 的 async trait。
 
 ---
 
@@ -272,12 +328,12 @@ end
 | 维度 | 旧（ML_Engine_Capability trait） | 新（MlSession UserData） |
 |------|-------------------------------|-------------------------|
 | 接口形式 | async trait, 5 方法, `Box<dyn Trait>` | 同步 struct, `impl mlua::UserData` |
-| Session | Create_Session（线程+通道+注册表） | `ml.load_model()` 直接返回 userdata |
+| Session | Create_Session（线程+通道+注册表） | `ml.new()` 空壳 + `sess:load_model()` 填充 |
 | 推理方式 | Run_Program_VM（批量执行指令序列） | `sess:forward()` / `sess:sample()` 单步 |
 | 调用路径 | Orchestrator → trait → channel → OS thread | Lua 线程 → `sess:method()` 直接调用 |
 | 抽象层数 | 4 层 | 1 层 |
 | 调用风格 | Lua: `ml:function(sess, ...)` | Lua: `sess:method(...)` |
-| 生命周期 | HashMap 注册 + shutdown 协议 | Lua GC 自动 drop |
+| 生命周期 | HashMap 注册 + shutdown 协议 | 空壳→load→推理→unload→空壳，Lua GC drop |
 
 ---
 
@@ -287,11 +343,11 @@ end
 
 - `context.rs` — `MlSession` userdata + `MlContext` 内部状态 + `impl mlua::UserData`
 - `capability.rs` — `analyze_model` / `split_model` 独立 async 函数
-- 旧代码已删除: `session.rs`, `service.rs`, `pipeline.rs`, `ML_VM/`
+- MlSession 两步构造：`new(device)` 空壳 + `load_model(path, start, end)` 填充
+- 旧代码已删除: `session.rs`, `service.rs`, `pipeline.rs`, `ML_VM/`, `Vm_Base/`
 
 ### ⚠ 待处理
 
-- `Vm_Base/` 等其他旧架构代码待远期删除
 - `forward` 方法中 Tensor 跨 Lua 边界传输待实现（当前占位 `mlua::Error::runtime`）
 - Lua 侧 `ml` 函数表注册 + `sess` userdata 实例化待完成
 
@@ -299,7 +355,7 @@ end
 
 - **#4** `tensorize` 已添加空 token_ids 检查 ✅
 - **#5** `sample` 后不清空 output — 已加文档注释
-- **#6** 缺少 `clear_kv_cache()` 方法
+- **#6** 缺少 `clear_kv_cache()` 方法 — `unload()` 已清空 output+offset
 - **#7** `load_model` PRNG seed 硬编码
 - **#8** `analyze_model` 应返回含 `layer_sizes_bytes` 的视图类型
-- **#9** `MlSession` 缺少单元测试
+- **#9** `MlSession` 单元测试：7 个，覆盖空壳 + 生命周期 ✅

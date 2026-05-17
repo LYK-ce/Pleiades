@@ -186,6 +186,10 @@ pub struct App {
     /// 是否应退出
     pub should_quit: bool,
 
+    // ===== Lua 命令补全 =====
+    /// 可用命令列表（来自 ProgramRegistry）
+    pub available_commands: Vec<String>,
+
     // ===== 面板区域（用于鼠标滚轮命中检测） =====
     /// Log 面板区域
     pub log_area: Rect,
@@ -213,6 +217,7 @@ impl App {
             active_frontend: None,
             active_job_id: None,
             should_quit: false,
+            available_commands: Vec::new(),
             log_area: Rect::default(),
             command_area: Rect::default(),
         }
@@ -349,5 +354,10 @@ impl App {
     /// 检查是否有活跃推理会话
     pub fn Has_Active_Session(&self) -> bool {
         self.active_frontend.is_some()
+    }
+
+    /// 设置可用命令列表（来自 ProgramRegistry）
+    pub fn set_available_commands(&mut self, commands: Vec<String>) {
+        self.available_commands = commands;
     }
 }

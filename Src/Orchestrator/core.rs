@@ -16,6 +16,7 @@ use super::job::{JobId, JobKind, LifecycleEvent};
 use super::command::UserCommand;
 use super::Capabilities;
 use crate::network::{Network_Inbound_Event, InboundRequest};
+use crate::lua::registry::ProgramRegistry;
 
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
 
@@ -76,6 +77,9 @@ pub struct Core {
     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
     lifecycle_rx: mpsc::Receiver<LifecycleEvent>,
 
+    // --- Lua 脚本引擎 ---
+    program_registry: ProgramRegistry,
+
     // --- 偏好设置 ---
     device_preference: String,
 }
@@ -89,6 +93,11 @@ impl Core {
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
+        let program_registry = ProgramRegistry::scan()
+            .unwrap_or_else(|e| {
+                tracing::warn!("ProgramRegistry 扫描失败: {}，使用空注册表", e);
+                ProgramRegistry::default()
+            });
         Core {
             registry: HashMap::new(),
             shutting_down: false,
@@ -98,6 +107,7 @@ impl Core {
             network_inbound_rx,
             lifecycle_tx,
             lifecycle_rx,
+            program_registry,
             device_preference: String::new(),
         }
     }

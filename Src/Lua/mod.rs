@@ -7,3 +7,4 @@
 
 pub mod engine;
 pub mod registry;
+pub mod capability_binding;

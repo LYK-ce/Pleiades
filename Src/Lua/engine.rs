@@ -55,4 +55,57 @@ mod tests {
             _ => panic!("os 未被正确禁用"),
         }
     }
+
+    // ─── Phase 1: 最小验证 ────────────────────────────────
+
+    #[test]
+    fn test_load_and_execute_hello_lua() {
+        let lua = LuaContext::new().expect("create lua");
+        let script = std::fs::read_to_string("programs/hello.lua").expect("read script");
+
+        // 1. 加载脚本，执行顶层（注册 COMMAND/DESCRIPTION/execute）
+        lua.load(&script).eval::<()>().expect("eval script");
+
+        // 2. 读取元数据
+        let command: String = lua.globals().get("COMMAND").expect("COMMAND");
+        assert_eq!(command, "hello");
+
+        // 3. 构造参数 table
+        let params = lua.create_table().expect("params table");
+        params.set("msg", "integration test").expect("set msg");
+
+        // 4. 调用 execute(params)
+        let execute: mlua::Function = lua.globals().get("execute").expect("execute fn");
+        let result: String = execute.call(params).expect("call execute");
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_script_missing_execute_errors() {
+        let lua = LuaContext::new().expect("create lua");
+        let script = r#"
+            COMMAND = "bad"
+            DESCRIPTION = "no execute function"
+        "#;
+        lua.load(script).eval::<()>().expect("eval script");
+
+        let result = lua.globals().get::<mlua::Function>("execute");
+        assert!(result.is_err(), "缺少 execute 函数应返回错误");
+    }
+
+    #[test]
+    fn test_sandbox_cannot_io_open() {
+        let lua = LuaContext::new().expect("create lua");
+        // io 被设为 nil，调用 io.open 应失败
+        let result = lua.load(r#"
+            if io and io.open then
+                return "should not reach"
+            end
+            return "sandbox ok"
+        "#).eval::<String>();
+        match result {
+            Ok(s) => assert_eq!(s, "sandbox ok"),
+            Err(_) => {} // 某些实现直接报错，也 OK
+        }
+    }
 }
