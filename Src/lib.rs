@@ -12,8 +12,7 @@
 //! - ml_engine: ML推理引擎模块
 //! - orchestrator: 编排器模块
 //! - storage: 存储管理模块
-//! - llm_io: LLM 文本交互通道模块（已升级为 session 模块）
-//! - scheduler: 分布式流水线拓扑调度模块
+//! - session: LLM 文本交互通道模块（已升级为 session 模块）
 //! - tensor_stream: 张量流子模块（Network 模块内部）
 //! - peer_management: 节点管理模块
 //! - event_bus: 全局事件总线模块
@@ -21,6 +20,7 @@
 
 #[path = "Vm_Base/mod.rs"]
 pub mod vm_base;
+#[path = "Config/mod.rs"]
 pub mod config;
 
 #[path = "Network/mod.rs"]
@@ -41,8 +41,6 @@ pub mod storage;
 #[path = "Session_Manager/mod.rs"]
 pub mod session;
 
-#[path = "Scheduler/mod.rs"]
-pub mod scheduler;
 
 #[path = "EventBus/mod.rs"]
 pub mod event_bus;
@@ -94,8 +92,6 @@ pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 pub use session::{Session_Capability, Session_Error, IoFrontend, IoHandle, SessionManager, SessionInfo};
 
 
-// Scheduler模块类型导出
-pub use scheduler::{Scheduler_Capability, Scheduler_Strategy, Scheduler_Error, Scheduler_Input, Pipeline_Plan, Worker_Assignment, Scheduler_Service, Scheduler_Weighted};
 
 // EventBus模块类型导出
 pub use event_bus::{EventBus, Bus_Event};

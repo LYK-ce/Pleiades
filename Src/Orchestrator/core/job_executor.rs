@@ -9,8 +9,8 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use super::job::{JobId, JobKind, JobResult, LifecycleEvent};
-use super::Capabilities;
+use crate::orchestrator::job::{JobId, JobKind, JobResult, LifecycleEvent};
+use crate::orchestrator::Capabilities;
 
 /// 最小 Job 执行器 stub。
 ///

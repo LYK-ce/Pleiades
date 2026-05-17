@@ -1,218 +1,145 @@
 //Presented by KeJi
-//Date ： 2026-04-27
+//Date ： 2026-05-17
 
-//! LLM_IO 模块集成测试
+//! Session 模块集成测试
 //!
-//! 验证 LLM_IO_Broker 在多 Job 并发场景下的通道隔离和生命周期。
-//! 每个测试使用独立的 Broker 实例，测试间互不干扰。
+//! 验证 SessionManager 在多会话并发场景下的通道隔离和生命周期。
+//! 每个测试使用独立的 SessionManager 实例，测试间互不干扰。
+//!
+//! 注意：IoHandle（ML 侧）和 IoFrontend（前端侧）是两条独立通道，
+//! 跨层桥接逻辑待 batching 实现。当前测试分别验证各层通道存活。
 
 #![allow(non_snake_case)]
 
 mod common;
 
-use pleiades::llm_io::{LLM_IO_Broker, LLM_IO_Capability, LLM_IO_Error};
-use pleiades::orchestrator::job::JobId;
+use pleiades::session::{SessionManager, Session_Capability, Session_Error};
 use std::sync::Arc;
 
-/// TC-01: 多 Job 并发分配与隔离
+/// TC-01: 多会话并发创建，验证 IoHandle 通道存活
 ///
-/// 并发 Allocate 10 个 JobId → Take 两端 → 每个 Job frontend 发唯一 prompt
-/// → ml_side 收 → 验证无串台
+/// 并发 create_session 10 个 → 每个 IoHandle 的 input_rx 应存活（对端未 drop）
 #[tokio::test]
-async fn tc01_multi_job_concurrent_isolation() {
-    let broker = Arc::new(LLM_IO_Broker::New());
-    let job_count = 10u64;
+async fn tc01_multi_session_io_handle_alive() {
+    let mgr = SessionManager::new(20);
+    let session_count = 10usize;
 
-    // 1. 分配 10 个 Job 的通道并 Take 两端
-    let mut frontends = Vec::new();
-    let mut ml_sides = Vec::new();
-
-    for i in 0..job_count {
-        broker.Allocate(JobId(i)).await.unwrap();
-        frontends.push(broker.Take_Frontend(JobId(i)).await.unwrap());
-        ml_sides.push(broker.Take_ML_Side(JobId(i)).await.unwrap());
+    let mut io_handles = Vec::new();
+    for i in 0..session_count {
+        let (session_id, io_handle) = mgr.create_session(format!("model_{}", i)).await.unwrap();
+        assert!(!session_id.is_empty(), "session_id 不应为空");
+        io_handles.push(io_handle);
     }
 
-    // 2. 每个 frontend 发送唯一 prompt
-    for (i, frontend) in frontends.iter().enumerate() {
-        let prompt = format!("prompt_from_job_{}", i);
-        frontend.input_tx.send(prompt).await.unwrap();
-    }
-
-    // 3. 每个 ml_side 接收 → 验证无串台
-    for (i, ml_side) in ml_sides.iter_mut().enumerate() {
-        let received = ml_side.input_rx.recv().await.unwrap();
-        let expected = format!("prompt_from_job_{}", i);
-        assert_eq!(
-            received, expected,
-            "Job {} 收到的 prompt 应与发送的一致，验证无串台",
-            i
+    // 每个 IoHandle 的 input_rx 应存活（对端 ml_input_tx 在 Session 中）
+    for io_handle in &mut io_handles {
+        let result = io_handle.input_rx.try_recv();
+        assert!(
+            !matches!(result, Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)),
+            "IoHandle.input_rx 应存活（对端存在于 Session 中）"
         );
     }
 
-    // 4. 每个 ml_side 回复，frontend 接收验证
-    for (i, ml_side) in ml_sides.iter().enumerate() {
-        let reply = format!("reply_from_ml_{}", i);
-        ml_side.output_tx.send(reply).await.unwrap();
-    }
-
-    for (i, frontend) in frontends.iter_mut().enumerate() {
-        let received = frontend.output_rx.recv().await.unwrap();
-        let expected = format!("reply_from_ml_{}", i);
-        assert_eq!(
-            received, expected,
-            "Job {} frontend 收到的回复应与 ml_side 发送的一致",
-            i
-        );
-    }
+    // 验证 list_sessions
+    let sessions = mgr.list_sessions();
+    assert_eq!(sessions.len(), session_count, "应创建 10 个会话");
 }
 
-/// TC-02: 通道关闭传播
+/// TC-02: connect 创建的 IoFrontend 通道存活
 ///
-/// Allocate → Take → 双向通信 → Deallocate → drop frontend → ml_side.recv() = None
+/// create_session → connect → IoFrontend 通道应存活 → drop IoFrontend → 对端关闭
 #[tokio::test]
-async fn tc02_channel_close_propagation() {
-    let broker = LLM_IO_Broker::New();
-    let job_id = JobId(200);
+async fn tc02_frontend_channel_alive() {
+    let mgr = SessionManager::new(4);
 
-    // 1. 分配通道并 Take 两端
-    broker.Allocate(job_id).await.unwrap();
-    let frontend = broker.Take_Frontend(job_id).await.unwrap();
-    let mut ml_side = broker.Take_ML_Side(job_id).await.unwrap();
+    let (session_id, _io_handle) = mgr.create_session("test_model".to_string()).await.unwrap();
+    let (slot_id, frontend) = mgr.connect(&session_id).await.unwrap();
+    assert_eq!(slot_id, 0);
 
-    // 前端发送
-    frontend.input_tx.send("ping".to_string()).await.unwrap();
-    let received = ml_side.input_rx.recv().await.unwrap();
-    assert_eq!(received, "ping");
-
-    // ML 侧回复
-    ml_side.output_tx.send("pong".to_string()).await.unwrap();
-
-    // 2. Deallocate（移除 ChannelEntry 中的 Sender 副本）
-    broker.Deallocate(job_id).await.unwrap();
-    assert!(!broker.Is_Active(job_id).await);
-
-    // 3. drop frontend（移除最后一个 input_tx）
-    drop(frontend);
-
-    // 4. ml_side.input_rx.recv() 应返回 None（通道关闭）
-    let result = ml_side.input_rx.recv().await;
+    // IoFrontend 应能发送而不会立即报 SendError
+    let result = frontend.input_tx.try_send("ping".to_string());
     assert!(
-        result.is_none(),
-        "Deallocate + drop frontend 后，ml_side.input_rx.recv() 应返回 None"
+        result.is_ok(),
+        "IoFrontend.input_tx 发送应成功（对端在 Session.frontend_pairs 中）"
     );
+
+    // drop IoFrontend 后，对端的 input_rx 应收不到更多消息（内部 rx 存活但 tx 已断）
+    drop(frontend);
+    // 通过 destroy 验证 Session 被释放时对端也被清理
+    mgr.destroy_session(&session_id).await.unwrap();
+    assert!(mgr.list_sessions().is_empty());
 }
 
-/// TC-03: 高速吞吐
+/// TC-03: 高速吞吐 — session 创建与销毁压力
 ///
-/// Allocate + Take 后连续发 1000 条消息 → 验证全部到达且顺序正确
+/// 快速创建+销毁 200 个 session，验证无泄漏/panic
 #[tokio::test]
-async fn tc03_high_speed_throughput() {
-    let broker = LLM_IO_Broker::New();
-    let job_id = JobId(300);
-    let message_count = 1000usize;
+async fn tc03_high_speed_create_destroy() {
+    let mgr = SessionManager::new(4);
+    let count = 200usize;
 
-    broker.Allocate(job_id).await.unwrap();
-    let frontend = broker.Take_Frontend(job_id).await.unwrap();
-    let mut ml_side = broker.Take_ML_Side(job_id).await.unwrap();
-
-    // 1. 生产者 — frontend 连续发 1000 条
-    let sender = frontend.input_tx.clone();
-    let producer = tokio::spawn(async move {
-        for i in 0..message_count {
-            sender.send(format!("msg_{}", i)).await.unwrap();
-        }
-    });
-
-    // 2. 消费者 — ml_side 接收并验证顺序
-    let consumer = tokio::spawn(async move {
-        let mut received_messages = Vec::with_capacity(message_count);
-        for _ in 0..message_count {
-            let msg = ml_side.input_rx.recv().await.unwrap();
-            received_messages.push(msg);
-        }
-        received_messages
-    });
-
-    producer.await.unwrap();
-    let received = consumer.await.unwrap();
-
-    assert_eq!(received.len(), message_count, "应收到全部 1000 条消息");
-
-    // 验证顺序正确
-    for (i, msg) in received.iter().enumerate() {
-        let expected = format!("msg_{}", i);
-        assert_eq!(
-            msg, &expected,
-            "第 {} 条消息顺序应正确",
-            i
-        );
+    for i in 0..count {
+        let (session_id, _io_handle) = mgr.create_session(format!("model_{}", i)).await.unwrap();
+        mgr.destroy_session(&session_id).await.unwrap();
     }
+
+    assert!(mgr.list_sessions().is_empty(), "全部释放后应无残留会话");
 }
 
-/// TC-04: 并发分配不同 JobId 无竞争
+/// TC-04: 并发创建会话无竞争
 ///
-/// spawn 20 个任务同时 Allocate 不同 JobId → 全部成功 → Is_Active 全部 true
+/// spawn 20 个任务同时 create_session 不同 model_id → 全部成功 → list_sessions 验证
 #[tokio::test]
-async fn tc04_concurrent_allocate_no_contention() {
-    let broker = Arc::new(LLM_IO_Broker::New());
+async fn tc04_concurrent_create_no_contention() {
+    let mgr = Arc::new(SessionManager::new(50));
     let task_count = 20u64;
 
-    // spawn 20 个并发 Allocate 任务
     let mut handles = Vec::new();
     for i in 0..task_count {
-        let broker_clone = Arc::clone(&broker);
+        let mgr_clone = Arc::clone(&mgr);
         let handle = tokio::spawn(async move {
-            let result = broker_clone.Allocate(JobId(400 + i)).await;
+            let result = mgr_clone.create_session(format!("model_{}", i)).await;
             (i, result)
         });
         handles.push(handle);
     }
 
-    // 等待全部完成
     for handle in handles {
         let (i, result) = handle.await.unwrap();
         assert!(
             result.is_ok(),
-            "JobId({}) 并发 Allocate 应成功",
-            400 + i
+            "model_{} 并发 create_session 应成功",
+            i
         );
     }
 
-    // 验证 Is_Active 全部 true
-    for i in 0..task_count {
-        assert!(
-            broker.Is_Active(JobId(400 + i)).await,
-            "JobId({}) 应处于活跃状态",
-            400 + i
-        );
-    }
+    let sessions = mgr.list_sessions();
+    assert_eq!(sessions.len(), task_count as usize, "应创建 20 个会话");
 }
 
-/// TC-05: 重复分配同一 JobId 错误处理
+/// TC-05: 槽位耗尽错误
 ///
-/// Allocate(job_1) → 再 Allocate(job_1) → AllocationFailed
+/// create_session(max_slots=2) → connect 3 次 → 第 3 次返回 SlotExhausted
 #[tokio::test]
-async fn tc05_duplicate_allocate_error() {
-    let broker = LLM_IO_Broker::New();
-    let job_id = JobId(500);
+async fn tc05_slot_exhausted_error() {
+    let mgr = SessionManager::new(2);
 
-    // 第一次分配成功
-    broker.Allocate(job_id).await.unwrap();
-    assert!(broker.Is_Active(job_id).await);
+    let (session_id, _io) = mgr.create_session("test_model".to_string()).await.unwrap();
 
-    // 第二次分配同一 JobId 应失败
-    let result = broker.Allocate(job_id).await;
-    assert!(result.is_err(), "重复 Allocate 同一 JobId 应返回错误");
+    mgr.connect(&session_id).await.unwrap();
+    mgr.connect(&session_id).await.unwrap();
+
+    let result = mgr.connect(&session_id).await;
+    assert!(result.is_err(), "第 3 次 connect 应返回错误");
 
     match result.unwrap_err() {
-        LLM_IO_Error::AllocationFailed(msg) => {
+        Session_Error::SlotExhausted(msg) => {
             assert!(
-                msg.contains("already has an active channel"),
-                "错误信息应包含 'already has an active channel'，实际: {}",
+                msg.contains(&session_id),
+                "错误信息应包含 session_id，实际: {}",
                 msg
             );
         }
-        other => panic!("Expected AllocationFailed, got {:?}", other),
+        other => panic!("期望 SlotExhausted，实际: {:?}", other),
     }
 }

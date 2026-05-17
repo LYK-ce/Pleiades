@@ -23,13 +23,44 @@
      #[error("Internal error: {0}")]
      Internal(String),
  }
+/// 节点连接状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerStatus {
+    Connected,
+    Disconnected,
+}
 
- /// 节点管理能力 trait
- ///
- /// Orchestrator 和 Network 层通过此 trait 操作节点信息。
- /// 实现方为 PeerHandle（持有 Arc<PeerManager>）。
- #[async_trait]
- pub trait Peer_Management_Capability: Send + Sync {
+/// 节点硬件能力描述
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerCapability {
+    pub has_gpu: bool,
+    pub cpu_cores: Option<u32>,
+    pub gpu_name: Option<String>,
+}
+
+impl Default for PeerCapability {
+    fn default() -> Self {
+        Self {
+            has_gpu: false,
+            cpu_cores: None,
+            gpu_name: None,
+        }
+    }
+}
+
+/// 节点事件（预留）
+#[derive(Debug, Clone)]
+pub enum PeerEvent {
+    Connected { peer_id: PeerId },
+    Disconnected { peer_id: PeerId },
+}
+
+/// 节点管理能力 trait
+///
+/// Orchestrator 和 Network 层通过此 trait 操作节点信息。
+/// 实现方为 PeerHandle（持有 Arc<PeerManager>）。
+#[async_trait]
+pub trait Peer_Management_Capability: Send + Sync {
      // ─── 查询操作 ──────────────────────────────
 
      /// 获取远程节点列表（排除本地）
@@ -61,9 +92,15 @@
      /// 更新节点持有的模型列表
      async fn Update_Supported_Models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> Result<(), Peer_Management_Error>;
 
-     /// 清理超时节点，返回清理数量
-     async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error>;
+    /// 清理超时节点，返回清理数量
+    async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error>;
 
-     /// 清空所有节点（保留本地节点）
-     async fn Clear(&self) -> Result<(), Peer_Management_Error>;
- }
+    /// 清空所有节点（保留本地节点）
+    async fn Clear(&self) -> Result<(), Peer_Management_Error>;
+
+    /// 更新节点心跳（延迟信息）
+    async fn Update_Heartbeat(&self, peer_id: &PeerId, latency_ms: Option<u64>) -> Result<(), Peer_Management_Error>;
+
+    /// 更新节点连接状态
+    async fn Update_Status(&self, peer_id: &PeerId, status: PeerStatus) -> Result<(), Peer_Management_Error>;
+}

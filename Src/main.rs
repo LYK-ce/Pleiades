@@ -1,16 +1,15 @@
 //Presented by KeJi
-//Date ： 2026-04-30
+//Date ： 2026-05-17
 
 //! Pleiades 入口点
 //!
 //! 启动引导流程：
 //! 1. 读取配置 + 确保节点身份
 //! 2. 创建工作目录 + 初始化 tracing 日志（文件输出）
-//! 3. 创建基础组件（EventBus、PeerManager、Storage）
+//! 3. 创建基础组件（EventBus、PeerManager、Storage、SessionManager）
 //! 4. 初始化 Network 服务
-//! 5. 创建 ML Engine + IO Broker
-//! 6. 组装 Capabilities + Orchestrator Core
-//! 7. 启动 Network 事件循环 + TUI + Core 主循环
+//! 5. 组装 Capabilities + Orchestrator Core
+//! 6. 启动 Network 事件循环 + TUI + Core 主循环
 //!
 //! ## 目录结构
 //! ```text
@@ -25,7 +24,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use libp2p::PeerId;
 use tokio::sync::mpsc;
@@ -33,16 +31,12 @@ use tracing::info;
 
 use pleiades::config::{Ensure_Config, Ensure_Identity};
 use pleiades::event_bus::EventBus;
-use pleiades::peer_management::{create_peer_management, PeerHandle, PeerInfo, PeerStatus, PeerCapability};
+use pleiades::peer_management::{create_peer_management, PeerHandle};
 use pleiades::network::{NetworkConfig, Network_Service};
 use pleiades::storage::StorageManager;
-use pleiades::ml_engine::ML_Engine_Service;
-use pleiades::llm_io::LLM_IO_Broker;
-use pleiades::tensor_io::Tensor_Port_Switch;
-use pleiades::scheduler::{Scheduler_Service, Scheduler_Strategy};
+use pleiades::session::SessionManager;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
-use pleiades::orchestrator::program_selector::ProgramSelector;
 use pleiades::orchestrator::command::UserCommand;
 use pleiades::tui::TUI_Loop;
 
@@ -62,25 +56,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ══════════════════════════════════════════════════════
 
     // 1. 读取/创建配置文件
-    let (config, config_path) = Ensure_Config()?;
+    let (config, _config_path) = Ensure_Config()?;
 
     // 2. 确保节点身份密钥对（持久化到 .config/keypair.bin）
     let keypair = Ensure_Identity(Path::new(CONFIG_DIR))?;
 
-    // 3. 确定工作目录（从 config.Storage.workspace_dir 读取，默认 Pleiades_Workspace）
+    // 3. 确定工作目录
     let workspace_dir: PathBuf = config.Storage.as_ref()
         .and_then(|s| s.workspace_dir.as_deref())
         .unwrap_or(DEFAULT_WORKSPACE)
         .into();
 
-    // 确保工作目录存在
     std::fs::create_dir_all(&workspace_dir)?;
 
     // ══════════════════════════════════════════════════════
-    // Phase 2: 初始化 tracing 日志（文件输出，避免与 TUI 冲突）
+    // Phase 2: 初始化 tracing 日志
     // ══════════════════════════════════════════════════════
 
-    // 4. 日志目录：{workspace}/Log/（或从 config.Log.log_file_path 读取）
     let log_dir: PathBuf = config.Log.as_ref()
         .and_then(|l| l.log_file_path.as_deref())
         .map(PathBuf::from)
@@ -95,7 +87,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    // 使用 tracing-appender 写入日志文件（每日滚动）
     let file_appender = tracing_appender::rolling::daily(&log_dir, "pleiades.log");
     let (non_blocking, _log_guard) = tracing_appender::non_blocking(file_appender);
 
@@ -105,8 +96,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(non_blocking)
         .init();
 
-    // _log_guard 必须存活到 main 函数结束，否则缓冲区中的日志会丢失
-
     info!("Pleiades 启动中...");
     info!("工作目录: {}", workspace_dir.display());
     info!("日志目录: {}", log_dir.display());
@@ -115,57 +104,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 3: 创建基础组件
     // ══════════════════════════════════════════════════════
 
-    // 5. EventBus — 全局事件总线
+    // 5. EventBus
     let event_bus = Arc::new(EventBus::New(1024));
 
-    // 6. PeerManagement — 节点管理
-    //    从 keypair 生成 local_peer_id，注册本地节点到 PeerManager
+    // 6. PeerManagement
     let local_peer_id = PeerId::from(keypair.public());
     let (peer_manager_arc, peer_capability_for_network) = create_peer_management(local_peer_id);
+    let peer_capability_for_core = Box::new(PeerHandle::new(peer_manager_arc.clone()));
 
-    // 注册本地节点
-    let now = Instant::now();
-    let self_info = PeerInfo {
-        peer_id: local_peer_id,
-        addresses: vec![],
-        latency_ms: None,
-        bandwidth_mbps: None,
-        connected_at: now,
-        last_active: now,
-        status: PeerStatus::Local,
-        capability: Some(PeerCapability::new()),
-    };
-    peer_manager_arc.upsert_peer(self_info).await;
-
-    let peer_capability_for_caps = Box::new(PeerHandle::new(peer_manager_arc.clone()));
-
-    // 7. Storage — 存储管理器（工作目录即为 Storage 根目录）
-    //    Arc 共享给 ML_Engine_Service 和 Capabilities
-    let quota_bytes = config.Storage.as_ref()
-        .and_then(|s| s.quota_gb)
-        .map(|gb| gb * 1024 * 1024 * 1024)
-        .unwrap_or(0);
-    let storage = Arc::new(
-        StorageManager::New_With_Quota(&workspace_dir, quota_bytes).await?
+    // 7. Storage
+    let storage: Arc<dyn pleiades::storage::StorageCapability> = Arc::new(
+        StorageManager::New(&workspace_dir).await?
     );
 
-    info!("Storage 初始化完成: dir={}, quota={}",
-        workspace_dir.display(),
-        if quota_bytes == 0 { "unlimited".to_string() } else { format!("{}GB", quota_bytes / (1024 * 1024 * 1024)) }
-    );
+    info!("Storage 初始化完成: dir={}", workspace_dir.display());
+
+    // 8. SessionManager
+    let max_slots = config.Session.as_ref()
+        .and_then(|s| s.max_slots)
+        .unwrap_or(4);
+    let session_mgr = SessionManager::new(max_slots);
+    let session: Box<dyn pleiades::session::Session_Capability> = Box::new(session_mgr);
 
     // ══════════════════════════════════════════════════════
     // Phase 4: 创建服务组件
     // ══════════════════════════════════════════════════════
 
-    // 8. 构建 NetworkConfig
+    // 9. 构建 NetworkConfig
     let net_cfg = {
         let n = config.Network.as_ref();
         NetworkConfig {
             lan_enabled:        n.and_then(|n| n.LAN).unwrap_or(true),
             wan_enabled:        n.and_then(|n| n.WAN).unwrap_or(false),
             transport_protocol: n.and_then(|n| n.Transport_Protocol.clone()).unwrap_or_else(|| "TCP".to_string()),
-            listen_port:        0,  // 随机端口
+            listen_port:        0,
             bootstrap_peers:    Vec::new(),
             cleanup_interval:   n.and_then(|n| n.cleanup_interval).unwrap_or(300),
             timeout_interval:   n.and_then(|n| n.timeout_interval).unwrap_or(300),
@@ -175,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 9. 初始化 Network 服务
+    // 10. 初始化 Network 服务
     let (mut network_service, _node_handle, inbound_rx, net_capability, net_event_rx)
         = Network_Service::Init(
             net_cfg,
@@ -186,54 +158,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Network 服务初始化完成");
 
-    // 10. ML Engine — 推理引擎（共享 Storage）
-    let ml_engine = ML_Engine_Service::New(storage.clone());
-
-    // 11. LLM_IO_Broker (Arc 共享给 Capabilities 和 TUI) + Tensor_IO_Broker
-    let io_broker = Arc::new(LLM_IO_Broker::New());
-    let tensor_switch = Arc::new(Tensor_Port_Switch::New());
-
     // ══════════════════════════════════════════════════════
     // Phase 5: 组装 Orchestrator
     // ══════════════════════════════════════════════════════
 
-    // 12. 组装 Capabilities
-    let scheduler_strategy = config.Scheduler
-        .as_ref()
-        .and_then(|s| s.strategy.as_deref())
-        .map(|s| match s {
-            "weighted" => Scheduler_Strategy::Weighted,
-            _ => Scheduler_Strategy::Uniform,
-        })
-        .unwrap_or(Scheduler_Strategy::Uniform);
-    let scheduler_strategy_str = match scheduler_strategy {
-        Scheduler_Strategy::Weighted => "weighted",
-        Scheduler_Strategy::Uniform => "uniform",
-    };
-    let scheduler = Scheduler_Service::New();
+    // 11. 组装 Capabilities
     let capabilities = Arc::new(Capabilities {
         storage,
-        ml_engine: Box::new(ml_engine),
         network: Box::new(net_capability),
-        peer_manager: peer_capability_for_caps,
-        scheduler: Box::new(scheduler),
+        peer_manager: peer_capability_for_core,
+        session,
         event_bus: event_bus.clone(),
-        io_broker: io_broker.clone(),
-        tensor_switch,
     });
 
-    // 13. 用户命令通道 (TUI → Core)
+    // 12. 用户命令通道 (TUI → Core)
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
 
-    // 14. 创建 Core
+    // 13. 创建 Core
     let core = Core::new(
-        Arc::new(ProgramSelector),
         capabilities,
-        config_path,
         user_cmd_rx,
         inbound_rx,
         net_event_rx,
-        scheduler_strategy_str.to_string(),
     );
 
     info!("Orchestrator Core 初始化完成");
@@ -242,21 +188,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 6: 启动运行时
     // ══════════════════════════════════════════════════════
 
-    // 15. 启动 Network 事件循环（独立 tokio task）
+    // 14. 启动 Network 事件循环
     tokio::spawn(async move {
         if let Err(e) = network_service.Start().await {
             tracing::error!("Network 事件循环异常退出: {}", e);
         }
     });
 
-    // 16. 启动 TUI（spawn_blocking，因为 ratatui 是同步阻塞 API）
+    // 15. 启动 TUI
+    // TODO: SessionManager 需要支持 TUI 的 Take_Frontend 方法（当前为 stub）
     let event_rx = event_bus.Subscribe();
-    let io_broker_for_tui = io_broker.clone();
+    let _io_broker_for_tui = Arc::new(SessionManager::new(max_slots));
     tokio::task::spawn_blocking(move || {
-        TUI_Loop(event_rx, user_cmd_tx, io_broker_for_tui);
+        TUI_Loop(event_rx, user_cmd_tx, Arc::new(SessionManager::new(4)));
     });
 
-    // 17. Core 主循环（阻塞当前 task 直到 Quit）
+    // 16. Core 主循环
     info!("进入 Orchestrator 主循环");
     core.run().await;
 

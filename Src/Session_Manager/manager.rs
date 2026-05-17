@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use super::capability::{IoFrontend, IoHandle, Session_Capability, Session_Error};
 use super::session::{Session, SessionInfo};
 use super::slot::SlotState;
+use crate::orchestrator::job::JobId;
 
 // ─── 常量 ───────────────────────────────────────────────────
 
@@ -28,6 +29,12 @@ impl SessionManager {
             max_slots,
         }
     }
+
+    /// 按 JobId 获取推理会话的前端端点（stub，待实现）
+    pub async fn Take_Frontend(&self, job_id: JobId) -> Result<IoFrontend, Session_Error> {
+        let _ = job_id;
+        Err(Session_Error::Internal("Take_Frontend not yet implemented".into()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -37,14 +44,19 @@ impl Session_Capability for SessionManager {
         model_id: String,
     ) -> Result<(String, IoHandle), Session_Error> {
         let session_id = generate_session_id();
-        let mut session = Session::new(session_id.clone(), model_id, self.max_slots);
 
         let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
         let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
 
         let io_handle = IoHandle { input_rx, output_tx };
-        // IoFrontend 由 connect() 按需创建（每个槽位独立通道）
-        drop(IoFrontend { input_tx, output_rx });
+        // 对端存入 Session，不再 drop
+        let session = Session::new(
+            session_id.clone(),
+            model_id,
+            self.max_slots,
+            input_tx,
+            output_rx,
+        );
 
         let mut sessions = self.sessions.lock().await;
         sessions.insert(session_id.clone(), session);
@@ -74,8 +86,11 @@ impl Session_Capability for SessionManager {
         };
         session.slot_counter += 1;
 
-        let (input_tx, _input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-        let (_output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
+        let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
+        let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
+
+        // 对端存入 Session，不再 drop
+        session.frontend_pairs.push((input_rx, output_tx));
 
         Ok((slot_id, IoFrontend { input_tx, output_rx }))
     }

@@ -33,9 +33,13 @@
 pub mod capability;
 pub mod network_service;
 pub mod node_handle;
+#[path = "Request_Response/mod.rs"]
 pub mod request_response;
+#[path = "File_Stream/mod.rs"]
 pub mod file_stream;
+#[path = "Tensor_Stream/mod.rs"]
 pub mod tensor_stream;
+#[path = "Bandwidth_Stream/mod.rs"]
 pub mod bandwidth_stream;
 mod command_handler;
 mod swarm_events;

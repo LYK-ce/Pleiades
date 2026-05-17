@@ -8,11 +8,11 @@ edition = "2021"
 
 [lib]
 name = "pleiades"
-path = "src/lib.rs"
+path = "Src/lib.rs"
 
 [[bin]]
 name = "pleiades"
-path = "src/main.rs"
+path = "Src/main.rs"
 
 [features]
 default = ["cuda"]

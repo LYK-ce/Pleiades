@@ -79,7 +79,7 @@ impl Network_Service {
             }
             NodeCommand::Stop => {
                 info!("收到停止命令，准备退出");
-                match self.peer_handle.List_Peers().await {
+                match self.peer_handle.Get_Peers().await {
                     Ok(peer_infos) => {
                         for peer_info in peer_infos {
                             let _ = self.swarm.disconnect_peer_id(peer_info.peer_id);

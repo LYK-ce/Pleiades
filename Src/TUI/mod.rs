@@ -57,7 +57,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use app::{App, Command_Output, InputFocus, Job_State, Transfer_Direction, View_Mode};
 
 use crate::event_bus::Bus_Event;
-use crate::llm_io::{LLM_IO_Broker, LLM_IO_Capability};
+use crate::session::{SessionManager, Session_Capability};
 use crate::orchestrator::command::UserCommand;
 use crate::orchestrator::job::JobId;
 
@@ -77,7 +77,7 @@ use crate::orchestrator::job::JobId;
 pub fn TUI_Loop(
     mut event_rx: broadcast::Receiver<Bus_Event>,
     user_cmd_tx: mpsc::Sender<UserCommand>,
-    io_broker: Arc<LLM_IO_Broker>,
+    io_broker: Arc<SessionManager>,
 ) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
@@ -303,7 +303,7 @@ fn Handle_Key_Event(
     key_code: KeyCode,
     modifiers: KeyModifiers,
     user_cmd_tx: &mpsc::Sender<UserCommand>,
-    io_broker: &Arc<LLM_IO_Broker>,
+    io_broker: &Arc<SessionManager>,
 ) {
     // Ctrl+C: 强制退出
     if modifiers.contains(KeyModifiers::CONTROL) && key_code == KeyCode::Char('c') {
@@ -453,7 +453,7 @@ fn Handle_Command_Input(
     app: &mut App,
     input: &str,
     user_cmd_tx: &mpsc::Sender<UserCommand>,
-    io_broker: &Arc<LLM_IO_Broker>,
+    io_broker: &Arc<SessionManager>,
 ) {
     let trimmed = input.trim();
 
@@ -510,6 +510,7 @@ fn Handle_Command_Input(
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::Run {
+            script: String::new(),
             model_path: model_path_str.to_string(),
             reply: reply_tx,
         };
@@ -856,65 +857,29 @@ fn Handle_Command_Input(
 
         if model_path_str.is_empty() {
             app.command_output.output_text =
-                "错误: 缺少 model_path 参数\n用法: pipeline <model_path> [uniform|weighted]"
+                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>"
                     .to_string();
             app.command_output.completed = true;
             return;
         }
 
-        let strategy = args.get(1).map(|s| s.to_string());
-
         let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::Pipeline {
-            model_path: model_path_str.to_string(),
-            strategy,
+        let mut params = std::collections::HashMap::new();
+        params.insert("model_path".to_string(), model_path_str.to_string());
+        let cmd = UserCommand::Execute {
+            command: "pipeline".to_string(),
+            params,
             reply: reply_tx,
         };
 
-        let strategy_label = args.get(1).copied().unwrap_or("default");
-        app.Add_Log(format!(
-            "执行命令: pipeline {} [{}]",
-            model_path_str, strategy_label
-        ));
+        app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
         app.command_output.output_text =
-            format!("启动分布式流水线推理中 (策略: {})...", strategy_label);
+            "Pipeline 功能已移除，请使用 execute 命令".to_string();
+        app.command_output.completed = true;
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.Add_Log(format!("Pipeline Job #{} 已创建", job_id.0));
-
-                // 从 IO Broker 获取前端端点（会合点设计）
-                let rt = tokio::runtime::Handle::current();
-                match rt.block_on(io_broker.Take_Frontend(job_id)) {
-                    Ok(frontend) => {
-                        app.active_frontend = Some(frontend);
-                        app.active_job_id = Some(job_id);
-                        app.command_output.output_text =
-                            "流水线已建立，请在 Prompt 框输入内容".to_string();
-                        app.Add_Log(format!("IoFrontend 获取成功, Pipeline Job #{}", job_id.0));
-                    }
-                    Err(e) => {
-                        app.Add_Log(format!("[错误] 获取前端通道失败: {}", e));
-                        app.command_output.output_text =
-                            format!("流水线建立成功但通道获取失败: {}", e);
-                        app.command_output.completed = true;
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }

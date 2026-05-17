@@ -6,7 +6,7 @@
 //! 处理来自 JobExecutor 的 LifecycleEvent（仅 Done）。
 
 use super::Core;
-use super::job::{JobResult, LifecycleEvent};
+use crate::orchestrator::job::{JobResult, LifecycleEvent};
 use crate::event_bus::Bus_Event;
 
 impl Core {

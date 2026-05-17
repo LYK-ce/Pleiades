@@ -239,14 +239,14 @@ impl mlua::UserData for MlSession {
 
         // ─── 推理 ──────────────────────────────────────────
         methods.add_method("tensorize", |_, sess, token_ids: Vec<u32>| {
-            sess.tensorize(&token_ids)
-                .map_err(|e| mlua::Error::runtime(e))
+            let _ = sess.tensorize(&token_ids);
+            Err::<mlua::Value, _>(mlua::Error::runtime("Tensor passing requires binding layer"))
         });
 
         methods.add_method_mut("forward", |_, sess, (tensor, offset): (mlua::Value, Option<usize>)| {
             // Tensor 跨 Lua 边界需要特殊处理，当前用 Value 占位
             let _ = (tensor, offset);
-            Err(mlua::Error::runtime("Tensor passing requires binding layer"))
+            Err::<mlua::Value, _>(mlua::Error::runtime("Tensor passing requires binding layer"))
         });
 
         // ─── 采样 ──────────────────────────────────────────

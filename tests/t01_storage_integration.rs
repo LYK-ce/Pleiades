@@ -1,9 +1,9 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Date ： 2026-05-17
 
 //! Storage 模块集成测试
 //!
-//! 从外部消费者视角（如 ML_Engine_Service）验证 Storage 生命周期。
+//! 从外部消费者视角验证 Storage 生命周期。
 //! 每个测试使用独立的 TempDir，测试间互不干扰。
 
 mod common;
@@ -27,14 +27,17 @@ async fn tc01_full_lifecycle() {
     tokio::fs::write(&write_path, &data_100kb).await.unwrap();
     drop(write_guard);
 
-    // 2. acquire_read → 读取验证
+    // 2. flush 刷新 size，然后 list 验证
+    manager.flush().await.unwrap();
+
+    // 3. acquire_read → 读取验证
     let (read_path, read_guard) = manager.acquire_read("lifecycle.bin").await.unwrap();
     let content = tokio::fs::read(&read_path).await.unwrap();
     assert_eq!(content.len(), 100 * 1024, "读取的数据长度应为 100KB");
     assert_eq!(content, data_100kb, "读取内容应与写入内容完全一致");
     drop(read_guard);
 
-    // 3. checksum — 默认算法 (XxHash64) 返回格式正确
+    // 4. checksum — 默认算法 (XxHash64) 返回格式正确
     let checksum = manager.checksum("lifecycle.bin", None).await.unwrap();
     assert!(
         checksum.starts_with("xxhash64:"),
@@ -43,7 +46,7 @@ async fn tc01_full_lifecycle() {
     );
     assert!(checksum.len() > "xxhash64:".len(), "校验码应包含哈希值");
 
-    // 4. remove → 验证索引和磁盘均已清除
+    // 5. remove → 验证索引和磁盘均已清除
     manager.remove("lifecycle.bin").await.unwrap();
     assert!(
         !manager.exists("lifecycle.bin").await.unwrap(),
@@ -69,7 +72,6 @@ async fn tc02_concurrent_multi_read_single_write() {
     tokio::fs::write(&write_path, b"concurrent_data").await.unwrap();
     drop(write_guard);
 
-    // 使用 Arc 共享 manager（StorageManager 内部已是 RwLock）
     let manager = std::sync::Arc::new(manager);
 
     // 1. spawn 10 个并发读取任务
@@ -80,20 +82,18 @@ async fn tc02_concurrent_multi_read_single_write() {
     }
     assert_eq!(read_guards.len(), 10, "应成功获取 10 个读锁");
 
-    // 2. 在读锁存活期间，acquire_write 应被阻塞（超时验证）
+    // 2. 在读锁存活期间，acquire_write 应被阻塞
     let manager_clone = std::sync::Arc::clone(&manager);
     let write_future = tokio::spawn(async move {
         manager_clone.acquire_write("concurrent.bin").await
     });
 
-    // 等待 200ms，写锁应因读锁存活而阻塞
     let write_result = timeout(Duration::from_millis(200), write_future).await;
     assert!(write_result.is_err(), "读锁存活时 acquire_write 应超时阻塞");
 
     // 3. drop 所有 ReadGuard → 写锁应能获得
     drop(read_guards);
 
-    // 重新尝试获取写锁（应立即成功）
     let manager_clone2 = std::sync::Arc::clone(&manager);
     let write_result2 = timeout(
         Duration::from_secs(5),
@@ -118,7 +118,7 @@ async fn tc03_init_scan() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path();
 
-    // 预先创建 3 个文件（模拟上次运行遗留的数据）
+    // 预先创建 3 个文件
     let file_names = ["alpha.dat", "beta.dat", "gamma.dat"];
     for name in &file_names {
         let file_path = base_path.join(name);
@@ -130,12 +130,16 @@ async fn tc03_init_scan() {
     // New(dir) 应扫描并建立索引
     let manager = StorageManager::New(base_path).await.unwrap();
 
-    // list() 应返回 3 个文件
-    let mut listed = manager.list().await.unwrap();
-    listed.sort();
+    // list() 应返回 3 个文件 — 按 file_name 排序后比较
+    let mut listed_names: Vec<String> = manager.list().await.unwrap()
+        .into_iter()
+        .map(|e| e.file_name)
+        .collect();
+    listed_names.sort();
+
     let mut expected: Vec<String> = file_names.iter().map(|s| s.to_string()).collect();
     expected.sort();
-    assert_eq!(listed, expected, "list() 应包含预创建的 3 个文件");
+    assert_eq!(listed_names, expected, "list() 应包含预创建的 3 个文件");
 
     // exists() 逐个验证
     for name in &file_names {
@@ -167,7 +171,6 @@ async fn tc04_large_file_checksum_consistency() {
     tokio::fs::write(&write_path, &data_1mb).await.unwrap();
     drop(write_guard);
 
-    // 计算三种算法的校验码（各两次，验证一致性）
     let algorithms = [
         (ChecksumAlgorithm::XxHash64, "xxhash64:"),
         (ChecksumAlgorithm::Sha256, "sha256:"),
@@ -184,7 +187,6 @@ async fn tc04_large_file_checksum_consistency() {
             .await
             .unwrap();
 
-        // 前缀验证
         assert!(
             checksum_1.starts_with(expected_prefix),
             "{:?} 校验码应以 '{}' 开头, 实际: {}",
@@ -193,14 +195,12 @@ async fn tc04_large_file_checksum_consistency() {
             checksum_1
         );
 
-        // 一致性验证
         assert_eq!(
             checksum_1, checksum_2,
             "{:?} 两次计算的校验码应一致",
             algo
         );
 
-        // 非空哈希值
         let hash_part = &checksum_1[expected_prefix.len()..];
         assert!(
             !hash_part.is_empty(),

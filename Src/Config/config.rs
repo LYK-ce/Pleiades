@@ -24,7 +24,6 @@ pub struct Pleiades_Config {
     pub Network: Option<Network_Config>,
     pub Runtime: Option<Runtime_Config>,
     pub Storage: Option<Storage_Config>,
-    pub Scheduler: Option<Scheduler_Config>,
     pub Session: Option<Session_Config>,
 }
 
@@ -65,13 +64,6 @@ pub struct Storage_Config {
     pub workspace_dir: Option<String>,
     /// 存储配额（单位：GB），0 表示不限制
     pub quota_gb: Option<u64>,
-}
-
-/// [Scheduler] 段配置
-#[derive(Debug, Deserialize)]
-pub struct Scheduler_Config {
-    /// 策略: "uniform" 或 "weighted"，默认 "uniform"
-    pub strategy: Option<String>,
 }
 
 /// [Session] 段配置

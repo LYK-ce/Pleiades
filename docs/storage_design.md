@@ -259,7 +259,27 @@ pub use storage_manager::StorageManager;
 
 惰性发现 (`Lazy_Discover`) 只为非索引文件建立基本条目。如果文件是 .gguf/.pgguf，model_id 等元信息在惰性发现时为 None，需等待 `flush()` 刷新。
 
-### 7.3 checksum 性能
+### 7.3 size 字段非实时更新
+
+`FileEntry.size` 和 `FileState.size` 仅在以下时机更新：
+
+- **构造时**（`StorageManager::New`）— 扫描磁盘取 `metadata.len()`
+- **flush() 时** — 对已有文件 re-stat 刷新
+
+**不更新**的时机：
+
+- `acquire_write` 后写入数据 → size 仍为旧值（或 `Ensure_Entry` 创建的初始值 0）
+- `acquire_write` 释放 `WriteGuard` 时 → 不触发 size 刷新
+
+这意味着 **`list()` 返回的 size 是最近一次 flush 的快照，而非实时磁盘大小**。设计权衡：
+
+- **收益**：避免每次 drop guard 都 syscall，减少锁竞争
+- **代价**：`list()` 可能返回过时的 size（如刚写入但未 flush 的文件 size=0）
+- **已知影响**：`test_list_returns_file_entries` 和 `test_flush_refreshes_file_size` 两个测试因此失败（前者在 flush 前断言 size，后者断言的值与实际不一致）
+
+修复方向：可在 `WriteGuard` drop 时自动 `fs::metadata` 更新 size，或在测试中显式调用 `flush` 后再断言。
+
+### 7.4 checksum 性能
 
 `checksum()` 实时读取文件内容计算哈希。大模型文件（GB级别）调用代价高。
 

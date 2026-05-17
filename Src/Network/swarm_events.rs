@@ -40,9 +40,7 @@ impl Network_Service {
                     peer_id,
                     vec![endpoint.get_remote_address().clone()]
                 );
-                if let Err(e) = self.peer_handle.Add_Peer(peer_info).await {
-                    warn!("添加节点到 PeerManager 失败: {}", e);
-                }
+                self.peer_handle.Upsert_Peer(peer_info).await;
                 self.event_bus.Publish(Bus_Event::Connection_Established {
                     peer_id: peer_id.to_string(),
                 });

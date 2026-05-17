@@ -6,8 +6,8 @@
 //! 所有业务逻辑用 todo!() 占位，仅验证 Capability 调用通路。
 
 use super::Core;
-use super::job::{JobId, JobKind};
-use super::command::UserCommand;
+use crate::orchestrator::job::{JobId, JobKind};
+use crate::orchestrator::command::UserCommand;
 
 impl Core {
     /// 路由用户命令 (B1)。

@@ -276,6 +276,7 @@ ML Engine 不再以 trait object 形式存在于 Capabilities 中：
 | 模型分发未实现 | DistributeModel/Send todo!() |
 | test_utils stub 使用旧方法名 | StubPeerManager 中 `List_Peers` 等方法已更新为最新 trait |
 | 外部模块有预存错误 | Scheduler/Network/TUI 等模块与最新 trait 不完全兼容 |
+| SessionManager 缺 Take_Frontend | TUI `run` 命令用 `JobId` 取 `IoFrontend`，但 SessionManager 索引体系是 `session_id`。当前 `Take_Frontend(job_id)` 为 stub（返回错误），需重构为 Core 返回 session_id → TUI 调 `connect(session_id)` 的完整流程 |
 
 ---
 
