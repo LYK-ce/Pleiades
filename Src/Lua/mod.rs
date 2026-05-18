@@ -8,3 +8,5 @@
 pub mod engine;
 pub mod registry;
 pub mod capability_binding;
+pub mod network_stream;
+pub mod storage_handle;

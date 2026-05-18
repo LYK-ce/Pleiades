@@ -26,7 +26,10 @@ use std::path::Path;
 
 use super::request_response::codec::{DataType, Network_Data};
 use super::node_handle::NodeHandle;
-use super::file_stream::protocol::{FILE_STREAM_PROTOCOL, Send_File_Data, Receive_File_Data};
+use super::file_stream::protocol::{
+    FILE_STREAM_PROTOCOL, Send_File_Data, Receive_File_Data,
+    Write_File_Stream_Header,
+};
 use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
 use super::bandwidth_stream::protocol::{
     BANDWIDTH_STREAM_PROTOCOL, DEFAULT_DURATION_SECS,
@@ -218,6 +221,15 @@ pub trait Network_Capability: Send + Sync {
         stream: &mut libp2p::Stream,
         dest_path: &Path,
         file_size: u64,
+    ) -> Result<(), Network_Error>;
+
+    /// 发送文件高层接口（内部串联动作为原子操作）。
+    ///
+    /// 串联: open_file_stream → Write_File_Stream_Header → send_file_data。
+    async fn send_file(
+        &self,
+        peer: PeerId,
+        file_path: &Path,
     ) -> Result<(), Network_Error>;
 
     // ========================================
@@ -463,6 +475,27 @@ impl Network_Capability for Network_Service_Capability {
         Receive_File_Data(stream, dest_path, file_size)
             .await
             .map_err(|e| Network_Error::StreamIoError(format!("receive_file_data: {}", e)))
+    }
+
+    async fn send_file(
+        &self,
+        peer: PeerId,
+        file_path: &Path,
+    ) -> Result<(), Network_Error> {
+        let file_name = file_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(|e| Network_Error::StreamIoError(format!("metadata: {}", e)))?;
+        let file_size = metadata.len();
+
+        let mut stream = self.open_file_stream(peer).await?;
+        Write_File_Stream_Header(&mut stream, &file_name, file_size, "")
+            .await
+            .map_err(|e| Network_Error::StreamIoError(format!("header: {}", e)))?;
+        self.send_file_data(&mut stream, file_path).await
     }
 
     // ========================================

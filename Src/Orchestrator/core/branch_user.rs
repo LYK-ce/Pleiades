@@ -9,7 +9,10 @@ use super::Core;
 use crate::orchestrator::job::JobId;
 use crate::orchestrator::command::UserCommand;
 use crate::lua::engine::LuaContext;
-use crate::lua::capability_binding::{register_caps, register_logging_caps};
+use crate::lua::capability_binding::{
+    register_caps, register_logging_caps, register_network_caps,
+    register_storage_caps,
+};
 use crate::event_bus::event::{Bus_Event, HelpEntry};
 
 // ============================================================
@@ -118,12 +121,24 @@ impl Core {
 
             // ─── 发送文件 ──────────────────────────────────
             UserCommand::Send { file_path, peer_id, reply } => {
-                todo!("Send file to peer")
+                let entry = match self.program_registry.get("send") {
+                    Some(e) => e.clone(),
+                    None => {
+                        let _ = reply.send(Err("send 脚本未找到".into()));
+                        return;
+                    }
+                };
+                let mut params = std::collections::HashMap::new();
+                params.insert("file".into(), file_path);
+                params.insert("peer".into(), peer_id);
+                let caps = self.capabilities.clone();
+                let result = execute_lua_script(&entry.path, &params, &caps).await;
+                let _ = reply.send(result.map(|_v| JobId(super::generate_id())));
             }
 
             // ─── 性能测试 ──────────────────────────────────
-            UserCommand::Profile { model_id, reply } => {
-                todo!("Profile model")
+            UserCommand::Profile { model_id: _, reply } => {
+                let _ = reply.send(Err("Profile: 尚未实现".into()));
             }
 
             // ─── 帮助信息 ──────────────────────────────────
@@ -180,6 +195,12 @@ async fn execute_lua_script(
 
     register_logging_caps(&lua, caps.event_bus.clone())
         .map_err(|e| format!("注册日志能力失败: {}", e))?;
+
+    register_network_caps(&lua, caps.clone())
+        .map_err(|e| format!("注册 Network 能力失败: {}", e))?;
+
+    register_storage_caps(&lua, caps.storage.clone())
+        .map_err(|e| format!("注册 Storage 能力失败: {}", e))?;
 
     lua.load(&script).eval::<()>()
         .map_err(|e| format!("脚本语法错误: {}", e))?;

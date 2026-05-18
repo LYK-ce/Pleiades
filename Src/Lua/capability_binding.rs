@@ -8,9 +8,13 @@
 
 use std::sync::Arc;
 use mlua::Lua;
+use libp2p::PeerId;
 use crate::storage::StorageCapability;
 use crate::ml_engine::MlSession;
 use crate::event_bus::{EventBus, event::Bus_Event};
+use crate::network::DataType;
+use crate::orchestrator::Capabilities;
+use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
 // ============================================================
 // 注册测试用能力函数
@@ -57,54 +61,105 @@ pub fn register_caps(lua: &Lua) -> mlua::Result<()> {
 }
 
 // ============================================================
-// 注册 Storage 能力函数
+// 注册 Storage 能力函数（完整版）
 // ============================================================
 
-/// 将 Storage 能力暴露给 Lua。
-///
-/// 注册以下函数到 `caps` 表：
-/// - `storage_list()` → 返回 `{{file_name="a.txt", size=5}, ...}`
-/// - `storage_exists(file_id)` → 返回 bool
-///
-/// 使用 tokio runtime handle 在同步闭包中执行异步 Storage API。
+/// 将 Storage 完整能力暴露给 Lua（全异步）。
 pub fn register_storage_caps(
     lua: &Lua,
     storage: Arc<dyn StorageCapability>,
-    handle: tokio::runtime::Handle,
 ) -> mlua::Result<()> {
-    let caps: mlua::Table = lua.globals().get("caps").unwrap_or_else(|_| lua.create_table().unwrap());
+    let caps: mlua::Table = lua.globals().get("caps").unwrap_or_else(|_| lua.create_table().expect("create caps table"));
 
-    // ─── storage_list: 返回文件列表 ────────────────────
+    // ─── storage_list ──────────────────────────────────
     let s = storage.clone();
-    let h = handle.clone();
-    caps.set(
-        "storage_list",
-        lua.create_function(move |lua, (): ()| {
-            let entries = h.block_on(s.list())
-                .map_err(|e| mlua::Error::runtime(format!("storage_list failed: {}", e)))?;
-
+    caps.set("storage_list", lua.create_async_function(move |lua, (): ()| {
+        let s = s.clone();
+        async move {
+            let entries = s.list().await
+                .map_err(|e| mlua::Error::runtime(format!("storage_list: {}", e)))?;
             let result = lua.create_table()?;
             for (i, entry) in entries.iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("file_name", entry.file_name.clone())?;
                 row.set("size", entry.size)?;
-                result.set(i + 1, row)?; // Lua 数组从 1 开始
+                result.set(i + 1, row)?;
             }
             Ok(result)
-        })?,
-    )?;
+        }
+    })?)?;
 
-    // ─── storage_exists: 检查文件是否存在 ──────────────
+    // ─── storage_exists ────────────────────────────────
     let s = storage.clone();
-    let h = handle.clone();
-    caps.set(
-        "storage_exists",
-        lua.create_function(move |_, file_id: String| {
-            let exists = h.block_on(s.exists(&file_id))
-                .map_err(|e| mlua::Error::runtime(format!("storage_exists failed: {}", e)))?;
-            Ok(exists)
-        })?,
-    )?;
+    caps.set("storage_exists", lua.create_async_function(move |_, file_id: String| {
+        let s = s.clone();
+        async move {
+            s.exists(&file_id).await
+                .map_err(|e| mlua::Error::runtime(format!("storage_exists: {}", e)))
+        }
+    })?)?;
+
+    // ─── storage_acquire_read ──────────────────────────
+    let s = storage.clone();
+    caps.set("storage_acquire_read", lua.create_async_function(move |_, file_id: String| {
+        let s = s.clone();
+        async move {
+            s.acquire_read(&file_id).await
+                .map(|(path, guard)| StorageReadHandle::new(path, guard))
+                .map_err(|e| mlua::Error::runtime(format!("storage_acquire_read: {}", e)))
+        }
+    })?)?;
+
+    // ─── storage_acquire_write ─────────────────────────
+    let s = storage.clone();
+    caps.set("storage_acquire_write", lua.create_async_function(move |_, file_id: String| {
+        let s = s.clone();
+        async move {
+            s.acquire_write(&file_id).await
+                .map(|(path, guard)| StorageWriteHandle::new(path, guard))
+                .map_err(|e| mlua::Error::runtime(format!("storage_acquire_write: {}", e)))
+        }
+    })?)?;
+
+    // ─── storage_remove ────────────────────────────────
+    let s = storage.clone();
+    caps.set("storage_remove", lua.create_async_function(move |_, file_id: String| {
+        let s = s.clone();
+        async move {
+            s.remove(&file_id).await
+                .map_err(|e| mlua::Error::runtime(format!("storage_remove: {}", e)))
+        }
+    })?)?;
+
+    // ─── storage_checksum ──────────────────────────────
+    let s = storage.clone();
+    caps.set("storage_checksum", lua.create_async_function(move |_, (file_id, algo): (String, Option<String>)| {
+        let s = s.clone();
+        async move {
+            let algo = match algo.as_deref() {
+                Some("blake3") => Some(crate::storage::ChecksumAlgorithm::Blake3),
+                Some("sha256") => Some(crate::storage::ChecksumAlgorithm::Sha256),
+                Some("xxhash64") | None => None,
+                _ => return Err(mlua::Error::runtime(format!("未知算法: {}", algo.unwrap()))),
+            };
+            s.checksum(&file_id, algo).await
+                .map_err(|e| mlua::Error::runtime(format!("storage_checksum: {}", e)))
+        }
+    })?)?;
+
+    // ─── storage_flush ─────────────────────────────────
+    let s = storage.clone();
+    caps.set("storage_flush", lua.create_async_function(move |lua, (): ()| {
+        let s = s.clone();
+        async move {
+            let (added, removed) = s.flush().await
+                .map_err(|e| mlua::Error::runtime(format!("storage_flush: {}", e)))?;
+            let tbl = lua.create_table()?;
+            tbl.set("added", added)?;
+            tbl.set("removed", removed)?;
+            Ok(tbl)
+        }
+    })?)?;
 
     lua.globals().set("caps", caps)?;
     Ok(())
@@ -149,7 +204,7 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
 ///
 /// 注册 `caps.print(msg)` — 同时写入 tracing 日志文件 和 TUI 日志面板。
 pub fn register_logging_caps(lua: &Lua, event_bus: Arc<EventBus>) -> mlua::Result<()> {
-    let caps: mlua::Table = lua.globals().get("caps").unwrap_or_else(|_| lua.create_table().unwrap());
+    let caps: mlua::Table = lua.globals().get("caps").unwrap_or_else(|_| lua.create_table().expect("create caps table"));
 
     caps.set(
         "print",
@@ -160,6 +215,100 @@ pub fn register_logging_caps(lua: &Lua, event_bus: Arc<EventBus>) -> mlua::Resul
         })?,
     )?;
 
+    lua.globals().set("caps", caps)?;
+    Ok(())
+}
+
+// ============================================================
+// 注册 Network 能力函数（非流方法）
+// ============================================================
+
+/// 将 Network 能力暴露给 Lua（全异步）。
+pub fn register_network_caps(
+    lua: &Lua,
+    capabilities: Arc<Capabilities>,
+) -> mlua::Result<()> {
+    let caps: mlua::Table = lua.globals().get("caps")
+        .unwrap_or_else(|_| lua.create_table().expect("create caps table"));
+    let network = lua.create_table()?;
+
+    // ─── send_data ──────────────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("send_data", lua.create_async_function(move |lua, (peer_str, data_type_str, payload): (String, String, String)| {
+        let caps_net = caps_net.clone();
+        async move {
+            let peer = peer_str.parse::<PeerId>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
+            let dt = match data_type_str.as_str() {
+                "Command" => DataType::Command,
+                "Data" => DataType::Data,
+                "File" => DataType::File,
+                "Info" => DataType::Info,
+                _ => return Err(mlua::Error::runtime(format!("未知 DataType: {}", data_type_str))),
+            };
+            let result = caps_net.network.send_data(peer, dt, payload.into_bytes()).await
+                .map_err(|e| mlua::Error::runtime(format!("send_data: {}", e)))?;
+            let tbl = lua.create_table()?;
+            tbl.set("payload", String::from_utf8_lossy(&result.payload).to_string())?;
+            Ok(tbl)
+        }
+    })?)?;
+
+    // ─── get_local_peer_id ──────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("get_local_peer_id", lua.create_function(move |_, (): ()| {
+        Ok::<_, mlua::Error>(caps_net.network.get_local_peer_id().to_base58())
+    })?)?;
+
+    // ─── dial ──────────────────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("dial", lua.create_async_function(move |_, addr: String| {
+        let caps_net = caps_net.clone();
+        async move {
+            let ma = addr.parse::<libp2p::Multiaddr>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 Multiaddr: {}", e)))?;
+            caps_net.network.dial(ma).await
+                .map_err(|e| mlua::Error::runtime(format!("dial: {}", e)))
+        }
+    })?)?;
+
+    // ─── disconnect ─────────────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("disconnect", lua.create_async_function(move |_, peer_str: String| {
+        let caps_net = caps_net.clone();
+        async move {
+            let peer = peer_str.parse::<PeerId>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
+            caps_net.network.disconnect(peer).await
+                .map_err(|e| mlua::Error::runtime(format!("disconnect: {}", e)))
+        }
+    })?)?;
+
+    // ─── test_bandwidth ─────────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("test_bandwidth", lua.create_async_function(move |_, peer_str: String| {
+        let caps_net = caps_net.clone();
+        async move {
+            let peer = peer_str.parse::<PeerId>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
+            caps_net.network.test_bandwidth(peer).await
+                .map_err(|e| mlua::Error::runtime(format!("test_bandwidth: {}", e)))
+        }
+    })?)?;
+
+    // ─── send_file ──────────────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("send_file", lua.create_async_function(move |_, (peer_str, file_path): (String, String)| {
+        let caps_net = caps_net.clone();
+        async move {
+            let peer = peer_str.parse::<PeerId>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
+            caps_net.network.send_file(peer, std::path::Path::new(&file_path)).await
+                .map_err(|e| mlua::Error::runtime(format!("send_file: {}", e)))
+        }
+    })?)?;
+
+    caps.set("network", network)?;
     lua.globals().set("caps", caps)?;
     Ok(())
 }
@@ -269,28 +418,28 @@ mod tests {
 
         // 4. 创建 Lua + 注册 storage caps
         let lua = LuaContext::new().expect("create lua");
-        register_storage_caps(&lua, storage, rt.handle().clone()).expect("register storage caps");
+        register_storage_caps(&lua, storage).expect("register storage caps");
 
         // 5. Lua 脚本调用 storage_list → 验证文件列表
-        let result: mlua::Value = lua.load(r#"
+        let result: mlua::Value = rt.block_on(lua.load(r#"
             local files = caps.storage_list()
             if #files == 0 then
                 return "empty"
             end
             local f = files[1]
             return f.file_name .. ":" .. tostring(f.size)
-        "#).eval().expect("call storage_list");
+        "#).eval_async()).expect("call storage_list");
 
         let result_str = result.to_string().expect("to_string");
         assert_eq!(result_str, "hello.txt:11");
 
         // 6. Lua 脚本调用 storage_exists
-        let exists: bool = lua.load(r#"return caps.storage_exists("hello.txt")"#)
-            .eval().expect("call exists");
+        let exists: bool = rt.block_on(lua.load(r#"return caps.storage_exists("hello.txt")"#)
+            .eval_async()).expect("call exists");
         assert!(exists);
 
-        let missing: bool = lua.load(r#"return caps.storage_exists("nope.txt")"#)
-            .eval().expect("call exists");
+        let missing: bool = rt.block_on(lua.load(r#"return caps.storage_exists("nope.txt")"#)
+            .eval_async()).expect("call exists");
         assert!(!missing);
     }
 

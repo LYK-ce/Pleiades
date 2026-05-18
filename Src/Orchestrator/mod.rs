@@ -62,6 +62,7 @@ pub(crate) mod test_utils {
         async fn open_file_stream(&self, _peer: libp2p::PeerId) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn send_file_data(&self, _s: &mut libp2p::Stream, _p: &std::path::Path) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn receive_file_data(&self, _s: &mut libp2p::Stream, _p: &std::path::Path, _sz: u64) -> Result<(), Network_Error> { unimplemented!("stub") }
+        async fn send_file(&self, _peer: libp2p::PeerId, _path: &std::path::Path) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn open_tensor_stream(&self, _peer: libp2p::PeerId, _inference_id: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn accept_tensor_stream(&self, _inference_id: u64, _timeout_secs: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
