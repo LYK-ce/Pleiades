@@ -7,13 +7,19 @@
 
 use pleiades::lua::engine::LuaContext;
 use pleiades::lua::capability_binding::register_caps;
+use std::sync::Arc;
 
 #[test]
 fn test_hello_script_loads_and_executes() {
     let lua = LuaContext::new().expect("create lua");
-    let script = std::fs::read_to_string("programs/hello.lua").expect("read script");
+    let script = std::fs::read_to_string("programs/user/hello.lua").expect("read script");
 
     lua.load(&script).eval::<()>().expect("eval script");
+
+    // hello.lua 调用 caps.print，需注册 logging caps
+    let bus = Arc::new(pleiades::event_bus::EventBus::New(4));
+    pleiades::lua::capability_binding::register_logging_caps(&lua, bus)
+        .expect("register logging caps");
 
     let command: String = lua.globals().get("COMMAND").expect("COMMAND");
     assert_eq!(command, "hello");
@@ -29,12 +35,15 @@ fn test_hello_script_loads_and_executes() {
 #[test]
 fn test_hello_script_with_caps() {
     let lua = LuaContext::new().expect("create lua");
-    let script = std::fs::read_to_string("programs/hello.lua").expect("read script");
+    let script = std::fs::read_to_string("programs/user/hello.lua").expect("read script");
 
     lua.load(&script).eval::<()>().expect("eval script");
     register_caps(&lua).expect("register caps");
 
-    // hello.lua 的 execute 不接受 caps，但仍可正常执行
+    let bus = Arc::new(pleiades::event_bus::EventBus::New(4));
+    pleiades::lua::capability_binding::register_logging_caps(&lua, bus)
+        .expect("register logging caps");
+
     let params = lua.create_table().expect("params");
     let execute: mlua::Function = lua.globals().get("execute").expect("execute");
     let result: String = execute.call(params).expect("call execute");

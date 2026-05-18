@@ -57,9 +57,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use app::{App, Command_Output, InputFocus, Job_State, Transfer_Direction, View_Mode};
 
 use crate::event_bus::Bus_Event;
-use crate::session::{SessionManager, Session_Capability};
 use crate::orchestrator::command::UserCommand;
 use crate::orchestrator::job::JobId;
+use crate::session::{SessionManager, Session_Capability};
 
 // ============================================================
 // TUI 主循环
@@ -290,6 +290,23 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
             app.Add_Log(format!("设备已切换: {}", device.to_uppercase()));
             app.device = device;
         }
+        Bus_Event::HelpInfo { builtin, user } => {
+            let mut lines = vec!["[内置命令]".to_string()];
+            for e in &builtin {
+                lines.push(format!("  {:<38} {}", e.usage, e.description));
+            }
+            lines.push(String::new());
+            lines.push("[用户命令]".to_string());
+            if user.is_empty() {
+                lines.push("  (无)".to_string());
+            } else {
+                for e in &user {
+                    lines.push(format!("  {:<38} {}", e.usage, e.description));
+                }
+            }
+            app.command_output.output_text = lines.join("\n");
+            app.command_output.completed = true;
+        }
     }
 }
 
@@ -473,22 +490,11 @@ fn Handle_Command_Input(
     if trimmed == "help" {
         app.command_output = Command_Output::New();
         app.command_scroll = 0;
-        app.command_output.output_text = [
-            "可用命令:",
-            "  run <model_path>         - 启动本地推理",
-            "  pipeline <model_path>    - 启动分布式流水线推理",
-            "  send <file> <peer>       - 向节点发送文件",
-            "  cancel <job_id>          - 取消指定作业",
-            "  display-peer / dp        - 查看节点列表",
-            "  set-device cpu/cuda      - 切换计算设备",
-            "  ls                       - 列出存储文件",
-            "  distribute <model> <peer:start-end> ... - 分发模型分片",
-            "  clear                    - 清空日志",
-            "  quit / exit              - 退出",
-            "  help                     - 显示此帮助",
-        ]
-        .join("\n");
-        app.command_output.completed = true;
+        app.command_output.output_text = "正在获取帮助信息...".to_string();
+        if user_cmd_tx.blocking_send(UserCommand::Help).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+        }
         return;
     }
 
@@ -857,8 +863,7 @@ fn Handle_Command_Input(
 
         if model_path_str.is_empty() {
             app.command_output.output_text =
-                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>"
-                    .to_string();
+                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
             app.command_output.completed = true;
             return;
         }
@@ -873,8 +878,7 @@ fn Handle_Command_Input(
         };
 
         app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
-        app.command_output.output_text =
-            "Pipeline 功能已移除，请使用 execute 命令".to_string();
+        app.command_output.output_text = "Pipeline 功能已移除，请使用 execute 命令".to_string();
         app.command_output.completed = true;
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
@@ -920,6 +924,73 @@ fn Handle_Command_Input(
             Ok(Err(e)) => {
                 app.Add_Log(format!("Profile 启动失败: {}", e));
                 app.command_output.output_text = format!("Profile 启动失败: {}", e);
+                app.command_output.completed = true;
+            }
+            Err(_) => {
+                app.Add_Log("[错误] reply 通道已关闭".to_string());
+                app.command_output.output_text = "错误: reply 通道已关闭".to_string();
+                app.command_output.completed = true;
+            }
+        }
+        return;
+    }
+
+    // ---- exec <command> [key=value ...] ----
+
+    if trimmed.starts_with("exec ") {
+        let args: Vec<&str> = trimmed
+            .strip_prefix("exec ")
+            .unwrap_or("")
+            .trim()
+            .split_whitespace()
+            .collect();
+        let command = args.first().copied().unwrap_or("");
+        if command.is_empty() {
+            app.command_output.output_text =
+                "错误: 缺少命令名\n用法: exec <command> [key=value ...]".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let mut params = std::collections::HashMap::new();
+        for arg in &args[1..] {
+            if let Some((k, v)) = arg.split_once('=') {
+                params.insert(k.to_string(), v.to_string());
+            } else {
+                app.command_output.output_text = format!(
+                    "错误: 参数格式无效 '{}'\n用法: exec <command> [key=value ...]",
+                    arg
+                );
+                app.command_output.completed = true;
+                return;
+            }
+        }
+
+        let cmd = UserCommand::Execute {
+            command: command.to_string(),
+            params,
+            reply: reply_tx,
+        };
+
+        app.Add_Log(format!("执行脚本: {}", command));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+            return;
+        }
+
+        match reply_rx.blocking_recv() {
+            Ok(Ok(job_id)) => {
+                app.Add_Log(format!("脚本 {} Job #{} 已创建", command, job_id.0));
+                app.command_output.output_text =
+                    format!("脚本 '{}' 执行完成 (Job #{})", command, job_id.0);
+                app.command_output.completed = true;
+            }
+            Ok(Err(e)) => {
+                app.Add_Log(format!("脚本 {} 执行失败: {}", command, e));
+                app.command_output.output_text = format!("执行失败: {}", e);
                 app.command_output.completed = true;
             }
             Err(_) => {

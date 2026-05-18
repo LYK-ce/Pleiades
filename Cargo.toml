@@ -11,7 +11,7 @@ name = "pleiades"
 path = "Src/lib.rs"
 
 [[bin]]
-name = "pleiades"
+name = "Pleiades"
 path = "Src/main.rs"
 
 [features]

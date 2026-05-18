@@ -93,9 +93,9 @@ impl Core {
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
-        let program_registry = ProgramRegistry::scan()
+        let program_registry = ProgramRegistry::new()
             .unwrap_or_else(|e| {
-                tracing::warn!("ProgramRegistry 扫描失败: {}，使用空注册表", e);
+                tracing::warn!("ProgramRegistry 初始化失败: {}，使用空注册表", e);
                 ProgramRegistry::default()
             });
         Core {
@@ -169,6 +169,6 @@ impl Core {
 /// 生成唯一 ID
 static JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn generate_id() -> u64 {
+pub(super) fn generate_id() -> u64 {
     JOB_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }

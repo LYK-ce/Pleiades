@@ -9,7 +9,28 @@ use super::Core;
 use crate::orchestrator::job::JobId;
 use crate::orchestrator::command::UserCommand;
 use crate::lua::engine::LuaContext;
-use crate::lua::capability_binding::register_caps;
+use crate::lua::capability_binding::{register_caps, register_logging_caps};
+use crate::event_bus::event::{Bus_Event, HelpEntry};
+
+// ============================================================
+// 内置命令描述符（与命令实现同文件，就近管理）
+// ============================================================
+
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("run <model>",           "启动本地推理"),
+    ("pipeline <model>",      "启动分布式流水线推理"),
+    ("cancel <job_id>",       "取消指定作业"),
+    ("dp / display-peer",     "查看节点列表"),
+    ("set-device cpu|cuda",   "切换计算设备"),
+    ("ls",                    "列出存储文件"),
+    ("distribute <model> <peer:0-15> ...", "分发模型分片"),
+    ("send <file> <peer>",    "向节点发送文件"),
+    ("profile <model>",       "启动 Profile"),
+    ("exec <cmd> [k=v ...]",  "执行用户 Lua 脚本"),
+    ("clear",                 "清空日志"),
+    ("quit / exit",           "退出程序"),
+    ("help",                  "显示此帮助"),
+];
 
 impl Core {
     /// 路由用户命令 (B1)。
@@ -19,7 +40,7 @@ impl Core {
         match cmd {
             // ─── 通用 Lua 脚本执行 ─────────────────────────
             UserCommand::Execute { command, params, reply } => {
-                let entry = match self.program_registry.get(&command) {
+                let entry = match self.program_registry.get_user(&command) {
                     Some(e) => e.clone(),
                     None => {
                         let _ = reply.send(Err(format!("未知命令: {}", command)));
@@ -30,7 +51,7 @@ impl Core {
                 let caps = self.capabilities.clone();
                 // 直接在 Core 的 async 上下文中执行，避免 Lua (非 Send) 跨线程
                 let result = execute_lua_script(&entry.path, &params, &caps).await;
-                let _ = reply.send(result.map(|_v| JobId(0)));
+                let _ = reply.send(result.map(|_v| JobId(super::generate_id())));
             }
 
             // ─── 单机推理 (Lua 脚本 + 模型) ───
@@ -104,6 +125,36 @@ impl Core {
             UserCommand::Profile { model_id, reply } => {
                 todo!("Profile model")
             }
+
+            // ─── 帮助信息 ──────────────────────────────────
+            UserCommand::Help => {
+                let mut builtin: Vec<HelpEntry> = BUILTIN_COMMANDS
+                    .iter()
+                    .map(|(usage, desc)| HelpEntry {
+                        usage: usage.to_string(),
+                        description: desc.to_string(),
+                    })
+                    .collect();
+
+                // 合并 Lua 内置脚本的元数据
+                for e in self.program_registry.builtin_entries() {
+                    builtin.push(HelpEntry {
+                        usage: e.command.clone(),
+                        description: e.description.clone(),
+                    });
+                }
+
+                let user: Vec<HelpEntry> = self.program_registry
+                    .user_entries()
+                    .into_iter()
+                    .map(|e| HelpEntry {
+                        usage: e.command.clone(),
+                        description: e.description.clone(),
+                    })
+                    .collect();
+
+                self.capabilities.event_bus.Publish(Bus_Event::HelpInfo { builtin, user });
+            }
         }
     }
 }
@@ -116,7 +167,7 @@ impl Core {
 async fn execute_lua_script(
     path: &std::path::Path,
     params: &std::collections::HashMap<String, String>,
-    _caps: &std::sync::Arc<crate::orchestrator::Capabilities>,
+    caps: &std::sync::Arc<crate::orchestrator::Capabilities>,
 ) -> Result<mlua::Value, String> {
     let script = std::fs::read_to_string(path)
         .map_err(|e| format!("读取脚本失败: {}", e))?;
@@ -126,6 +177,9 @@ async fn execute_lua_script(
 
     register_caps(&lua)
         .map_err(|e| format!("注册能力函数失败: {}", e))?;
+
+    register_logging_caps(&lua, caps.event_bus.clone())
+        .map_err(|e| format!("注册日志能力失败: {}", e))?;
 
     lua.load(&script).eval::<()>()
         .map_err(|e| format!("脚本语法错误: {}", e))?;

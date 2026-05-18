@@ -94,6 +94,11 @@ pub enum UserCommand {
         model_id: String,
         reply: oneshot::Sender<Result<JobId, String>>,
     },
+    /// 请求帮助信息
+    ///
+    /// Core 通过 EventBus 发布 `Bus_Event::HelpInfo`，前端订阅渲染。
+    /// 无需 reply 通道。
+    Help,
 }
 
 // ============================================================

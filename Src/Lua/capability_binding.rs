@@ -10,6 +10,7 @@ use std::sync::Arc;
 use mlua::Lua;
 use crate::storage::StorageCapability;
 use crate::ml_engine::MlSession;
+use crate::event_bus::{EventBus, event::Bus_Event};
 
 // ============================================================
 // 注册测试用能力函数
@@ -137,6 +138,29 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     lua.globals().set("ml", ml)?;
+    Ok(())
+}
+
+// ============================================================
+// 注册日志能力函数 (tracing + EventBus)
+// ============================================================
+
+/// 将日志输出能力暴露给 Lua。
+///
+/// 注册 `caps.print(msg)` — 同时写入 tracing 日志文件 和 TUI 日志面板。
+pub fn register_logging_caps(lua: &Lua, event_bus: Arc<EventBus>) -> mlua::Result<()> {
+    let caps: mlua::Table = lua.globals().get("caps").unwrap_or_else(|_| lua.create_table().unwrap());
+
+    caps.set(
+        "print",
+        lua.create_function(move |_, msg: String| {
+            tracing::info!(target: "lua", "{}", msg);
+            event_bus.Publish(Bus_Event::Log { message: msg });
+            Ok::<_, mlua::Error>(())
+        })?,
+    )?;
+
+    lua.globals().set("caps", caps)?;
     Ok(())
 }
 

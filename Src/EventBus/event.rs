@@ -27,7 +27,6 @@
 #[derive(Debug, Clone)]
 pub enum Bus_Event {
     // ===== 网络/节点事件 =====
-
     /// 发现新节点（mDNS / DHT）
     Peer_Discovered {
         /// 节点 ID（字符串形式）
@@ -53,7 +52,6 @@ pub enum Bus_Event {
     },
 
     // ===== 作业生命周期事件 =====
-
     /// 作业已创建
     Job_Created {
         /// 作业 ID
@@ -81,7 +79,6 @@ pub enum Bus_Event {
     },
 
     // ===== 推理事件 =====
-
     /// 推理开始
     Inference_Started {
         /// 作业 ID
@@ -117,7 +114,6 @@ pub enum Bus_Event {
     },
 
     // ===== 文件传输事件 =====
-
     /// 文件传输进度
     File_Progress {
         /// 文件名
@@ -133,7 +129,6 @@ pub enum Bus_Event {
     },
 
     // ===== 系统事件 =====
-
     /// 通用日志（供 UI 显示）
     Log {
         /// 日志消息
@@ -151,4 +146,22 @@ pub enum Bus_Event {
         /// 设备名称（如 "cpu" / "cuda"）
         device: String,
     },
+
+    // ===== 帮助系统 =====
+    /// 帮助信息（由 Core 组装，TUI/GUI 渲染）
+    HelpInfo {
+        /// 内置命令列表
+        builtin: Vec<HelpEntry>,
+        /// 用户 Lua 命令列表
+        user: Vec<HelpEntry>,
+    },
+}
+
+/// 帮助条目：一条命令的用法和描述
+#[derive(Debug, Clone)]
+pub struct HelpEntry {
+    /// 命令用法（如 "run <model>"）
+    pub usage: String,
+    /// 命令描述
+    pub description: String,
 }
