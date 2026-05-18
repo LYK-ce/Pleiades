@@ -472,7 +472,8 @@ mod tests {
 
         let result: mlua::Table = lua.load(r#"
             local sess = ml.new("cpu")
-            return sess:tensorize({1, 2, 3, 4, 5})
+            local t = sess:tensorize({1, 2, 3, 4, 5})
+            return t:dims()
         "#).eval().expect("call tensorize");
 
         assert_eq!(result.get::<usize>(1).expect("dim0"), 1);  // batch
@@ -490,7 +491,8 @@ mod tests {
             for i = 1, 1024 do
                 table.insert(ids, i % 32000)
             end
-            return sess:tensorize(ids)
+            local t = sess:tensorize(ids)
+            return t:dims()
         "#).eval().expect("call tensorize large");
 
         assert_eq!(result.get::<usize>(1).expect("dim0"), 1);    // batch
@@ -511,6 +513,31 @@ mod tests {
     }
 
     #[test]
+    fn test_ml_forward_with_lua_tensor() {
+        let lua = LuaContext::new().expect("create lua");
+        register_ml_caps(&lua).expect("register ml caps");
+
+        // tensorize 返回 LuaTensor → 传入 forward
+        // 空壳无模型，forward 内部报 "no model loaded"，但证明 LuaTensor 类型桥接正确
+        let result = lua.load(r#"
+            local sess = ml.new("cpu")
+            local t = sess:tensorize({1, 2, 3})
+            sess:forward(t, 0)
+        "#).eval::<mlua::Value>();
+
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("no model"),
+                    "期望 'no model' 错误（无模型已加载），实际: {msg}"
+                );
+            }
+            Ok(_) => panic!("空壳 forward 应该报错"),
+        }
+    }
+
+    #[test]
     fn test_ml_script_calls_multiple_methods() {
         let lua = LuaContext::new().expect("create lua");
         register_ml_caps(&lua).expect("register ml caps");
@@ -519,7 +546,8 @@ mod tests {
             COMMAND = "ml_demo"
             function execute(params)
                 local sess = ml.new(params.device or "cpu")
-                local dims = sess:tensorize({1, 2, 3})
+                local t = sess:tensorize({1, 2, 3})
+                local dims = t:dims()
 
                 return {
                     has_model = sess:has_model(),

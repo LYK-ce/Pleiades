@@ -10,7 +10,6 @@ use std::sync::Arc;
 use crate::network::Network_Capability;
 use crate::peer_management::Peer_Management_Capability;
 use crate::storage::StorageCapability;
-use crate::session::Session_Capability;
 use crate::event_bus::EventBus;
 
 // ============================================================
@@ -31,8 +30,6 @@ pub struct Capabilities {
     pub storage: Arc<dyn StorageCapability>,
     /// 节点管理
     pub peer_manager: Box<dyn Peer_Management_Capability>,
-    /// 会话管理 (IO 通道)
-    pub session: Box<dyn Session_Capability>,
     /// 事件总线
     pub event_bus: Arc<EventBus>,
 }
@@ -47,7 +44,6 @@ pub(crate) mod test_utils {
     use crate::network::{Network_Capability, Network_Error, Network_Data, DataType};
     use crate::peer_management::{Peer_Management_Capability, Peer_Management_Error, PeerInfo, PeerStatus};
     use crate::storage::{StorageCapability, StorageError, FileEntry, ChecksumAlgorithm, ReadGuard, WriteGuard};
-    use crate::session::{Session_Capability, Session_Error, IoHandle, IoFrontend, SessionInfo};
 
     // ─── Network stub ──────────────────────────────────────
 
@@ -105,19 +101,6 @@ pub(crate) mod test_utils {
         async fn list(&self) -> Result<Vec<FileEntry>, StorageError> { Ok(vec![]) }
         async fn checksum(&self, _file_id: &str, _algo: Option<ChecksumAlgorithm>) -> Result<String, StorageError> { unimplemented!("stub") }
         async fn flush(&self) -> Result<(usize, usize), StorageError> { Ok((0, 0)) }
-    }
-
-    // ─── Session stub ──────────────────────────────────────
-
-    pub struct StubSession;
-
-    #[async_trait]
-    impl Session_Capability for StubSession {
-        async fn create_session(&self, _model_id: String) -> Result<(String, IoHandle), Session_Error> { unimplemented!("stub") }
-        async fn destroy_session(&self, _session_id: &str) -> Result<(), Session_Error> { unimplemented!("stub") }
-        async fn connect(&self, _session_id: &str) -> Result<(u32, IoFrontend), Session_Error> { unimplemented!("stub") }
-        fn list_sessions(&self) -> Vec<SessionInfo> { vec![] }
-        async fn release_slot(&self, _session_id: &str, _slot_id: u32) -> Result<(), Session_Error> { unimplemented!("stub") }
     }
 }
 

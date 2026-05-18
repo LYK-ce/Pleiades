@@ -11,7 +11,7 @@ use crate::orchestrator::command::UserCommand;
 use crate::lua::engine::LuaContext;
 use crate::lua::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
-    register_storage_caps,
+    register_storage_caps, register_ml_caps,
 };
 use crate::event_bus::event::{Bus_Event, HelpEntry};
 
@@ -201,6 +201,9 @@ async fn execute_lua_script(
 
     register_storage_caps(&lua, caps.storage.clone())
         .map_err(|e| format!("注册 Storage 能力失败: {}", e))?;
+
+    register_ml_caps(&lua)
+        .map_err(|e| format!("注册 ML 能力失败: {}", e))?;
 
     lua.load(&script).eval::<()>()
         .map_err(|e| format!("脚本语法错误: {}", e))?;

@@ -59,7 +59,6 @@ use app::{App, Command_Output, InputFocus, Job_State, Transfer_Direction, View_M
 use crate::event_bus::Bus_Event;
 use crate::orchestrator::command::UserCommand;
 use crate::orchestrator::job::JobId;
-use crate::session::{SessionManager, Session_Capability};
 
 // ============================================================
 // TUI 主循环
@@ -73,11 +72,9 @@ use crate::session::{SessionManager, Session_Capability};
 /// # 参数
 /// - `event_rx`: 从 EventBus::Subscribe() 获得的 broadcast Receiver
 /// - `user_cmd_tx`: 发送用户命令给 Orchestrator Core
-/// - `io_broker`: IO Broker 共享引用，用于 Take_Frontend 获取推理会话端点
 pub fn TUI_Loop(
     mut event_rx: broadcast::Receiver<Bus_Event>,
     user_cmd_tx: mpsc::Sender<UserCommand>,
-    io_broker: Arc<SessionManager>,
 ) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
@@ -111,38 +108,11 @@ pub fn TUI_Loop(
             }
         }
 
-        // 2b-extra: 轮询推理输出（从 IoFrontend.output_rx 读取流式 token）
-        if let Some(ref mut frontend) = app.active_frontend {
-            let mut disconnected = false;
-            loop {
-                match frontend.output_rx.try_recv() {
-                    Ok(token) => {
-                        app.command_output.output_text.push_str(&token);
-                        app.command_output.token_count += 1;
-                        // 自动滚动到底部
-                        let line_count = app.command_output.output_text.lines().count();
-                        app.command_scroll = line_count.saturating_sub(1);
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-            if disconnected {
-                app.active_frontend = None;
-                app.active_job_id = None;
-                app.command_output.completed = true;
-                app.Add_Log("推理会话已结束".to_string());
-            }
-        }
-
         // 2c. 处理输入事件（50ms 超时，约 20fps）
         if crossterm::event::poll(Duration::from_millis(50)).unwrap_or(false) {
             match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    Handle_Key_Event(&mut app, key.code, key.modifiers, &user_cmd_tx, &io_broker);
+                    Handle_Key_Event(&mut app, key.code, key.modifiers, &user_cmd_tx);
                 }
                 Ok(Event::Mouse(mouse)) => {
                     Handle_Mouse_Event(&mut app, mouse.kind, mouse.column, mouse.row);
@@ -320,7 +290,6 @@ fn Handle_Key_Event(
     key_code: KeyCode,
     modifiers: KeyModifiers,
     user_cmd_tx: &mpsc::Sender<UserCommand>,
-    io_broker: &Arc<SessionManager>,
 ) {
     // Ctrl+C: 强制退出
     if modifiers.contains(KeyModifiers::CONTROL) && key_code == KeyCode::Char('c') {
@@ -338,7 +307,7 @@ fn Handle_Key_Event(
             InputFocus::Command => {
                 let input = app.Take_Input();
                 if !input.is_empty() {
-                    Handle_Command_Input(app, &input, user_cmd_tx, io_broker);
+                    Handle_Command_Input(app, &input, user_cmd_tx);
                 }
             }
             InputFocus::Prompt => {
@@ -401,33 +370,7 @@ fn Handle_Prompt_Submit(app: &mut App) {
     if prompt.is_empty() {
         return;
     }
-
-    if let Some(ref frontend) = app.active_frontend {
-        // 清空命令输出面板，准备显示新的推理输出
-        app.command_output = Command_Output::New();
-        app.command_scroll = 0;
-        app.view_mode = View_Mode::Busy_Coordinator;
-
-        match frontend.input_tx.blocking_send(prompt.clone()) {
-            Ok(()) => {
-                app.Add_Log(format!(
-                    "已发送 Prompt: {}...",
-                    if prompt.len() > 20 {
-                        &prompt[..20]
-                    } else {
-                        &prompt
-                    }
-                ));
-            }
-            Err(_) => {
-                app.Add_Log("[错误] Prompt 发送失败（会话可能已关闭）".to_string());
-                app.active_frontend = None;
-                app.active_job_id = None;
-            }
-        }
-    } else {
-        app.Add_Log("[提示] 无活跃推理会话，请先执行 run <model_path>".to_string());
-    }
+    app.Add_Log("[提示] 无活跃推理会话，请先执行 run <model_path>".to_string());
 }
 
 // ============================================================
@@ -470,7 +413,6 @@ fn Handle_Command_Input(
     app: &mut App,
     input: &str,
     user_cmd_tx: &mpsc::Sender<UserCommand>,
-    io_broker: &Arc<SessionManager>,
 ) {
     let trimmed = input.trim();
 
@@ -534,24 +476,10 @@ fn Handle_Command_Input(
         match reply_rx.blocking_recv() {
             Ok(Ok(job_id)) => {
                 app.Add_Log(format!("推理 Job #{} 已创建", job_id.0));
-
-                // 从 IO Broker 获取前端端点（会合点设计）
-                let rt = tokio::runtime::Handle::current();
-                match rt.block_on(io_broker.Take_Frontend(job_id)) {
-                    Ok(frontend) => {
-                        app.active_frontend = Some(frontend);
-                        app.active_job_id = Some(job_id);
-                        app.command_output.output_text =
-                            "会话已建立，请在 Prompt 框输入内容".to_string();
-                        app.Add_Log(format!("IoFrontend 获取成功, Job #{}", job_id.0));
-                    }
-                    Err(e) => {
-                        app.Add_Log(format!("[错误] 获取前端通道失败: {}", e));
-                        app.command_output.output_text =
-                            format!("会话创建成功但通道获取失败: {}", e);
-                        app.command_output.completed = true;
-                    }
-                }
+                app.active_job_id = Some(job_id);
+                app.command_output.output_text =
+                    format!("推理 Job #{} 已创建（推理功能待实现）", job_id.0);
+                app.command_output.completed = true;
             }
             Ok(Err(e)) => {
                 app.command_output.output_text = format!("错误: {}", e);

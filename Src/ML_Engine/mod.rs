@@ -11,8 +11,10 @@
 //! - `gguf_model`: 模型抽象（load / unload / inference / encode / decode）
 //! - `gguf_model_manager`: 底层 GGUF 操作（analyze / load_layer / split）
 //! - `gguf_tensor`: 张量序列化（网络传输用）
+//! - `lua_tensor`: Tensor 的 mlua UserData 包装（跨 Lua 边界）
 
 pub mod gguf_tensor;
+pub mod lua_tensor;
 pub mod gguf_model_manager;
 pub mod gguf_model;
 pub mod context;

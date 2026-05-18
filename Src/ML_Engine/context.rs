@@ -20,6 +20,7 @@ use std::path::Path;
 
 use candle_core::{Device, Tensor};
 
+use super::lua_tensor::LuaTensor;
 use super::gguf_model::{
     GGUF_Decode, GGUF_Encode, GGUF_Load_Model, GGUF_Model,
     GGUF_Model_Inference, GGUF_Unload_Model,
@@ -317,19 +318,17 @@ impl mlua::UserData for MlSession {
         });
 
         // ─── 推理 ──────────────────────────────────────────
-        methods.add_method("tensorize", |lua, sess, token_ids: Vec<u32>| {
+        methods.add_method("tensorize", |_, sess, token_ids: Vec<u32>| {
             let t = sess.tensorize(&token_ids)
                 .map_err(|e| mlua::Error::runtime(e))?;
-            let dims = t.dims();
-            let result = lua.create_table()?;
-            for (i, &d) in dims.iter().enumerate() {
-                result.set(i + 1, d)?;
-            }
-            Ok(result)
+            Ok(LuaTensor(t))
         });
 
-        methods.add_method_mut("forward", |_, _sess, (_tensor, _offset): (mlua::Value, Option<usize>)| {
-            Err::<mlua::Value, _>(mlua::Error::runtime("Tensor passing requires binding layer"))
+        methods.add_method_mut("forward", |_, sess, (tensor, offset): (mlua::AnyUserData, Option<usize>)| {
+            let t = tensor.borrow::<LuaTensor>()
+                .map_err(|e| mlua::Error::runtime(format!("forward: expected LuaTensor: {e}")))?;
+            sess.forward(&t, offset)
+                .map_err(|e| mlua::Error::runtime(e))
         });
 
         // ─── 采样 ──────────────────────────────────────────

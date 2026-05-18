@@ -10,7 +10,6 @@
 #![allow(non_snake_case)]
 
 use crate::orchestrator::job::JobId;
-use crate::session::IoFrontend;
 use ratatui::layout::Rect;
 
 // ============================================================
@@ -177,8 +176,6 @@ pub struct App {
     pub focus: InputFocus,
 
     // ===== 推理会话 =====
-    /// 当前活跃的 IoFrontend（单 session）
-    pub active_frontend: Option<IoFrontend>,
     /// 当前活跃的 job_id
     pub active_job_id: Option<JobId>,
 
@@ -214,7 +211,6 @@ impl App {
             prompt_buffer: String::new(),
             prompt_cursor: 0,
             focus: InputFocus::Command,
-            active_frontend: None,
             active_job_id: None,
             should_quit: false,
             available_commands: Vec::new(),
@@ -353,7 +349,7 @@ impl App {
 
     /// 检查是否有活跃推理会话
     pub fn Has_Active_Session(&self) -> bool {
-        self.active_frontend.is_some()
+        false
     }
 
     /// 设置可用命令列表（来自 ProgramRegistry）
