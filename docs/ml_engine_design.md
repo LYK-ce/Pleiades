@@ -50,8 +50,8 @@ Lua 脚本 (OS 线程)
    ├── sess:load_model(path, 0, 999999)            → 填充模型
    ├── sess:encode(prompt)                       → token IDs
    ├── sess:tensorize(tokens)                    → Tensor
-   ├── sess:forward(tensor, offset)               → 推理
-   ├── sess:sample(temperature)                   → 下一个 token
+    ├── sess:forward(tensor, offset)               → Tensor (logits/hidden)
+    ├── sess:sample(logits, temperature)           → 下一个 token
    ├── sess:decode(token_id)                      → 文本
    ├── sess:get_eos()                             → EOS token
    ├── sess:get_offset()                          → 位置偏移量
@@ -62,7 +62,7 @@ Lua 脚本 (OS 线程)
       MlSession (userdata 包装)
          │
          ▼
-      MlContext (内部状态: model(Option) + device + output + offset + rng + eos)
+       MlContext (内部状态: model(Option) + device + offset + rng + eos)
          │
          ▼
      GGUF_Model → Model_Weights (embedding + layers + norm + lm_head)
@@ -113,7 +113,6 @@ MlSession 是状态机：空壳创建 → load_model → 推理 → unload → �
 ```rust
 struct MlContext {
     model: Option<GGUF_Model>,  // 模型权重 + tokenizer（None = 空壳）
-    output: Option<Tensor>,     // 推理输出缓冲区（logits 或 hidden state）
     offset: usize,              // 自增序列位置
     rng_state: u64,             // xoshiro 随机数生成器状态
     eos_token_id: u32,          // EOS token ID
@@ -121,7 +120,7 @@ struct MlContext {
 }
 ```
 
-6 个字段。`model` 为 `Option`，空壳时为 `None`。`device` 在 `new()` 时确定，不随模型变化。不设 input 缓冲区——Tensor 由调用方直接传入 `forward()`。
+5 个字段。`model` 为 `Option`，空壳时为 `None`。`device` 在 `new()` 时确定，不随模型变化。推理输出由 `forward()` 直接返回，不存内部缓冲区。
 
 ### 2.3 GGUF_Model — 模型抽象
 
@@ -187,9 +186,9 @@ Lua 侧：`sess:load_model("model.gguf", 0, 40)`。
 | Lua 调用 | Rust 签名 | 说明 |
 |----------|----------|------|
 | `sess:tensorize(token_ids)` | `tensorize(&self, &[u32]) → Tensor` | Vec<u32> → [1, seq_len] u32 Tensor，**空壳可用** |
-| `sess:forward(tensor, offset)` | `forward(&mut self, &Tensor, Option<usize>) → ()` | 单次前向推理，需要模型 |
+| `sess:forward(tensor, offset)` | `forward(&mut self, &Tensor, Option<usize>) → Tensor` | 单次前向推理，返回 logits/hidden states |
 
-`forward` 接受 `&mut self`。有 embedding 层则自动 embedding → forward，无则直接 forward。`offset=None` 时自动递增。
+`forward` 返回 Tensor（对标 PyTorch `output = model(input)`）。结果不存内部缓冲区，由调用方持有。有 embedding 层则自动 embedding → forward，无则直接 forward。`offset=None` 时自动递增。
 
 > `tensorize` 是纯数据转换，不依赖模型，空壳状态可直接使用。
 
@@ -199,9 +198,11 @@ Lua 侧：`sess:load_model("model.gguf", 0, 40)`。
 
 | Lua 调用 | Rust 签名 | 说明 |
 |----------|----------|------|
-| `sess:sample(temperature)` | `sample(&mut self, f64) → u32` | 从 output 采样下一个 token |
+| `sess:sample(logits, temperature)` | `sample(&mut self, &Tensor, f64) → u32` | 从 logits tensor 采样下一个 token |
 
-`temperature ≤ 0` 时 argmax，否则 softmax 随机采样 (xoshiro)。
+对标 PyTorch: `probs = softmax(logits[:,-1,:] / temp); tok = multinomial(probs, 1)`。
+
+`temperature ≤ 0` 时 argmax，否则 softmax 随机采样 (xoshiro)。logits 由 `forward()` 返回值直接传入。
 
 ---
 
@@ -225,8 +226,8 @@ impl mlua::UserData for MlSession {
         methods.add_method("encode",     |_, sess, text| sess.encode(&text));
         methods.add_method("decode",     |_, sess, id| sess.decode(id));
         methods.add_method("tensorize",  |_, sess, ids| sess.tensorize(&ids));
-        methods.add_method_mut("forward", |_, sess, (t, off)| sess.forward(&t, off));
-        methods.add_method_mut("sample", |_, sess, temp| sess.sample(temp));
+        methods.add_method_mut("forward", |_, sess, (t, off)| { let o = sess.forward(&t, off)?; Ok(LuaTensor(o)) });
+        methods.add_method_mut("sample", |_, sess, (logits, temp)| sess.sample(&logits, temp));
         methods.add_method("get_eos",    |_, sess, ()| Ok(sess.get_eos()));
         methods.add_method("get_offset", |_, sess, ()| Ok(sess.get_offset()));
     }

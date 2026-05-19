@@ -10,7 +10,10 @@ use std::sync::Arc;
 use mlua::Lua;
 use libp2p::PeerId;
 use crate::storage::StorageCapability;
-use crate::ml_engine::MlSession;
+use crate::ml_engine::{MlSession, capability};
+use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor, tensor_to_bytes};
+use crate::lua::network_stream::NetworkStream;
+use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
 use crate::event_bus::{EventBus, event::Bus_Event};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
@@ -192,6 +195,60 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    ml.set(
+        "tensor_from_bytes",
+        lua.create_function(|_, (bytes, device): (mlua::String, String)| {
+            let device = match device.to_lowercase().as_str() {
+                "cpu" => candle_core::Device::Cpu,
+                "cuda" => match candle_core::Device::new_cuda(0) {
+                    Ok(d) => d,
+                    Err(e) => return Err(mlua::Error::runtime(format!("cuda: {e}"))),
+                },
+                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
+            };
+            let tensor = bytes_to_tensor(&bytes.as_bytes(), &device)
+                .map_err(|e| mlua::Error::runtime(e))?;
+            Ok(LuaTensor(tensor))
+        })?,
+    )?;
+
+    ml.set(
+        "analyze_model",
+        lua.create_async_function(move |lua, path: String| async move {
+            let info = capability::analyze_model(std::path::Path::new(&path)).await
+                .map_err(|e| mlua::Error::runtime(e))?;
+            let t = lua.create_table()?;
+            t.set("architecture", info.architecture)?;
+            t.set("num_layers", info.num_layers)?;
+            t.set("embedding_length", info.embedding_length)?;
+            t.set("head_count", info.head_count)?;
+            t.set("head_count_kv", info.head_count_kv)?;
+            t.set("head_dim", info.head_dim)?;
+            t.set("feed_forward_length", info.feed_forward_length)?;
+            t.set("context_length", info.context_length)?;
+            t.set("rms_norm_eps", info.rms_norm_eps)?;
+            t.set("rope_freq_base", info.rope_freq_base)?;
+            t.set("vocab_size", info.vocab_size)?;
+            t.set("eos_token_id", info.eos_token_id)?;
+            t.set("is_split", info.is_split)?;
+            t.set("split_start", info.split_start)?;
+            t.set("split_end", info.split_end)?;
+            Ok(t)
+        })?,
+    )?;
+
+    ml.set(
+        "split_model",
+        lua.create_async_function(move |_, (path, start, end, output_dir): (String, usize, usize, String)| async move {
+            capability::split_model(
+                std::path::Path::new(&path),
+                start,
+                end,
+                std::path::Path::new(&output_dir),
+            ).await.map_err(|e| mlua::Error::runtime(e))
+        })?,
+    )?;
+
     lua.globals().set("ml", ml)?;
     Ok(())
 }
@@ -305,6 +362,86 @@ pub fn register_network_caps(
                 .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
             caps_net.network.send_file(peer, std::path::Path::new(&file_path)).await
                 .map_err(|e| mlua::Error::runtime(format!("send_file: {}", e)))
+        }
+    })?)?;
+
+    // ─── open_tensor_stream ──────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("open_tensor_stream", lua.create_async_function(move |_, (peer_str, inference_id): (String, u64)| {
+        let caps_net = caps_net.clone();
+        async move {
+            let peer = peer_str.parse::<PeerId>()
+                .map_err(|e| mlua::Error::runtime(format!("无效 PeerId: {}", e)))?;
+            let stream = caps_net.network.open_tensor_stream(peer, inference_id).await
+                .map_err(|e| mlua::Error::runtime(format!("open_tensor_stream: {}", e)))?;
+            Ok(NetworkStream::new(stream, caps_net))
+        }
+    })?)?;
+
+    // ─── accept_tensor_stream ────────────────────────────
+    let caps_net = capabilities.clone();
+    network.set("accept_tensor_stream", lua.create_async_function(move |_, (inference_id, timeout): (u64, u64)| {
+        let caps_net = caps_net.clone();
+        async move {
+            let stream = caps_net.network.accept_tensor_stream(inference_id, timeout).await
+                .map_err(|e| mlua::Error::runtime(format!("accept_tensor_stream: {}", e)))?;
+            Ok(NetworkStream::new(stream, caps_net))
+        }
+    })?)?;
+
+    // ─── send_tensor ─────────────────────────────────────
+    network.set("send_tensor", lua.create_async_function(move |_, (stream, tensor, offset): (mlua::AnyUserData, mlua::AnyUserData, u64)| {
+        async move {
+            let t = tensor.borrow::<LuaTensor>()
+                .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
+            let bytes = tensor_to_bytes(&t)
+                .map_err(|e| mlua::Error::runtime(e))?;
+            let stream_ud = stream.borrow::<NetworkStream>()
+                .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
+            let mut guard = stream_ud.stream.lock().unwrap();
+            Send_Tensor_Frame(&mut *guard, offset, &bytes).await
+                .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
+            Ok(())
+        }
+    })?)?;
+
+    // ─── recv_tensor ─────────────────────────────────────
+    network.set("recv_tensor", lua.create_async_function(move |_, (stream, device): (mlua::AnyUserData, String)| {
+        async move {
+            let device = match device.to_lowercase().as_str() {
+                "cpu" => candle_core::Device::Cpu,
+                "cuda" => match candle_core::Device::new_cuda(0) {
+                    Ok(d) => d,
+                    Err(e) => return Err(mlua::Error::runtime(format!("cuda: {e}"))),
+                },
+                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
+            };
+            let stream_ud = stream.borrow::<NetworkStream>()
+                .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
+            let mut guard = stream_ud.stream.lock().unwrap();
+            let mut buffer = Tensor_Buffer::New(16 * 1024 * 1024);
+            let offset = Receive_Tensor_Frame(&mut *guard, &mut buffer).await
+                .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
+            drop(guard);
+            drop(stream_ud);
+            if offset == crate::network::tensor_stream::protocol::TENSOR_EOF_OFFSET {
+                return Err(mlua::Error::runtime("recv_tensor: received EOF"));
+            }
+            let tensor = bytes_to_tensor(buffer.As_Slice(), &device)
+                .map_err(|e| mlua::Error::runtime(e))?;
+            Ok((LuaTensor(tensor), offset))
+        }
+    })?)?;
+
+    // ─── send_eof ────────────────────────────────────────
+    network.set("send_eof", lua.create_async_function(move |_, stream: mlua::AnyUserData| {
+        async move {
+            let stream_ud = stream.borrow::<NetworkStream>()
+                .map_err(|e| mlua::Error::runtime(format!("send_eof: {e}")))?;
+            let mut guard = stream_ud.stream.lock().unwrap();
+            Send_EOF(&mut *guard).await
+                .map_err(|e| mlua::Error::runtime(format!("send_eof: {e}")))?;
+            Ok(())
         }
     })?)?;
 

@@ -32,13 +32,13 @@ function execute(params)
 
     -- 4. 首次推理
     local t = sess:tensorize(tokens)
-    sess:forward(t, 0)
+    local logits = sess:forward(t, 0)
 
     -- 5. 自回归生成
     local eos = sess:get_eos()
     local generated = 0
-    for i = 1, 240 do
-        local tok = sess:sample(temperature)
+    for i = 1, 120 do
+        local tok = sess:sample(logits, temperature)
         if tok == eos then
             caps.print("<eos>")
             break
@@ -49,7 +49,7 @@ function execute(params)
         generated = generated + 1
 
         local next_t = sess:tensorize({tok})
-        sess:forward(next_t, nil)  -- nil = 自动 offset
+        logits = sess:forward(next_t, nil)  -- nil = 自动 offset
     end
 
     caps.print("生成完成, 共 " .. generated .. " tokens")

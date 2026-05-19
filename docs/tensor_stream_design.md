@@ -246,3 +246,25 @@ net.close_tensor_stream(stream)                              -- 发送 EOF + 关
 ### accept_tensor_stream 流清理
 
 `insert_inbound` 存入的 stream 若无匹配（accept 超时或永不调用），需要超时清理机制。
+
+---
+
+## 11. Tensor 序列化限制
+
+Tensor_Stream 协议传输裸字节 `Vec<u8>`，但 candle_core::Tensor 不暴露底层 Storage 为 `&[u8]`。
+
+**原因：**
+- `Storage` 的所有数据访问方法（`as_slice`, `copy_strided_src` 等）均为 `pub(crate)`
+- 唯一对外导出路径是 `to_vec1/2/3<T>()`，内部必然有一份内存拷贝
+- GPU tensor 需先 `to_device(Device::Cpu)` 才能读取（candle 不暴露 CUDA 指针）
+
+**当前方案：**
+- `tensor_to_bytes`: `reshape(&[total])` → `to_vec1::<f32>()` → 拷贝到 Vec → 写入 header + raw bytes
+- `bytes_to_tensor`: 读 header 恢复 shape → `from_vec(f32_data, &shape, device)` → 重建 Tensor
+- 反序列化侧：`from_vec` 从 `&[f32]` 拷贝到新 Tensor 内部存储
+
+**替代方案探索：**
+- `safetensors::serialize` — 内部也是拷贝，且需额外依赖
+- `npy::write_npy` — 文件 I/O，不是内存方案
+- CPU backend 的 `CpuStorage` — 字段 `pub(crate)`，无法从外部访问
+

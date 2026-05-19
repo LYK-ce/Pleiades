@@ -316,6 +316,7 @@ async fn tc03_all_bus_event_variants() {
                 assert_eq!(device, "cuda");
                 "Device_Changed"
             }
+            _ => continue,
         };
         variant_names.push(name.to_string());
     }

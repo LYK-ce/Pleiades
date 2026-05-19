@@ -9,8 +9,8 @@
 //! local sess = ml.new("cpu")
 //! sess:load_model("model.gguf", 0, 999999)
 //! local tokens = sess:encode(prompt)
-//! sess:forward(sess:tensorize(tokens), 0)
-//! local tok = sess:sample(0.8)
+//! local logits = sess:forward(sess:tensorize(tokens), 0)
+//! local tok = sess:sample(logits, 0.8)
 //! sess:unload()
 //! ```
 
@@ -20,11 +20,10 @@ use std::path::Path;
 
 use candle_core::{Device, Tensor};
 
-use super::lua_tensor::LuaTensor;
 use super::gguf_model::{
-    GGUF_Decode, GGUF_Encode, GGUF_Load_Model, GGUF_Model,
-    GGUF_Model_Inference, GGUF_Unload_Model,
+    GGUF_Decode, GGUF_Encode, GGUF_Load_Model, GGUF_Model, GGUF_Model_Inference, GGUF_Unload_Model,
 };
+use super::lua_tensor::LuaTensor;
 
 // ============================================================
 // MlSession — 对外句柄 (Lua userdata)
@@ -63,8 +62,6 @@ pub struct MlSession {
 struct MlContext {
     /// 模型权重 + tokenizer（None = 空壳状态）
     model: Option<GGUF_Model>,
-    /// 推理输出缓冲区（logits 或 hidden state）
-    output: Option<Tensor>,
     /// 自增序列位置（forward offset=None 时自动 += seq_len）
     offset: usize,
     /// 采样随机数生成器状态 (xoshiro)
@@ -96,13 +93,16 @@ impl MlSession {
                 Ok(d) => d,
                 Err(e) => return Err(format!("CUDA device init failed: {e}")),
             },
-            other => return Err(format!("Unsupported device: '{other}'. Use 'cpu' or 'cuda'.")),
+            other => {
+                return Err(format!(
+                    "Unsupported device: '{other}'. Use 'cpu' or 'cuda'."
+                ))
+            }
         };
 
         Ok(Self {
             ctx: MlContext {
                 model: None,
-                output: None,
                 offset: 0,
                 rng_state: 299792458,
                 eos_token_id: 151645, // Qwen3 默认 EOS
@@ -114,12 +114,7 @@ impl MlSession {
     /// 加载模型到当前 session。
     ///
     /// 若已有模型，先卸载旧模型再加载新模型。
-    pub fn load_model(
-        &mut self,
-        path: &Path,
-        start: usize,
-        end: usize,
-    ) -> Result<(), String> {
+    pub fn load_model(&mut self, path: &Path, start: usize, end: usize) -> Result<(), String> {
         // 先卸载已有模型
         if self.ctx.model.is_some() {
             self.unload();
@@ -142,7 +137,6 @@ impl MlSession {
         if let Some(model) = self.ctx.model.take() {
             GGUF_Unload_Model(model);
         }
-        self.ctx.output = None;
         self.ctx.offset = 0;
         self.ctx.eos_token_id = 151645;
     }
@@ -155,17 +149,21 @@ impl MlSession {
     // ─── 编解码 ────────────────────────────────────────────
 
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        let model = self.ctx.model.as_ref()
+        let model = self
+            .ctx
+            .model
+            .as_ref()
             .ok_or("encode: no model loaded. Call load_model() first.")?;
-        GGUF_Encode(model, text)
-            .map_err(|e| format!("Encode failed: {e}"))
+        GGUF_Encode(model, text).map_err(|e| format!("Encode failed: {e}"))
     }
 
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
-        let model = self.ctx.model.as_ref()
+        let model = self
+            .ctx
+            .model
+            .as_ref()
             .ok_or("decode: no model loaded. Call load_model() first.")?;
-        GGUF_Decode(model, &[token_id])
-            .map_err(|e| format!("Decode failed: {e}"))
+        GGUF_Decode(model, &[token_id]).map_err(|e| format!("Decode failed: {e}"))
     }
 
     // ─── 推理 ──────────────────────────────────────────────
@@ -182,34 +180,36 @@ impl MlSession {
             .map_err(|e| format!("Tensorize failed: {e}"))
     }
 
-    pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<(), String> {
-        let model = self.ctx.model.as_mut()
+    pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor, String> {
+        let model = self
+            .ctx
+            .model
+            .as_mut()
             .ok_or("forward: no model loaded. Call load_model() first.")?;
         let off = offset.unwrap_or(self.ctx.offset);
         let seq_len = tensor.dims().get(1).copied().unwrap_or(1);
 
-        let output = GGUF_Model_Inference(model, tensor, off)
-            .map_err(|e| format!("Forward failed: {e}"))?;
+        let output =
+            GGUF_Model_Inference(model, tensor, off).map_err(|e| format!("Forward failed: {e}"))?;
 
-        self.ctx.device
+        self.ctx
+            .device
             .synchronize()
             .map_err(|e| format!("Device sync failed: {e}"))?;
-
-        self.ctx.output = Some(output);
 
         if offset.is_none() {
             self.ctx.offset += seq_len;
         }
 
-        Ok(())
+        Ok(output)
     }
 
     // ─── 采样 ──────────────────────────────────────────────
 
-    pub fn sample(&mut self, temperature: f64) -> Result<u32, String> {
-        let logits = self.ctx.output.as_ref()
-            .ok_or("No output tensor. Call forward() first.")?;
-
+    /// 对 logits tensor 采样，返回下一个 token ID。
+    ///
+    /// logits 形状: [1, seq_len, vocab_size] 或 [vocab_size]
+    pub fn sample(&mut self, logits: &Tensor, temperature: f64) -> Result<u32, String> {
         let last_logits = Self::extract_last_logits(logits)?;
 
         let token = if temperature <= 0.0 {
@@ -221,13 +221,15 @@ impl MlSession {
         } else {
             let scaled = (&last_logits / temperature)
                 .map_err(|e| format!("temperature scaling failed: {e}"))?;
-            let probs = candle_nn::ops::softmax(&scaled, 0)
-                .map_err(|e| format!("softmax failed: {e}"))?;
+            let probs =
+                candle_nn::ops::softmax(&scaled, 0).map_err(|e| format!("softmax failed: {e}"))?;
             let probs_vec: Vec<f32> = probs
                 .to_vec1::<f32>()
                 .map_err(|e| format!("probs → vec failed: {e}"))?;
 
-            self.ctx.rng_state = self.ctx.rng_state
+            self.ctx.rng_state = self
+                .ctx
+                .rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let random = (self.ctx.rng_state >> 33) as f32 / (u32::MAX as f32);
@@ -248,10 +250,6 @@ impl MlSession {
     }
 
     // ─── 状态查询 ──────────────────────────────────────────
-
-    pub fn get_output_tensor(&self) -> Option<&Tensor> {
-        self.ctx.output.as_ref()
-    }
 
     /// 返回 EOS token ID。空壳时返回默认值 151645。
     pub fn get_eos(&self) -> u32 {
@@ -292,14 +290,15 @@ impl MlSession {
 impl mlua::UserData for MlSession {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // ─── 生命周期 ──────────────────────────────────────
-        methods.add_method_mut("load_model", |_, sess, (path, start, end): (String, usize, usize)| {
-            sess.load_model(std::path::Path::new(&path), start, end)
-                .map_err(|e| mlua::Error::runtime(e))
-        });
+        methods.add_method_mut(
+            "load_model",
+            |_, sess, (path, start, end): (String, usize, usize)| {
+                sess.load_model(std::path::Path::new(&path), start, end)
+                    .map_err(|e| mlua::Error::runtime(e))
+            },
+        );
 
-        methods.add_method("has_model", |_, sess, (): ()| {
-            Ok(sess.has_model())
-        });
+        methods.add_method("has_model", |_, sess, (): ()| Ok(sess.has_model()));
 
         methods.add_method_mut("unload", |_, sess, (): ()| {
             sess.unload();
@@ -308,43 +307,50 @@ impl mlua::UserData for MlSession {
 
         // ─── 编解码 ────────────────────────────────────────
         methods.add_method("encode", |_, sess, text: String| {
-            sess.encode(&text)
-                .map_err(|e| mlua::Error::runtime(e))
+            sess.encode(&text).map_err(|e| mlua::Error::runtime(e))
         });
 
         methods.add_method("decode", |_, sess, token_id: u32| {
-            sess.decode(token_id)
-                .map_err(|e| mlua::Error::runtime(e))
+            sess.decode(token_id).map_err(|e| mlua::Error::runtime(e))
         });
 
         // ─── 推理 ──────────────────────────────────────────
         methods.add_method("tensorize", |_, sess, token_ids: Vec<u32>| {
-            let t = sess.tensorize(&token_ids)
+            let t = sess
+                .tensorize(&token_ids)
                 .map_err(|e| mlua::Error::runtime(e))?;
             Ok(LuaTensor(t))
         });
 
-        methods.add_method_mut("forward", |_, sess, (tensor, offset): (mlua::AnyUserData, Option<usize>)| {
-            let t = tensor.borrow::<LuaTensor>()
-                .map_err(|e| mlua::Error::runtime(format!("forward: expected LuaTensor: {e}")))?;
-            sess.forward(&t, offset)
-                .map_err(|e| mlua::Error::runtime(e))
-        });
+        methods.add_method_mut(
+            "forward",
+            |_, sess, (tensor, offset): (mlua::AnyUserData, Option<usize>)| {
+                let t = tensor.borrow::<LuaTensor>().map_err(|e| {
+                    mlua::Error::runtime(format!("forward: expected LuaTensor: {e}"))
+                })?;
+                let output = sess
+                    .forward(&t, offset)
+                    .map_err(|e| mlua::Error::runtime(e))?;
+                Ok(LuaTensor(output))
+            },
+        );
 
         // ─── 采样 ──────────────────────────────────────────
-        methods.add_method_mut("sample", |_, sess, temperature: f64| {
-            sess.sample(temperature)
-                .map_err(|e| mlua::Error::runtime(e))
-        });
+        methods.add_method_mut(
+            "sample",
+            |_, sess, (logits, temperature): (mlua::AnyUserData, f64)| {
+                let t = logits.borrow::<LuaTensor>().map_err(|e| {
+                    mlua::Error::runtime(format!("sample: expected LuaTensor: {e}"))
+                })?;
+                sess.sample(&t, temperature)
+                    .map_err(|e| mlua::Error::runtime(e))
+            },
+        );
 
         // ─── 状态查询 ──────────────────────────────────────
-        methods.add_method("get_eos", |_, sess, (): ()| {
-            Ok(sess.get_eos())
-        });
+        methods.add_method("get_eos", |_, sess, (): ()| Ok(sess.get_eos()));
 
-        methods.add_method("get_offset", |_, sess, (): ()| {
-            Ok(sess.get_offset())
-        });
+        methods.add_method("get_offset", |_, sess, (): ()| Ok(sess.get_offset()));
     }
 }
 
@@ -372,8 +378,8 @@ mod tests {
         let t = sess.tensorize(&[1, 2, 3, 4, 5]).expect("tensorize");
         let dims = t.dims();
         assert_eq!(dims.len(), 2);
-        assert_eq!(dims[0], 1);  // batch
-        assert_eq!(dims[1], 5);  // seq_len
+        assert_eq!(dims[0], 1); // batch
+        assert_eq!(dims[1], 5); // seq_len
     }
 
     #[test]
