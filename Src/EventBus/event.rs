@@ -155,6 +155,15 @@ pub enum Bus_Event {
         /// 用户 Lua 命令列表
         user: Vec<HelpEntry>,
     },
+
+    // ===== 命令结果 =====
+    /// 通用命令执行结果，TUI 展示到 Command Output 面板
+    CommandResult {
+        /// 结果文本
+        text: String,
+        /// 是否已完成（true 表示最终结果，false 表示中间更新）
+        completed: bool,
+    },
 }
 
 /// 帮助条目：一条命令的用法和描述

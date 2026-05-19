@@ -37,7 +37,7 @@ function execute(params)
     -- 5. 自回归生成
     local eos = sess:get_eos()
     local generated = 0
-    for i = 1, max_tokens do
+    for i = 1, 240 do
         local tok = sess:sample(temperature)
         if tok == eos then
             caps.print("<eos>")

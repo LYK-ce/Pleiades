@@ -6,7 +6,6 @@
 //! 所有业务逻辑用 todo!() 占位，仅验证 Capability 调用通路。
 
 use super::Core;
-use crate::orchestrator::job::JobId;
 use crate::orchestrator::command::UserCommand;
 use crate::lua::engine::LuaContext;
 use crate::lua::capability_binding::{
@@ -42,33 +41,52 @@ impl Core {
     pub async fn route_user(&mut self, cmd: UserCommand) {
         match cmd {
             // ─── 通用 Lua 脚本执行 ─────────────────────────
-            UserCommand::Execute { command, params, reply } => {
+            UserCommand::Execute { command, params } => {
                 let entry = match self.program_registry.get_user(&command) {
                     Some(e) => e.clone(),
                     None => {
-                        let _ = reply.send(Err(format!("未知命令: {}", command)));
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: format!("未知命令: {}", command),
+                            completed: true,
+                        });
                         return;
                     }
                 };
 
                 let caps = self.capabilities.clone();
-                // 直接在 Core 的 async 上下文中执行，避免 Lua (非 Send) 跨线程
                 let result = execute_lua_script(&entry.path, &params, &caps).await;
-                let _ = reply.send(result.map(|_v| JobId(super::generate_id())));
+                match result {
+                    Ok(_v) => {
+                        let job_id = super::generate_id();
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: format!("脚本 '{}' 执行完成 (Job #{})", command, job_id),
+                            completed: true,
+                        });
+                    }
+                    Err(e) => {
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: format!("执行失败: {}", e),
+                            completed: true,
+                        });
+                    }
+                }
             }
 
             // ─── 单机推理 (Lua 脚本 + 模型) ───
-            UserCommand::Run { script, model_path, reply } => {
-                // 1. analyze_model(model_path).await → Model_Arch_Info
-                // 2. session.create_session(...).await → (session_id, IoHandle)
-                // 3. 加载并执行 Lua script → ml.load_model(...) → sess:forward/sample (todo!())
-                let _ = reply.send(Err("Run: not yet implemented".into()));
+            UserCommand::Run { script: _, model_path: _ } => {
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text: "Run: not yet implemented".to_string(),
+                    completed: true,
+                });
             }
 
             // ─── 取消作业 ──────────────────────────────────
-            UserCommand::Cancel { job_id, reply } => {
+            UserCommand::Cancel { job_id } => {
                 self.cancel_job(job_id);
-                let _ = reply.send(Ok(()));
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text: format!("Job #{} 取消信号已发送", job_id.0),
+                    completed: true,
+                });
             }
 
             // ─── 优雅退出 ──────────────────────────────────
@@ -78,67 +96,105 @@ impl Core {
             }
 
             // ─── 查看节点 ──────────────────────────────────
-            UserCommand::DisplayPeer { reply } => {
-                let result = match self.capabilities.peer_manager.Get_Peers().await {
+            UserCommand::DisplayPeer => {
+                let text = match self.capabilities.peer_manager.Get_Peers().await {
                     Ok(peers) => {
-                        let list: Vec<String> = peers.iter()
-                            .map(|p| format!("{} [mem={:?}MB latency={:?}ms]", p.peer_id, p.profile.memory_mb, p.profile.latency_ms))
-                            .collect();
-                        Ok(list)
+                        if peers.is_empty() {
+                            "当前无已知节点".to_string()
+                        } else {
+                            peers.iter()
+                                .map(|p| format!("{} [mem={:?}MB latency={:?}ms]", p.peer_id, p.profile.memory_mb, p.profile.latency_ms))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
                     }
-                    Err(e) => Err(format!("{e}")),
+                    Err(e) => format!("错误: {}", e),
                 };
-                let _ = reply.send(result);
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text,
+                    completed: true,
+                });
             }
 
             // ─── 设置设备 ──────────────────────────────────
-            UserCommand::SetDevice { device, reply } => {
-                self.device_preference = device;
-                let _ = reply.send(Ok(()));
+            UserCommand::SetDevice { device } => {
+                self.device_preference = device.clone();
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text: format!("设备已切换为: {}", device.to_uppercase()),
+                    completed: true,
+                });
             }
 
             // ─── 模型分发 ──────────────────────────────────
-            UserCommand::DistributeModel { model_path, peers, reply } => {
-                // 1. analyze_model(&Path::new(&model_path)).await
-                // 2. split_model(...).await (per peer)
-                // 3. storage.acquire_read → network.send_data → network.open_file_stream
-                let _ = reply.send(Err("DistributeModel: not yet implemented".into()));
+            UserCommand::DistributeModel { model_path: _, peers: _ } => {
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text: "DistributeModel: not yet implemented".to_string(),
+                    completed: true,
+                });
             }
 
             // ─── 列出模型 ──────────────────────────────────
-            UserCommand::List { reply } => {
-                let result = match self.capabilities.storage.list().await {
+            UserCommand::List => {
+                let text = match self.capabilities.storage.list().await {
                     Ok(entries) => {
-                        let list: Vec<String> = entries.iter()
-                            .map(|e| format!("{} ({} bytes)", e.file_name, e.size))
-                            .collect();
-                        Ok(list)
+                        if entries.is_empty() {
+                            "存储为空（无文件）".to_string()
+                        } else {
+                            let mut output = format!("共 {} 个文件:\n", entries.len());
+                            for e in &entries {
+                                output.push_str(&format!("  {} ({} bytes)\n", e.file_name, e.size));
+                            }
+                            output
+                        }
                     }
-                    Err(e) => Err(format!("{e}")),
+                    Err(e) => format!("错误: {}", e),
                 };
-                let _ = reply.send(result);
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text,
+                    completed: true,
+                });
             }
 
             // ─── 发送文件 ──────────────────────────────────
-            UserCommand::Send { file_path, peer_id, reply } => {
+            UserCommand::Send { file_path, peer_id } => {
                 let entry = match self.program_registry.get("send") {
                     Some(e) => e.clone(),
                     None => {
-                        let _ = reply.send(Err("send 脚本未找到".into()));
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: "send 脚本未找到".to_string(),
+                            completed: true,
+                        });
                         return;
                     }
                 };
                 let mut params = std::collections::HashMap::new();
-                params.insert("file".into(), file_path);
-                params.insert("peer".into(), peer_id);
+                params.insert("file".into(), file_path.clone());
+                params.insert("peer".into(), peer_id.clone());
                 let caps = self.capabilities.clone();
                 let result = execute_lua_script(&entry.path, &params, &caps).await;
-                let _ = reply.send(result.map(|_v| JobId(super::generate_id())));
+                match result {
+                    Ok(_v) => {
+                        let job_id = super::generate_id();
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: format!("发送 Job #{} 已创建 ({} → {})", job_id, file_path, peer_id),
+                            completed: true,
+                        });
+                    }
+                    Err(e) => {
+                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                            text: format!("错误: {}", e),
+                            completed: true,
+                        });
+                    }
+                }
             }
 
             // ─── 性能测试 ──────────────────────────────────
-            UserCommand::Profile { model_id: _, reply } => {
-                let _ = reply.send(Err("Profile: 尚未实现".into()));
+            UserCommand::Profile { model_id: _ } => {
+                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
+                    text: "Profile: 尚未实现".to_string(),
+                    completed: true,
+                });
             }
 
             // ─── 帮助信息 ──────────────────────────────────

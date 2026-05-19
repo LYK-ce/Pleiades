@@ -277,6 +277,11 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
             app.command_output.output_text = lines.join("\n");
             app.command_output.completed = true;
         }
+        Bus_Event::CommandResult { text, completed } => {
+            app.command_output.output_text = text;
+            app.command_output.completed = completed;
+            app.command_scroll = 0;
+        }
     }
 }
 
@@ -409,11 +414,7 @@ fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u1
 // ============================================================
 
 /// 处理用户输入的命令，通过 user_cmd_tx 发送 UserCommand 给 Orchestrator Core
-fn Handle_Command_Input(
-    app: &mut App,
-    input: &str,
-    user_cmd_tx: &mpsc::Sender<UserCommand>,
-) {
+fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<UserCommand>) {
     let trimmed = input.trim();
 
     // ---- 本地命令（不发给 Core） ----
@@ -456,11 +457,9 @@ fn Handle_Command_Input(
             return;
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::Run {
             script: String::new(),
             model_path: model_path_str.to_string(),
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: run {}", model_path_str));
@@ -469,26 +468,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        // 同步等待 Core 回复
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.Add_Log(format!("推理 Job #{} 已创建", job_id.0));
-                app.active_job_id = Some(job_id);
-                app.command_output.output_text =
-                    format!("推理 Job #{} 已创建（推理功能待实现）", job_id.0);
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -507,33 +486,13 @@ fn Handle_Command_Input(
             }
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::Cancel {
-            job_id,
-            reply: reply_tx,
-        };
+        let cmd = UserCommand::Cancel { job_id };
 
         app.Add_Log(format!("执行命令: cancel {}", id_str));
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(())) => {
-                app.command_output.output_text = format!("Job #{} 取消信号已发送", job_id.0);
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -541,34 +500,13 @@ fn Handle_Command_Input(
     // ---- display-peer / dp ----
 
     if trimmed == "display-peer" || trimmed == "dp" {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::DisplayPeer { reply: reply_tx };
+        let cmd = UserCommand::DisplayPeer;
 
         app.Add_Log("执行命令: display-peer".to_string());
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(peers)) => {
-                if peers.is_empty() {
-                    app.command_output.output_text = "当前无已知节点".to_string();
-                } else {
-                    app.command_output.output_text = peers.join("\n");
-                }
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -588,10 +526,8 @@ fn Handle_Command_Input(
             return;
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::SetDevice {
             device: device_str.clone(),
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: set-device {}", device_str));
@@ -599,23 +535,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(())) => {
-                app.command_output.output_text =
-                    format!("设备已切换为: {}", device_str.to_uppercase());
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -623,38 +542,13 @@ fn Handle_Command_Input(
     // ---- ls (列出存储文件) ----
 
     if trimmed == "ls" {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let cmd = UserCommand::List { reply: reply_tx };
+        let cmd = UserCommand::List;
 
         app.Add_Log("执行命令: ls".to_string());
 
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(files)) => {
-                if files.is_empty() {
-                    app.command_output.output_text = "存储为空（无文件）".to_string();
-                } else {
-                    let mut output = format!("共 {} 个文件:\n", files.len());
-                    for file_id in &files {
-                        output.push_str(&format!("  {}\n", file_id));
-                    }
-                    app.command_output.output_text = output;
-                }
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -679,11 +573,9 @@ fn Handle_Command_Input(
         let file_path = args[0].to_string();
         let peer_id = args[1].to_string();
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::Send {
             file_path: file_path.clone(),
             peer_id: peer_id.clone(),
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: send {} → {}", file_path, peer_id));
@@ -691,25 +583,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.command_output.output_text = format!(
-                    "发送 Job #{} 已创建 ({} → {})",
-                    job_id.0, file_path, peer_id
-                );
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -746,11 +619,9 @@ fn Handle_Command_Input(
             }
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::DistributeModel {
             model_path: model_path.clone(),
             peers,
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: distribute {}", model_path));
@@ -758,22 +629,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.command_output.output_text = format!("分发 Job #{} 已创建", job_id.0);
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.command_output.output_text = format!("错误: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.command_output.output_text = "Orchestrator 未响应".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -796,13 +651,11 @@ fn Handle_Command_Input(
             return;
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let mut params = std::collections::HashMap::new();
         params.insert("model_path".to_string(), model_path_str.to_string());
         let cmd = UserCommand::Execute {
             command: "pipeline".to_string(),
             params,
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
@@ -825,10 +678,8 @@ fn Handle_Command_Input(
             return;
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let cmd = UserCommand::Profile {
             model_id: model_id.to_string(),
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行命令: profile {}", model_id));
@@ -837,28 +688,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.Add_Log(format!("Profile Job #{} 已创建", job_id.0));
-                app.command_output.output_text = format!(
-                    "Profile Job #{} 执行中...\n模型: {}\n层数: 5",
-                    job_id.0, model_id
-                );
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.Add_Log(format!("Profile 启动失败: {}", e));
-                app.command_output.output_text = format!("Profile 启动失败: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.Add_Log("[错误] reply 通道已关闭".to_string());
-                app.command_output.output_text = "错误: reply 通道已关闭".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }
@@ -880,7 +709,6 @@ fn Handle_Command_Input(
             return;
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
         let mut params = std::collections::HashMap::new();
         for arg in &args[1..] {
             if let Some((k, v)) = arg.split_once('=') {
@@ -898,7 +726,6 @@ fn Handle_Command_Input(
         let cmd = UserCommand::Execute {
             command: command.to_string(),
             params,
-            reply: reply_tx,
         };
 
         app.Add_Log(format!("执行脚本: {}", command));
@@ -906,26 +733,6 @@ fn Handle_Command_Input(
         if user_cmd_tx.blocking_send(cmd).is_err() {
             app.Add_Log("[错误] Orchestrator 已关闭".to_string());
             app.should_quit = true;
-            return;
-        }
-
-        match reply_rx.blocking_recv() {
-            Ok(Ok(job_id)) => {
-                app.Add_Log(format!("脚本 {} Job #{} 已创建", command, job_id.0));
-                app.command_output.output_text =
-                    format!("脚本 '{}' 执行完成 (Job #{})", command, job_id.0);
-                app.command_output.completed = true;
-            }
-            Ok(Err(e)) => {
-                app.Add_Log(format!("脚本 {} 执行失败: {}", command, e));
-                app.command_output.output_text = format!("执行失败: {}", e);
-                app.command_output.completed = true;
-            }
-            Err(_) => {
-                app.Add_Log("[错误] reply 通道已关闭".to_string());
-                app.command_output.output_text = "错误: reply 通道已关闭".to_string();
-                app.command_output.completed = true;
-            }
         }
         return;
     }

@@ -10,90 +10,39 @@ use tokio::sync::oneshot;
 
 /// 用户命令，来自 CLI / TUI / GUI 等前端接入层。
 ///
-/// 每个变体携带 `reply` 通道，Core 处理完命令后通过 reply 回传结果。
-/// 前端 `await` 回复即可获得处理结果（非 fire-and-forget）。
+/// 所有命令均为 fire-and-forget，Core 通过 EventBus 发布 `Bus_Event::CommandResult`
+/// 或更具体的事件（如 HelpInfo）将结果推送给前端。
 pub enum UserCommand {
     /// 执行 Lua 策略脚本（通用命令入口）
     ///
     /// `command` 对应 `programs/*.lua` 中声明的 `COMMAND` 值，
     /// `params` 以 `HashMap<String, String>` 传递。
     /// Core 通过 ProgramRegistry 查找对应脚本，调用 `execute(params, caps)`。
-    ///
-    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 失败原因
     Execute {
         command: String,
         params: std::collections::HashMap<String, String>,
-        reply: oneshot::Sender<Result<JobId, String>>,
     },
     /// 启动本地推理作业
-    ///
-    /// `script` 为 Lua 脚本路径（用户指定或内置），`model_path` 为模型文件路径。
-    ///
-    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 编译或分配失败原因
-    Run {
-        script: String,
-        model_path: String,
-        reply: oneshot::Sender<Result<JobId, String>>,
-    },
+    Run { script: String, model_path: String },
     /// 取消指定作业
-    ///
-    /// 回复：`Ok(())` 已发送取消信号；`Err(String)` Job 不存在
-    Cancel {
-        job_id: JobId,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
+    Cancel { job_id: JobId },
     /// 请求优雅退出
-    ///
-    /// 回复：`()` 确认已进入关闭流程
     Quit { reply: oneshot::Sender<()> },
     /// 查询当前节点列表
-    ///
-    /// 回复：`Ok(Vec<String>)` 节点列表；`Err(String)` 查询失败
-    DisplayPeer {
-        reply: oneshot::Sender<Result<Vec<String>, String>>,
-    },
+    DisplayPeer,
     /// 修改默认计算设备偏好
-    ///
-    /// 回复：`Ok(())` 设置成功；`Err(String)` 设置失败
-    SetDevice {
-        device: String,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
+    SetDevice { device: String },
     /// 分发模型分片到远端节点
-    ///
-    /// 对模型执行 AnalyzeModel → 对每个 peer 执行 SplitModel + SendFile。
-    /// `peers` 中每个元素为 `(peer_id, layer_start, layer_end)`，
-    /// 分片范围由用户指定（而非自动均分），因为用户了解各节点的计算能力。
-    ///
-    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 编译或分配失败原因
     DistributeModel {
         model_path: String,
         peers: Vec<(String, usize, usize)>,
-        reply: oneshot::Sender<Result<JobId, String>>,
     },
     /// 列出 Storage 当前追踪的所有文件
-    ///
-    /// 处理流程：先调用 Storage::flush() 同步磁盘状态，再调用 list() 返回文件列表。
-    /// 回复：`Ok(Vec<String>)` 文件 ID 列表；`Err(String)` 操作失败原因
-    List {
-        reply: oneshot::Sender<Result<Vec<String>, String>>,
-    },
+    List,
     /// 向指定节点发送单个文件
-    ///
-    /// 编译为 Const(file) → Const(peer) → SendFile 的三指令程序。
-    /// 回复：`Ok(JobId)` 成功分配的 Job ID；`Err(String)` 编译或分配失败原因
-    Send {
-        file_path: String,
-        peer_id: String,
-        reply: oneshot::Sender<Result<JobId, String>>,
-    },
+    Send { file_path: String, peer_id: String },
     /// Profile 指定模型的单层推理耗时
-    ///
-    /// 回复：`Ok(JobId)` Profile Job 已启动；`Err(String)` 启动失败
-    Profile {
-        model_id: String,
-        reply: oneshot::Sender<Result<JobId, String>>,
-    },
+    Profile { model_id: String },
     /// 请求帮助信息
     ///
     /// Core 通过 EventBus 发布 `Bus_Event::HelpInfo`，前端订阅渲染。
