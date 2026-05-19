@@ -137,29 +137,74 @@ caps.storage_acquire_read(file_id)
 
 ---
 
-## 张量流（待实现）
+## 张量流
+
+### 打开/接受流
 
 ```
 发送方:
   caps.network.open_tensor_stream(peer, inference_id)
-    → Network_Service_Capability::open_tensor_stream()
+    → Network_Capability::open_tensor_stream(peer, inference_id)
       → tensor_stream_control.open_stream(peer, "/pleiades/tensor-stream/1.0.0")
-      → Write_Tensor_Stream_Handshake(stream, inference_id)
-      → 返回 libp2p::Stream（包装为 NetworkStream UserData）
+      → Write_Tensor_Stream_Handshake(stream, inference_id)  # 写入 8B LE inference_id
+      → 返回 NetworkStream { stream: Mutex<libp2p::Stream>, caps }
 
 接收方:
   caps.network.accept_tensor_stream(inference_id, timeout_secs)
-    → Network_Service_Capability::accept_tensor_stream()
-      → RendezvousMap::register_accept(inference_id)
-      → 等待 Network_Service 转发入站流
-      → 返回 libp2p::Stream（包装为 NetworkStream UserData）
-
-NetworkStream UserData:
-  stream:read(n_bytes)  → Vec<u8>   (待实现)
-  stream:write(data)    → ()         (待实现)
+    → Network_Capability::accept_tensor_stream(inference_id, timeout)
+      → RendezvousMap::register_accept(inference_id)  # 注册期望
+      → 等待 Network_Service 转发入站流 (Network_Inbound_Event::TensorStreamArrived)
+      → RendezvousMap 匹配 → 返回 NetworkStream
 ```
 
-Note: `NetworkStream` 结构体已定义 (`Src/Lua/network_stream.rs`)，当前无 UserData 方法。
+### 发送张量
+
+```
+caps.network.send_tensor(stream_ud, tensor_ud, offset)
+  → 取出 LuaTensor → tensor_to_bytes() 序列化
+  → 取出 NetworkStream → Mutex lock stream
+  → Send_Tensor_Frame(&mut stream, offset, &bytes)
+    → 写入帧: [帧头] [数据]
+      Header: [8B offset LE] [8B data_len LE] [8B checksum LE]
+      Data: raw bytes
+```
+
+### 接收张量
+
+```
+caps.network.recv_tensor(stream_ud, device_str)
+  → 取出 NetworkStream → Mutex lock stream
+  → 创建 Tensor_Buffer(16 MiB)
+  → Receive_Tensor_Frame(&mut stream, &mut buffer)
+    → 读取帧头 → 读取数据 → 校验 checksum
+    → 返回 offset
+  → 若 offset == TENSOR_EOF_OFFSET → 抛出 "received EOF" 错误
+  → bytes_to_tensor(buffer.as_slice(), &device) → LuaTensor
+  → 返回 (LuaTensor, offset)
+```
+
+### 发送 EOF
+
+```
+caps.network.send_eof(stream_ud)
+  → 取出 NetworkStream → Mutex lock stream
+  → Send_EOF(&mut stream)
+    → 写入 8B LE TENSOR_EOF_OFFSET 作为帧头
+```
+
+### NetworkStream UserData
+
+定义于 `Src/Lua/network_stream.rs`，包装 `Mutex<libp2p::Stream>` + `Arc<Capabilities>`：
+
+```rust
+pub struct NetworkStream {
+    pub stream: Mutex<libp2p::Stream>,
+    caps: Arc<Capabilities>,
+}
+```
+
+- `Mutex` 使异步函数可通过共享引用获得可变访问，无需 `&mut self`
+- 实现 `mlua::UserData`，无实例方法 — 所有操作在 `caps.network.*` 全局函数中完成
 
 ---
 
@@ -169,8 +214,8 @@ Note: `NetworkStream` 结构体已定义 (`Src/Lua/network_stream.rs`)，当前�
 
 ```
 ml.new(device)
-  → ML_Engine::MlSession::new(device)
-    → 创建 Candida 后端 + 分配 KV Cache 虚拟地址
+  → MlSession::new(device)
+    → 创建空壳 MlContext { model=None, offset=0, rng_state=299792458, eos=151645, device }
     → 不加载模型（延迟加载）
     → 注册 UserData 方法
 ```
@@ -178,18 +223,103 @@ ml.new(device)
 **模型加载**:
 ```
 sess:load_model(path, start_layer, end_layer)
-  → MlSession::load_model(path, start, end)
-    → 实际加载 GGUF 文件指定的层范围到内存
+  → 若已加载，先 unload()
+  → GGUF_Load_Model(start, end, path, &device) → GGUF_Model
+  → 更新 eos_token_id = model.inference_config.eos_token
 ```
 
-**推理**:
+**推理完整流程**:
 ```
-sess:tensorize({1, 2, 3, 4})
-  → 将 token 序列转为张量
-  → 返回 {dim0=batch, dim1=seq_len}
+-- 文本 → token
+local tokens = sess:encode("Hello")
+  → MlSession::encode(text) → GGUF_Encode → Vec<u32>
+
+-- token → Tensor[1, seq_len]
+local t = sess:tensorize(tokens)
+  → MlSession::tensorize(&[u32]) → Tensor::new → unsqueeze(0) → LuaTensor
+
+-- 前向推理
+local logits = sess:forward(t, 0)
+  → MlSession::forward(&tensor, offset)
+    → GGUF_Model_Inference(&mut model, &tensor, offset)
+    → device.synchronize()
+    → offset += seq_len (若未显式指定 offset)
+    → 返回 LuaTensor(logits)   # 形状: [1, seq_len, vocab_size]
+
+-- 采样
+local next = sess:sample(logits, 0.8)
+  → MlSession::sample(&logits, temperature)
+    → extract_last_logits(logits)  # 取最后一个位置
+    → 若 temperature <= 0: argmax（贪婪）
+    → 若 temperature > 0: softmax → multinomial 采样 (xoshiro RNG)
+    → 返回 u32 token_id
 ```
 
-注意: 空输入 `tensorize({})` 会返回错误。
+**空壳状态**: `load_model()` 之前，`tensorize()` 可用（纯数据转换，仅需 device），`encode()`/`decode()`/`forward()`/`sample()` 返回 "no model loaded" 错误。
+
+---
+
+## Tensor 序列化
+
+### LuaTensor UserData
+
+定义于 `Src/ML_Engine/lua_tensor.rs`，包装 `candle_core::Tensor`：
+
+```rust
+pub struct LuaTensor(pub Tensor);
+```
+
+- 实现 `Deref<Target=Tensor>` — Rust 侧零开销解引用
+- `UserData` 方法：`dims() → table`, `to_bytes() → string`
+
+### 序列化格式 (`tensor_to_bytes` / `bytes_to_tensor`)
+
+```
++--------+-------+-----+-------+--------+
+| ndim   | d0    | ... | dn    | data   |
+| u64 LE | u64LE |     | u64LE | f32 LE |
++--------+-------+-----+-------+--------+
+
+Header: 8 + ndim × 8 字节
+Data:   (d0 × d1 × ... × dn) × 4 字节
+```
+
+- 先 flatten 为 1D f32 数组，再序列化
+- 可在 CPU/CUDA 间透明传输（candle 处理 device transfer）
+- `ml.tensor_from_bytes(data, device)` 在指定设备上重建 Tensor
+
+---
+
+## ML 分析/切分（独立函数）
+
+### `ml.analyze_model(path)`
+
+```
+ml.analyze_model(path)
+  → capability::analyze_model(Path)
+    → 打开 GGUF/PGGUF 文件
+    → 读取元数据头
+    → 返回 Model_Arch_Info {
+        architecture, num_layers, embedding_length, head_count,
+        head_count_kv, head_dim, feed_forward_length, context_length,
+        rms_norm_eps, rope_freq_base, vocab_size, eos_token_id,
+        is_split, split_start, split_end
+      }
+```
+
+不依赖 MlSession，可在加载模型前调用。用于判断模型是否已切分、层数范围等。
+
+### `ml.split_model(path, start, end, output_dir)`
+
+```
+ml.split_model(path, start, end, output_dir)
+  → capability::split_model(Path, start, end, out_dir)
+    → 读取 GGUF 头
+    → 提取指定层范围的 tensor
+    → 写入 .pgguf 文件到 output_dir
+```
+
+输出为 PGGUF (Pleiades GGUF) 格式，可直接被 `MlSession:load_model()` 加载。
 
 ---
 

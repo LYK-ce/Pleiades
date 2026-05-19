@@ -85,6 +85,7 @@ impl MlSession {
     /// - `tensorize()` — 纯数据转换，仅需 device
     /// - `get_eos()` — 返回默认 EOS token
     /// - `get_offset()` — 返回 0
+    /// - `set_seed()` — 设置采样随机种子
     /// - `load_model()` — 加载模型填充空壳
     pub fn new(device: &str) -> Result<Self, String> {
         let device = match device.to_lowercase().as_str() {
@@ -100,11 +101,17 @@ impl MlSession {
             }
         };
 
+        // 默认种子基于系统时间，避免所有 session 使用相同随机序列
+        let default_seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(299792458);
+
         Ok(Self {
             ctx: MlContext {
                 model: None,
                 offset: 0,
-                rng_state: 299792458,
+                rng_state: default_seed,
                 eos_token_id: 151645, // Qwen3 默认 EOS
                 device,
             },
@@ -260,6 +267,16 @@ impl MlSession {
         self.ctx.offset
     }
 
+    // ─── 随机种子 ──────────────────────────────────────────
+
+    /// 设置采样随机数生成器的种子。
+    ///
+    /// 用于 temperature > 0 时的 multinomial 采样。设置相同种子可复现推理结果。
+    /// 空壳状态下也可调用——种子独立于模型加载。
+    pub fn set_seed(&mut self, seed: u64) {
+        self.ctx.rng_state = seed;
+    }
+
     // ─── 辅助 ──────────────────────────────────────────────
 
     fn extract_last_logits(logits: &Tensor) -> Result<Tensor, String> {
@@ -351,6 +368,12 @@ impl mlua::UserData for MlSession {
         methods.add_method("get_eos", |_, sess, (): ()| Ok(sess.get_eos()));
 
         methods.add_method("get_offset", |_, sess, (): ()| Ok(sess.get_offset()));
+
+        // ─── 随机种子 ──────────────────────────────────────
+        methods.add_method_mut("set_seed", |_, sess, seed: u64| {
+            sess.set_seed(seed);
+            Ok(())
+        });
     }
 }
 

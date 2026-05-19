@@ -72,7 +72,7 @@ pub use ml_engine::{
 };
 pub use ml_engine::{
     Model_Arch_Info, Layer_Info, Tensor_Detail, GGUF_Layer_Weights,
-    GGUF_Analyze, GGUF_Load_Layer, GGUF_Split_Model,
+    GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Load_Layer, GGUF_Split_Model,
 };
 pub use ml_engine::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,

@@ -398,7 +398,7 @@ pub fn register_network_caps(
                 .map_err(|e| mlua::Error::runtime(e))?;
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
-            let mut guard = stream_ud.stream.lock().unwrap();
+            let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
             Send_Tensor_Frame(&mut *guard, offset, &bytes).await
                 .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
             Ok(())
@@ -418,7 +418,7 @@ pub fn register_network_caps(
             };
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
-            let mut guard = stream_ud.stream.lock().unwrap();
+            let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
             let mut buffer = Tensor_Buffer::New(16 * 1024 * 1024);
             let offset = Receive_Tensor_Frame(&mut *guard, &mut buffer).await
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
@@ -438,7 +438,7 @@ pub fn register_network_caps(
         async move {
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("send_eof: {e}")))?;
-            let mut guard = stream_ud.stream.lock().unwrap();
+            let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
             Send_EOF(&mut *guard).await
                 .map_err(|e| mlua::Error::runtime(format!("send_eof: {e}")))?;
             Ok(())

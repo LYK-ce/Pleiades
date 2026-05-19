@@ -22,7 +22,8 @@ use candle_transformers::quantized_nn::RmsNorm;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::gguf_model_manager::{GGUF_Analyze, GGUF_Load_Layer, Model_Arch_Info};
+use candle_core::quantized::gguf_file;
+use super::gguf_model_manager::{GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
 use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding};
 
 // ============================================================
@@ -98,8 +99,13 @@ pub fn GGUF_Load_Model(
     model_path: &Path,
     device: &Device,
 ) -> Result<GGUF_Model> {
-    // 1. 调用 GGUF_Analyze 解析模型文件，获取模型架构信息
-    let arch_info = GGUF_Analyze(model_path)?;
+    // 1. 打开文件并解析 GGUF Content（仅此一次）
+    let mut file = std::fs::File::open(model_path)?;
+    let content = gguf_file::Content::read(&mut file)
+        .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {}", e))?;
+
+    // 从已加载的 Content 提取架构信息（零 I/O）
+    let arch_info = GGUF_Analyze_From_Content(&content)?;
 
     // 2. 根据模型架构信息，匹配对应的模型架构
     let architecture = arch_info.architecture.to_lowercase();
@@ -154,7 +160,7 @@ pub fn GGUF_Load_Model(
     let (embed_tokens, tokenizer): (Option<candle_nn::Embedding>, Option<shimmytok::Tokenizer>) =
         if has_input_head {
             // 通过 GGUF_Load_Layer 加载第 0 层（embedding）
-            let mut lw = GGUF_Load_Layer(model_path, 0, device)?;
+            let mut lw = GGUF_Load_Layer(&content, &mut file, 0, device)?;
             let embed_qtensor = lw
                 .tensors
                 .remove("token_embd.weight")
@@ -189,7 +195,7 @@ pub fn GGUF_Load_Model(
 
     let mut layers = Vec::with_capacity(block_count);
     for i in block_start..=block_end {
-        let mut lw = GGUF_Load_Layer(model_path, i, device)?;
+        let mut lw = GGUF_Load_Layer(&content, &mut file, i, device)?;
         // blk index = layer_index - 1（层 1 -> blk.0, 层 2 -> blk.1, ...）
         let blk_idx = i - 1;
         let layer = Layer_Weights::From_Extracted(
@@ -210,7 +216,7 @@ pub fn GGUF_Load_Model(
 
     let (norm, lm_head): (Option<RmsNorm>, Option<QMatMul>) = if has_output_head {
         // 通过 GGUF_Load_Layer 加载第 N+1 层（output）
-        let mut lw = GGUF_Load_Layer(model_path, max_layer_index, device)?;
+        let mut lw = GGUF_Load_Layer(&content, &mut file, max_layer_index, device)?;
 
         let norm_qtensor = lw
             .tensors
@@ -224,7 +230,7 @@ pub fn GGUF_Load_Model(
             qt
         } else {
             // Weight tying: 使用 embedding 权重作为 lm_head
-            let mut embed_lw = GGUF_Load_Layer(model_path, 0, device).map_err(|e| {
+            let mut embed_lw = GGUF_Load_Layer(&content, &mut file, 0, device).map_err(|e| {
                 anyhow::anyhow!("Failed to load embedding for lm_head fallback: {}", e)
             })?;
             embed_lw

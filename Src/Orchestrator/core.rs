@@ -114,9 +114,10 @@ impl Core {
 
     /// 主事件循环。
     ///
-    /// 4 个 select! 分支，每轮只处理一个事件。
-    /// 业务逻辑全部 todo!() 占位。
+    /// 5 个 select! 分支，每轮只处理一个事件。
+    /// B5 为 shutdown 超时兜底，仅在 shutting_down 时激活。
     pub async fn run(mut self) {
+        const SHUTDOWN_GRACE_SECS: u64 = 30;
         loop {
             if self.shutting_down && self.registry.is_empty() {
                 break;
@@ -134,9 +135,18 @@ impl Core {
                 Some(event) = self.network_inbound_rx.recv(), if !self.shutting_down => {
                     self.route_stream(event).await;
                 }
-                // B4: 生命周期事件（始终活跃）
+                // B4: 生命周期事件（始终活跃，shutdown 期间仍处理完成事件）
                 Some(event) = self.lifecycle_rx.recv() => {
                     self.route_lifecycle(event);
+                }
+                // B5: shutdown 超时兜底 — 防止 Job 卡死导致进程永不退出
+                _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)),
+                    if self.shutting_down => {
+                    tracing::warn!(
+                        "shutdown grace period ({SHUTDOWN_GRACE_SECS}s) expired, {} jobs still running, forcing exit",
+                        self.registry.len()
+                    );
+                    break;
                 }
             }
         }

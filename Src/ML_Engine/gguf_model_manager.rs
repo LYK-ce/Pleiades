@@ -322,6 +322,162 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
     })
 }
 
+/// 从已加载的 GGUF Content 中提取模型架构信息（零 I/O）。
+///
+/// 与 `GGUF_Analyze` 功能相同，但不打开文件也不解析 header——
+/// 直接使用调用方已加载的 Content，避免重复打开文件。
+pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_Arch_Info> {
+    let architecture = Get_Metadata_String(&content.metadata, "general.architecture")
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let num_layers = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.block_count", architecture),
+    )
+    .unwrap_or(0);
+
+    let embedding_length = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.embedding_length", architecture),
+    )
+    .unwrap_or(0);
+
+    let head_count = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.attention.head_count", architecture),
+    )
+    .unwrap_or(0);
+
+    let head_count_kv = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.attention.head_count_kv", architecture),
+    )
+    .unwrap_or(0);
+
+    let feed_forward_length = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.feed_forward_length", architecture),
+    )
+    .unwrap_or(0);
+
+    let head_dim = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.attention.key_length", architecture),
+    )
+    .unwrap_or_else(|| {
+        if head_count > 0 {
+            embedding_length / head_count
+        } else {
+            0
+        }
+    });
+
+    let context_length = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.context_length", architecture),
+    )
+    .unwrap_or(2048);
+
+    let rms_norm_eps = Get_Metadata_F64(
+        &content.metadata,
+        &format!("{}.attention.layer_norm_rms_epsilon", architecture),
+    )
+    .unwrap_or(1e-6);
+
+    let rope_freq_base = Get_Metadata_F64(
+        &content.metadata,
+        &format!("{}.rope.freq_base", architecture),
+    )
+    .unwrap_or(10000.0);
+
+    let vocab_size = Get_Metadata_Usize(
+        &content.metadata,
+        &format!("{}.vocab_size", architecture),
+    )
+    .unwrap_or_else(|| {
+        Get_Metadata_Usize(&content.metadata, "tokenizer.ggml.tokens").unwrap_or(0)
+    });
+
+    let eos_token_id = Get_Metadata_Usize(&content.metadata, "tokenizer.ggml.eos_token_id")
+        .map(|v| v as u32)
+        .unwrap_or(0);
+
+    let mut layer_tensors_map: HashMap<usize, Vec<Tensor_Detail>> = HashMap::new();
+    let mut non_layer_tensors: Vec<Tensor_Detail> = Vec::new();
+
+    for (tensor_name, tensor_info) in &content.tensor_infos {
+        let detail = Tensor_Detail {
+            name: tensor_name.clone(),
+            shape: tensor_info.shape.dims().to_vec(),
+            dtype: format!("{:?}", tensor_info.ggml_dtype),
+            size_bytes: Calc_Tensor_Size_Bytes(tensor_info),
+        };
+
+        if tensor_name.starts_with("blk.") {
+            let parts: Vec<&str> = tensor_name.splitn(3, '.').collect();
+            if parts.len() >= 2 {
+                if let Ok(layer_idx) = parts[1].parse::<usize>() {
+                    layer_tensors_map
+                        .entry(layer_idx)
+                        .or_default()
+                        .push(detail);
+                    continue;
+                }
+            }
+        }
+
+        non_layer_tensors.push(detail);
+    }
+
+    let split_start_val = Get_Metadata_Usize(&content.metadata, "pleiades.split.start");
+    let split_end_val = Get_Metadata_Usize(&content.metadata, "pleiades.split.end");
+    let is_split = split_start_val.is_some() && split_end_val.is_some();
+    let split_start = split_start_val.unwrap_or(0);
+    let split_end = split_end_val.unwrap_or(0);
+
+    let mut layers: Vec<Layer_Info> = Vec::with_capacity(num_layers);
+    for i in 0..num_layers {
+        let layer_idx = i;
+        let mut tensors = layer_tensors_map.remove(&layer_idx).unwrap_or_default();
+        tensors.sort_by(|a, b| a.name.cmp(&b.name));
+        let total_size_bytes = tensors.iter().map(|t| t.size_bytes).sum();
+
+        layers.push(Layer_Info {
+            layer_index: layer_idx,
+            tensors,
+            total_size_bytes,
+        });
+    }
+
+    non_layer_tensors.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut metadata_raw: HashMap<String, String> = HashMap::new();
+    for (key, val) in &content.metadata {
+        metadata_raw.insert(key.clone(), Value_To_Display_String(val));
+    }
+
+    Ok(Model_Arch_Info {
+        architecture,
+        num_layers,
+        embedding_length,
+        head_count,
+        head_count_kv,
+        head_dim,
+        feed_forward_length,
+        context_length,
+        rms_norm_eps,
+        rope_freq_base,
+        vocab_size,
+        eos_token_id,
+        layers,
+        non_layer_tensors,
+        metadata_raw,
+        is_split,
+        split_start,
+        split_end,
+    })
+}
+
 // GGUF_Load_Layer(gguf_file_path, layer_index, device)
 // 输入：gguf文件路径，层索引（单个），设备信息
 // 输出：GGUF_Layer_Weights，包含指定层的权重
@@ -337,14 +493,11 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
 // 5. 将解析后的数据转换为 GGUF_Layer_Weights 对象
 // 6. 返回 GGUF_Layer_Weights 对象
 pub fn GGUF_Load_Layer(
-    gguf_file_path: &Path,
+    content: &gguf_file::Content,
+    file: &mut std::fs::File,
     layer_index: usize,
     device: &Device,
 ) -> Result<GGUF_Layer_Weights> {
-    // 1. 打开文件并解析 GGUF Content
-    let mut file = std::fs::File::open(gguf_file_path)?;
-    let content = gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {}", e))?;
 
     // 2. 读取架构信息，获取总层数 N
     let architecture = Get_Metadata_String(&content.metadata, "general.architecture")
@@ -378,7 +531,7 @@ pub fn GGUF_Load_Layer(
         let tensor_name = "token_embd.weight";
         if content.tensor_infos.contains_key(tensor_name) {
             let qtensor = content
-                .tensor(&mut file, tensor_name, device)
+                .tensor(file, tensor_name, device)
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e)
                 })?;
@@ -399,7 +552,7 @@ pub fn GGUF_Load_Layer(
         for tensor_name in content.tensor_infos.keys() {
             if tensor_name.starts_with(&prefix) {
                 let qtensor = content
-                    .tensor(&mut file, tensor_name, device)
+                    .tensor(file, tensor_name, device)
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e)
                     })?;
@@ -420,7 +573,7 @@ pub fn GGUF_Load_Layer(
         for tensor_name in &["output_norm.weight", "output.weight"] {
             if content.tensor_infos.contains_key(*tensor_name) {
                 let qtensor = content
-                    .tensor(&mut file, *tensor_name, device)
+                    .tensor(file, *tensor_name, device)
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e)
                     })?;
