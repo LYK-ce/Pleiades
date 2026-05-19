@@ -13,6 +13,7 @@ use super::capability::{StorageCapability, StorageError, ChecksumAlgorithm, File
 use super::guard::{ReadGuard, WriteGuard};
 
 /// 文件状态，内部用于管理锁和模型元信息
+#[derive(Debug)]
 struct FileState {
     lock: Arc<RwLock<()>>,
     /// 文件磁盘大小（字节），flush 时统一刷新
@@ -31,6 +32,7 @@ struct FileState {
 ///
 /// 职责：锁管理 + 路径解析 + 文件注册表 + 模型统一管理。
 /// 不封装 I/O，消费模块自行决定如何读写文件。
+#[derive(Debug)]
 pub struct StorageManager {
     base_dir: PathBuf,
     files: RwLock<HashMap<String, FileState>>,
@@ -215,44 +217,44 @@ impl StorageCapability for StorageManager {
 
     async fn remove(&self, file_id: &str) -> Result<(), StorageError> {
         Self::Validate_File_Id(file_id)?;
-        let files = self.files.read().await;
-        let state = match files.get(file_id) {
-            Some(s) => s,
-            None => {
-                // 索引中不存在，检查磁盘
+
+        // 快速路径：索引中不存在的文件，直接检查磁盘并删除
+        {
+            let files = self.files.read().await;
+            if !files.contains_key(file_id) {
+                drop(files);
                 let full_path = self.Full_Path(file_id);
                 match fs::metadata(&full_path).await {
                     Ok(metadata) if metadata.is_file() => {
-                        // 磁盘存在文件，删除它
                         if let Err(e) = fs::remove_file(&full_path).await {
                             if e.kind() != std::io::ErrorKind::NotFound {
                                 return Err(StorageError::Io(format!("remove_file failed: {}", e)));
                             }
                         }
-                        return Ok(());
                     }
-                    _ => {
-                        // 磁盘也不存在，幂等返回成功
-                        return Ok(());
-                    }
+                    _ => {} // 磁盘也不存在，幂等返回成功
                 }
+                return Ok(());
             }
+        }
+
+        // 文件在索引中：持有 files 写锁，原子化探针 + 删除
+        let mut files = self.files.write().await;
+        let file_lock = match files.get(file_id) {
+            Some(state) => Arc::clone(&state.lock),
+            None => return Ok(()), // 在等锁期间被其他线程删除
         };
-        // 尝试获取写锁（探测是否有活跃守卫）
-        match Arc::clone(&state.lock).try_write_owned() {
+
+        match file_lock.try_write_owned() {
             Ok(_guard) => {
                 drop(_guard);
-                drop(files);
-                let mut files = self.files.write().await;
-                if files.contains_key(file_id) {
-                    let full_path = self.Full_Path(file_id);
-                    if let Err(e) = fs::remove_file(&full_path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            return Err(StorageError::Io(format!("remove_file failed: {}", e)));
-                        }
+                let full_path = self.Full_Path(file_id);
+                if let Err(e) = fs::remove_file(&full_path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(StorageError::Io(format!("remove_file failed: {}", e)));
                     }
-                    files.remove(file_id);
                 }
+                files.remove(file_id);
                 Ok(())
             }
             Err(_) => Err(StorageError::InUse(format!("file {} is in use", file_id))),
@@ -274,9 +276,14 @@ impl StorageCapability for StorageManager {
                         if fs::metadata(&full_path).await.is_err() {
                             // 僵尸条目：移除索引
                             files.remove(file_id);
+                            Ok(false)
+                        } else {
+                            // 在等锁期间文件被重新创建到磁盘上
+                            Ok(true)
                         }
+                    } else {
+                        Ok(false)
                     }
-                    Ok(false)
                 }
             }
         } else {
@@ -388,7 +395,7 @@ impl StorageCapability for StorageManager {
             // 检查是否已在索引中
             {
                 let files = self.files.read().await;
-                if let Some(state) = files.get(&file_name_str) {
+                if files.contains_key(&file_name_str) {
                     // 已有文件：刷新 size
                     drop(files);
                     let mut files = self.files.write().await;
@@ -724,6 +731,7 @@ mod tests {
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
+        manager.flush().await.unwrap(); // size 由 flush 统一刷新
         let entries = manager.list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].file_name, "test.txt");
@@ -766,6 +774,8 @@ mod tests {
         tokio::fs::write(&path, vec![0u8; 100]).await.unwrap();
         drop(wg);
 
+        // size 由 flush 统一刷新，直接 list 拿到的是 Ensure_Entry 的初始值 0
+        manager.flush().await.unwrap();
         let entries = manager.list().await.unwrap();
         assert_eq!(entries[0].size, 100);
 
