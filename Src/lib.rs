@@ -82,7 +82,9 @@ pub use ml_engine::MlSession;
 pub use ml_engine::{analyze_model, split_model};
 
 // PeerManagement模块类型导出
-pub use peer_management::{PeerInfo, PeerStatus, PeerCapability, PeerManager, PeerHandle, PeerEvent, create_peer_management};
+pub use peer_management::{
+    PeerInfo, SupportedModel, PeerProfile, PeerManager, PeerHandle, create_peer_management,
+};
 pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
 // Session模块类型导出（原 LLM_IO，已升级为 SessionManager）

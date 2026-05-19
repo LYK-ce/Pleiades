@@ -42,7 +42,7 @@ pub struct Capabilities {
 pub(crate) mod test_utils {
     use async_trait::async_trait;
     use crate::network::{Network_Capability, Network_Error, Network_Data, DataType};
-    use crate::peer_management::{Peer_Management_Capability, Peer_Management_Error, PeerInfo, PeerStatus};
+    use crate::peer_management::{Peer_Management_Capability, Peer_Management_Error, PeerInfo};
     use crate::storage::{StorageCapability, StorageError, FileEntry, ChecksumAlgorithm, ReadGuard, WriteGuard};
 
     // ─── Network stub ──────────────────────────────────────
@@ -84,8 +84,6 @@ pub(crate) mod test_utils {
         async fn Update_Supported_Models(&self, _peer_id: &libp2p::PeerId, _models: Vec<crate::peer_management::SupportedModel>) -> Result<(), Peer_Management_Error> { Ok(()) }
         async fn Cleanup_Timeout_Peers(&self, _timeout_secs: u64) -> Result<usize, Peer_Management_Error> { Ok(0) }
         async fn Clear(&self) -> Result<(), Peer_Management_Error> { Ok(()) }
-        async fn Update_Heartbeat(&self, _peer_id: &libp2p::PeerId, _latency_ms: Option<u64>) -> Result<(), Peer_Management_Error> { Ok(()) }
-        async fn Update_Status(&self, _peer_id: &libp2p::PeerId, _status: PeerStatus) -> Result<(), Peer_Management_Error> { Ok(()) }
     }
 
     // ─── Storage stub ──────────────────────────────────────

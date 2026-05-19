@@ -317,8 +317,8 @@ pub trait Network_Capability: Send + Sync {
 ///
 /// ## 简单事件（Network 内部处理，不转发）
 /// - mDNS 发现/离开 → 仅 Kademlia 添加地址
-/// - Ping 心跳 → peer_handle.update_heartbeat
-/// - 连接建立/断开 → peer_handle.add_peer/remove_peer
+/// - Ping 心跳 → peer_handle.Update_Profile
+/// - 连接建立/断开 → peer_handle.Upsert_Peer / Remove_Peer
 ///
 /// ## 复杂事件（转发给 Orchestrator）
 /// - 入站文件流 → `FileStreamArrived`

@@ -234,15 +234,18 @@ impl Network_Service {
                 let latency_ms = rtt.as_millis() as u64;
                 info!("Ping成功: {} | RTT: {}ms", peer_id, latency_ms);
 
-                if let Err(e) = self.peer_handle.Update_Heartbeat(&peer_id, Some(latency_ms)).await {
+                let profile = crate::peer_management::PeerProfile {
+                    latency_ms: Some(latency_ms),
+                    ..crate::peer_management::PeerProfile::default()
+                };
+                if let Err(e) = self.peer_handle.Update_Profile(&peer_id, profile).await {
                     info!("更新节点心跳失败 ({}): {}", peer_id, e);
                 }
             }
             Err(ping::Failure::Timeout) => {
                 info!("Ping超时: {}", peer_id);
 
-                if let Err(e) = self.peer_handle.Update_Status(&peer_id,
-                    crate::peer_management::PeerStatus::Disconnected).await {
+                if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
                     info!("更新节点状态失败 ({}): {}", peer_id, e);
                 }
             }

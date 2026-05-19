@@ -10,7 +10,7 @@
 mod common;
 
 use pleiades::peer_management::{
-    PeerInfo, PeerStatus, Peer_Management_Error,
+    PeerInfo, Peer_Management_Error,
     PeerManager, PeerHandle, Peer_Management_Capability,
     PeerProfile, create_peer_management,
 };
@@ -43,7 +43,8 @@ async fn tc01_bulk_peer_crud() {
 
     // 3. 对前 8 个节点更新心跳（设置延迟）
     for i in 0..8 {
-        handle.Update_Heartbeat(&peer_ids[i], Some(10)).await.unwrap();
+        let profile = PeerProfile { latency_ms: Some(10), ..PeerProfile::default() };
+        handle.Update_Profile(&peer_ids[i], profile).await.unwrap();
     }
 
     // 4. remove 5 个节点（取后 5 个）
@@ -65,7 +66,7 @@ async fn tc01_bulk_peer_crud() {
 
 /// TC-02: 心跳与超时清理
 ///
-/// upsert 5 → sleep → 仅 Update_Heartbeat 3 个 → Cleanup_Timeout_Peers(1) → 清除 2 → count = 3
+/// upsert 5 → sleep → 仅 Update_Profile 3 个 → Cleanup_Timeout_Peers(1) → 清除 2 → count = 3
 #[tokio::test]
 async fn tc02_heartbeat_and_timeout_cleanup() {
     let (_manager, handle) = create_peer_management(PeerId::random());
@@ -84,10 +85,8 @@ async fn tc02_heartbeat_and_timeout_cleanup() {
 
     // 3. 仅对前 3 个更新心跳（重置 last_active）
     for i in 0..3 {
-        handle
-            .Update_Heartbeat(&peer_ids[i], Some(10))
-            .await
-            .unwrap();
+        let profile = PeerProfile { latency_ms: Some(10), ..PeerProfile::default() };
+        handle.Update_Profile(&peer_ids[i], profile).await.unwrap();
     }
 
     // 4. Cleanup_Timeout_Peers(1) → 应清除 elapsed >= 1s 的节点（后 2 个）
@@ -139,11 +138,9 @@ async fn tc03_concurrent_safety() {
             let _list = h.Get_Peers().await.unwrap();
             let _count = h.Count().await.unwrap();
 
-            // 穿插 Update_Status
+            // 穿插 Contains_Peer 检查
             if !task_peers.is_empty() {
-                h.Update_Status(&task_peers[0], PeerStatus::Connected)
-                    .await
-                    .unwrap();
+                assert!(h.Contains_Peer(&task_peers[0]).await.unwrap());
             }
 
             task_peers
@@ -179,7 +176,7 @@ async fn tc03_concurrent_safety() {
 /// TC-04: Profile 更新与查询
 ///
 /// upsert peer → Update_Profile → Get_Peer → 验证 profile 字段
-/// → Update_Heartbeat → 验证延迟
+/// → Update_Profile → 验证延迟
 #[tokio::test]
 async fn tc04_profile_update_and_query() {
     let (_manager, handle) = create_peer_management(PeerId::random());
@@ -203,8 +200,9 @@ async fn tc04_profile_update_and_query() {
     assert_eq!(info.profile.bandwidth_mbps, Some(1000), "带宽应为 1000 Mbps");
     assert_eq!(info.profile.memory_mb, Some(8192), "内存应为 8192 MB");
 
-    // 3. Update_Heartbeat: 设置延迟
-    handle.Update_Heartbeat(&peer_id, Some(25)).await.unwrap();
+    // 3. Update_Profile: 设置延迟
+    let profile = PeerProfile { latency_ms: Some(25), ..PeerProfile::default() };
+    handle.Update_Profile(&peer_id, profile).await.unwrap();
 
     let info = handle.Get_Peer(&peer_id).await.unwrap();
     assert_eq!(info.profile.latency_ms, Some(25), "延迟应为 25ms");

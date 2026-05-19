@@ -29,7 +29,7 @@
  // 导出 peer_handle 模块中的公共类型
  pub use peer_handle::PeerHandle;
  // 导出 capability 模块中的公共类型
-pub use capability::{Peer_Management_Capability, Peer_Management_Error, PeerStatus, PeerCapability, PeerEvent};
+pub use capability::{Peer_Management_Capability, Peer_Management_Error};
 
  /// 创建节点管理系统的工厂函数
  ///

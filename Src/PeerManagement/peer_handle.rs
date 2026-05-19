@@ -13,7 +13,7 @@
 
  use super::peer_info::{PeerInfo, PeerProfile, SupportedModel};
  use super::peer_manager::PeerManager;
- use super::capability::{Peer_Management_Capability, Peer_Management_Error, PeerStatus};
+ use super::capability::{Peer_Management_Capability, Peer_Management_Error};
 
  /// 节点管理句柄（impl Peer_Management_Capability）
  ///
@@ -91,21 +91,6 @@
 
     async fn Clear(&self) -> Result<(), Peer_Management_Error> {
         self.inner.clear().await;
-        Ok(())
-    }
-
-    async fn Update_Heartbeat(&self, peer_id: &PeerId, latency_ms: Option<u64>) -> Result<(), Peer_Management_Error> {
-        let profile = PeerProfile {
-            latency_ms,
-            ..PeerProfile::default()
-        };
-        self.Update_Profile(peer_id, profile).await
-    }
-
-    async fn Update_Status(&self, peer_id: &PeerId, _status: PeerStatus) -> Result<(), Peer_Management_Error> {
-        // 状态更新目前只记录日志，不改变内部结构
-        let _ = self.inner.get_peer(peer_id).await
-            .ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string()))?;
         Ok(())
     }
 }
