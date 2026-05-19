@@ -279,7 +279,10 @@ files.read() → 索引命中？
 Phase 1: 磁盘 → 索引
     for each 磁盘文件（忽略隐藏/目录）:
         ├── 索引已存在 ──► 刷新 FileState.size
-        └── 索引不存在 ──► 插入新 FileState（含 size + 模型元信息 TODO）
+        │     └── 若为 .gguf/.pgguf ──► 调用 analyze_model 刷新模型元信息
+        └── 索引不存在 ──► 插入新 FileState
+              └── 若为 .gguf/.pgguf ──► 调用 analyze_model 获取 model_id + layer_bitmap
+                                         （GGUF 自动转换为 PGGUF）
 
 Phase 2: 清理僵尸（索引有但磁盘无）
     zombies = 索引 keys - 磁盘文件集合
@@ -379,9 +382,9 @@ Lua 侧通过 `caps.storage` 调用 `acquire_read` / `acquire_write` / `remove` 
 
 `Lazy_Discover` 在 `fs::metadata` 成功后到 `files.insert` 之间，文件可能被外部删除。导致索引短暂存在一条指向不存在的文件的条目。`exists()` 和 `flush()` 会自动清理此类僵尸，无数据风险。
 
-### 7.4 模型元信息未实现
+### 7.4 模型元信息 — ✅ 已实现
 
-`FileState` 的 `model_id` / `num_layers` / `layer_bitmap` / `architecture` 始终为 `None`。`flush()` 中有 TODO 标记等待 ML 模块 `Analyze` 就绪后填充。
+`flush()` 中对 `.gguf` / `.pgguf` 文件调用 ML `analyze_model`，自动获取 `model_id` / `num_layers` / `layer_bitmap` / `architecture` 并填入 `FileState`。原始 `.gguf` 文件在首次 flush 时自动转换为 PGGUF 格式（追加 `pleiades.model_id` 和 `pleiades.layer_bitmap` 元数据），后续操作走快速路径零 I/O。
 
 ### 7.5 checksum 无缓存
 
@@ -460,10 +463,10 @@ pub trait StorageCapability: Send + Sync {
 
 ## 11. TODO
 
-### 模型元信息（Phase 3）
+### 模型元信息 — ✅ 已完成
 
-- `flush()` 中对 `.gguf` / `.pgguf` 文件调用 ML Analyze，填充 `model_id` / `num_layers` / `layer_bitmap` / `architecture`
-- `.gguf` 文件自动转换为 `.pgguf` 格式
+- ✅ `flush()` 中对 `.gguf` / `.pgguf` 文件调用 ML Analyze，填充 `model_id` / `num_layers` / `layer_bitmap` / `architecture`
+- ✅ `.gguf` 文件自动转换为 `.pgguf` 格式（`GGUF_Analyze_And_Convert` → 追加 `pleiades.model_id` + `pleiades.layer_bitmap`）
 
 ### 性能优化
 

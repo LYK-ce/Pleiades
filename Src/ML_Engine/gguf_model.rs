@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use candle_core::quantized::gguf_file;
-use super::gguf_model_manager::{GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
+use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
 use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding};
 
 // ============================================================
@@ -99,6 +99,9 @@ pub fn GGUF_Load_Model(
     model_path: &Path,
     device: &Device,
 ) -> Result<GGUF_Model> {
+    // 0. 自动 GGUF → PGGUF 转换（仅首次，已转换的文件零开销跳过）
+    GGUF_Analyze_And_Convert(model_path)?;
+
     // 1. 打开文件并解析 GGUF Content（仅此一次）
     let mut file = std::fs::File::open(model_path)?;
     let content = gguf_file::Content::read(&mut file)

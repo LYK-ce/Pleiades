@@ -29,7 +29,7 @@ pub use gguf_tensor::{
 };
 pub use gguf_model_manager::{
     Model_Arch_Info, Layer_Info, Tensor_Detail, GGUF_Layer_Weights,
-    GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Load_Layer, GGUF_Split_Model,
+    GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model,
 };
 pub use gguf_models::{
     Gguf, Rotary_Embedding, Mlp_Weights, Attention_Weights,

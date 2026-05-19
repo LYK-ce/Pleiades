@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 use super::capability::{StorageCapability, StorageError, ChecksumAlgorithm, FileEntry};
 use super::guard::{ReadGuard, WriteGuard};
+use crate::ml_engine::capability::analyze_model;
 
 /// 文件状态，内部用于管理锁和模型元信息
 #[derive(Debug)]
@@ -396,11 +397,25 @@ impl StorageCapability for StorageManager {
             {
                 let files = self.files.read().await;
                 if files.contains_key(&file_name_str) {
-                    // 已有文件：刷新 size
+                    // 已有文件：刷新 size + 模型元信息（若适用）
                     drop(files);
                     let mut files = self.files.write().await;
                     if let Some(state) = files.get_mut(&file_name_str) {
                         state.size = actual_size;
+                    }
+                    drop(files);
+                    // 对模型文件刷新元信息（已转换 PGGUF 走快速路径，零 I/O）
+                    if Self::Is_Model_File(&file_name_str) {
+                        let full_path = self.Full_Path(&file_name_str);
+                        if let Ok(arch_info) = analyze_model(&full_path).await {
+                            let mut files = self.files.write().await;
+                            if let Some(state) = files.get_mut(&file_name_str) {
+                                state.model_id = arch_info.model_id;
+                                state.num_layers = Some(arch_info.num_layers as u32);
+                                state.layer_bitmap = arch_info.layer_bitmap;
+                                state.architecture = Some(arch_info.architecture);
+                            }
+                        }
                     }
                     continue;
                 }
@@ -414,14 +429,20 @@ impl StorageCapability for StorageManager {
             let mut architecture: Option<String> = None;
 
             if is_model {
-                // TODO: Phase 3 — 待 ML 模块 Analyze 就绪后调用
-                // let result = ml_analyze(&full_path, &file_name_str).await?;
-                // 对 .gguf 文件：ML 层自动转换为 .pgguf 并返回元信息
-                // 对 .pgguf 文件：ML 层读取元数据并返回
-                // model_id = result.model_id;
-                // num_layers = result.num_layers;
-                // layer_bitmap = result.layer_bitmap;
-                // architecture = result.architecture;
+                // 调用 ML Analyze 获取模型元信息（GGUF 自动转换为 PGGUF）
+                let full_path = self.Full_Path(&file_name_str);
+                match analyze_model(&full_path).await {
+                    Ok(arch_info) => {
+                        model_id = arch_info.model_id;
+                        num_layers = Some(arch_info.num_layers as u32);
+                        layer_bitmap = arch_info.layer_bitmap;
+                        architecture = Some(arch_info.architecture);
+                    }
+                    Err(e) => {
+                        // 解析失败不中断 flush，仅跳过元信息填充
+                        tracing::warn!("analyze_model failed for {}: {}", file_name_str, e);
+                    }
+                }
             }
 
             let mut files = self.files.write().await;

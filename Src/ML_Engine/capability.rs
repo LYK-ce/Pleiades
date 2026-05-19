@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model, Model_Arch_Info};
+use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Split_Model, Model_Arch_Info};
 
 // ============================================================
 // 模型分析
@@ -18,14 +18,17 @@ use super::gguf_model_manager::{GGUF_Analyze, GGUF_Split_Model, Model_Arch_Info}
 
 /// 解析 GGUF/PGGUF 模型文件，返回架构元信息。
 ///
+/// 如果是原始 .gguf：自动计算 model_id + layer_bitmap，转换并重命名为 .pgguf。
+/// 如果已是 .pgguf：直接读取已存储的 model_id + layer_bitmap。
+///
 /// 使用 `tokio::task::spawn_blocking` 执行同步 I/O，
 /// 调用方必须在 tokio runtime 上下文中调用。
 pub async fn analyze_model(gguf_file_path: &Path) -> Result<Model_Arch_Info, String> {
     let path = gguf_file_path.to_path_buf();
-    tokio::task::spawn_blocking(move || GGUF_Analyze(&path))
+    tokio::task::spawn_blocking(move || GGUF_Analyze_And_Convert(&path))
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?
-        .map_err(|e| format!("GGUF_Analyze failed: {e}"))
+        .map_err(|e| format!("GGUF_Analyze_And_Convert failed: {e}"))
 }
 
 // ============================================================

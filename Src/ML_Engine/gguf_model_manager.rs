@@ -15,8 +15,9 @@ use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
 use candle_core::Device;
 use std::collections::HashMap;
-use std::io::BufWriter;
+use std::io::{BufWriter, Read, Seek, SeekFrom};
 use std::path::Path;
+use twox_hash::xxh3::hash64;
 
 // ============================================================
 // 数据结构定义
@@ -46,6 +47,10 @@ pub struct Model_Arch_Info {
     pub split_start: usize,
     /// 切分的结束层（仅当 is_split 为 true 时有效）
     pub split_end: usize,
+    /// 模型唯一标识 — xxhash64(原始文件字节)，PGGUF 从 metadata 读取
+    pub model_id: Option<u64>,
+    /// 256 位层位图，bit N=1 表示文件含第 N 层
+    pub layer_bitmap: Option<[u8; 32]>,
 }
 
 /// 每层的信息
@@ -319,6 +324,8 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         is_split,
         split_start,
         split_end,
+        model_id: None,
+        layer_bitmap: None,
     })
 }
 
@@ -475,7 +482,165 @@ pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_A
         is_split,
         split_start,
         split_end,
+        model_id: None,
+        layer_bitmap: None,
     })
+}
+
+// ============================================================
+// GGUF_Analyze_And_Convert — 分析 + GGUF→PGGUF 自动转换
+// ============================================================
+
+/// 从 layer_tensors_map 构建 256 位层位图。
+///
+/// layer_tensors_map: key=blk 索引 (0..num_layers-1)，value=该层的 tensor 列表。
+/// 如果某 key 存在且有至少一个 tensor → bit 置 1。
+fn Build_Layer_Bitmap(
+    layer_tensors_map: &HashMap<usize, Vec<Tensor_Detail>>,
+    num_layers: usize,
+) -> [u8; 32] {
+    let mut bitmap = [0u8; 32];
+    for i in 0..num_layers {
+        if let Some(tensors) = layer_tensors_map.get(&i) {
+            if !tensors.is_empty() {
+                let byte_idx = i / 8;
+                let bit_idx = i % 8;
+                if byte_idx < 32 {
+                    bitmap[byte_idx] |= 1 << bit_idx;
+                }
+            }
+        }
+    }
+    bitmap
+}
+
+/// 解析 GGUF / PGGUF 文件，返回架构元信息。
+///
+/// 如果是原始 GGUF（metadata 无 pleiades.model_id）：
+///   1. 读全量字节 → xxhash64 → model_id
+///   2. 从 tensor 信息构建 layer_bitmap
+///   3. 写入 .pgguf 文件（metadata 追加 model_id + layer_bitmap）
+///   4. 删除原始 .gguf → 重命名 .pgguf 覆盖原后缀
+///
+/// 如果已是 PGGUF（metadata 有 pleiades.model_id）：
+///   直接读取 model_id + layer_bitmap，零额外 I/O。
+pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
+    // 1. 打开文件并解析 GGUF Content
+    let mut file = std::fs::File::open(gguf_file_path)?;
+    let content = gguf_file::Content::read(&mut file)
+        .map_err(|e| anyhow::anyhow!("Failed to read GGUF content: {}", e))?;
+
+    // 2. 从 Content 提取架构信息（零 I/O）
+    let mut arch_info = GGUF_Analyze_From_Content(&content)?;
+
+    // 3. 检查是否已是 PGGUF（metadata 中有 pleiades.model_id）
+    let existing_model_id = Get_Metadata_Usize(&content.metadata, "pleiades.model_id");
+    let existing_bitmap = Get_Metadata_String(&content.metadata, "pleiades.layer_bitmap");
+
+    if let (Some(id), Some(hex_bitmap)) = (existing_model_id, existing_bitmap) {
+        // 已是 PGGUF → 直接读取，零 I/O
+        arch_info.model_id = Some(id as u64);
+        arch_info.layer_bitmap = Some(Parse_Bitmap_Hex(&hex_bitmap));
+        return Ok(arch_info);
+    }
+
+    // 4. 原始 GGUF → 计算 model_id + layer_bitmap
+    //    读全量字节计算 xxhash64
+    let mut raw_bytes = Vec::new();
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| anyhow::anyhow!("Failed to seek to start: {}", e))?;
+    file.read_to_end(&mut raw_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to read file bytes: {}", e))?;
+    let model_id = hash64(&raw_bytes);
+
+    // 5. 从 Content 的 tensor_infos 构建 layer_bitmap
+    //    先重建 layer_tensors_map（与 GGUF_Analyze_From_Content 相同逻辑）
+    let mut layer_tensors_map: HashMap<usize, Vec<Tensor_Detail>> = HashMap::new();
+    for (tensor_name, _tensor_info) in &content.tensor_infos {
+        if tensor_name.starts_with("blk.") {
+            let parts: Vec<&str> = tensor_name.splitn(3, '.').collect();
+            if parts.len() >= 2 {
+                if let Ok(layer_idx) = parts[1].parse::<usize>() {
+                    layer_tensors_map.entry(layer_idx).or_default();
+                }
+            }
+        }
+    }
+    let layer_bitmap = Build_Layer_Bitmap(&layer_tensors_map, arch_info.num_layers);
+
+    // 6. 写入 .pgguf：在原始 metadata 基础上追加 pleiades.model_id + layer_bitmap
+    let pgguf_path = gguf_file_path.with_extension("pgguf");
+    let out_file = std::fs::File::create(&pgguf_path)?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut metadata_pairs: Vec<(String, gguf_file::Value)> = content
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    metadata_pairs.push((
+        "pleiades.model_id".to_string(),
+        gguf_file::Value::U64(model_id),
+    ));
+    metadata_pairs.push((
+        "pleiades.layer_bitmap".to_string(),
+        gguf_file::Value::String(Bitmap_To_Hex(&layer_bitmap)),
+    ));
+    metadata_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // 加载所有 tensor 数据（CPU 设备，仅用于复制）
+    let device = Device::Cpu;
+    let mut loaded_tensors: Vec<(String, QTensor)> = Vec::new();
+    for tensor_name in content.tensor_infos.keys() {
+        let qtensor = content
+            .tensor(&mut file, tensor_name, &device)
+            .map_err(|e| anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e))?;
+        loaded_tensors.push((tensor_name.clone(), qtensor));
+    }
+
+    let metadata_refs: Vec<(&str, &gguf_file::Value)> = metadata_pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+    let tensor_refs: Vec<(&str, &QTensor)> = loaded_tensors
+        .iter()
+        .map(|(n, t)| (n.as_str(), t))
+        .collect();
+
+    gguf_file::write(&mut writer, &metadata_refs, &tensor_refs)
+        .map_err(|e| anyhow::anyhow!("Failed to write PGGUF file: {}", e))?;
+    drop(writer);
+
+    // 7. 删除原始 .gguf，重命名 .pgguf → 原路径（改后缀）
+    std::fs::remove_file(gguf_file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to remove original GGUF: {}", e))?;
+    std::fs::rename(&pgguf_path, gguf_file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to rename PGGUF: {}", e))?;
+
+    arch_info.model_id = Some(model_id);
+    arch_info.layer_bitmap = Some(layer_bitmap);
+    Ok(arch_info)
+}
+
+/// 将 32 字节位图编码为 64 字符 hex 字符串
+fn Bitmap_To_Hex(bitmap: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bitmap {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// 从 64 字符 hex 字符串解码为 32 字节位图
+fn Parse_Bitmap_Hex(hex: &str) -> [u8; 32] {
+    let mut bitmap = [0u8; 32];
+    let hex = hex.trim();
+    for i in 0..32.min(hex.len() / 2) {
+        if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+            bitmap[i] = b;
+        }
+    }
+    bitmap
 }
 
 // GGUF_Load_Layer(gguf_file_path, layer_index, device)

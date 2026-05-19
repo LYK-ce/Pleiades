@@ -120,15 +120,17 @@ impl MlSession {
 
     /// 加载模型到当前 session。
     ///
-    /// 若已有模型，先卸载旧模型再加载新模型。
+    /// 若已有模型，先验证新模型路径有效再卸载旧模型，
+    /// 避免因路径无效导致旧模型丢失。
     pub fn load_model(&mut self, path: &Path, start: usize, end: usize) -> Result<(), String> {
-        // 先卸载已有模型
-        if self.ctx.model.is_some() {
-            self.unload();
-        }
-
+        // 先尝试加载新模型（失败则保留旧模型不动）
         let model = GGUF_Load_Model(start, end, path, &self.ctx.device)
             .map_err(|e| format!("Failed to load model: {e}"))?;
+
+        // 新模型加载成功 → 安全卸载旧模型
+        if let Some(old) = self.ctx.model.take() {
+            GGUF_Unload_Model(old);
+        }
 
         self.ctx.eos_token_id = model.inference_config.eos_token;
         self.ctx.model = Some(model);
@@ -239,12 +241,13 @@ impl MlSession {
                 .rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let random = (self.ctx.rng_state >> 33) as f32 / (u32::MAX as f32);
+            // f64 避免 u32::MAX 超出 f32 精确表示范围导致的分布偏差
+            let random = (self.ctx.rng_state >> 33) as f64 / (u32::MAX as f64);
 
-            let mut cumulative = 0.0f32;
+            let mut cumulative = 0.0f64;
             let mut chosen = (probs_vec.len() - 1) as u32;
             for (i, &p) in probs_vec.iter().enumerate() {
-                cumulative += p;
+                cumulative += p as f64;
                 if cumulative > random {
                     chosen = i as u32;
                     break;
