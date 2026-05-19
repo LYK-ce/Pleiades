@@ -8,7 +8,7 @@
 
 use super::Core;
 use crate::network::{Network_Inbound_Event, Read_File_Stream_Header};
-use crate::event_bus::event::Bus_Event;
+use crate::event_bus::{Bus_Event, NotifyLevel};
 
 impl Core {
     /// 路由 Stream 入站事件 (B3)。
@@ -49,7 +49,8 @@ impl Core {
 
                 tracing::info!("文件接收完成: {} ({} bytes) from {}", file_name, file_size, peer_str);
 
-                self.capabilities.event_bus.Publish(Bus_Event::Log {
+                self.capabilities.event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Info,
                     message: format!("接收文件完成: {} ({} bytes) from {}", file_name, file_size, peer_str),
                 });
 

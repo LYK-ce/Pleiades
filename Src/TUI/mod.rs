@@ -141,78 +141,126 @@ pub fn TUI_Loop(
 /// 处理 Bus_Event，更新 App 状态
 fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
     match event {
-        Bus_Event::Log { message } => {
-            app.Add_Log(message);
+        Bus_Event::Notify { level, message } => {
+            let msg = match level {
+                crate::event_bus::NotifyLevel::Error => format!("[错误] {message}"),
+                crate::event_bus::NotifyLevel::Warn => {
+                    app.Add_Log(format!("[警告] {message}"));
+                    return;
+                }
+                crate::event_bus::NotifyLevel::Info => message,
+            };
+            app.Add_Log(msg);
         }
-        Bus_Event::Error { message } => {
-            app.Add_Log(format!("[错误] {}", message));
+        Bus_Event::State { payload } => {
+            let v = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    app.Add_Log(format!("[EventBus] State JSON 解析失败: {e}"));
+                    return;
+                }
+            };
+            handle_state(app, &v);
         }
-        Bus_Event::Peer_Discovered { peer_id } => {
-            app.Update_Peer(peer_id.clone(), false);
-            app.Add_Log(format!("发现节点: {}", peer_id));
+        Bus_Event::Stream { payload } => {
+            let v = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    app.Add_Log(format!("[EventBus] Stream JSON 解析失败: {e}"));
+                    return;
+                }
+            };
+            handle_stream(app, &v);
         }
-        Bus_Event::Peer_Left { peer_id } => {
-            app.Remove_Peer(&peer_id);
-            app.Add_Log(format!("节点离开: {}", peer_id));
+        Bus_Event::Output { payload } => {
+            let v = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    app.Add_Log(format!("[EventBus] Output JSON 解析失败: {e}"));
+                    return;
+                }
+            };
+            handle_output(app, &v);
         }
-        Bus_Event::Connection_Established { peer_id } => {
-            app.Update_Peer(peer_id.clone(), true);
-            app.Add_Log(format!("连接建立: {}", peer_id));
+    }
+}
+
+// ============================================================
+// State 事件处理
+// ============================================================
+
+fn handle_state(app: &mut App, v: &serde_json::Value) {
+    match v["type"].as_str() {
+        Some("peer_discovered") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            app.Update_Peer(peer_id.to_string(), false);
+            app.Add_Log(format!("发现节点: {peer_id}"));
         }
-        Bus_Event::Connection_Closed { peer_id } => {
-            app.Update_Peer(peer_id.clone(), false);
-            app.Add_Log(format!("连接断开: {}", peer_id));
+        Some("peer_left") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            app.Remove_Peer(peer_id);
+            app.Add_Log(format!("节点离开: {peer_id}"));
         }
-        Bus_Event::File_Progress {
-            file_name,
-            direction,
-            peer,
-            sent,
-            total,
-        } => {
-            let dir = if direction == "send" {
-                Transfer_Direction::Send
+        Some("peer_connected") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            app.Update_Peer(peer_id.to_string(), true);
+            app.Add_Log(format!("连接建立: {peer_id}"));
+        }
+        Some("peer_disconnected") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            app.Update_Peer(peer_id.to_string(), false);
+            app.Add_Log(format!("连接断开: {peer_id}"));
+        }
+        Some("job_created") => {
+            let job_id = v["job_id"].as_u64().unwrap_or(0);
+            let kind = v["kind"].as_str().unwrap_or("?");
+            let model = v["model"].as_str().unwrap_or("");
+            let msg = if model.is_empty() {
+                format!("Job #{job_id} 已创建 [{kind}]")
             } else {
-                Transfer_Direction::Receive
+                format!("Job #{job_id} 已创建 [{kind}] 模型: {model}")
             };
-            app.job = Job_State::File_Transfer {
-                direction: dir,
-                file_name,
-                peer,
-                sent,
-                total,
-            };
+            app.Add_Log(msg);
         }
-        Bus_Event::Inference_Started {
-            job_id: _,
-            model_name,
-            device_count,
-            layer_range,
-        } => {
+        Some("job_phase_changed") => {
+            let job_id = v["job_id"].as_u64().unwrap_or(0);
+            let phase = v["phase"].as_str().unwrap_or("?");
+            app.Add_Log(format!("Job #{job_id} 阶段: {phase}"));
+            if let Job_State::Inference {
+                phase: ref mut current_phase,
+                ..
+            } = app.job
+            {
+                *current_phase = phase.to_string();
+            }
+        }
+        Some("job_completed") => {
+            let job_id = v["job_id"].as_u64().unwrap_or(0);
+            let result = v["result"].as_str().unwrap_or("?");
+            app.Add_Log(format!("Job #{job_id} 完成: {result}"));
+            if app.view_mode != View_Mode::Busy_Coordinator {
+                app.job = Job_State::Idle;
+                app.view_mode = View_Mode::Idle;
+            }
+        }
+        Some("inference_started") => {
+            let model = v["model"].as_str().unwrap_or("?").to_string();
+            let devices = v["devices"].as_u64().unwrap_or(1) as usize;
+            let layers = v["layers"].as_str().unwrap_or("?").to_string();
             app.job = Job_State::Inference {
-                model_name: model_name.clone(),
-                device_count,
-                layer_range: layer_range.clone(),
+                model_name: model.clone(),
+                device_count: devices,
+                layer_range: layers.clone(),
                 phase: "初始化".to_string(),
             };
             app.view_mode = View_Mode::Busy;
-            app.Add_Log(format!("推理开始: {} [{}]", model_name, layer_range));
+            app.Add_Log(format!("推理开始: {model} [{layers}]"));
         }
-        Bus_Event::Inference_Token { job_id: _, token } => {
-            app.command_output.output_text.push_str(&token);
-            app.command_output.token_count += 1;
-            app.view_mode = View_Mode::Busy_Coordinator;
-            // 自动滚动到底部，跟随推理输出
-            let line_count = app.command_output.output_text.lines().count();
-            app.command_scroll = line_count.saturating_sub(1);
-        }
-        Bus_Event::Inference_Completed {
-            job_id: _,
-            text,
-            tokens,
-            tok_per_sec,
-            total_secs,
-        } => {
+        Some("inference_completed") => {
+            let text = v["text"].as_str().unwrap_or("").to_string();
+            let tokens = v["tokens"].as_u64().unwrap_or(0) as usize;
+            let tok_per_sec = v["tok_per_sec"].as_f64().unwrap_or(0.0);
+            let total_secs = v["total_secs"].as_f64().unwrap_or(0.0);
             app.command_output.output_text = text;
             app.command_output.token_count = tokens;
             app.command_output.tok_per_sec = tok_per_sec;
@@ -220,68 +268,72 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
             app.command_output.completed = true;
             app.job = Job_State::Idle;
             app.Add_Log(format!(
-                "推理完成: {} tokens, {:.1} tok/s, {:.1}s",
-                tokens, tok_per_sec, total_secs
+                "推理完成: {tokens} tokens, {tok_per_sec:.1} tok/s, {total_secs:.1}s"
             ));
         }
-        Bus_Event::Job_Created {
-            job_id,
-            kind,
-            model_name,
-        } => {
-            let msg = if model_name.is_empty() {
-                format!("Job #{} 已创建 [{}]", job_id, kind)
-            } else {
-                format!("Job #{} 已创建 [{}] 模型: {}", job_id, kind, model_name)
-            };
-            app.Add_Log(msg);
-        }
-        Bus_Event::Job_State_Changed { job_id, phase } => {
-            app.Add_Log(format!("Job #{} 阶段: {}", job_id, phase));
-            // 更新 Inference 阶段（如果当前 Job 是推理类型）
-            if let Job_State::Inference {
-                phase: ref mut current_phase,
-                ..
-            } = app.job
-            {
-                *current_phase = phase;
-            }
-        }
-        Bus_Event::Job_Completed { job_id, result } => {
-            app.Add_Log(format!("Job #{} 完成: {}", job_id, result));
-            // 仅当当前不在推理输出模式时才切回 Idle
-            // （推理完成已由 Inference_Completed 处理）
-            if app.view_mode != View_Mode::Busy_Coordinator {
-                app.job = Job_State::Idle;
-                app.view_mode = View_Mode::Idle;
-            }
-        }
-        Bus_Event::Device_Changed { device } => {
+        Some("device_changed") => {
+            let device = v["device"].as_str().unwrap_or("?").to_string();
             app.Add_Log(format!("设备已切换: {}", device.to_uppercase()));
             app.device = device;
         }
-        Bus_Event::HelpInfo { builtin, user } => {
-            let mut lines = vec!["[内置命令]".to_string()];
-            for e in &builtin {
-                lines.push(format!("  {:<38} {}", e.usage, e.description));
-            }
-            lines.push(String::new());
-            lines.push("[用户命令]".to_string());
-            if user.is_empty() {
-                lines.push("  (无)".to_string());
-            } else {
-                for e in &user {
-                    lines.push(format!("  {:<38} {}", e.usage, e.description));
-                }
-            }
-            app.command_output.output_text = lines.join("\n");
-            app.command_output.completed = true;
+        _ => {}
+    }
+}
+
+// ============================================================
+// Stream 事件处理
+// ============================================================
+
+fn handle_stream(app: &mut App, v: &serde_json::Value) {
+    match v["type"].as_str() {
+        Some("token") => {
+            let text = v["text"].as_str().unwrap_or("");
+            app.command_output.output_text.push_str(text);
+            app.command_output.token_count += 1;
+            app.view_mode = View_Mode::Busy_Coordinator;
+            let line_count = app.command_output.output_text.lines().count();
+            app.command_scroll = line_count.saturating_sub(1);
         }
-        Bus_Event::CommandResult { text, completed } => {
-            app.command_output.output_text = text;
-            app.command_output.completed = completed;
+        Some("file_progress") => {
+            let file_name = v["name"].as_str().unwrap_or("?").to_string();
+            let direction = v["dir"].as_str().unwrap_or("send");
+            let peer = v["peer"].as_str().unwrap_or("?").to_string();
+            let sent = v["sent"].as_u64().unwrap_or(0);
+            let total = v["total"].as_u64().unwrap_or(0);
+            app.job = Job_State::File_Transfer {
+                direction: if direction == "send" {
+                    Transfer_Direction::Send
+                } else {
+                    Transfer_Direction::Receive
+                },
+                file_name,
+                peer,
+                sent,
+                total,
+            };
+        }
+        _ => {}
+    }
+}
+
+// ============================================================
+// Output 事件处理
+// ============================================================
+
+fn handle_output(app: &mut App, v: &serde_json::Value) {
+    match v["type"].as_str() {
+        Some("cmd_result") => {
+            app.command_output.output_text =
+                v["text"].as_str().unwrap_or("").to_string();
+            app.command_output.completed = v["completed"].as_bool().unwrap_or(true);
             app.command_scroll = 0;
         }
+        Some("help") => {
+            app.command_output.output_text =
+                v["text"].as_str().unwrap_or("").to_string();
+            app.command_output.completed = true;
+        }
+        _ => {}
     }
 }
 

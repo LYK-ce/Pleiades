@@ -14,7 +14,7 @@ use crate::ml_engine::{MlSession, capability};
 use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor, tensor_to_bytes};
 use crate::lua::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
-use crate::event_bus::{EventBus, event::Bus_Event};
+use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
@@ -267,7 +267,10 @@ pub fn register_logging_caps(lua: &Lua, event_bus: Arc<EventBus>) -> mlua::Resul
         "print",
         lua.create_function(move |_, msg: String| {
             tracing::info!(target: "lua", "{}", msg);
-            event_bus.Publish(Bus_Event::Log { message: msg });
+            event_bus.Publish(Bus_Event::Notify {
+                level: NotifyLevel::Info,
+                message: msg,
+            });
             Ok::<_, mlua::Error>(())
         })?,
     )?;

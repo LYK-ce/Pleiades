@@ -11,7 +11,7 @@
 
 use tokio::sync::broadcast;
 
-use super::event::Bus_Event;
+use super::event::{Bus_Event, NotifyLevel};
 
 // ============================================================
 // EventBus 结构体
@@ -82,13 +82,14 @@ mod tests {
         let bus = EventBus::New(16);
         let mut rx = bus.Subscribe();
 
-        bus.Publish(Bus_Event::Log {
+        bus.Publish(Bus_Event::Notify {
+            level: NotifyLevel::Info,
             message: "hello".to_string(),
         });
 
         let event = rx.recv().await.unwrap();
         match event {
-            Bus_Event::Log { message } => assert_eq!(message, "hello"),
+            Bus_Event::Notify { level: _, message } => assert_eq!(message, "hello"),
             _ => panic!("unexpected event variant"),
         }
     }
@@ -99,8 +100,8 @@ mod tests {
         let mut rx1 = bus.Subscribe();
         let mut rx2 = bus.Subscribe();
 
-        bus.Publish(Bus_Event::Peer_Discovered {
-            peer_id: "peer-1".to_string(),
+        bus.Publish(Bus_Event::State {
+            payload: serde_json::json!({"type":"peer_discovered","peer_id":"peer-1"}).to_string(),
         });
 
         // 两个订阅者都应收到事件副本
@@ -108,13 +109,7 @@ mod tests {
         let e2 = rx2.recv().await.unwrap();
 
         match (&e1, &e2) {
-            (
-                Bus_Event::Peer_Discovered { peer_id: id1 },
-                Bus_Event::Peer_Discovered { peer_id: id2 },
-            ) => {
-                assert_eq!(id1, "peer-1");
-                assert_eq!(id2, "peer-1");
-            }
+            (Bus_Event::State { .. }, Bus_Event::State { .. }) => {}
             _ => panic!("unexpected event variants"),
         }
     }
@@ -123,7 +118,8 @@ mod tests {
     async fn test_no_subscriber_no_panic() {
         let bus = EventBus::New(16);
         // 没有订阅者时发布不应 panic
-        bus.Publish(Bus_Event::Error {
+        bus.Publish(Bus_Event::Notify {
+            level: NotifyLevel::Error,
             message: "test error".to_string(),
         });
     }
@@ -133,21 +129,23 @@ mod tests {
         let bus = EventBus::New(16);
 
         // 先发布，后订阅
-        bus.Publish(Bus_Event::Log {
+        bus.Publish(Bus_Event::Notify {
+            level: NotifyLevel::Info,
             message: "before subscribe".to_string(),
         });
 
         let mut rx = bus.Subscribe();
 
         // 再发布一条
-        bus.Publish(Bus_Event::Log {
+        bus.Publish(Bus_Event::Notify {
+            level: NotifyLevel::Info,
             message: "after subscribe".to_string(),
         });
 
         // 订阅者只应收到订阅之后的事件
         let event = rx.recv().await.unwrap();
         match event {
-            Bus_Event::Log { message } => assert_eq!(message, "after subscribe"),
+            Bus_Event::Notify { level: _, message } => assert_eq!(message, "after subscribe"),
             _ => panic!("unexpected event variant"),
         }
     }

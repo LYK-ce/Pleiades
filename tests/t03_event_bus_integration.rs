@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Date ： 2026-05-19
 
 //! EventBus 模块集成测试
 //!
@@ -10,7 +10,7 @@
 
 mod common;
 
-use pleiades::event_bus::{EventBus, Bus_Event};
+use pleiades::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -40,7 +40,6 @@ async fn tc01_multi_producer_multi_consumer() {
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        // 在大缓冲下不应发生 Lagged
                         panic!(
                             "Consumer {} unexpectedly lagged by {} messages",
                             consumer_id, n
@@ -60,7 +59,8 @@ async fn tc01_multi_producer_multi_consumer() {
         let bus_clone = Arc::clone(&bus);
         let handle = tokio::spawn(async move {
             for msg_idx in 0..messages_per_producer {
-                bus_clone.Publish(Bus_Event::Log {
+                bus_clone.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Info,
                     message: format!("producer_{}_msg_{}", producer_id, msg_idx),
                 });
             }
@@ -105,7 +105,8 @@ async fn tc02_slow_consumer_lagged_recovery() {
 
     // 快速发布 100 条（不等待消费者）
     for i in 0..publish_count {
-        bus.Publish(Bus_Event::Log {
+        bus.Publish(Bus_Event::Notify {
+            level: NotifyLevel::Info,
             message: format!("fast_msg_{}", i),
         });
     }
@@ -115,7 +116,6 @@ async fn tc02_slow_consumer_lagged_recovery() {
     let mut received_count = 0usize;
     let mut encountered_lagged = false;
 
-    // 尝试读取所有可用消息
     loop {
         match rx.try_recv() {
             Ok(_event) => {
@@ -124,7 +124,6 @@ async fn tc02_slow_consumer_lagged_recovery() {
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                 lagged_count += n;
                 encountered_lagged = true;
-                // Lagged 后继续接收
                 continue;
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -150,183 +149,92 @@ async fn tc02_slow_consumer_lagged_recovery() {
     );
 
     // 在 Lagged 恢复后，新发布的消息应能正常接收
-    bus.Publish(Bus_Event::Log {
+    bus.Publish(Bus_Event::Notify {
+        level: NotifyLevel::Info,
         message: "after_recovery".to_string(),
     });
     let event = rx.recv().await.unwrap();
     match event {
-        Bus_Event::Log { message } => {
+        Bus_Event::Notify { level, message } => {
+            assert!(matches!(level, NotifyLevel::Info));
             assert_eq!(message, "after_recovery", "Lagged 恢复后应能接收新消息");
         }
-        _ => panic!("期望 Log 事件"),
+        _ => panic!("期望 Notify 事件"),
     }
 }
 
-/// TC-03: 全部 Bus_Event 变体
+/// TC-03: 全部 4 种 Bus_Event 类型
 ///
-/// 逐一发布每种 Bus_Event 变体 → 消费者 match 验证
+/// 逐一发布 4 种类型 → 消费者 match 验证
 #[tokio::test]
-async fn tc03_all_bus_event_variants() {
+async fn tc03_all_event_types() {
     let bus = EventBus::New(64);
     let mut rx = bus.Subscribe();
 
-    // 定义所有 14 种 variant
-    let all_events = vec![
-        Bus_Event::Peer_Discovered {
-            peer_id: "peer-1".to_string(),
-        },
-        Bus_Event::Peer_Left {
-            peer_id: "peer-2".to_string(),
-        },
-        Bus_Event::Connection_Established {
-            peer_id: "peer-3".to_string(),
-        },
-        Bus_Event::Connection_Closed {
-            peer_id: "peer-4".to_string(),
-        },
-        Bus_Event::Job_Created {
-            job_id: 1,
-            kind: "Run".to_string(),
-            model_name: "qwen3".to_string(),
-        },
-        Bus_Event::Job_State_Changed {
-            job_id: 1,
-            phase: "Executing".to_string(),
-        },
-        Bus_Event::Job_Completed {
-            job_id: 1,
-            result: "Success".to_string(),
-        },
-        Bus_Event::Inference_Started {
-            job_id: 2,
-            model_name: "qwen3".to_string(),
-            device_count: 3,
-            layer_range: "0-15".to_string(),
-        },
-        Bus_Event::Inference_Token {
-            job_id: 2,
-            token: "Hello".to_string(),
-        },
-        Bus_Event::Inference_Completed {
-            job_id: 2,
-            text: "Hello World".to_string(),
-            tokens: 2,
-            tok_per_sec: 10.5,
-            total_secs: 0.19,
-        },
-        Bus_Event::File_Progress {
-            file_name: "model.gguf".to_string(),
-            direction: "send".to_string(),
-            peer: "peer-5".to_string(),
-            sent: 512,
-            total: 1024,
-        },
-        Bus_Event::Log {
-            message: "test log".to_string(),
-        },
-        Bus_Event::Error {
-            message: "test error".to_string(),
-        },
-        Bus_Event::Device_Changed {
-            device: "cuda".to_string(),
-        },
-    ];
+    // Notify
+    bus.Publish(Bus_Event::Notify {
+        level: NotifyLevel::Error,
+        message: "test error".to_string(),
+    });
 
-    let expected_count = all_events.len();
+    // State
+    bus.Publish(Bus_Event::State {
+        payload: serde_json::json!({"type":"peer_discovered","peer_id":"peer-1"}).to_string(),
+    });
 
-    // 发布所有事件
-    for event in &all_events {
-        bus.Publish(event.clone());
+    // Stream
+    bus.Publish(Bus_Event::Stream {
+        payload: serde_json::json!({"type":"token","text":"Hello"}).to_string(),
+    });
+
+    // Output
+    bus.Publish(Bus_Event::Output {
+        payload: serde_json::json!({"type":"cmd_result","text":"done","completed":true}).to_string(),
+    });
+
+    // Receive Notify
+    let event = rx.recv().await.unwrap();
+    match event {
+        Bus_Event::Notify { level, message } => {
+            assert!(matches!(level, NotifyLevel::Error));
+            assert_eq!(message, "test error");
+        }
+        _ => panic!("期望 Notify"),
     }
 
-    // 接收并用 match 验证每个 variant
-    let mut variant_names = Vec::new();
-    for _ in 0..expected_count {
-        let event = rx.recv().await.unwrap();
-        let name = match &event {
-            Bus_Event::Peer_Discovered { peer_id } => {
-                assert_eq!(peer_id, "peer-1");
-                "Peer_Discovered"
-            }
-            Bus_Event::Peer_Left { peer_id } => {
-                assert_eq!(peer_id, "peer-2");
-                "Peer_Left"
-            }
-            Bus_Event::Connection_Established { peer_id } => {
-                assert_eq!(peer_id, "peer-3");
-                "Connection_Established"
-            }
-            Bus_Event::Connection_Closed { peer_id } => {
-                assert_eq!(peer_id, "peer-4");
-                "Connection_Closed"
-            }
-            Bus_Event::Job_Created { job_id, kind, model_name } => {
-                assert_eq!(*job_id, 1);
-                assert_eq!(kind, "Run");
-                assert_eq!(model_name, "qwen3");
-                "Job_Created"
-            }
-            Bus_Event::Job_State_Changed { job_id, phase } => {
-                assert_eq!(*job_id, 1);
-                assert_eq!(phase, "Executing");
-                "Job_State_Changed"
-            }
-            Bus_Event::Job_Completed { job_id, result } => {
-                assert_eq!(*job_id, 1);
-                assert_eq!(result, "Success");
-                "Job_Completed"
-            }
-            Bus_Event::Inference_Started { job_id, model_name, device_count, layer_range } => {
-                assert_eq!(*job_id, 2);
-                assert_eq!(model_name, "qwen3");
-                assert_eq!(*device_count, 3);
-                assert_eq!(layer_range, "0-15");
-                "Inference_Started"
-            }
-            Bus_Event::Inference_Token { job_id, token } => {
-                assert_eq!(*job_id, 2);
-                assert_eq!(token, "Hello");
-                "Inference_Token"
-            }
-            Bus_Event::Inference_Completed { job_id, text, tokens, tok_per_sec, total_secs } => {
-                assert_eq!(*job_id, 2);
-                assert_eq!(text, "Hello World");
-                assert_eq!(*tokens, 2);
-                assert!(*tok_per_sec > 10.0);
-                assert!(*total_secs < 1.0);
-                "Inference_Completed"
-            }
-            Bus_Event::File_Progress { file_name, direction, peer, sent, total } => {
-                assert_eq!(file_name, "model.gguf");
-                assert_eq!(direction, "send");
-                assert_eq!(peer, "peer-5");
-                assert_eq!(*sent, 512);
-                assert_eq!(*total, 1024);
-                "File_Progress"
-            }
-            Bus_Event::Log { message } => {
-                assert_eq!(message, "test log");
-                "Log"
-            }
-            Bus_Event::Error { message } => {
-                assert_eq!(message, "test error");
-                "Error"
-            }
-            Bus_Event::Device_Changed { device } => {
-                assert_eq!(device, "cuda");
-                "Device_Changed"
-            }
-            _ => continue,
-        };
-        variant_names.push(name.to_string());
+    // Receive State
+    let event = rx.recv().await.unwrap();
+    match event {
+        Bus_Event::State { payload } => {
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["type"], "peer_discovered");
+            assert_eq!(v["peer_id"], "peer-1");
+        }
+        _ => panic!("期望 State"),
     }
 
-    assert_eq!(
-        variant_names.len(),
-        expected_count,
-        "应接收到全部 {} 种 variant",
-        expected_count
-    );
+    // Receive Stream
+    let event = rx.recv().await.unwrap();
+    match event {
+        Bus_Event::Stream { payload } => {
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["type"], "token");
+            assert_eq!(v["text"], "Hello");
+        }
+        _ => panic!("期望 Stream"),
+    }
+
+    // Receive Output
+    let event = rx.recv().await.unwrap();
+    match event {
+        Bus_Event::Output { payload } => {
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["type"], "cmd_result");
+            assert_eq!(v["text"], "done");
+            assert_eq!(v["completed"], true);
+        }
+        _ => panic!("期望 Output"),
+    }
 }
 
 /// TC-04: Subscribe 后发布才能接收
@@ -337,7 +245,8 @@ async fn tc04_subscribe_after_publish_only_receives_later() {
     let bus = EventBus::New(64);
 
     // 先发布一条（无订阅者）
-    bus.Publish(Bus_Event::Log {
+    bus.Publish(Bus_Event::Notify {
+        level: NotifyLevel::Info,
         message: "before_subscribe".to_string(),
     });
 
@@ -345,20 +254,21 @@ async fn tc04_subscribe_after_publish_only_receives_later() {
     let mut rx = bus.Subscribe();
 
     // 再发布一条
-    bus.Publish(Bus_Event::Log {
+    bus.Publish(Bus_Event::Notify {
+        level: NotifyLevel::Info,
         message: "after_subscribe".to_string(),
     });
 
     // 消费者应只收到订阅之后的事件
     let event = rx.recv().await.unwrap();
     match event {
-        Bus_Event::Log { message } => {
+        Bus_Event::Notify { level: _, message } => {
             assert_eq!(
                 message, "after_subscribe",
                 "应只收到 Subscribe 之后发布的事件"
             );
         }
-        _ => panic!("期望 Log 事件"),
+        _ => panic!("期望 Notify 事件"),
     }
 
     // 验证没有更多消息（try_recv 应返回 Empty）

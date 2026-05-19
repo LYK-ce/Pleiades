@@ -1,5 +1,5 @@
 // Presented by KeJi
-// Date ： 2026-05-16
+// Date ： 2026-05-19
 
 //! B1: 用户命令路由。
 //!
@@ -12,7 +12,24 @@ use crate::lua::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
     register_storage_caps, register_ml_caps,
 };
-use crate::event_bus::event::{Bus_Event, HelpEntry};
+use crate::event_bus::Bus_Event;
+
+// ============================================================
+// 本地 HelpEntry（已从 EventBus 中解耦）
+// ============================================================
+
+struct HelpEntry {
+    usage: String,
+    description: String,
+}
+
+// ============================================================
+// Output 构造辅助
+// ============================================================
+
+fn cmd_output(text: impl Into<String>, completed: bool) -> String {
+    serde_json::json!({"type":"cmd_result","text":text.into(),"completed":completed}).to_string()
+}
 
 // ============================================================
 // 内置命令描述符（与命令实现同文件，就近管理）
@@ -45,9 +62,8 @@ impl Core {
                 let entry = match self.program_registry.get_user(&command) {
                     Some(e) => e.clone(),
                     None => {
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: format!("未知命令: {}", command),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(format!("未知命令: {}", command), true),
                         });
                         return;
                     }
@@ -58,15 +74,16 @@ impl Core {
                 match result {
                     Ok(_v) => {
                         let job_id = super::generate_id();
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: format!("脚本 '{}' 执行完成 (Job #{})", command, job_id),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(
+                                format!("脚本 '{}' 执行完成 (Job #{})", command, job_id),
+                                true,
+                            ),
                         });
                     }
                     Err(e) => {
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: format!("执行失败: {}", e),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(format!("执行失败: {}", e), true),
                         });
                     }
                 }
@@ -74,18 +91,19 @@ impl Core {
 
             // ─── 单机推理 (Lua 脚本 + 模型) ───
             UserCommand::Run { script: _, model_path: _ } => {
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text: "Run: not yet implemented".to_string(),
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output("Run: not yet implemented", true),
                 });
             }
 
             // ─── 取消作业 ──────────────────────────────────
             UserCommand::Cancel { job_id } => {
                 self.cancel_job(job_id);
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text: format!("Job #{} 取消信号已发送", job_id.0),
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("Job #{} 取消信号已发送", job_id.0),
+                        true,
+                    ),
                 });
             }
 
@@ -110,26 +128,26 @@ impl Core {
                     }
                     Err(e) => format!("错误: {}", e),
                 };
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text,
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(text, true),
                 });
             }
 
             // ─── 设置设备 ──────────────────────────────────
             UserCommand::SetDevice { device } => {
                 self.device_preference = device.clone();
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text: format!("设备已切换为: {}", device.to_uppercase()),
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("设备已切换为: {}", device.to_uppercase()),
+                        true,
+                    ),
                 });
             }
 
             // ─── 模型分发 ──────────────────────────────────
             UserCommand::DistributeModel { model_path: _, peers: _ } => {
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text: "DistributeModel: not yet implemented".to_string(),
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output("DistributeModel: not yet implemented", true),
                 });
             }
 
@@ -149,9 +167,8 @@ impl Core {
                     }
                     Err(e) => format!("错误: {}", e),
                 };
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text,
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(text, true),
                 });
             }
 
@@ -160,9 +177,8 @@ impl Core {
                 let entry = match self.program_registry.get("send") {
                     Some(e) => e.clone(),
                     None => {
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: "send 脚本未找到".to_string(),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output("send 脚本未找到", true),
                         });
                         return;
                     }
@@ -175,15 +191,16 @@ impl Core {
                 match result {
                     Ok(_v) => {
                         let job_id = super::generate_id();
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: format!("发送 Job #{} 已创建 ({} → {})", job_id, file_path, peer_id),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(
+                                format!("发送 Job #{} 已创建 ({} → {})", job_id, file_path, peer_id),
+                                true,
+                            ),
                         });
                     }
                     Err(e) => {
-                        self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                            text: format!("错误: {}", e),
-                            completed: true,
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(format!("错误: {}", e), true),
                         });
                     }
                 }
@@ -191,9 +208,8 @@ impl Core {
 
             // ─── 性能测试 ──────────────────────────────────
             UserCommand::Profile { model_id: _ } => {
-                self.capabilities.event_bus.Publish(Bus_Event::CommandResult {
-                    text: "Profile: 尚未实现".to_string(),
-                    completed: true,
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output("Profile: 尚未实现", true),
                 });
             }
 
@@ -207,7 +223,6 @@ impl Core {
                     })
                     .collect();
 
-                // 合并 Lua 内置脚本的元数据
                 for e in self.program_registry.builtin_entries() {
                     builtin.push(HelpEntry {
                         usage: e.command.clone(),
@@ -224,7 +239,24 @@ impl Core {
                     })
                     .collect();
 
-                self.capabilities.event_bus.Publish(Bus_Event::HelpInfo { builtin, user });
+                let mut lines = vec!["[内置命令]".to_string()];
+                for e in &builtin {
+                    lines.push(format!("  {:<38} {}", e.usage, e.description));
+                }
+                lines.push(String::new());
+                lines.push("[用户命令]".to_string());
+                if user.is_empty() {
+                    lines.push("  (无)".to_string());
+                } else {
+                    for e in &user {
+                        lines.push(format!("  {:<38} {}", e.usage, e.description));
+                    }
+                }
+                let text = lines.join("\n");
+
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: serde_json::json!({"type":"help","text":text}).to_string(),
+                });
             }
         }
     }

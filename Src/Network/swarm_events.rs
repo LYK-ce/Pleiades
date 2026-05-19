@@ -41,8 +41,11 @@ impl Network_Service {
                     vec![endpoint.get_remote_address().clone()]
                 );
                 self.peer_handle.Upsert_Peer(peer_info).await;
-                self.event_bus.Publish(Bus_Event::Connection_Established {
-                    peer_id: peer_id.to_string(),
+                self.event_bus.Publish(Bus_Event::State {
+                    payload: serde_json::json!({
+                        "type": "peer_connected",
+                        "peer_id": peer_id.to_string(),
+                    }).to_string(),
                 });
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -50,8 +53,11 @@ impl Network_Service {
                 if let Err(e) = self.peer_handle.Remove_Peer(&peer_id).await {
                     warn!("从 PeerManager 移除节点失败: {}", e);
                 }
-                self.event_bus.Publish(Bus_Event::Connection_Closed {
-                    peer_id: peer_id.to_string(),
+                self.event_bus.Publish(Bus_Event::State {
+                    payload: serde_json::json!({
+                        "type": "peer_disconnected",
+                        "peer_id": peer_id.to_string(),
+                    }).to_string(),
                 });
             }
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -81,8 +87,11 @@ impl Network_Service {
                             .behaviour_mut()
                             .kademlia
                             .add_address(&peer_id, addr);
-                        self.event_bus.Publish(Bus_Event::Peer_Discovered {
-                            peer_id: peer_id.to_string(),
+                        self.event_bus.Publish(Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_discovered",
+                                "peer_id": peer_id.to_string(),
+                            }).to_string(),
                         });
                     }
                 }
@@ -90,8 +99,11 @@ impl Network_Service {
             mdns::Event::Expired(peers) => {
                 for (peer_id, _addr) in peers {
                     info!("节点离开: {}", peer_id);
-                    self.event_bus.Publish(Bus_Event::Peer_Left {
-                        peer_id: peer_id.to_string(),
+                    self.event_bus.Publish(Bus_Event::State {
+                        payload: serde_json::json!({
+                            "type": "peer_left",
+                            "peer_id": peer_id.to_string(),
+                        }).to_string(),
                     });
                 }
             }

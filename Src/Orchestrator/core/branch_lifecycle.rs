@@ -17,9 +17,12 @@ impl Core {
         match event {
             LifecycleEvent::Done { job_id, result } => {
                 let job_id_val = job_id.0;
-                self.capabilities.event_bus.Publish(Bus_Event::Job_Completed {
-                    job_id: job_id_val,
-                    result: format!("{:?}", result),
+                self.capabilities.event_bus.Publish(Bus_Event::State {
+                    payload: serde_json::json!({
+                        "type": "job_completed",
+                        "job_id": job_id_val,
+                        "result": format!("{:?}", result),
+                    }).to_string(),
                 });
                 self.registry.remove(&job_id);
             }

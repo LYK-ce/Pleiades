@@ -27,5 +27,5 @@
 pub mod event;
 pub mod event_bus;
 
-pub use event::Bus_Event;
+pub use event::{Bus_Event, NotifyLevel};
 pub use event_bus::EventBus;

@@ -6,7 +6,7 @@
 //! 处理来自 Network_Service 的 InboundRequest（仅 Command + File DataType）。
 
 use super::Core;
-use crate::event_bus::event::Bus_Event;
+use crate::event_bus::{Bus_Event, NotifyLevel};
 use crate::network::{InboundRequest, DataType};
 
 impl Core {
@@ -18,7 +18,8 @@ impl Core {
         match req.data_type {
             DataType::Command => {
                 // TODO: 未来实现 Establish_Tensor_Stream / Join_Pipeline / Profile_Request
-                self.capabilities.event_bus.Publish(Bus_Event::Log {
+                self.capabilities.event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Info,
                     message: format!(
                         "[route_inbound] Command 入站暂未实现 (peer: {})",
                         req.peer
@@ -28,7 +29,8 @@ impl Core {
             }
             DataType::File => {
                 // TODO: 未来实现文件元数据协商 → pending_file_receives
-                self.capabilities.event_bus.Publish(Bus_Event::Log {
+                self.capabilities.event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Info,
                     message: format!(
                         "[route_inbound] File 入站暂未实现 (peer: {})",
                         req.peer
