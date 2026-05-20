@@ -133,12 +133,13 @@ impl Core {
 
             // ─── 列出模型 ──────────────────────────────────
             UserCommand::List => {
-                let text = match self.capabilities.storage.list().await {
+                let (text, json_entries) = match self.capabilities.storage.list().await {
                     Ok(entries) => {
                         if entries.is_empty() {
-                            "存储为空（无文件）".to_string()
+                            ("存储为空（无文件）".to_string(), vec![])
                         } else {
                             let mut output = format!("共 {} 个文件:\n", entries.len());
+                            let mut items: Vec<serde_json::Value> = Vec::new();
                             for e in &entries {
                                 let size = if e.size >= 1_073_741_824 {
                                     format!("{:.1} GB", e.size as f64 / 1_073_741_824.0)
@@ -149,6 +150,11 @@ impl Core {
                                 } else {
                                     format!("{} B", e.size)
                                 };
+                                let bitmap_hex = e.layer_bitmap.map(|bm| {
+                                    let mut s = String::with_capacity(64);
+                                    for b in &bm { s.push_str(&format!("{:02x}", b)); }
+                                    s
+                                });
                                 if let (Some(arch), Some(layers), Some(id)) =
                                     (e.architecture.as_ref(), e.num_layers, e.model_id)
                                 {
@@ -162,14 +168,28 @@ impl Core {
                                         e.file_name, size
                                     ));
                                 }
+                                items.push(serde_json::json!({
+                                    "file_name": e.file_name,
+                                    "size": e.size,
+                                    "architecture": e.architecture,
+                                    "num_layers": e.num_layers,
+                                    "model_id": e.model_id,
+                                    "layer_bitmap": bitmap_hex,
+                                }));
                             }
-                            output
+                            (output, items)
                         }
                     }
-                    Err(e) => format!("错误: {}", e),
+                    Err(e) => (format!("错误: {}", e), vec![]),
                 };
                 self.capabilities.event_bus.Publish(Bus_Event::Output {
-                    payload: cmd_output(text, true),
+                    payload: serde_json::json!({
+                        "type": "cmd_result",
+                        "text": text,
+                        "completed": true,
+                        "entries": json_entries,
+                    })
+                    .to_string(),
                 });
             }
 

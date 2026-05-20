@@ -323,8 +323,20 @@ fn handle_stream(app: &mut App, v: &serde_json::Value) {
 fn handle_output(app: &mut App, v: &serde_json::Value) {
     match v["type"].as_str() {
         Some("cmd_result") => {
-            app.command_output.output_text =
-                v["text"].as_str().unwrap_or("").to_string();
+            let mut text = v["text"].as_str().unwrap_or("").to_string();
+            // 解析 entries 中的 layer_bitmap，追加层范围信息
+            if let Some(entries) = v["entries"].as_array() {
+                for entry in entries {
+                    if let (Some(name), Some(bitmap_str)) =
+                        (entry["file_name"].as_str(), entry["layer_bitmap"].as_str())
+                    {
+                        if let Some(range) = bitmap_hex_to_layer_range(bitmap_str) {
+                            text.push_str(&format!("\n  {} layers: {}", name, range));
+                        }
+                    }
+                }
+            }
+            app.command_output.output_text = text;
             app.command_output.completed = v["completed"].as_bool().unwrap_or(true);
             app.command_scroll = 0;
         }
@@ -335,6 +347,49 @@ fn handle_output(app: &mut App, v: &serde_json::Value) {
         }
         _ => {}
     }
+}
+
+/// 将 64 字符 hex 位图解码为层范围字符串（如 "0-3,5,7-9"）
+fn bitmap_hex_to_layer_range(hex: &str) -> Option<String> {
+    if hex.len() < 64 {
+        return None;
+    }
+    let mut layers: Vec<usize> = Vec::new();
+    for i in 0..32 {
+        let Ok(byte) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) else {
+            return None;
+        };
+        for bit in 0..8 {
+            if byte & (1 << bit) != 0 {
+                layers.push(i * 8 + bit);
+            }
+        }
+    }
+    if layers.is_empty() {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut start = layers[0];
+    let mut end = layers[0];
+    for &l in &layers[1..] {
+        if l == end + 1 {
+            end = l;
+        } else {
+            ranges.push(if start == end {
+                format!("{}", start)
+            } else {
+                format!("{}-{}", start, end)
+            });
+            start = l;
+            end = l;
+        }
+    }
+    ranges.push(if start == end {
+        format!("{}", start)
+    } else {
+        format!("{}-{}", start, end)
+    });
+    Some(ranges.join(","))
 }
 
 // ============================================================
