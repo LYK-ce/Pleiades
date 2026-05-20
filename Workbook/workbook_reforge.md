@@ -15,3 +15,11 @@
 - ML_VM/, Orchestrator_VM/, Vm_Base/, Scheduler/ 全删
 - program_selector.rs 删除, TOML 模板全删
 - Orchestrator/core/ 重构 (branch_user/command/stream/lifecycle)
+
+## reload 命令实现 (completed)
+开始: 2026-05-20 | 结束: 2026-05-20
+修改文件:
+- Src/Orchestrator/command.rs: +UserCommand::Reload
+- Src/Orchestrator/core/branch_user.rs: route_user 处理 Reload → program_registry.reload_user() → Bus_Event::Output 返回结果; BUILTIN_COMMANDS + ("reload", "重新加载用户 Lua 脚本")
+- Src/TUI/mod.rs: Handle_Command_Input + "reload" 分支 → UserCommand::Reload
+cargo check --no-default-features: 0 errors, 19 pre-existing warnings

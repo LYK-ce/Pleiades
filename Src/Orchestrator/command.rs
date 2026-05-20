@@ -52,6 +52,8 @@ pub enum UserCommand {
     Flush,
     /// 设置本地节点名称
     SetName { name: String },
+    /// 重新加载 programs/user/ 目录下的 Lua 脚本
+    Reload,
 }
 
 // ============================================================

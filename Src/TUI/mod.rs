@@ -674,6 +674,20 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- reload (重新加载用户脚本) ----
+
+    if trimmed == "reload" {
+        let cmd = UserCommand::Reload;
+
+        app.Add_Log("执行命令: reload".to_string());
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+        }
+        return;
+    }
+
     // ---- set-name <name> ----
 
     if let Some(name) = trimmed.strip_prefix("set-name ") {

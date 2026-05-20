@@ -30,7 +30,10 @@
 ### TUI 集成 (Phase 3)
 
 - [ ] 命令补全数据源切换为 ProgramRegistry::command_names()
-- [ ] reload 命令实现
+- [x] reload 命令实现
+  - [x] `Src/Orchestrator/command.rs` — 新增 `UserCommand::Reload`
+  - [x] `Src/Orchestrator/core/branch_user.rs` — `route_user` 处理 Reload，调用 `program_registry.reload_user()`，通过 `Bus_Event::Output` 返回结果
+  - [x] `Src/TUI/mod.rs` — `Handle_Command_Input` 新增 `"reload"` 分支，发送 `UserCommand::Reload`
 - [ ] Commands_Reloaded 事件通知 TUI 刷新
 
 ### 遗留代码清理 (Phase 4)

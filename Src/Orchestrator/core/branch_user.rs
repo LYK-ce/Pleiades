@@ -44,6 +44,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("set-device cpu|cuda",   "切换计算设备"),
     ("ls",                    "列出存储文件"),
     ("flush",                 "刷新存储索引"),
+    ("reload",                "重新加载用户 Lua 脚本"),
     ("set-name <name>",       "设置本地节点名称"),
     ("distribute <model> <peer:0-15> ...", "分发模型分片"),
     ("send <file> <name>",    "向节点发送文件（支持 name 或 peer_id）"),
@@ -145,6 +146,20 @@ impl Core {
                     }
                     Err(e) => format!("设置名称失败: {}", e),
                 };
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(text, true),
+                });
+            }
+
+            // ─── 重新加载 Lua 脚本 ──────────────────────────
+            UserCommand::Reload => {
+                let before = self.program_registry.command_names().len();
+                self.program_registry.reload_user();
+                let after = self.program_registry.command_names().len();
+                let text = format!(
+                    "reload 完成: 重新扫描 user 脚本 (总命令数: {} → {})",
+                    before, after
+                );
                 self.capabilities.event_bus.Publish(Bus_Event::Output {
                     payload: cmd_output(text, true),
                 });
