@@ -173,7 +173,17 @@ pub fn GGUF_Load_Model(
                 .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {}", e))?;
 
             // 尝试加载 tokenizer（如原 GGUF 文件包含，则加载；split 文件通常不含 tokenizer）
-            let tok = shimmytok::Tokenizer::from_gguf_file(model_path).ok();
+            let tok = match shimmytok::Tokenizer::from_gguf_file(model_path) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load tokenizer from {}: {}. Model will have no tokenizer.",
+                        model_path.display(),
+                        e
+                    );
+                    None
+                }
+            };
 
             (
                 Some(candle_nn::Embedding::new(
