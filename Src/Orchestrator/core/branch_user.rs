@@ -61,13 +61,19 @@ impl Core {
     pub async fn route_user(&mut self, cmd: UserCommand) {
         match cmd {
             // ─── 通用 Lua 脚本执行 (fire-and-forget) ─────
-            UserCommand::Execute { command, params } => {
+            UserCommand::Execute { command, mut params } => {
                 let Some(entry) = self.program_registry.get_user(&command).cloned() else {
                     self.capabilities.event_bus.Publish(Bus_Event::Output {
                         payload: cmd_output(format!("未知命令: {}", command), true),
                     });
                     return;
                 };
+                // 解析 peer 参数：name → peer_id
+                if let Some(peer_val) = params.get("peer") {
+                    if let Ok(info) = self.capabilities.peer_manager.Get_Peer_By_Name(peer_val).await {
+                        params.insert("peer".to_string(), info.peer_id.to_string());
+                    }
+                }
                 spawn_lua_script(entry.path, params, self.capabilities.clone(), command);
             }
 
