@@ -46,7 +46,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("flush",                 "刷新存储索引"),
     ("set-name <name>",       "设置本地节点名称"),
     ("distribute <model> <peer:0-15> ...", "分发模型分片"),
-    ("send <file> <peer>",    "向节点发送文件"),
+    ("send <file> <name>",    "向节点发送文件（支持 name 或 peer_id）"),
     ("profile <model>",       "启动 Profile"),
     ("exec <cmd> [k=v ...]",  "执行用户 Lua 脚本"),
     ("clear",                 "清空日志"),
@@ -266,9 +266,14 @@ impl Core {
                     });
                     return;
                 };
+                // 解析目标：优先按 name 查找，否则当作裸 peer_id
+                let target_id = match self.capabilities.peer_manager.Get_Peer_By_Name(&peer_id).await {
+                    Ok(info) => info.peer_id.to_string(),
+                    Err(_) => peer_id.clone(),
+                };
                 let mut params = std::collections::HashMap::new();
                 params.insert("file".into(), file_path.clone());
-                params.insert("peer".into(), peer_id.clone());
+                params.insert("peer".into(), target_id);
                 spawn_lua_script(
                     entry.path,
                     params,
