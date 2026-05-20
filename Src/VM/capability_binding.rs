@@ -215,18 +215,7 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     ml.set(
         "analyze_model",
         lua.create_async_function(move |lua, path: String| async move {
-            let p = std::path::Path::new(&path);
-            let resolved = if p.extension().map_or(true, |e| e != "gguf" && e != "pgguf") {
-                // 纯 model_name 或路径无模型后缀 → Resolve_Model_Path
-                let ws = p.parent().filter(|par| !par.as_os_str().is_empty())
-                    .unwrap_or(std::path::Path::new("Pleiades_Workspace"));
-                let name = p.file_stem().unwrap_or(p.as_os_str()).to_string_lossy();
-                crate::ml_engine::gguf_model_manager::Resolve_Model_Path(ws, &name)
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
-            } else {
-                p.to_path_buf()
-            };
-            let info = capability::analyze_model(&resolved).await
+            let info = capability::analyze_model(std::path::Path::new(&path)).await
                 .map_err(|e| mlua::Error::runtime(e))?;
             let t = lua.create_table()?;
             t.set("architecture", info.architecture)?;

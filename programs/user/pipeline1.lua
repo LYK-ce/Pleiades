@@ -7,8 +7,7 @@ COMMAND = "pipeline1"
 DESCRIPTION = "流水线并行前半段: embedding + transformer[0..mid-1], 负责采样解码"
 
 function execute(params)
-    local model = params.model or "test"
-    local model_path = "Pleiades_Workspace/" .. model
+    local model = params.model or "test.pgguf"
     local device = params.device or "cpu"
     local temperature = tonumber(params.temperature) or 0.8
     local max_tokens = tonumber(params.max_tokens) or 60
@@ -19,48 +18,57 @@ function execute(params)
         return
     end
 
-    -- 0. 分析模型获取层数
-    caps.print("[pipeline1] 分析模型: " .. model_path)
-    local info = ml.analyze_model(model_path)
-    local N = info.num_layers       -- transformer block 数
-    local total = N + 1             -- output 层
-    local mid = math.floor(N / 2)   -- 前半: 0..mid, 后半: mid+1..total
+    -- 0. 通过 Storage 获取模型路径
+    local handle = caps.storage_acquire_read(model)
+    local raw_path = handle:path()
+    caps.print("[pipeline1] 模型文件: " .. raw_path)
 
+    -- 1. 分析模型（自动处理 .gguf→.pgguf 转换）
+    caps.print("[pipeline1] 分析模型...")
+    local info = ml.analyze_model(raw_path)
+    local N = info.num_layers
+    local total = N + 1
+    local mid = math.floor(N / 2)
     caps.print("  总层: " .. total .. " (embedding=0, blocks=1.." .. N .. ", output=" .. total .. ")")
     caps.print("  分段: A[0.." .. mid .. "]  B[" .. (mid+1) .. ".." .. total .. "]")
 
-    -- 1. 创建会话，加载前半模型
+    -- 2. 确定 .pgguf 路径
+    local pgguf_path = raw_path
+    if raw_path:match("%.gguf$") then
+        pgguf_path = raw_path:gsub("%.gguf$", ".pgguf")
+    end
+
+    -- 3. 创建会话，加载前半模型
     local sess = ml.new(device)
     caps.print("[pipeline1] 加载 0.." .. mid)
-    sess:load_model(model_path, 0, mid)
+    sess:load_model(pgguf_path, 0, mid)
     caps.print("[pipeline1] 模型加载完成 (has_input_head=" .. tostring(sess:has_model()) .. ")")
 
-    -- 2. 编码 prompt
+    -- 4. 编码 prompt
     local prompt = "你好，请介绍一下你自己。"
     caps.print("[pipeline1] Prompt: " .. prompt)
     local tokens = sess:encode(prompt)
     caps.print("[pipeline1] 编码: " .. #tokens .. " tokens")
 
-    -- 3. 建立双流
+    -- 5. 建立双流
     caps.print("[pipeline1] 建立连接...")
     local stream1 = caps.network.open_tensor_stream(peer, 42)
     caps.print("[pipeline1] stream1 已打开")
     local stream2 = caps.network.accept_tensor_stream(42, 120)
     caps.print("[pipeline1] stream2 已建立")
 
-    -- 4. 首次前向 (处理 prompt)
+    -- 6. 首次前向 (处理 prompt)
     caps.print("[pipeline1] 首次前向...")
     local t = sess:tensorize(tokens)
     local initial_offset = 0
     local hidden = sess:forward(t, initial_offset)
     caps.print("[pipeline1] hidden dims: [" .. table.concat(hidden:dims(), ", ") .. "]")
     caps.network.send_tensor(stream1, hidden, initial_offset)
-    local offset = #tokens  -- prompt 长度之后的 offset
+    local offset = #tokens
 
-    -- 5. 接收 logits, 采样, 解码
+    -- 7. 接收 logits, 采样, 解码
     local eos = sess:get_eos()
 
-    -- 先收首次 logits
     local logits = caps.network.recv_tensor(stream2, device)
     local tok = sess:sample(logits, temperature)
 
@@ -75,15 +83,13 @@ function execute(params)
     caps.print(text)
     local generated = 1
 
-    -- 6. 自回归循环
+    -- 8. 自回归循环
     for i = 2, max_tokens do
-        -- 单 token 前向
         local next_t = sess:tensorize({tok})
         hidden = sess:forward(next_t, offset)
         caps.network.send_tensor(stream1, hidden, offset)
         offset = offset + 1
 
-        -- 收 B 的 logits
         logits = caps.network.recv_tensor(stream2, device)
         tok = sess:sample(logits, temperature)
 
@@ -97,7 +103,7 @@ function execute(params)
         generated = generated + 1
     end
 
-    -- 7. 结束
+    -- 9. 结束
     caps.network.send_eof(stream1)
     caps.print("[pipeline1] 完成, 共 " .. generated .. " tokens")
     sess:unload()

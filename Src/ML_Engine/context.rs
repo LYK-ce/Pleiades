@@ -314,16 +314,12 @@ impl mlua::UserData for MlSession {
             "load_model",
             |_, sess, (path, start, end): (String, usize, usize)| {
                 let p = std::path::Path::new(&path);
-                let resolved = if p.extension().map_or(true, |e| e != "gguf" && e != "pgguf") {
-                    let ws = p.parent().filter(|par| !par.as_os_str().is_empty())
-                        .unwrap_or(std::path::Path::new("Pleiades_Workspace"));
-                    let name = p.file_stem().unwrap_or(p.as_os_str()).to_string_lossy();
-                    crate::ml_engine::gguf_model_manager::Resolve_Model_Path(ws, &name)
-                        .map_err(|e| mlua::Error::runtime(e.to_string()))?
-                } else {
-                    p.to_path_buf()
-                };
-                sess.load_model(&resolved, start, end)
+                if p.extension().map_or(true, |e| e != "pgguf") {
+                    return Err(mlua::Error::runtime(
+                        "load_model 仅支持 .pgguf 格式，请先用 analyze_model 转换 .gguf 文件"
+                    ));
+                }
+                sess.load_model(p, start, end)
                     .map_err(|e| mlua::Error::runtime(e))
             },
         );

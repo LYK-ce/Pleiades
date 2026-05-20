@@ -4,37 +4,49 @@
 -- 单机推理脚本
 
 COMMAND = "run"
-DESCRIPTION = "单机推理 (硬编码 prompt, 模型默认 Pleiades_Workspace/test → .pgguf 或 .gguf)"
+DESCRIPTION = "单机推理 (默认模型 test.pgguf)"
 
 function execute(params)
-    local model_name = params.model or "test"
-    local model_path = "Pleiades_Workspace/" .. model_name
+    local model_name = params.model or "test.pgguf"
     local device = params.device or "cpu"
     local temperature = tonumber(params.temperature) or 0.8
     local max_tokens = tonumber(params.max_tokens) or 120
 
     caps.print("设备: " .. device)
-    caps.print("模型: " .. model_path)
+    caps.print("模型: " .. model_name)
 
-    -- 1. 创建会话
+    -- 0. 通过 Storage 获取模型路径
+    local handle = caps.storage_acquire_read(model_name)
+    local raw_path = handle:path()
+    caps.print("模型路径: " .. raw_path)
+
+    -- 1. 确定 .pgguf 路径（.gguf 先 analyze 转换）
+    local pgguf_path = raw_path
+    if raw_path:match("%.gguf$") then
+        caps.print("检测到 .gguf，正在转换...")
+        ml.analyze_model(raw_path)
+        pgguf_path = raw_path:gsub("%.gguf$", ".pgguf")
+    end
+
+    -- 2. 创建会话
     local sess = ml.new(device)
     caps.print("加载模型中...")
-    sess:load_model(model_path, 0, 999999)
+    sess:load_model(pgguf_path, 0, 999999)
     caps.print("模型加载完成")
 
-    -- 2. 硬编码 prompt
+    -- 3. 硬编码 prompt
     local prompt = "你好，请介绍一下你自己。"
     caps.print("Prompt: " .. prompt)
 
-    -- 3. 编码
+    -- 4. 编码
     local tokens = sess:encode(prompt)
     caps.print("编码完成, token 数: " .. #tokens)
 
-    -- 4. 首次推理
+    -- 5. 首次推理
     local t = sess:tensorize(tokens)
     local logits = sess:forward(t, 0)
 
-    -- 5. 自回归生成
+    -- 6. 自回归生成
     local eos = sess:get_eos()
     local generated = 0
     for i = 1, 120 do
@@ -49,12 +61,12 @@ function execute(params)
         generated = generated + 1
 
         local next_t = sess:tensorize({tok})
-        logits = sess:forward(next_t, nil)  -- nil = 自动 offset
+        logits = sess:forward(next_t, nil)
     end
 
     caps.print("生成完成, 共 " .. generated .. " tokens")
 
-    -- 6. 卸载模型
+    -- 7. 卸载模型
     sess:unload()
     caps.print("模型已卸载")
 end
