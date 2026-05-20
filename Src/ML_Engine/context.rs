@@ -315,9 +315,11 @@ impl mlua::UserData for MlSession {
             |_, sess, (path, start, end): (String, usize, usize)| {
                 let p = std::path::Path::new(&path);
                 let resolved = if p.extension().map_or(true, |e| e != "gguf" && e != "pgguf") {
-                    let pgguf = p.with_extension("pgguf");
-                    if pgguf.exists() { pgguf }
-                    else { p.with_extension("gguf") }
+                    let ws = p.parent().filter(|par| !par.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("Pleiades_Workspace"));
+                    let name = p.file_stem().unwrap_or(p.as_os_str()).to_string_lossy();
+                    crate::ml_engine::gguf_model_manager::Resolve_Model_Path(ws, &name)
+                        .map_err(|e| mlua::Error::runtime(e.to_string()))?
                 } else {
                     p.to_path_buf()
                 };
