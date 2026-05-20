@@ -7,7 +7,11 @@ COMMAND = "pipeline2"
 DESCRIPTION = "流水线并行后半段: transformer[mid..N] + output, 产出 logits"
 
 function execute(params)
-    local model = params.model or "test.pgguf"
+    local model = params.model
+    if not model then
+        caps.print("[pipeline2] 缺少 model 参数")
+        return
+    end
     local model_path = "Pleiades_Workspace/" .. model
     local device = params.device or "cpu"
     local peer = params.peer
