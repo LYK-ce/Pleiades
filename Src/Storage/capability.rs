@@ -111,8 +111,8 @@ pub trait StorageCapability: Send + Sync {
 pub struct FileEntry {
     /// 存储文件名（扁平命名空间）
     pub file_name: String,
-    /// 模型唯一标识（xxhash64(pgguf内容)），非模型文件为 None
-    pub model_id: Option<u64>,
+    /// 模型唯一标识（xxhash32(pgguf内容)），非模型文件为 None
+    pub model_id: Option<u32>,
     /// 磁盘文件大小（字节），flush 时统一刷新
     pub size: u64,
     /// 模型总层数

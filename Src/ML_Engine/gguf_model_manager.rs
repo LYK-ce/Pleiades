@@ -17,7 +17,8 @@ use candle_core::Device;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Seek, SeekFrom};
 use std::path::Path;
-use twox_hash::xxh3::hash64;
+use std::hash::Hasher;
+use twox_hash::XxHash32;
 
 // ============================================================
 // 数据结构定义
@@ -47,8 +48,8 @@ pub struct Model_Arch_Info {
     pub split_start: usize,
     /// 切分的结束层（仅当 is_split 为 true 时有效）
     pub split_end: usize,
-    /// 模型唯一标识 — xxhash64(原始文件字节)，PGGUF 从 metadata 读取
-    pub model_id: Option<u64>,
+    /// 模型唯一标识 — xxhash32(原始文件字节)，PGGUF 从 metadata 读取
+    pub model_id: Option<u32>,
     /// 256 位层位图，bit N=1 表示文件含第 N 层
     pub layer_bitmap: Option<[u8; 32]>,
 }
@@ -517,7 +518,7 @@ fn Build_Layer_Bitmap(
 /// 解析 GGUF / PGGUF 文件，返回架构元信息。
 ///
 /// 如果是原始 GGUF（metadata 无 pleiades.model_id）：
-///   1. 读全量字节 → xxhash64 → model_id
+///   1. 读全量字节 → xxhash32 → model_id
 ///   2. 从 tensor 信息构建 layer_bitmap
 ///   3. 写入 .pgguf 文件（metadata 追加 model_id + layer_bitmap）
 ///   4. 删除原始 .gguf → 重命名 .pgguf 覆盖原后缀
@@ -539,19 +540,21 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info
 
     if let (Some(id), Some(hex_bitmap)) = (existing_model_id, existing_bitmap) {
         // 已是 PGGUF → 直接读取，零 I/O
-        arch_info.model_id = Some(id as u64);
+        arch_info.model_id = Some(id as u32);
         arch_info.layer_bitmap = Some(Parse_Bitmap_Hex(&hex_bitmap));
         return Ok(arch_info);
     }
 
     // 4. 原始 GGUF → 计算 model_id + layer_bitmap
-    //    读全量字节计算 xxhash64
+    //    读全量字节计算 xxhash32
     let mut raw_bytes = Vec::new();
     file.seek(SeekFrom::Start(0))
         .map_err(|e| anyhow::anyhow!("Failed to seek to start: {}", e))?;
     file.read_to_end(&mut raw_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to read file bytes: {}", e))?;
-    let model_id = hash64(&raw_bytes);
+    let mut hasher = XxHash32::with_seed(0);
+    hasher.write(&raw_bytes);
+    let model_id = hasher.finish() as u32;
 
     // 5. 从 Content 的 tensor_infos 构建 layer_bitmap
     //    先重建 layer_tensors_map（与 GGUF_Analyze_From_Content 相同逻辑）
@@ -580,7 +583,7 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info
         .collect();
     metadata_pairs.push((
         "pleiades.model_id".to_string(),
-        gguf_file::Value::U64(model_id),
+        gguf_file::Value::U32(model_id),
     ));
     metadata_pairs.push((
         "pleiades.layer_bitmap".to_string(),

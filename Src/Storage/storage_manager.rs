@@ -20,7 +20,7 @@ struct FileState {
     /// 文件磁盘大小（字节），flush 时统一刷新
     size: u64,
     /// 模型唯一标识（从 PGGUF 元数据读取），非模型文件为 None
-    model_id: Option<u64>,
+    model_id: Option<u32>,
     /// 模型总层数
     num_layers: Option<u32>,
     /// 256 位层位图
@@ -423,7 +423,7 @@ impl StorageCapability for StorageManager {
 
             // 不在索引中，插入
             let is_model = Self::Is_Model_File(&file_name_str);
-            let mut model_id: Option<u64> = None;
+            let mut model_id: Option<u32> = None;
             let mut num_layers: Option<u32> = None;
             let mut layer_bitmap: Option<[u8; 32]> = None;
             let mut architecture: Option<String> = None;

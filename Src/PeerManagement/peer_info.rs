@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 /// - `layer_bitmap` 用于判断节点持有模型的哪些层
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupportedModel {
-    /// 模型唯一标识 — xxhash64(content) → u64
-    pub id: u64,
+    /// 模型唯一标识 — xxhash32(content) → u32
+    pub id: u32,
     /// 存储文件名（Storage file_id）
     pub file_name: String,
     /// 256 位层位图，bit N = 1 表示持有第 N 层
@@ -31,7 +31,7 @@ pub struct SupportedModel {
 
 impl SupportedModel {
     /// 创建持有完整模型（全部层）的描述
-    pub fn full(id: u64, file_name: String) -> Self {
+    pub fn full(id: u32, file_name: String) -> Self {
         Self {
             id,
             file_name,
@@ -40,7 +40,7 @@ impl SupportedModel {
     }
 
     /// 创建持有模型分片的描述，仅指定层范围的位为 1
-    pub fn shard(id: u64, file_name: String, layer_start: usize, layer_end: usize) -> Self {
+    pub fn shard(id: u32, file_name: String, layer_start: usize, layer_end: usize) -> Self {
         let mut bitmap = [0u8; 32];
         for layer in layer_start..layer_end {
             let byte_idx = layer / 8;
