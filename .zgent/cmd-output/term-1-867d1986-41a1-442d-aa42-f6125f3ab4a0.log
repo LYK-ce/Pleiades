@@ -1,3 +1,0 @@
-> cd /workspace && git checkout -b reforge origin/reforge
-branch 'reforge' set up to track 'origin/reforge'.
-Switched to a new branch 'reforge'

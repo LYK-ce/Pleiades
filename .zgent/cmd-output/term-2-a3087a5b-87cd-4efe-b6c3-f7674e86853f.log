@@ -1,4 +1,0 @@
-> cd /workspace && cargo check --no-default-features 2>&1 | grep -E "error|Finished"
-warning: unused imports: `debug` and `error`
-43 | use tracing::{debug, error, info, warn};
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.11s

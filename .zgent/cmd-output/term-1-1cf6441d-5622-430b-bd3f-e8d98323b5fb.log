@@ -1,3 +1,0 @@
-> cd /workspace && git remote set-url origin git@github.com:LYK-ce/Pleiades.git && git remote -v
-origingit@github.com:LYK-ce/Pleiades.git (fetch)
-origingit@github.com:LYK-ce/Pleiades.git (push)

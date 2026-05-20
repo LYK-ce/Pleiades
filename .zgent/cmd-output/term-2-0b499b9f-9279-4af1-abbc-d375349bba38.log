@@ -1,3 +1,0 @@
-> ls -la /workspace/Pleiades_Workspace/ 2>&1 || echo "NO_DIR"
-ls: cannot access '/workspace/Pleiades_Workspace/': No such file or directory
-NO_DIR

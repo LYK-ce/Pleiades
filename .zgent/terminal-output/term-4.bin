@@ -1,40 +1,0 @@
-cd /workspace && git branch -a && echo "---" && git log --oneline -1
-[?1h=  master[m[m
-  reforge[m[m
-* [32mtui-reforge[m[m
-  [31mremotes/origin/HEAD[m -> origin/master[m
-  [31mremotes/origin/eventbus-reforge[m[m
-  [31mremotes/origin/feature/lua[m[m
-  [31mremotes/origin/lua-tensor[m[m
-  [31mremotes/origin/machine-learning-reforge[m[m
-  [31mremotes/origin/master[m[m
-  [31mremotes/origin/orchestrator-reforge[m[m
-  [31mremotes/origin/peer-manager-reforge[m[m
-  [31mremotes/origin/reforge[m[m
-[K[?1l>---
-[?1h=[33mdb5a128[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mtui-reforge[m[33m)[m docs: TUI 设计文档 — 布局/面板/EventBus映射/已知限制/TODO[m
-[K[?1l>[?2004h[32m>[0m ls -la ~/.ssh/ 2>/dev/null && chmod 600 ~/.ssh/id_ed25519 2>/dev/null; chmod 644 ~/.ssh/id_ed25519.pub 2>/dev/null; echo "SSH keys checked"
-total 9
-drwxr-xr-x 2 agent agent   6 May 15 07:52 [0m[01;34m.[0m
-drwx------ 5 agent agent  11 May 20 01:57 [01;34m..[0m
--rw------- 1 agent agent 411 May 15 07:08 id_ed25519
--rw-r--r-- 1 agent agent  98 May 15 07:08 id_ed25519.pub
--rw------- 1 agent agent 828 May 15 07:52 known_hosts
--rw-r--r-- 1 agent agent  92 May 15 07:52 known_hosts.old
-SSH keys checked
-[?2004h[32m>[0m export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && ssh -T git@github.com 2>&1
-[?2004lHi LYK-ce! You've successfully authenticated, but GitHub does not provide shell access.
-[?2004h[32m>[0m cd /workspace && git remote -v
-[?2004lorigin	git@github.com:LYK-ce/Pleiades.git (fetch)
-origin	git@github.com:LYK-ce/Pleiades.git (push)
-[?2004h[32m>[0m cd /workspace && export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && git merge tui-reforge -m "merge: tui-reforge → reforge (TUI 设计文档)"
-[?2004lUpdating b4b316d..db5a128
-Fast-forward (no commit created; -m option ignored)
- Workbook/workbook_2026_05_19.md |  20 [32m++++[m
- docs/design_doc/tui_design.md   | 501 [32m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[m
- 2 files changed, 521 insertions(+)
- create mode 100644 Workbook/workbook_2026_05_19.md
- create mode 100644 docs/design_doc/tui_design.md
-[?2004h[32m>[0m cd /workspace && export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && git push origin reforge
-Enumerating objects: 11, done.
-Counting objects:   9% (1/11)Counting objects:  18% (2/11)Counting objects:  27% (3/11)Counting objects:  36% (4/11)Counting objects:  45% (5/11)Counting objects:  54% (6/11)Counting objects:  63% (7/11)Counting objects:  72% (8/11)Counting objects:  81% (9/11)Counting objects:  90% (10/11)Counting objects: 100% (11/11)Counting objects: 100% (11/11), done.

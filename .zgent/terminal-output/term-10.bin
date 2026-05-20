@@ -1,1 +1,0 @@
-cd /workspace && cargo check --no-default-features 2>&1

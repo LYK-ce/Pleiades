@@ -1,2 +1,0 @@
-> cd /workspace && grep "Resolve_Model_Path\|GGUF_Analyze_And_Convert" Src/lib.rs
-    GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model,
