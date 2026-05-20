@@ -68,7 +68,7 @@ mod tests {
 
         // 2. 注册日志能力（hello.lua 调用 caps.print）
         let bus = std::sync::Arc::new(crate::event_bus::EventBus::New(4));
-        crate::lua::capability_binding::register_logging_caps(&lua, bus)
+        crate::vm::capability_binding::register_logging_caps(&lua, bus)
             .expect("register logging caps");
 
         // 3. 读取元数据

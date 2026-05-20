@@ -1,0 +1,8 @@
+> cd /workspace && export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && git merge tui-reforge -m "merge: tui-reforge → reforge (TUI 设计文档)"
+Updating b4b316d..db5a128
+Fast-forward (no commit created; -m option ignored)
+ Workbook/workbook_2026_05_19.md |  20 ++++
+ docs/design_doc/tui_design.md   | 501 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 521 insertions(+)
+ create mode 100644 Workbook/workbook_2026_05_19.md
+ create mode 100644 docs/design_doc/tui_design.md

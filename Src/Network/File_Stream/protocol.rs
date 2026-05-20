@@ -28,6 +28,8 @@ use std::io;
 use std::path::Path;
 use tracing::{debug, info};
 
+use crate::event_bus::{Bus_Event, EventBus};
+
 // ===== 协议标识符 =====
 pub const FILE_STREAM_PROTOCOL: &str = "/pleiades/file-stream/1.0.0";
 
@@ -166,15 +168,20 @@ pub async fn Read_File_Stream_Ack(
 ///
 /// # 注意
 /// - 不包含流内嵌 header（文件名+文件大小已协商）
-/// - 不上报进度（进度上报将在 Phase 3 通过 Orchestrator 机制实现）
 /// - 在调用方的 tokio task 中执行，不 spawn 新任务
 pub async fn Send_File_Data(
     stream: &mut libp2p::Stream,
     file_path: &Path,
+    event_bus: &EventBus,
 ) -> io::Result<()> {
     // 1. 打开文件
     let mut file = tokio::fs::File::open(file_path).await?;
     let file_size = tokio::fs::metadata(file_path).await?.len();
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string();
 
     info!(
         "开始发送文件数据: {} ({} bytes)",
@@ -194,6 +201,18 @@ pub async fn Send_File_Data(
         stream.write_all(&buf[..n]).await?;
         sent += n as u64;
         debug!("已发送: {}/{} bytes", sent, file_size);
+
+        event_bus.Publish(Bus_Event::Stream {
+            payload: serde_json::json!({
+                "type": "file_progress",
+                "name": file_name,
+                "dir": "send",
+                "peer": "",
+                "sent": sent,
+                "total": file_size,
+            })
+            .to_string(),
+        });
     }
 
     // 3. flush 确保所有数据已写入
@@ -222,14 +241,20 @@ pub async fn Send_File_Data(
 ///
 /// # 注意
 /// - 不包含流内嵌 header（文件名+文件大小已协商）
-/// - 不上报进度（进度上报将在 Phase 3 通过 Orchestrator 机制实现）
 /// - 在调用方的 tokio task 中执行，不 spawn 新任务
 /// - 如果流在传输中断（read 返回 0 但 remaining > 0），返回 UnexpectedEof
 pub async fn Receive_File_Data(
     stream: &mut libp2p::Stream,
     dest_path: &Path,
     file_size: u64,
+    event_bus: &EventBus,
 ) -> io::Result<()> {
+    let file_name = dest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string();
+
     info!(
         "开始接收文件数据: {} ({} bytes)",
         dest_path.display(),
@@ -265,6 +290,18 @@ pub async fn Receive_File_Data(
         remaining -= n as u64;
         let received = file_size - remaining;
         debug!("已接收: {}/{} bytes", received, file_size);
+
+        event_bus.Publish(Bus_Event::Stream {
+            payload: serde_json::json!({
+                "type": "file_progress",
+                "name": file_name,
+                "dir": "receive",
+                "peer": "",
+                "sent": received,
+                "total": file_size,
+            })
+            .to_string(),
+        });
     }
 
     // 4. flush 确保所有数据已落盘

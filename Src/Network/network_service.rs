@@ -284,6 +284,7 @@ impl Network_Service {
             tensor_open_control,
             bandwidth_stream_control,
             rendezvous.clone(),
+            event_bus.clone(),
         );
 
         // 9. 创建 Network_Service 实例

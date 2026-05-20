@@ -1,0 +1,4 @@
+cd /workspace && cargo check --no-default-features 2>&1
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache

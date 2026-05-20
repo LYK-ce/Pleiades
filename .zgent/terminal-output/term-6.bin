@@ -1,0 +1,4 @@
+cd /workspace && cargo check --no-default-features 2>&1
+[1m[92m    Blocking[0m waiting for file lock on package cache
+[1m[92m    Blocking[0m waiting for file lock on package cache
+[1m[92m    Blocking[0m waiting for file lock on package cache

@@ -12,7 +12,7 @@ use libp2p::PeerId;
 use crate::storage::StorageCapability;
 use crate::ml_engine::{MlSession, capability};
 use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor, tensor_to_bytes};
-use crate::lua::network_stream::NetworkStream;
+use crate::vm::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
@@ -460,7 +460,7 @@ pub fn register_network_caps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lua::engine::LuaContext;
+    use crate::vm::engine::LuaContext;
 
     #[test]
     fn test_sync_function_echo() {

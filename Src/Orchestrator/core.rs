@@ -16,7 +16,7 @@ use super::job::{JobId, JobKind, LifecycleEvent};
 use super::command::UserCommand;
 use super::Capabilities;
 use crate::network::{Network_Inbound_Event, InboundRequest};
-use crate::lua::registry::ProgramRegistry;
+use crate::vm::registry::ProgramRegistry;
 
 const LIFECYCLE_CHANNEL_BUFFER: usize = 64;
 

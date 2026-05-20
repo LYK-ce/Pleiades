@@ -1,3 +1,341 @@
-export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new" && cd /workspace && git add -A && git commit -m "feat: MlSession UserData — Lua class 风格重构 + 设计文档更新
-[?2004l[?2004h> 
-[?2004l[?2004h> 
+cd /workspace && cargo check --no-default-features 2>&1
+[1m[92m   Compiling[0m quote v1.0.45
+[1m[92m    Checking[0m hashlink v0.10.0
+[1m[92m   Compiling[0m nix v0.30.1
+[1m[92m    Checking[0m rustix v1.1.4
+[1m[92m    Checking[0m parking_lot_core v0.9.12
+[1m[92m    Checking[0m generic-array v0.14.7
+[1m[92m    Checking[0m getrandom v0.3.4
+[1m[92m    Checking[0m getrandom v0.2.17
+[1m[92m    Checking[0m errno v0.3.14
+[1m[92m    Checking[0m mio v1.1.1
+[1m[92m    Checking[0m num-traits v0.2.19
+[1m[92m    Checking[0m socket2 v0.6.3
+[1m[92m    Checking[0m hashbrown v0.16.1
+[1m[92m    Checking[0m castaway v0.2.4
+[1m[92m   Compiling[0m onig_sys v69.9.1
+[1m[92m   Compiling[0m ring v0.17.14
+[1m[92m    Checking[0m serde_json v1.0.149
+[1m[92m   Compiling[0m which v8.0.2
+[1m[92m    Checking[0m regex v1.12.3
+[1m[92m    Checking[0m mio v0.8.11
+[1m[92m    Checking[0m time v0.3.47
+[1m[92m    Checking[0m num_cpus v1.17.0
+[1m[92m    Checking[0m memmap2 v0.9.10
+[1m[92m    Checking[0m socket2 v0.5.10
+[1m[92m    Checking[0m matchers v0.2.0
+[1m[92m    Checking[0m uint v0.10.0
+[1m[92m    Checking[0m fancy-regex v0.17.0
+[1m[92m    Checking[0m getrandom v0.4.2
+[1m[92m    Checking[0m fancy-regex v0.13.0
+[1m[92m   Compiling[0m blake3 v1.8.4
+[1m[92m   Compiling[0m syn v2.0.117
+[1m[92m    Checking[0m tracing-core v0.1.36
+[1m[92m    Checking[0m crossbeam-deque v0.8.6
+[1m[92m    Checking[0m netlink-packet-route v0.28.0
+[1m[92m    Checking[0m signal-hook-registry v1.4.8
+[1m[92m    Checking[0m rand_core v0.6.4
+[1m[92m    Checking[0m rand_core v0.9.5
+[1m[96m    Building[0m [===========>             ] 224/433: nix, generic-array, which, blake3(build), num_cpus, matchers, traci…[K[1m[92m    Checking[0m parking_lot v0.12.5
+[1m[96m    Building[0m [===========>             ] 225/433: nix, generic-array, which, blake3(build), num_cpus, matchers, traci…[1m[96m    Building[0m [============>            ] 226/433: nix, generic-array, which, blake3(build), num_cpus, matchers, traci…[1m[96m    Building[0m [============>            ] 227/433: nix, generic-array, which, blake3(build), num_cpus, tracing-core, m…[1m[96m    Building[0m [============>            ] 228/433: nix, generic-array, which, blake3(build), num_cpus, tracing-core, m…[1m[96m    Building[0m [============>            ] 229/433: nix, generic-array, which, blake3(build), tracing-core, mio, getran…[1m[96m    Building[0m [============>            ] 230/433: nix, generic-array, which, blake3(build), tracing-core, mio, getran…[1m[96m    Building[0m [============>            ] 231/433: nix, generic-array, which, blake3(build), tracing-core, mio, crossb…[1m[96m    Building[0m [============>            ] 232/433: nix, generic-array, which, blake3(build), tracing-core, mio, crossb…[K[1m[92m   Compiling[0m luajit-src v210.7.1+18b087c
+[1m[96m    Building[0m [============>            ] 232/433: nix, generic-array, which, blake3(build), tracing-core, mio, crossb…[1m[96m    Building[0m [============>            ] 233/433: nix, generic-array, blake3(build), tracing-core, mio, crossbeam-deq…[1m[96m    Building[0m [============>            ] 234/433: nix, generic-array, blake3(build), tracing-core, mio, crossbeam-deq…[1m[96m    Building[0m [============>            ] 235/433: nix, generic-array, blake3(build), tracing-core, mio, crossbeam-deq…[K[1m[92m    Checking[0m rayon-core v1.13.0
+[1m[96m    Building[0m [============>            ] 236/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[K[1m[92m    Checking[0m signal-hook v0.3.18
+[1m[96m    Building[0m [============>            ] 237/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[1m[96m    Building[0m [============>            ] 238/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[1m[96m    Building[0m [============>            ] 239/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[1m[96m    Building[0m [============>            ] 240/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[1m[96m    Building[0m [============>            ] 241/433: nix, generic-array, blake3(build), tracing-core, mio, fancy-regex, …[1m[96m    Building[0m [============>            ] 242/433: nix, generic-array, blake3(build), tracing-core, fancy-regex, hashb…[1m[96m    Building[0m [=============>           ] 243/433: nix, generic-array, blake3(build), tracing-core, fancy-regex, hashb…[K[1m[92m    Checking[0m tracing-log v0.2.0
+[1m[96m    Building[0m [=============>           ] 244/433: nix, generic-array, blake3(build), fancy-regex, hashbrown, rustix, …[K[1m[92m    Checking[0m crypto-common v0.1.7
+[1m[92m    Checking[0m block-buffer v0.10.4
+[1m[96m    Building[0m [=============>           ] 245/433: nix, blake3(build), fancy-regex, hashbrown, crypto-common, rustix, …[1m[96m    Building[0m [=============>           ] 246/433: nix, blake3(build), hashbrown, crypto-common, rustix, ring(build), …[K[1m[92m    Checking[0m signal-hook-mio v0.2.5
+[1m[96m    Building[0m [=============>           ] 247/433: signal-hook-mio, nix, blake3(build), hashbrown, crypto-common, rust…[K[1m[92m   Compiling[0m mlua-sys v0.11.0-rc.1
+[1m[96m    Building[0m [=============>           ] 248/433: signal-hook-mio, nix, blake3(build), hashbrown, crypto-common, rust…[1m[96m    Building[0m [=============>           ] 249/433: signal-hook-mio, nix, blake3(build), hashbrown, crypto-common, rust…[K[1m[92m    Checking[0m chrono v0.4.44
+[1m[96m    Building[0m [=============>           ] 250/433: signal-hook-mio, nix, blake3(build), hashbrown, crypto-common, chro…[1m[96m    Building[0m [=============>           ] 252/433: signal-hook-mio, nix, blake3(build), hashbrown, chrono, rustix, rin…[K[1m[92m    Checking[0m digest v0.10.7
+[1m[96m    Building[0m [=============>           ] 253/433: signal-hook-mio, nix, blake3(build), hashbrown, chrono, rustix, rin…[K[1m[92m    Checking[0m crossterm v0.27.0
+[1m[96m    Building[0m [=============>           ] 254/433: nix, blake3(build), hashbrown, chrono, rustix, ring(build), digest,…[K[1m[92m    Checking[0m indexmap v2.13.0
+[1m[92m    Checking[0m lru v0.16.4
+[1m[96m    Building[0m [=============>           ] 255/433: nix, indexmap, blake3(build), chrono, rustix, ring(build), digest, …[K[1m[92m    Checking[0m rayon v1.12.0
+[1m[96m    Building[0m [=============>           ] 256/433: nix, indexmap, blake3(build), rayon, chrono, rustix, ring(build), d…[1m[96m    Building[0m [=============>           ] 257/433: nix, indexmap, blake3(build), rayon, chrono, rustix, ring(build), m…[1m[96m    Building[0m [=============>           ] 258/433: nix, indexmap, blake3(build), rayon, chrono, rustix, ring(build), m…[K[1m[92m    Checking[0m sha2 v0.10.9
+[1m[92m    Checking[0m hmac v0.12.1
+[1m[96m    Building[0m [=============>           ] 259/433: hmac, nix, indexmap, blake3(build), rayon, chrono, rustix, ring(bui…[1m[96m    Building[0m [==============>          ] 260/433: hmac, nix, indexmap, blake3(build), rayon, chrono, rustix, ring(bui…[1m[96m    Building[0m [==============>          ] 261/433: hmac, nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(b…[K[1m[92m    Checking[0m hkdf v0.12.4
+[1m[96m    Building[0m [==============>          ] 262/433: nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(build),…[1m[96m    Building[0m [==============>          ] 263/433: nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(build),…[1m[96m    Building[0m [==============>          ] 264/433: nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(build),…[1m[96m    Building[0m [==============>          ] 265/433: nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(build),…[1m[96m    Building[0m [==============>          ] 266/433: nix, indexmap, rayon, chrono, rustix, ring(build), mlua-sys(build),…[K[1m[92m    Checking[0m zip v7.2.0
+[1m[96m    Building[0m [==============>          ] 267/433: nix, rayon, zip, chrono, rustix, ring(build), mlua-sys(build), onig…[1m[96m    Building[0m [==============>          ] 268/433: nix, rayon, zip, chrono, rustix, ring(build), mlua-sys(build), onig…[1m[96m    Building[0m [==============>          ] 269/433: rayon, zip, chrono, rustix, ring(build), mlua-sys(build), onig_sys(…[K[1m[92m    Checking[0m tempfile v3.27.0
+[1m[96m    Building[0m [==============>          ] 270/433: tempfile, rayon, zip, chrono, ring(build), mlua-sys(build), onig_sy…[1m[96m    Building[0m [==============>          ] 271/433: tempfile, rayon, zip, ring(build), mlua-sys(build), onig_sys(build)…[1m[96m    Building[0m [==============>          ] 272/433: rayon, zip, ring(build), mlua-sys(build), onig_sys(build), netlink-…[1m[96m    Building[0m [==============>          ] 273/433: rayon, ring(build), mlua-sys(build), onig_sys(build), netlink-packe…[K[1m[92m    Checking[0m rayon-cond v0.4.0
+[1m[92m    Checking[0m sysinfo v0.33.1
+[1m[96m    Building[0m [==============>          ] 274/433: ring(build), mlua-sys(build), rayon-cond, onig_sys(build), netlink-…[1m[96m    Building[0m [==============>          ] 275/433: ring(build), mlua-sys(build), onig_sys(build), netlink-packet-route…[1m[96m    Building[0m [==============>          ] 276/433: ring(build), mlua-sys(build), onig_sys(build), netlink-packet-route…[K[1m[92m   Compiling[0m snow v0.9.6
+[1m[96m    Building[0m [==============>          ] 277/433: mlua-sys(build), ring, onig_sys(build), netlink-packet-route, syn, …[1m[96m    Building[0m [===============>         ] 278/433: mlua-sys(build), ring, onig_sys(build), netlink-packet-route, syn   [1m[96m    Building[0m [===============>         ] 279/433: mlua-sys(build), ring, onig_sys(build), syn                         [K[1m[92m   Compiling[0m synstructure v0.13.2
+[1m[92m   Compiling[0m darling_core v0.20.11
+[1m[92m   Compiling[0m darling_core v0.23.0
+[1m[96m    Building[0m [===============>         ] 279/433: darling_core, mlua-sys(build), darling_core, ring, onig_sys(build),…[1m[96m    Building[0m [===============>         ] 280/433: darling_core, mlua-sys(build), darling_core, ring, onig_sys(build),…[K[1m[92m   Compiling[0m zerocopy-derive v0.8.42
+[1m[92m   Compiling[0m serde_derive v1.0.228
+[1m[92m   Compiling[0m thiserror-impl v2.0.18
+[1m[92m   Compiling[0m zerofrom-derive v0.1.6
+[1m[92m   Compiling[0m yoke-derive v0.8.1
+[1m[92m   Compiling[0m futures-macro v0.3.32
+[1m[92m   Compiling[0m zerovec-derive v0.11.2
+[1m[92m   Compiling[0m displaydoc v0.2.5
+[1m[92m   Compiling[0m tracing-attributes v0.1.31
+[1m[92m   Compiling[0m zeroize_derive v1.4.3
+[1m[92m   Compiling[0m pin-project-internal v1.1.11
+[1m[92m   Compiling[0m curve25519-dalek-derive v0.1.1
+[1m[92m   Compiling[0m data-encoding-macro-internal v0.1.17
+[1m[92m   Compiling[0m tokio-macros v2.6.1
+[1m[92m   Compiling[0m bytemuck_derive v1.10.2
+[1m[92m   Compiling[0m match-lookup v0.1.2
+[1m[92m   Compiling[0m thiserror-impl v1.0.69
+[1m[92m   Compiling[0m libp2p-swarm-derive v0.35.1
+[1m[92m   Compiling[0m strum_macros v0.27.2
+[1m[92m   Compiling[0m monostate-impl v0.1.18
+[1m[92m   Compiling[0m derive_more-impl v2.1.1
+[1m[92m   Compiling[0m async-trait v0.1.89
+[1m[92m   Compiling[0m enum-as-inner v0.6.1
+[1m[96m    Building[0m [===============>         ] 281/433: match-lookup, libp2p-swarm-derive, data-encoding-macro-internal, de…[1m[96m    Building[0m [===============>         ] 282/433: match-lookup, libp2p-swarm-derive, data-encoding-macro-internal, de…[K[1m[92m    Checking[0m base256emoji v1.0.2
+[1m[96m    Building[0m [===============>         ] 283/433: libp2p-swarm-derive, data-encoding-macro-internal, derive_more-impl…[K[1m[92m    Checking[0m data-encoding-macro v0.1.19
+[1m[96m    Building[0m [===============>         ] 284/433: libp2p-swarm-derive, derive_more-impl, async-trait, zerocopy-derive…[K[1m[92m    Checking[0m monostate v0.1.18
+[1m[96m    Building[0m [===============>         ] 285/433: libp2p-swarm-derive, derive_more-impl, async-trait, zerocopy-derive…[1m[96m    Building[0m [===============>         ] 286/433: libp2p-swarm-derive, derive_more-impl, async-trait, zerocopy-derive…[K[1m[92m    Checking[0m zeroize v1.8.2
+[1m[96m    Building[0m [===============>         ] 287/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[1m[96m    Building[0m [===============>         ] 288/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[1m[96m    Building[0m [===============>         ] 289/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[1m[96m    Building[0m [===============>         ] 290/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[K[1m[92m    Checking[0m multibase v0.9.2
+[1m[96m    Building[0m [===============>         ] 291/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[1m[96m    Building[0m [===============>         ] 292/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[K[1m[92m    Checking[0m tokio v1.50.0
+[1m[96m    Building[0m [===============>         ] 293/433: zeroize, libp2p-swarm-derive, derive_more-impl, async-trait, zeroco…[K[1m[92m    Checking[0m curve25519-dalek v4.1.3
+[1m[96m    Building[0m [===============>         ] 294/433: libp2p-swarm-derive, derive_more-impl, async-trait, zerocopy-derive…[1m[96m    Building[0m [================>        ] 295/433: derive_more-impl, async-trait, zerocopy-derive, monostate, zerofrom…[K[1m[92m    Checking[0m futures-util v0.3.32
+[1m[96m    Building[0m [================>        ] 296/433: derive_more-impl, async-trait, zerocopy-derive, monostate, zerofrom…[1m[96m    Building[0m [================>        ] 297/433: derive_more-impl, async-trait, zerocopy-derive, zerofrom-derive, da…[1m[96m    Building[0m [================>        ] 298/433: derive_more-impl, async-trait, zerocopy-derive, zerofrom-derive, da…[K[1m[92m    Checking[0m derive_more v2.1.1
+[1m[96m    Building[0m [================>        ] 299/433: async-trait, zerocopy-derive, zerofrom-derive, darling_core, tokio,…[1m[96m    Building[0m [================>        ] 300/433: async-trait, zerocopy-derive, zerofrom-derive, darling_core, tokio,…[1m[96m    Building[0m [================>        ] 301/433: zerocopy-derive, zerofrom-derive, darling_core, tokio, futures-util…[K[1m[92m    Checking[0m zerofrom v0.1.6
+[1m[96m    Building[0m [================>        ] 302/433: zerocopy-derive, darling_core, tokio, futures-util, mlua-sys(build)…[K[1m[92m    Checking[0m crossterm v0.29.0
+[1m[96m    Building[0m [================>        ] 303/433: zerocopy-derive, darling_core, tokio, futures-util, mlua-sys(build)…[K[1m[92m    Checking[0m pin-project v1.1.11
+[1m[96m    Building[0m [================>        ] 304/433: zerocopy-derive, pin-project, darling_core, tokio, futures-util, ml…[1m[96m    Building[0m [================>        ] 305/433: zerocopy-derive, pin-project, darling_core, tokio, futures-util, ml…[1m[96m    Building[0m [================>        ] 306/433: zerocopy-derive, pin-project, darling_core, tokio, futures-util, da…[K[1m[92m    Checking[0m tracing v0.1.44
+[1m[96m    Building[0m [================>        ] 307/433: zerocopy-derive, pin-project, darling_core, tokio, futures-util, da…[1m[96m    Building[0m [================>        ] 308/433: zerocopy-derive, darling_core, tokio, futures-util, darling_core, z…[K[1m[92m    Checking[0m yoke v0.8.1
+[1m[96m    Building[0m [================>        ] 309/433: zerocopy-derive, darling_core, tokio, futures-util, darling_core, s…[K[1m[92m    Checking[0m thiserror v2.0.18
+[1m[96m    Building[0m [================>        ] 310/433: zerocopy-derive, thiserror, darling_core, tokio, futures-util, darl…[K[1m[92m    Checking[0m thiserror v1.0.69
+[1m[96m    Building[0m [================>        ] 311/433: zerocopy-derive, thiserror, darling_core, tokio, futures-util, darl…[1m[96m    Building[0m [=================>       ] 312/433: zerocopy-derive, thiserror, darling_core, tokio, futures-util, darl…[1m[96m    Building[0m [=================>       ] 313/433: zerocopy-derive, thiserror, darling_core, tokio, futures-util, darl…[K[1m[92m    Checking[0m bytemuck v1.25.0
+[1m[96m    Building[0m [=================>       ] 314/433: zerocopy-derive, thiserror, bytemuck, darling_core, tokio, futures-…[K[1m[92m    Checking[0m kasuari v0.4.12
+[1m[92m    Checking[0m shimmytok v0.7.0
+[1m[96m    Building[0m [=================>       ] 315/433: zerocopy-derive, kasuari, bytemuck, darling_core, tokio, shimmytok,…[1m[96m    Building[0m [=================>       ] 316/433: zerocopy-derive, kasuari, bytemuck, darling_core, tokio, shimmytok,…[K[1m[92m    Checking[0m tracing-subscriber v0.3.22
+[1m[96m    Building[0m [=================>       ] 317/433: tracing-subscriber, zerocopy-derive, kasuari, bytemuck, darling_cor…[K[1m[92m    Checking[0m zerovec v0.11.5
+[1m[92m    Checking[0m zerotrie v0.2.3
+[1m[96m    Building[0m [=================>       ] 318/433: tracing-subscriber, zerocopy-derive, kasuari, bytemuck, darling_cor…[K[1m[92m    Checking[0m onig v6.5.1
+[1m[92m    Checking[0m zerocopy v0.8.42
+[1m[96m    Building[0m [=================>       ] 320/433: tracing-subscriber, onig, kasuari, bytemuck, darling_core, tokio, s…[K[1m[92m    Checking[0m num-complex v0.4.6
+[1m[92m    Checking[0m dyn-stack v0.13.2
+[1m[96m    Building[0m [=================>       ] 321/433: tracing-subscriber, onig, kasuari, darling_core, tokio, shimmytok, …[1m[96m    Building[0m [=================>       ] 322/433: tracing-subscriber, onig, darling_core, tokio, shimmytok, futures-u…[K[1m[92m   Compiling[0m darling_macro v0.20.11
+[1m[96m    Building[0m [=================>       ] 323/433: tracing-subscriber, onig, darling_core, tokio, shimmytok, futures-u…[1m[96m    Building[0m [=================>       ] 324/433: tracing-subscriber, onig, darling_core, tokio, shimmytok, futures-u…[1m[96m    Building[0m [=================>       ] 325/433: tracing-subscriber, onig, darling_core, tokio, shimmytok, futures-u…[1m[96m    Building[0m [=================>       ] 326/433: tracing-subscriber, onig, darling_core, tokio, shimmytok, futures-u…[1m[96m    Building[0m [=================>       ] 327/433: tracing-subscriber, onig, darling_core, tokio, futures-util, serde_…[K[1m[92m   Compiling[0m darling_macro v0.23.0
+[1m[96m    Building[0m [=================>       ] 328/433: tracing-subscriber, onig, tokio, futures-util, serde_derive, num-co…[K[1m[92m    Checking[0m ed25519-dalek v2.2.0
+[1m[92m    Checking[0m x25519-dalek v2.0.1
+[1m[96m    Building[0m [=================>       ] 329/433: tracing-subscriber, onig, tokio, ed25519-dalek, futures-util, x2551…[1m[96m    Building[0m [==================>      ] 330/433: tracing-subscriber, tokio, ed25519-dalek, futures-util, x25519-dale…[K[1m[92m    Checking[0m pulp v0.22.2
+[1m[96m    Building[0m [==================>      ] 331/433: tracing-subscriber, tokio, ed25519-dalek, futures-util, x25519-dale…[K[1m[92m    Checking[0m strum v0.27.2
+[1m[96m    Building[0m [==================>      ] 332/433: tracing-subscriber, tokio, ed25519-dalek, futures-util, x25519-dale…[1m[96m    Building[0m [==================>      ] 333/433: tracing-subscriber, tokio, ed25519-dalek, futures-util, serde_deriv…[K[1m[92m    Checking[0m tinystr v0.8.2
+[1m[92m    Checking[0m potential_utf v0.1.4
+[1m[96m    Building[0m [==================>      ] 334/433: tracing-subscriber, potential_utf, tokio, ed25519-dalek, futures-ut…[K[1m[92m   Compiling[0m darling v0.20.11
+[1m[96m    Building[0m [==================>      ] 335/433: tracing-subscriber, potential_utf, tokio, ed25519-dalek, futures-ut…[1m[96m    Building[0m [==================>      ] 336/433: tracing-subscriber, potential_utf, tokio, futures-util, darling, se…[1m[96m    Building[0m [==================>      ] 337/433: tracing-subscriber, potential_utf, tokio, futures-util, darling, se…[K[1m[92m   Compiling[0m derive_builder_core v0.20.2
+[1m[96m    Building[0m [==================>      ] 337/433: derive_builder_core, tracing-subscriber, potential_utf, tokio, futu…[K[1m[92m   Compiling[0m wrapcenum-derive v0.4.1
+[1m[96m    Building[0m [==================>      ] 338/433: derive_builder_core, tracing-subscriber, potential_utf, tokio, futu…[K[1m[92m    Checking[0m icu_collections v2.1.1
+[1m[96m    Building[0m [==================>      ] 339/433: derive_builder_core, tracing-subscriber, tokio, futures-util, serde…[K[1m[92m   Compiling[0m darling v0.23.0
+[1m[96m    Building[0m [==================>      ] 340/433: derive_builder_core, tracing-subscriber, darling, tokio, futures-ut…[K[1m[92m    Checking[0m icu_locale_core v2.1.1
+[1m[96m    Building[0m [==================>      ] 341/433: derive_builder_core, tracing-subscriber, darling, tokio, futures-ut…[K[1m[92m   Compiling[0m instability v0.3.12
+[1m[96m    Building[0m [==================>      ] 342/433: derive_builder_core, tracing-subscriber, tokio, futures-util, serde…[1m[96m    Building[0m [==================>      ] 343/433: derive_builder_core, tracing-subscriber, tokio, futures-util, serde…[K[1m[92m    Checking[0m nvml-wrapper v0.11.0
+[1m[96m    Building[0m [==================>      ] 344/433: derive_builder_core, tracing-subscriber, nvml-wrapper, tokio, futur…[K[1m[92m    Checking[0m tracing-appender v0.2.4
+[1m[96m    Building[0m [==================>      ] 345/433: derive_builder_core, tracing-appender, nvml-wrapper, tokio, futures…[K[1m[92m    Checking[0m serde v1.0.228
+[1m[96m    Building[0m [==================>      ] 346/433: derive_builder_core, serde, tracing-appender, nvml-wrapper, tokio, …[1m[96m    Building[0m [===================>     ] 347/433: derive_builder_core, serde, tracing-appender, nvml-wrapper, tokio, …[1m[96m    Building[0m [===================>     ] 348/433: derive_builder_core, serde, nvml-wrapper, tokio, futures-util, icu_…[K[1m[92m   Compiling[0m derive_builder_macro v0.20.2
+[1m[96m    Building[0m [===================>     ] 349/433: serde, nvml-wrapper, tokio, futures-util, icu_locale_core, pulp, de…[K[1m[92m    Checking[0m icu_provider v2.1.1
+[1m[96m    Building[0m [===================>     ] 350/433: serde, nvml-wrapper, tokio, futures-util, pulp, derive_builder_macr…[K[1m[92m    Checking[0m compact_str v0.9.0
+[1m[92m    Checking[0m dary_heap v0.3.8
+[1m[92m    Checking[0m spm_precompiled v0.1.4
+[1m[92m    Checking[0m safetensors v0.7.0
+[1m[92m    Checking[0m serde_spanned v0.6.9
+[1m[92m    Checking[0m toml_datetime v0.6.11
+[1m[92m    Checking[0m serde_plain v1.0.2
+[1m[92m    Checking[0m bincode v1.3.3
+[1m[96m    Building[0m [===================>     ] 351/433: nvml-wrapper, tokio, safetensors, futures-util, bincode, toml_datet…[K[1m[92m    Checking[0m icu_normalizer v2.1.1
+[1m[92m    Checking[0m icu_properties v2.1.2
+[1m[96m    Building[0m [===================>     ] 352/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, bin…[K[1m[92m    Checking[0m derive_builder v0.20.2
+[1m[96m    Building[0m [===================>     ] 353/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, der…[1m[96m    Building[0m [===================>     ] 354/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, der…[1m[96m    Building[0m [===================>     ] 355/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, der…[1m[96m    Building[0m [===================>     ] 356/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, der…[1m[96m    Building[0m [===================>     ] 357/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, bin…[1m[96m    Building[0m [===================>     ] 358/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, bin…[K[1m[92m    Checking[0m toml_edit v0.22.27
+[1m[96m    Building[0m [===================>     ] 359/433: nvml-wrapper, tokio, safetensors, futures-util, icu_normalizer, bin…[1m[96m    Building[0m [===================>     ] 360/433: nvml-wrapper, tokio, futures-util, icu_normalizer, bincode, toml_ed…[1m[96m    Building[0m [===================>     ] 361/433: nvml-wrapper, tokio, futures-util, icu_normalizer, toml_edit, compa…[1m[96m    Building[0m [===================>     ] 362/433: nvml-wrapper, tokio, futures-util, toml_edit, compact_str, pulp, ze…[1m[96m    Building[0m [===================>     ] 363/433: tokio, futures-util, toml_edit, compact_str, pulp, zerocopy, icu_pr…[K[1m[92m    Checking[0m ratatui-core v0.1.0
+[1m[96m    Building[0m [====================>    ] 364/433: ratatui-core, tokio, futures-util, toml_edit, pulp, zerocopy, icu_p…[K[1m[92m    Checking[0m futures-executor v0.3.32
+[1m[92m    Checking[0m asynchronous-codec v0.7.0
+[1m[92m    Checking[0m futures-bounded v0.2.4
+[1m[92m    Checking[0m mlua v0.12.0-rc.1
+[1m[96m    Building[0m [====================>    ] 365/433: asynchronous-codec, ratatui-core, tokio, futures-executor, toml_edi…[1m[96m    Building[0m [====================>    ] 366/433: asynchronous-codec, ratatui-core, tokio, futures-executor, toml_edi…[K[1m[92m    Checking[0m futures v0.3.32
+[1m[96m    Building[0m [====================>    ] 367/433: futures, asynchronous-codec, ratatui-core, tokio, toml_edit, pulp, …[K[1m[92m    Checking[0m quick-protobuf-codec v0.3.1
+[1m[96m    Building[0m [====================>    ] 368/433: futures, ratatui-core, tokio, toml_edit, pulp, mlua, zerocopy, icu_…[K[1m[92m    Checking[0m rw-stream-sink v0.4.0
+[1m[92m    Checking[0m multistream-select v0.13.0
+[1m[96m    Building[0m [====================>    ] 369/433: ratatui-core, tokio, multistream-select, toml_edit, pulp, mlua, zer…[1m[96m    Building[0m [====================>    ] 370/433: ratatui-core, tokio, multistream-select, toml_edit, pulp, mlua, zer…[1m[96m    Building[0m [====================>    ] 371/433: ratatui-core, tokio, multistream-select, toml_edit, pulp, mlua, zer…[K[1m[92m    Checking[0m idna_adapter v1.2.1
+[1m[96m    Building[0m [====================>    ] 372/433: idna_adapter, ratatui-core, tokio, multistream-select, toml_edit, p…[1m[96m    Building[0m [====================>    ] 373/433: idna_adapter, ratatui-core, tokio, toml_edit, pulp, mlua, zerocopy  [K[1m[92m    Checking[0m idna v1.1.0
+[1m[96m    Building[0m [====================>    ] 374/433: idna, ratatui-core, tokio, toml_edit, pulp, mlua, zerocopy          [K[1m[92m    Checking[0m ratatui-widgets v0.3.0
+[1m[92m    Checking[0m ratatui-crossterm v0.1.0
+[1m[96m    Building[0m [====================>    ] 375/433: idna, ratatui-widgets, ratatui-crossterm, tokio, toml_edit, pulp, m…[K[1m[92m    Checking[0m url v2.5.8
+[1m[96m    Building[0m [====================>    ] 376/433: url, ratatui-widgets, ratatui-crossterm, tokio, toml_edit, pulp, ml…[1m[96m    Building[0m [====================>    ] 377/433: url, ratatui-widgets, tokio, toml_edit, pulp, mlua, zerocopy        [K[1m[92m    Checking[0m toml v0.8.23
+[1m[96m    Building[0m [====================>    ] 378/433: url, ratatui-widgets, toml, tokio, pulp, mlua, zerocopy             [1m[96m    Building[0m [====================>    ] 379/433: ratatui-widgets, toml, tokio, pulp, mlua, zerocopy                  [K[1m[92m    Checking[0m netlink-sys v0.8.8
+[1m[92m    Checking[0m tokio-util v0.7.18
+[1m[96m    Building[0m [====================>    ] 380/433: ratatui-widgets, toml, pulp, mlua, tokio-util, zerocopy, netlink-sys[K[1m[92m    Checking[0m ppv-lite86 v0.2.21
+[1m[92m    Checking[0m ahash v0.8.12
+[1m[96m    Building[0m [====================>    ] 381/433: ratatui-widgets, toml, ahash, pulp, mlua, ppv-lite86, tokio-util, n…[1m[96m    Building[0m [=====================>   ] 382/433: ratatui-widgets, ahash, pulp, mlua, ppv-lite86, tokio-util, netlink…[K[1m[92m    Checking[0m netlink-proto v0.12.0
+[1m[96m    Building[0m [=====================>   ] 383/433: ratatui-widgets, ahash, pulp, mlua, ppv-lite86, netlink-proto, toki…[1m[96m    Building[0m [=====================>   ] 384/433: ratatui-widgets, ahash, mlua, ppv-lite86, netlink-proto, tokio-util [K[1m[92m    Checking[0m ratatui-macros v0.7.0
+[1m[96m    Building[0m [=====================>   ] 385/433: ratatui-macros, ahash, mlua, ppv-lite86, netlink-proto, tokio-util  [1m[96m    Building[0m [=====================>   ] 386/433: ratatui-macros, mlua, ppv-lite86, netlink-proto, tokio-util         [K[1m[92m    Checking[0m ratatui v0.30.0
+[1m[92m    Checking[0m rtnetlink v0.20.0
+[1m[96m    Building[0m [=====================>   ] 388/433: rtnetlink, mlua, ppv-lite86, ratatui, tokio-util                    [K[1m[92m    Checking[0m rand_chacha v0.9.0
+[1m[92m    Checking[0m rand_chacha v0.3.1
+[1m[96m    Building[0m [=====================>   ] 389/433: rand_chacha, rtnetlink, mlua, ratatui, tokio-util, rand_chacha      [1m[96m    Building[0m [=====================>   ] 390/433: rand_chacha, rtnetlink, ratatui, tokio-util, rand_chacha            [1m[96m    Building[0m [=====================>   ] 391/433: rand_chacha, rtnetlink, tokio-util, rand_chacha                     [K[1m[92m    Checking[0m rand v0.9.2
+[1m[96m    Building[0m [=====================>   ] 392/433: rtnetlink, rand, tokio-util, rand_chacha                            [K[1m[92m    Checking[0m rand v0.8.5
+[1m[96m    Building[0m [=====================>   ] 393/433: rtnetlink, rand, tokio-util, rand                                   [1m[96m    Building[0m [=====================>   ] 394/433: rtnetlink, rand, rand                                               [K[1m[92m    Checking[0m if-watch v3.2.2
+[1m[96m    Building[0m [=====================>   ] 395/433: if-watch, rand, rand                                                [1m[96m    Building[0m [=====================>   ] 396/433: rand, rand                                                          [K[1m[92m    Checking[0m rand_distr v0.5.1
+[1m[92m    Checking[0m tokenizers v0.22.2
+[1m[92m    Checking[0m hickory-proto v0.25.2
+[1m[92m    Checking[0m yamux v0.13.10
+[1m[96m    Building[0m [=====================>   ] 397/433: rand_distr, tokenizers, hickory-proto, yamux, rand                  [K[1m[92m    Checking[0m libp2p-identity v0.2.13
+[1m[92m    Checking[0m yamux v0.12.1
+[1m[92m    Checking[0m twox-hash v1.6.3
+[1m[96m    Building[0m [=====================>   ] 398/433: rand_distr, yamux, tokenizers, hickory-proto, yamux, twox-hash, lib…[K[1m[92m    Checking[0m multiaddr v0.18.2
+[1m[96m    Building[0m [======================>  ] 399/433: multiaddr, rand_distr, yamux, tokenizers, hickory-proto, yamux, two…[1m[96m    Building[0m [======================>  ] 400/433: multiaddr, rand_distr, yamux, tokenizers, hickory-proto, yamux      [1m[96m    Building[0m [======================>  ] 401/433: multiaddr, rand_distr, yamux, tokenizers, hickory-proto             [1m[96m    Building[0m [======================>  ] 402/433: multiaddr, rand_distr, tokenizers, hickory-proto                    [K[1m[92m    Checking[0m half v2.7.1
+[1m[96m    Building[0m [======================>  ] 403/433: multiaddr, tokenizers, hickory-proto, half                          [K[1m[92m    Checking[0m libp2p-core v0.43.2
+[1m[96m    Building[0m [======================>  ] 404/433: tokenizers, hickory-proto, libp2p-core, half                        [K[1m[92m    Checking[0m gemm-common v0.19.0
+[1m[92m    Checking[0m float8 v0.7.0
+[1m[96m    Building[0m [======================>  ] 405/433: float8, tokenizers, hickory-proto, libp2p-core, gemm-common         [1m[96m    Building[0m [======================>  ] 406/433: tokenizers, hickory-proto, libp2p-core, gemm-common                 [K[1m[92m    Checking[0m gemm-f32 v0.19.0
+[1m[92m    Checking[0m gemm-c32 v0.19.0
+[1m[92m    Checking[0m gemm-f64 v0.19.0
+[1m[92m    Checking[0m gemm-c64 v0.19.0
+[1m[96m    Building[0m [======================>  ] 407/433: gemm-f32, gemm-c32, tokenizers, hickory-proto, libp2p-core, gemm-f6…[K[1m[92m    Checking[0m libp2p-swarm v0.47.1
+[1m[92m    Checking[0m libp2p-yamux v0.47.0
+[1m[92m    Checking[0m libp2p-tcp v0.44.1
+[1m[92m    Checking[0m libp2p-noise v0.46.1
+[1m[96m    Building[0m [======================>  ] 408/433: gemm-f32, gemm-c32, libp2p-tcp, libp2p-swarm, tokenizers, libp2p-no…[1m[96m    Building[0m [======================>  ] 409/433: gemm-f32, gemm-c32, libp2p-tcp, libp2p-swarm, tokenizers, libp2p-no…[1m[96m    Building[0m [======================>  ] 410/433: gemm-f32, gemm-c32, libp2p-tcp, libp2p-swarm, tokenizers, libp2p-no…[K[1m[92m    Checking[0m gemm-f16 v0.19.0
+[1m[96m    Building[0m [======================>  ] 411/433: gemm-c32, gemm-f16, libp2p-tcp, libp2p-swarm, tokenizers, libp2p-no…[1m[96m    Building[0m [======================>  ] 412/433: gemm-c32, gemm-f16, libp2p-swarm, tokenizers, libp2p-noise, hickory…[1m[96m    Building[0m [======================>  ] 413/433: gemm-c32, gemm-f16, libp2p-swarm, tokenizers, hickory-proto, gemm-c…[1m[96m    Building[0m [======================>  ] 414/433: gemm-c32, libp2p-swarm, tokenizers, hickory-proto, gemm-c64         [1m[96m    Building[0m [======================>  ] 415/433: gemm-c32, libp2p-swarm, tokenizers, gemm-c64                        [1m[96m    Building[0m [=======================> ] 416/433: gemm-c32, libp2p-swarm, tokenizers                                  [K[1m[92m    Checking[0m gemm v0.19.0
+[1m[96m    Building[0m [=======================> ] 417/433: libp2p-swarm, tokenizers, gemm                                      [1m[96m    Building[0m [=======================> ] 418/433: libp2p-swarm, tokenizers                                            [K[1m[92m    Checking[0m libp2p-ping v0.47.0
+[1m[92m    Checking[0m libp2p-allow-block-list v0.6.0
+[1m[92m    Checking[0m libp2p-mdns v0.48.0
+[1m[92m    Checking[0m libp2p-kad v0.48.0
+[1m[92m    Checking[0m libp2p-request-response v0.29.0
+[1m[92m    Checking[0m libp2p-connection-limits v0.6.0
+[1m[92m    Checking[0m libp2p-stream v0.4.0-alpha
+[1m[96m    Building[0m [=======================> ] 419/433: libp2p-allow-block-list, libp2p-ping, libp2p-kad, tokenizers, libp2…[1m[96m    Building[0m [=======================> ] 420/433: libp2p-ping, libp2p-kad, tokenizers, libp2p-request-response, libp2…[1m[96m    Building[0m [=======================> ] 421/433: libp2p-ping, libp2p-kad, tokenizers, libp2p-request-response, libp2…[1m[96m    Building[0m [=======================> ] 422/433: libp2p-kad, tokenizers, libp2p-request-response, libp2p-stream, lib…[1m[96m    Building[0m [=======================> ] 423/433: libp2p-kad, tokenizers, libp2p-request-response, libp2p-mdns        [1m[96m    Building[0m [=======================> ] 424/433: libp2p-kad, tokenizers, libp2p-mdns                                 [1m[96m    Building[0m [=======================> ] 425/433: libp2p-kad, tokenizers                                              [K[1m[92m    Checking[0m candle-core v0.10.2
+[1m[96m    Building[0m [=======================> ] 426/433: libp2p-kad, candle-core                                             [K[1m[92m    Checking[0m libp2p v0.56.0
+[1m[96m    Building[0m [=======================> ] 427/433: libp2p, candle-core                                                 [1m[96m    Building[0m [=======================> ] 428/433: candle-core                                                         [K[1m[92m    Checking[0m candle-nn v0.10.2
+[1m[96m    Building[0m [=======================> ] 429/433: candle-nn                                                           [K[1m[92m    Checking[0m candle-transformers v0.10.2
+[1m[96m    Building[0m [=======================> ] 430/433: candle-transformers                                                 [K[1m[92m    Checking[0m Pleiades v0.1.0 (/workspace)
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused imports: `debug` and `error`[0m
+  [1m[94m--> [0mSrc/Network/network_service.rs:43:15
+   [1m[94m|[0m
+[1m[94m43[0m [1m[94m|[0m use tracing::{debug, error, info, warn};
+   [1m[94m|[0m               [1m[33m^^^^^[0m  [1m[33m^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: unused imports: `DataType` and `Network_Data`[0m
+  [1m[94m--> [0mSrc/Network/network_service.rs:49:5
+   [1m[94m|[0m
+[1m[94m49[0m [1m[94m|[0m     DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
+   [1m[94m|[0m     [1m[33m^^^^^^^^[0m  [1m[33m^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused import: `PeerId`[0m
+ [1m[94m--> [0mSrc/Network/command_handler.rs:8:19
+  [1m[94m|[0m
+[1m[94m8[0m [1m[94m|[0m use libp2p::{kad, PeerId};
+  [1m[94m|[0m                   [1m[33m^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused imports: `Multiaddr` and `PeerId`[0m
+ [1m[94m--> [0mSrc/Network/swarm_events.rs:8:68
+  [1m[94m|[0m
+[1m[94m8[0m [1m[94m|[0m use libp2p::{kad, mdns, ping, request_response, swarm::SwarmEvent, Multiaddr, PeerId};
+  [1m[94m|[0m                                                                    [1m[33m^^^^^^^^^[0m  [1m[33m^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused import: `JobResult`[0m
+ [1m[94m--> [0mSrc/Orchestrator/core/branch_lifecycle.rs:9:32
+  [1m[94m|[0m
+[1m[94m9[0m [1m[94m|[0m use crate::orchestrator::job::{JobResult, LifecycleEvent};
+  [1m[94m|[0m                                [1m[33m^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused import: `NotifyLevel`[0m
+  [1m[94m--> [0mSrc/EventBus/event_bus.rs:14:31
+   [1m[94m|[0m
+[1m[94m14[0m [1m[94m|[0m use super::event::{Bus_Event, NotifyLevel};
+   [1m[94m|[0m                               [1m[33m^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: unused import: `std::sync::Arc`[0m
+  [1m[94m--> [0mSrc/TUI/mod.rs:41:5
+   [1m[94m|[0m
+[1m[94m41[0m [1m[94m|[0m use std::sync::Arc;
+   [1m[94m|[0m     [1m[33m^^^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: function `query_system_memory_mb` is never used[0m
+   [1m[94m--> [0mSrc/Orchestrator/mod.rs:110:4
+    [1m[94m|[0m
+[1m[94m110[0m [1m[94m|[0m fn query_system_memory_mb() -> u64 {
+    [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: function `query_cuda_memory_mb` is never used[0m
+   [1m[94m--> [0mSrc/Orchestrator/mod.rs:117:4
+    [1m[94m|[0m
+[1m[94m117[0m [1m[94m|[0m fn query_cuda_memory_mb() -> u64 {
+    [1m[94m|[0m    [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: function `query_free_memory_mb` is never used[0m
+   [1m[94m--> [0mSrc/Orchestrator/mod.rs:133:15
+    [1m[94m|[0m
+[1m[94m133[0m [1m[94m|[0m pub(crate) fn query_free_memory_mb(device: &str) -> u64 {
+    [1m[94m|[0m               [1m[33m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: fields `kind` and `inference_id` are never read[0m
+  [1m[94m--> [0mSrc/Orchestrator/core.rs:41:5
+   [1m[94m|[0m
+[1m[94m40[0m [1m[94m|[0m struct JobHandle {
+   [1m[94m|[0m        [1m[94m---------[0m [1m[94mfields in this struct[0m
+[1m[94m41[0m [1m[94m|[0m     kind: JobKind,
+   [1m[94m|[0m     [1m[33m^^^^[0m
+[1m[94m42[0m [1m[94m|[0m     cancel: CancellationToken,
+[1m[94m43[0m [1m[94m|[0m     inference_id: Option<u64>,
+   [1m[94m|[0m     [1m[33m^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: field `lifecycle_tx` is never read[0m
+  [1m[94m--> [0mSrc/Orchestrator/core.rs:77:5
+   [1m[94m|[0m
+[1m[94m59[0m [1m[94m|[0m pub struct Core {
+   [1m[94m|[0m            [1m[94m----[0m [1m[94mfield in this struct[0m
+[1m[94m...[0m
+[1m[94m77[0m [1m[94m|[0m     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
+   [1m[94m|[0m     [1m[33m^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: method `register_job` is never used[0m
+   [1m[94m--> [0mSrc/Orchestrator/core.rs:157:8
+    [1m[94m|[0m
+[1m[94m 87[0m [1m[94m|[0m impl Core {
+    [1m[94m|[0m [1m[94m---------[0m [1m[94mmethod in this implementation[0m
+[1m[94m...[0m
+[1m[94m157[0m [1m[94m|[0m     fn register_job(&mut self, job_id: JobId, kind: JobKind) {
+    [1m[94m|[0m        [1m[33m^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: struct `JobExecutor` is never constructed[0m
+  [1m[94m--> [0mSrc/Orchestrator/core/job_executor.rs:19:12
+   [1m[94m|[0m
+[1m[94m19[0m [1m[94m|[0m pub struct JobExecutor {
+   [1m[94m|[0m            [1m[33m^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: associated items `new` and `run` are never used[0m
+  [1m[94m--> [0mSrc/Orchestrator/core/job_executor.rs:28:12
+   [1m[94m|[0m
+[1m[94m27[0m [1m[94m|[0m impl JobExecutor {
+   [1m[94m|[0m [1m[94m----------------[0m [1m[94massociated items in this implementation[0m
+[1m[94m28[0m [1m[94m|[0m     pub fn new(
+   [1m[94m|[0m            [1m[33m^^^[0m
+[1m[94m...[0m
+[1m[94m48[0m [1m[94m|[0m     pub async fn run(self) {
+   [1m[94m|[0m                  [1m[33m^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: fields `ml_input_tx` and `ml_output_rx` are never read[0m
+  [1m[94m--> [0mSrc/Session_Manager/session.rs:18:16
+   [1m[94m|[0m
+[1m[94m11[0m [1m[94m|[0m pub(crate) struct Session {
+   [1m[94m|[0m                   [1m[94m-------[0m [1m[94mfields in this struct[0m
+[1m[94m...[0m
+[1m[94m18[0m [1m[94m|[0m     pub(crate) ml_input_tx: mpsc::Sender<String>,
+   [1m[94m|[0m                [1m[33m^^^^^^^^^^^[0m
+[1m[94m19[0m [1m[94m|[0m     /// ML Thread output 通道的接收端 — create_session 时存入，不再 drop
+[1m[94m20[0m [1m[94m|[0m     pub(crate) ml_output_rx: mpsc::Receiver<String>,
+   [1m[94m|[0m                [1m[33m^^^^^^^^^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m[1m: field `caps` is never read[0m
+  [1m[94m--> [0mSrc/Lua/network_stream.rs:17:5
+   [1m[94m|[0m
+[1m[94m15[0m [1m[94m|[0m pub struct NetworkStream {
+   [1m[94m|[0m            [1m[94m-------------[0m [1m[94mfield in this struct[0m
+[1m[94m16[0m [1m[94m|[0m     pub stream: Mutex<libp2p::Stream>,
+[1m[94m17[0m [1m[94m|[0m     caps: Arc<Capabilities>,
+   [1m[94m|[0m     [1m[33m^^^^[0m
+
+[1m[96m    Building[0m [=======================> ] 431/433: Pleiades                                                            [K[1m[33mwarning[0m: `Pleiades` (lib) generated 17 warnings (run `cargo fix --lib -p Pleiades` to apply 7 suggestions)
+[1m[96m    Building[0m [=======================> ] 432/433: Pleiades(bin)                                                       [K[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 18.72s
+[?2004h[32m>[0m 

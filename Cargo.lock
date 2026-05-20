@@ -24,6 +24,7 @@ dependencies = [
  "nvml-wrapper",
  "ratatui",
  "serde",
+ "serde_json",
  "sha2",
  "shimmytok",
  "sysinfo",

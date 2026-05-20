@@ -1,0 +1,5 @@
+cd /workspace && git checkout -b reforge origin/reforge
+error: The following untracked working tree files would be overwritten by checkout:
+.zgent/terminal-output/term-1.bin
+Please move or remove them before you switch branches.
+Aborting

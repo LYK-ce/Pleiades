@@ -7,8 +7,8 @@
 
 use super::Core;
 use crate::orchestrator::command::UserCommand;
-use crate::lua::engine::LuaContext;
-use crate::lua::capability_binding::{
+use crate::vm::engine::LuaContext;
+use crate::vm::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
     register_storage_caps, register_ml_caps,
 };

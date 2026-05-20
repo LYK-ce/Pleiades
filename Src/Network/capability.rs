@@ -23,7 +23,9 @@ use libp2p::{Multiaddr, PeerId, StreamProtocol};
 use libp2p_stream as stream;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::event_bus::EventBus;
 use super::request_response::codec::{DataType, Network_Data};
 use super::node_handle::NodeHandle;
 use super::file_stream::protocol::{
@@ -368,6 +370,8 @@ pub struct Network_Service_Capability {
     bandwidth_stream_control: stream::Control,
     /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
     tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
+    /// 事件总线（文件传输进度上报等）
+    event_bus: Arc<EventBus>,
 }
 
 impl Network_Service_Capability {
@@ -379,12 +383,14 @@ impl Network_Service_Capability {
     /// - `tensor_stream_control`: 张量流的 stream::Control（由 Network_Service::Init 创建）
     /// - `bandwidth_stream_control`: 带宽测试流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_rendezvous`: RendezvousMap（与 Network_Service Event Loop 共享）
+    /// - `event_bus`: 事件总线（文件传输进度上报等）
     pub fn New(
         node_handle: NodeHandle,
         file_stream_control: stream::Control,
         tensor_stream_control: stream::Control,
         bandwidth_stream_control: stream::Control,
         tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             node_handle,
@@ -392,6 +398,7 @@ impl Network_Service_Capability {
             tensor_stream_control,
             bandwidth_stream_control,
             tensor_rendezvous,
+            event_bus,
         }
     }
 }
@@ -461,7 +468,7 @@ impl Network_Capability for Network_Service_Capability {
         stream: &mut libp2p::Stream,
         file_path: &Path,
     ) -> Result<(), Network_Error> {
-        Send_File_Data(stream, file_path)
+        Send_File_Data(stream, file_path, &self.event_bus)
             .await
             .map_err(|e| Network_Error::StreamIoError(format!("send_file_data: {}", e)))
     }
@@ -472,7 +479,7 @@ impl Network_Capability for Network_Service_Capability {
         dest_path: &Path,
         file_size: u64,
     ) -> Result<(), Network_Error> {
-        Receive_File_Data(stream, dest_path, file_size)
+        Receive_File_Data(stream, dest_path, file_size, &self.event_bus)
             .await
             .map_err(|e| Network_Error::StreamIoError(format!("receive_file_data: {}", e)))
     }
