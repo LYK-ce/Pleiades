@@ -495,20 +495,18 @@ pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_A
 /// 从 layer_tensors_map 构建 256 位层位图。
 ///
 /// layer_tensors_map: key=blk 索引 (0..num_layers-1)，value=该层的 tensor 列表。
-/// 如果某 key 存在且有至少一个 tensor → bit 置 1。
+/// 只要 key 存在即表示该层存在 → bit 置 1。
 fn Build_Layer_Bitmap(
     layer_tensors_map: &HashMap<usize, Vec<Tensor_Detail>>,
     num_layers: usize,
 ) -> [u8; 32] {
     let mut bitmap = [0u8; 32];
     for i in 0..num_layers {
-        if let Some(tensors) = layer_tensors_map.get(&i) {
-            if !tensors.is_empty() {
-                let byte_idx = i / 8;
-                let bit_idx = i % 8;
-                if byte_idx < 32 {
-                    bitmap[byte_idx] |= 1 << bit_idx;
-                }
+        if layer_tensors_map.contains_key(&i) {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            if byte_idx < 32 {
+                bitmap[byte_idx] |= 1 << bit_idx;
             }
         }
     }

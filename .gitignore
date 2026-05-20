@@ -77,3 +77,6 @@ Test_Environment_1/
 Test_Environment_2/
 Test_Environment_3/
 相关工作/
+# ZGent 运行时文件
+.zgent/
+uploads/
