@@ -313,7 +313,15 @@ impl mlua::UserData for MlSession {
         methods.add_method_mut(
             "load_model",
             |_, sess, (path, start, end): (String, usize, usize)| {
-                sess.load_model(std::path::Path::new(&path), start, end)
+                let p = std::path::Path::new(&path);
+                let resolved = if p.extension().map_or(true, |e| e != "gguf" && e != "pgguf") {
+                    let pgguf = p.with_extension("pgguf");
+                    if pgguf.exists() { pgguf }
+                    else { p.with_extension("gguf") }
+                } else {
+                    p.to_path_buf()
+                };
+                sess.load_model(&resolved, start, end)
                     .map_err(|e| mlua::Error::runtime(e))
             },
         );

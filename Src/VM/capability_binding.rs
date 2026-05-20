@@ -215,7 +215,16 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     ml.set(
         "analyze_model",
         lua.create_async_function(move |lua, path: String| async move {
-            let info = capability::analyze_model(std::path::Path::new(&path)).await
+            let p = std::path::Path::new(&path);
+            // 自动检测后缀：无后缀或非 .gguf/.pgguf 时，先试 .pgguf 再试 .gguf
+            let resolved = if p.extension().map_or(true, |e| e != "gguf" && e != "pgguf") {
+                let pgguf = p.with_extension("pgguf");
+                if pgguf.exists() { pgguf }
+                else { p.with_extension("gguf") }
+            } else {
+                p.to_path_buf()
+            };
+            let info = capability::analyze_model(&resolved).await
                 .map_err(|e| mlua::Error::runtime(e))?;
             let t = lua.create_table()?;
             t.set("architecture", info.architecture)?;
