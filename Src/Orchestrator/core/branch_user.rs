@@ -12,7 +12,7 @@ use crate::vm::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
     register_storage_caps, register_ml_caps,
 };
-use crate::event_bus::Bus_Event;
+use crate::event_bus::{Bus_Event, NotifyLevel};
 
 // ============================================================
 // 本地 HelpEntry（已从 EventBus 中解耦）
@@ -57,36 +57,15 @@ impl Core {
     /// 每个分支组合调用 Capability 方法，推理相关业务留给未来 Lua 层。
     pub async fn route_user(&mut self, cmd: UserCommand) {
         match cmd {
-            // ─── 通用 Lua 脚本执行 ─────────────────────────
+            // ─── 通用 Lua 脚本执行 (fire-and-forget) ─────
             UserCommand::Execute { command, params } => {
-                let entry = match self.program_registry.get_user(&command) {
-                    Some(e) => e.clone(),
-                    None => {
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output(format!("未知命令: {}", command), true),
-                        });
-                        return;
-                    }
+                let Some(entry) = self.program_registry.get_user(&command).cloned() else {
+                    self.capabilities.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(format!("未知命令: {}", command), true),
+                    });
+                    return;
                 };
-
-                let caps = self.capabilities.clone();
-                let result = execute_lua_script(&entry.path, &params, &caps).await;
-                match result {
-                    Ok(_v) => {
-                        let job_id = super::generate_id();
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output(
-                                format!("脚本 '{}' 执行完成 (Job #{})", command, job_id),
-                                true,
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output(format!("执行失败: {}", e), true),
-                        });
-                    }
-                }
+                spawn_lua_script(entry.path, params, self.capabilities.clone(), command);
             }
 
             // ─── 单机推理 (Lua 脚本 + 模型) ───
@@ -172,38 +151,23 @@ impl Core {
                 });
             }
 
-            // ─── 发送文件 ──────────────────────────────────
+            // ─── 发送文件 (fire-and-forget) ──────────────
             UserCommand::Send { file_path, peer_id } => {
-                let entry = match self.program_registry.get("send") {
-                    Some(e) => e.clone(),
-                    None => {
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output("send 脚本未找到", true),
-                        });
-                        return;
-                    }
+                let Some(entry) = self.program_registry.get("send").cloned() else {
+                    self.capabilities.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output("send 脚本未找到", true),
+                    });
+                    return;
                 };
                 let mut params = std::collections::HashMap::new();
                 params.insert("file".into(), file_path.clone());
                 params.insert("peer".into(), peer_id.clone());
-                let caps = self.capabilities.clone();
-                let result = execute_lua_script(&entry.path, &params, &caps).await;
-                match result {
-                    Ok(_v) => {
-                        let job_id = super::generate_id();
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output(
-                                format!("发送 Job #{} 已创建 ({} → {})", job_id, file_path, peer_id),
-                                true,
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        self.capabilities.event_bus.Publish(Bus_Event::Output {
-                            payload: cmd_output(format!("错误: {}", e), true),
-                        });
-                    }
-                }
+                spawn_lua_script(
+                    entry.path,
+                    params,
+                    self.capabilities.clone(),
+                    format!("send {} -> {}", file_path, peer_id),
+                );
             }
 
             // ─── 性能测试 ──────────────────────────────────
@@ -262,50 +226,175 @@ impl Core {
     }
 }
 
-/// 加载并执行 Lua 脚本。
+/// Fire-and-forget: 在独立线程中加载并执行 Lua 脚本。
 ///
-/// 1. 创建沙箱 Lua 实例
-/// 2. 注册 caps 函数表
-/// 3. 加载脚本 → 构造 params table → 调用 execute(params, caps)
-async fn execute_lua_script(
-    path: &std::path::Path,
-    params: &std::collections::HashMap<String, String>,
-    caps: &std::sync::Arc<crate::orchestrator::Capabilities>,
-) -> Result<mlua::Value, String> {
-    let script = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取脚本失败: {}", e))?;
+/// 线程内创建 tokio runtime 驱动异步能力函数，执行结果通过 EventBus 推送。
+/// Core 调用后立即返回，不等待脚本完成。
+fn spawn_lua_script(
+    path: std::path::PathBuf,
+    params: std::collections::HashMap<String, String>,
+    caps: std::sync::Arc<crate::orchestrator::Capabilities>,
+    label: String,
+) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                caps.event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Error,
+                    message: format!("[{}] 创建 tokio runtime 失败: {}", label, e),
+                });
+                return;
+            }
+        };
 
-    let lua = LuaContext::new()
-        .map_err(|e| format!("创建 Lua 实例失败: {}", e))?;
+        rt.block_on(async {
+            // 1. 读取脚本
+            let script = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 读取脚本失败: {}", label, e),
+                            true,
+                        ),
+                    });
+                    return;
+                }
+            };
 
-    register_caps(&lua)
-        .map_err(|e| format!("注册能力函数失败: {}", e))?;
+            // 2. 创建沙箱 Lua 实例
+            let lua = match LuaContext::new() {
+                Ok(l) => l,
+                Err(e) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 创建 Lua 实例失败: {}", label, e),
+                            true,
+                        ),
+                    });
+                    return;
+                }
+            };
 
-    register_logging_caps(&lua, caps.event_bus.clone())
-        .map_err(|e| format!("注册日志能力失败: {}", e))?;
+            // 3. 注册能力函数
+            if let Err(e) = register_caps(&lua) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册基础能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+            if let Err(e) = register_logging_caps(&lua, caps.event_bus.clone()) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册日志能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+            if let Err(e) = register_network_caps(&lua, caps.clone()) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册 Network 能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+            if let Err(e) = register_storage_caps(&lua, caps.storage.clone()) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册 Storage 能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+            if let Err(e) = register_ml_caps(&lua) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册 ML 能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
 
-    register_network_caps(&lua, caps.clone())
-        .map_err(|e| format!("注册 Network 能力失败: {}", e))?;
+            // 4. 编译脚本
+            if let Err(e) = lua.load(&script).eval::<()>() {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 脚本语法错误: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
 
-    register_storage_caps(&lua, caps.storage.clone())
-        .map_err(|e| format!("注册 Storage 能力失败: {}", e))?;
+            // 5. 构造参数 table
+            let params_table = match lua.create_table() {
+                Ok(t) => t,
+                Err(e) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 创建参数表失败: {}", label, e),
+                            true,
+                        ),
+                    });
+                    return;
+                }
+            };
+            for (k, v) in &params {
+                if let Err(e) = params_table.set(k.as_str(), v.as_str()) {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 设置参数 {} 失败: {}", label, k, e),
+                            true,
+                        ),
+                    });
+                    return;
+                }
+            }
 
-    register_ml_caps(&lua)
-        .map_err(|e| format!("注册 ML 能力失败: {}", e))?;
+            // 6. 调用 execute 函数
+            let execute: mlua::Function = match lua.globals().get("execute") {
+                Ok(f) => f,
+                Err(_) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 脚本缺少 execute 函数", label),
+                            true,
+                        ),
+                    });
+                    return;
+                }
+            };
 
-    lua.load(&script).eval::<()>()
-        .map_err(|e| format!("脚本语法错误: {}", e))?;
-
-    let params_table = lua.create_table()
-        .map_err(|e| format!("创建 params 表失败: {}", e))?;
-    for (k, v) in params {
-        params_table.set(k.as_str(), v.as_str())
-            .map_err(|e| format!("设置参数 {} 失败: {}", k, e))?;
-    }
-
-    let execute: mlua::Function = lua.globals().get("execute")
-        .map_err(|_| "脚本缺少 execute 函数".to_string())?;
-
-    execute.call_async::<mlua::Value>(params_table).await
-        .map_err(|e| format!("脚本执行失败: {}", e))
+            match execute.call_async::<mlua::Value>(params_table).await {
+                Ok(_) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 执行完成", label),
+                            true,
+                        ),
+                    });
+                }
+                Err(e) => {
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(
+                            format!("[{}] 执行失败: {}", label, e),
+                            true,
+                        ),
+                    });
+                }
+            }
+        });
+    });
 }
