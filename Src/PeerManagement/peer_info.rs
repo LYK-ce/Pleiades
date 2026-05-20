@@ -212,13 +212,13 @@ impl PeerInfo {
         }
     }
 
-    /// 显示名称：有 name → "name#XXXX"，否则 "unknown"
+    /// 显示名称：有 name → "name#XXXX"（XXXX 为 peer_id 后 4 位），否则 "unknown"
     pub fn display_name(&self) -> String {
         if self.name.is_empty() {
             "unknown".to_string()
         } else {
             let peer_str = self.peer_id.to_string();
-            let suffix = if peer_str.len() >= 4 { &peer_str[..4] } else { &peer_str };
+            let suffix = if peer_str.len() >= 4 { &peer_str[peer_str.len()-4..] } else { &peer_str };
             format!("{}#{}", self.name, suffix)
         }
     }
