@@ -152,16 +152,19 @@ impl Core {
                 });
             }
 
-            // ─── 刷新存储索引 ──────────────────────────────
+            // ─── 刷新存储索引 (fire-and-forget) ──────────
             UserCommand::Flush => {
-                let text = match self.capabilities.storage.flush().await {
-                    Ok((added, removed)) => {
-                        format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
-                    }
-                    Err(e) => format!("flush 失败: {}", e),
-                };
-                self.capabilities.event_bus.Publish(Bus_Event::Output {
-                    payload: cmd_output(text, true),
+                let caps = self.capabilities.clone();
+                tokio::spawn(async move {
+                    let text = match caps.storage.flush().await {
+                        Ok((added, removed)) => {
+                            format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
+                        }
+                        Err(e) => format!("flush 失败: {}", e),
+                    };
+                    caps.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(text, true),
+                    });
                 });
             }
 
