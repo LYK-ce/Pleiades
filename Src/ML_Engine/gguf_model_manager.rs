@@ -16,7 +16,7 @@ use candle_core::quantized::QTensor;
 use candle_core::Device;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::hash::Hasher;
 use twox_hash::XxHash32;
 
@@ -525,7 +525,7 @@ fn Build_Layer_Bitmap(
 ///
 /// 如果已是 PGGUF（metadata 有 pleiades.model_id）：
 ///   直接读取 model_id + layer_bitmap，零额外 I/O。
-pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
+pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Info, PathBuf)> {
     // 1. 打开文件并解析 GGUF Content
     let mut file = std::fs::File::open(gguf_file_path)?;
     let content = gguf_file::Content::read(&mut file)
@@ -542,7 +542,7 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info
         // 已是 PGGUF → 直接读取，零 I/O
         arch_info.model_id = Some(id as u32);
         arch_info.layer_bitmap = Some(Parse_Bitmap_Hex(&hex_bitmap));
-        return Ok(arch_info);
+        return Ok((arch_info, gguf_file_path.to_path_buf()));
     }
 
     // 4. 原始 GGUF → 计算 model_id + layer_bitmap
@@ -614,15 +614,31 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<Model_Arch_Info
         .map_err(|e| anyhow::anyhow!("Failed to write PGGUF file: {}", e))?;
     drop(writer);
 
-    // 7. 删除原始 .gguf，重命名 .pgguf → 原路径（改后缀）
+    // 7. 删除原始 .gguf，保留 .pgguf
     std::fs::remove_file(gguf_file_path)
         .map_err(|e| anyhow::anyhow!("Failed to remove original GGUF: {}", e))?;
-    std::fs::rename(&pgguf_path, gguf_file_path)
-        .map_err(|e| anyhow::anyhow!("Failed to rename PGGUF: {}", e))?;
 
     arch_info.model_id = Some(model_id);
     arch_info.layer_bitmap = Some(layer_bitmap);
-    Ok(arch_info)
+    Ok((arch_info, pgguf_path))
+}
+
+/// 根据模型名称在 workspace 中查找模型文件。
+///
+/// 优先 `.pgguf`，回退 `.gguf`。
+pub fn Resolve_Model_Path(workspace: &Path, model_name: &str) -> Result<PathBuf> {
+    let pgguf = workspace.join(format!("{}.pgguf", model_name));
+    if pgguf.exists() {
+        return Ok(pgguf);
+    }
+    let gguf = workspace.join(format!("{}.gguf", model_name));
+    if gguf.exists() {
+        return Ok(gguf);
+    }
+    anyhow::bail!(
+        "Model file not found: '{}.pgguf' or '{}.gguf' in {}",
+        model_name, model_name, workspace.display()
+    )
 }
 
 /// 将 32 字节位图编码为 64 字符 hex 字符串

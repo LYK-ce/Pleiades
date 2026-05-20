@@ -100,7 +100,9 @@ pub fn GGUF_Load_Model(
     device: &Device,
 ) -> Result<GGUF_Model> {
     // 0. 自动 GGUF → PGGUF 转换（仅首次，已转换的文件零开销跳过）
-    GGUF_Analyze_And_Convert(model_path)?;
+    //    转换后 model_path 指向实际文件（可能是 .pgguf）
+    let (_arch_info, actual_path) = GGUF_Analyze_And_Convert(model_path)?;
+    let model_path = &actual_path;
 
     // 1. 打开文件并解析 GGUF Content（仅此一次）
     let mut file = std::fs::File::open(model_path)?;

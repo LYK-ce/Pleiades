@@ -25,7 +25,7 @@ use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Split_Model, Mode
 /// 调用方必须在 tokio runtime 上下文中调用。
 pub async fn analyze_model(gguf_file_path: &Path) -> Result<Model_Arch_Info, String> {
     let path = gguf_file_path.to_path_buf();
-    tokio::task::spawn_blocking(move || GGUF_Analyze_And_Convert(&path))
+    tokio::task::spawn_blocking(move || GGUF_Analyze_And_Convert(&path).map(|(a, _)| a))
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?
         .map_err(|e| format!("GGUF_Analyze_And_Convert failed: {e}"))
