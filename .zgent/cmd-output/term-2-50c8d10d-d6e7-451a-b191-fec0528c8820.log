@@ -1,0 +1,4 @@
+> cd /workspace && grep "twox-hash\|twox_hash" Cargo.toml Cargo.lock
+Cargo.toml:twox-hash = "1.6"
+Cargo.lock: "twox-hash",
+Cargo.lock:name = "twox-hash"

@@ -42,6 +42,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("dp / display-peer",     "查看节点列表"),
     ("set-device cpu|cuda",   "切换计算设备"),
     ("ls",                    "列出存储文件"),
+    ("flush",                 "刷新存储索引"),
     ("distribute <model> <peer:0-15> ...", "分发模型分片"),
     ("send <file> <peer>",    "向节点发送文件"),
     ("profile <model>",       "启动 Profile"),
@@ -145,6 +146,19 @@ impl Core {
                         }
                     }
                     Err(e) => format!("错误: {}", e),
+                };
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(text, true),
+                });
+            }
+
+            // ─── 刷新存储索引 ──────────────────────────────
+            UserCommand::Flush => {
+                let text = match self.capabilities.storage.flush().await {
+                    Ok((added, removed)) => {
+                        format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
+                    }
+                    Err(e) => format!("flush 失败: {}", e),
                 };
                 self.capabilities.event_bus.Publish(Bus_Event::Output {
                     payload: cmd_output(text, true),

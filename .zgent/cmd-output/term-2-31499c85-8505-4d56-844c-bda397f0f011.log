@@ -1,0 +1,1 @@
+> cd /workspace && grep -rn "SupportedModel::full\|SupportedModel::shard\|\.full(\|\.shard(" Src/ --include="*.rs"

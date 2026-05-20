@@ -605,6 +605,20 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- flush (刷新存储索引) ----
+
+    if trimmed == "flush" {
+        let cmd = UserCommand::Flush;
+
+        app.Add_Log("执行命令: flush".to_string());
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+        }
+        return;
+    }
+
     // ---- send <file> <peer> ----
 
     if trimmed.starts_with("send ") {

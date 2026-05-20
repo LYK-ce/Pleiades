@@ -1,0 +1,11 @@
+> find ~/.cargo/registry/src/ -path "*/shimmytok-0.7.0/src*" -name "*.rs" -type f 2>/dev/null
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/vocab.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/gguf.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/bpe.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/lib.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/plamo2.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/wpm.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/sentencepiece.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/ugm.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/byte_encoder.rs
+/home/agent/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/shimmytok-0.7.0/src/rwkv.rs

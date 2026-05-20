@@ -1,0 +1,71 @@
+> cd /workspace && cargo check --no-default-features 2>&1
+    Checking Pleiades v0.1.0 (/workspace)
+    Building [=======================> ] 431/433: Pleiades                                                            error[E0425]: cannot find type `PathBuf` in this scope
+   --> Src/ML_Engine/gguf_model_manager.rs:528:84
+    |
+528 | pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Info, PathBuf)> {
+    |                                                                                    ^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+ 13 + use std::path::PathBuf;
+    |
+
+    Building [=======================> ] 431/433: Pleiades                                                            error[E0425]: cannot find type `PathBuf` in this scope
+   --> Src/ML_Engine/gguf_model_manager.rs:629:73
+    |
+629 | pub fn Resolve_Model_Path(workspace: &Path, model_name: &str) -> Result<PathBuf> {
+    |                                                                         ^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+ 13 + use std::path::PathBuf;
+    |
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused imports: `debug` and `error`
+  --> Src/Network/network_service.rs:43:15
+   |
+43 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused imports: `DataType` and `Network_Data`
+  --> Src/Network/network_service.rs:49:5
+   |
+49 |     DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
+   |     ^^^^^^^^  ^^^^^^^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused import: `PeerId`
+ --> Src/Network/command_handler.rs:8:19
+  |
+8 | use libp2p::{kad, PeerId};
+  |                   ^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused imports: `Multiaddr` and `PeerId`
+ --> Src/Network/swarm_events.rs:8:68
+  |
+8 | use libp2p::{kad, mdns, ping, request_response, swarm::SwarmEvent, Multiaddr, PeerId};
+  |                                                                    ^^^^^^^^^  ^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused import: `JobResult`
+ --> Src/Orchestrator/core/branch_lifecycle.rs:9:32
+  |
+9 | use crate::orchestrator::job::{JobResult, LifecycleEvent};
+  |                                ^^^^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused import: `NotifyLevel`
+  --> Src/EventBus/event_bus.rs:14:31
+   |
+14 | use super::event::{Bus_Event, NotifyLevel};
+   |                               ^^^^^^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            warning: unused import: `std::sync::Arc`
+  --> Src/TUI/mod.rs:41:5
+   |
+41 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+    Building [=======================> ] 431/433: Pleiades                                                            For more information about this error, try `rustc --explain E0425`.
+    Building [=======================> ] 431/433: Pleiades                                                            warning: `Pleiades` (lib) generated 7 warnings
+error: could not compile `Pleiades` (lib) due to 2 previous errors; 7 warnings emitted

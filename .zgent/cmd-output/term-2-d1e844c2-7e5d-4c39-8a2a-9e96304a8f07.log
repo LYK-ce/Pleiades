@@ -1,0 +1,76 @@
+> cd /workspace && grep -rn "model_id" Src/ML_Engine/ Src/ --include="*.rs"
+Src/ML_Engine/capability.rs:21:/// 如果是原始 .gguf：自动计算 model_id + layer_bitmap，转换并重命名为 .pgguf。
+Src/ML_Engine/capability.rs:22:/// 如果已是 .pgguf：直接读取已存储的 model_id + layer_bitmap。
+Src/ML_Engine/gguf_model_manager.rs:51:    pub model_id: Option<u64>,
+Src/ML_Engine/gguf_model_manager.rs:327:        model_id: None,
+Src/ML_Engine/gguf_model_manager.rs:485:        model_id: None,
+Src/ML_Engine/gguf_model_manager.rs:519:/// 如果是原始 GGUF（metadata 无 pleiades.model_id）：
+Src/ML_Engine/gguf_model_manager.rs:520:///   1. 读全量字节 → xxhash64 → model_id
+Src/ML_Engine/gguf_model_manager.rs:522:///   3. 写入 .pgguf 文件（metadata 追加 model_id + layer_bitmap）
+Src/ML_Engine/gguf_model_manager.rs:525:/// 如果已是 PGGUF（metadata 有 pleiades.model_id）：
+Src/ML_Engine/gguf_model_manager.rs:526:///   直接读取 model_id + layer_bitmap，零额外 I/O。
+Src/ML_Engine/gguf_model_manager.rs:536:    // 3. 检查是否已是 PGGUF（metadata 中有 pleiades.model_id）
+Src/ML_Engine/gguf_model_manager.rs:537:    let existing_model_id = Get_Metadata_Usize(&content.metadata, "pleiades.model_id");
+Src/ML_Engine/gguf_model_manager.rs:540:    if let (Some(id), Some(hex_bitmap)) = (existing_model_id, existing_bitmap) {
+Src/ML_Engine/gguf_model_manager.rs:542:        arch_info.model_id = Some(id as u64);
+Src/ML_Engine/gguf_model_manager.rs:547:    // 4. 原始 GGUF → 计算 model_id + layer_bitmap
+Src/ML_Engine/gguf_model_manager.rs:554:    let model_id = hash64(&raw_bytes);
+Src/ML_Engine/gguf_model_manager.rs:571:    // 6. 写入 .pgguf：在原始 metadata 基础上追加 pleiades.model_id + layer_bitmap
+Src/ML_Engine/gguf_model_manager.rs:582:        "pleiades.model_id".to_string(),
+Src/ML_Engine/gguf_model_manager.rs:583:        gguf_file::Value::U64(model_id),
+Src/ML_Engine/gguf_model_manager.rs:620:    arch_info.model_id = Some(model_id);
+Src/PeerManagement/peer_info.rs:92:    /// 模型单层耗时（model_id → Duration）
+Src/TUI/mod.rs:725:        let model_id = trimmed[8..].trim();
+Src/TUI/mod.rs:726:        if model_id.is_empty() {
+Src/TUI/mod.rs:728:                "错误: 缺少 model_id 参数\n用法: profile <model_id>".to_string();
+Src/TUI/mod.rs:734:            model_id: model_id.to_string(),
+Src/TUI/mod.rs:737:        app.Add_Log(format!("执行命令: profile {}", model_id));
+Src/Orchestrator/core/branch_user.rs:174:            UserCommand::Profile { model_id: _ } => {
+Src/Orchestrator/command.rs:45:    Profile { model_id: String },
+Src/Orchestrator/command.rs:101:    /// 格式: `PROFILE|{model_id}|{layer_count}|{device}`
+Src/Orchestrator/command.rs:104:        model_id: String,
+Src/Orchestrator/command.rs:169:                    "PROFILE 格式错误: 需要 4 个字段, 实际 {}. 格式: PROFILE|model_id|layer_count|device",
+Src/Orchestrator/command.rs:173:            let model_id = parts[1].to_string();
+Src/Orchestrator/command.rs:179:                model_id,
+Src/Orchestrator/command.rs:211:            model_id,
+Src/Orchestrator/command.rs:214:        } => format!("PROFILE|{}|{}|{}", model_id, layer_count, device),
+Src/ML_Engine/capability.rs:21:/// 如果是原始 .gguf：自动计算 model_id + layer_bitmap，转换并重命名为 .pgguf。
+Src/ML_Engine/capability.rs:22:/// 如果已是 .pgguf：直接读取已存储的 model_id + layer_bitmap。
+Src/ML_Engine/gguf_model_manager.rs:51:    pub model_id: Option<u64>,
+Src/ML_Engine/gguf_model_manager.rs:327:        model_id: None,
+Src/ML_Engine/gguf_model_manager.rs:485:        model_id: None,
+Src/ML_Engine/gguf_model_manager.rs:519:/// 如果是原始 GGUF（metadata 无 pleiades.model_id）：
+Src/ML_Engine/gguf_model_manager.rs:520:///   1. 读全量字节 → xxhash64 → model_id
+Src/ML_Engine/gguf_model_manager.rs:522:///   3. 写入 .pgguf 文件（metadata 追加 model_id + layer_bitmap）
+Src/ML_Engine/gguf_model_manager.rs:525:/// 如果已是 PGGUF（metadata 有 pleiades.model_id）：
+Src/ML_Engine/gguf_model_manager.rs:526:///   直接读取 model_id + layer_bitmap，零额外 I/O。
+Src/ML_Engine/gguf_model_manager.rs:536:    // 3. 检查是否已是 PGGUF（metadata 中有 pleiades.model_id）
+Src/ML_Engine/gguf_model_manager.rs:537:    let existing_model_id = Get_Metadata_Usize(&content.metadata, "pleiades.model_id");
+Src/ML_Engine/gguf_model_manager.rs:540:    if let (Some(id), Some(hex_bitmap)) = (existing_model_id, existing_bitmap) {
+Src/ML_Engine/gguf_model_manager.rs:542:        arch_info.model_id = Some(id as u64);
+Src/ML_Engine/gguf_model_manager.rs:547:    // 4. 原始 GGUF → 计算 model_id + layer_bitmap
+Src/ML_Engine/gguf_model_manager.rs:554:    let model_id = hash64(&raw_bytes);
+Src/ML_Engine/gguf_model_manager.rs:571:    // 6. 写入 .pgguf：在原始 metadata 基础上追加 pleiades.model_id + layer_bitmap
+Src/ML_Engine/gguf_model_manager.rs:582:        "pleiades.model_id".to_string(),
+Src/ML_Engine/gguf_model_manager.rs:583:        gguf_file::Value::U64(model_id),
+Src/ML_Engine/gguf_model_manager.rs:620:    arch_info.model_id = Some(model_id);
+Src/Storage/storage_manager.rs:23:    model_id: Option<u64>,
+Src/Storage/storage_manager.rs:75:                        model_id: None,
+Src/Storage/storage_manager.rs:138:                    model_id: None,
+Src/Storage/storage_manager.rs:168:            model_id: None,
+Src/Storage/storage_manager.rs:186:            model_id: state.model_id,
+Src/Storage/storage_manager.rs:413:                                state.model_id = arch_info.model_id;
+Src/Storage/storage_manager.rs:426:            let mut model_id: Option<u64> = None;
+Src/Storage/storage_manager.rs:436:                        model_id = arch_info.model_id;
+Src/Storage/storage_manager.rs:454:                    model_id,
+Src/Storage/storage_manager.rs:760:        assert_eq!(entries[0].model_id, None);
+Src/Storage/capability.rs:115:    pub model_id: Option<u64>,
+Src/Session_Manager/session.rs:13:    pub model_id: String,
+Src/Session_Manager/session.rs:28:        model_id: String,
+Src/Session_Manager/session.rs:36:            model_id,
+Src/Session_Manager/session.rs:59:    pub model_id: String,
+Src/Session_Manager/mod.rs:42:            model_id: "qwen3".to_string(),
+Src/Session_Manager/manager.rs:44:        model_id: String,
+Src/Session_Manager/manager.rs:55:            model_id,
+Src/Session_Manager/manager.rs:102:                model_id: s.model_id.clone(),
+Src/Session_Manager/capability.rs:60:    async fn create_session(&self, model_id: String)

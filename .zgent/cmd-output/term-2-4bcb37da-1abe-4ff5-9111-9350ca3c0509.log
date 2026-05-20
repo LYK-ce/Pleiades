@@ -1,0 +1,1 @@
+> ls -la /workspace/Pleiades_Workspace/ 2>/dev/null && echo "---" && head -c 200 /workspace/Pleiades_Workspace/test.gguf 2>/dev/null | xxd | head -5

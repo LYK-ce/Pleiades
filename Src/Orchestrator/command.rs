@@ -48,6 +48,8 @@ pub enum UserCommand {
     /// Core 通过 EventBus 发布 `Bus_Event::HelpInfo`，前端订阅渲染。
     /// 无需 reply 通道。
     Help,
+    /// 刷新存储索引（扫描磁盘文件，同步 FileEntry）
+    Flush,
 }
 
 // ============================================================

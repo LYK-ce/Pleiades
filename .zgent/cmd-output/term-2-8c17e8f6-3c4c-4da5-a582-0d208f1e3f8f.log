@@ -1,0 +1,146 @@
+> cd /workspace && cargo check --no-default-features 2>&1
+warning: unused imports: `debug` and `error`
+  --> Src/Network/network_service.rs:43:15
+   |
+43 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DataType` and `Network_Data`
+  --> Src/Network/network_service.rs:49:5
+   |
+49 |     DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
+   |     ^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `PeerId`
+ --> Src/Network/command_handler.rs:8:19
+  |
+8 | use libp2p::{kad, PeerId};
+  |                   ^^^^^^
+
+warning: unused imports: `Multiaddr` and `PeerId`
+ --> Src/Network/swarm_events.rs:8:68
+  |
+8 | use libp2p::{kad, mdns, ping, request_response, swarm::SwarmEvent, Multiaddr, PeerId};
+  |                                                                    ^^^^^^^^^  ^^^^^^
+
+warning: unused import: `JobResult`
+ --> Src/Orchestrator/core/branch_lifecycle.rs:9:32
+  |
+9 | use crate::orchestrator::job::{JobResult, LifecycleEvent};
+  |                                ^^^^^^^^^
+
+warning: unused import: `NotifyLevel`
+  --> Src/EventBus/event_bus.rs:14:31
+   |
+14 | use super::event::{Bus_Event, NotifyLevel};
+   |                               ^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> Src/TUI/mod.rs:41:5
+   |
+41 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: function `query_system_memory_mb` is never used
+   --> Src/Orchestrator/mod.rs:110:4
+    |
+110 | fn query_system_memory_mb() -> u64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `query_cuda_memory_mb` is never used
+   --> Src/Orchestrator/mod.rs:117:4
+    |
+117 | fn query_cuda_memory_mb() -> u64 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `query_free_memory_mb` is never used
+   --> Src/Orchestrator/mod.rs:133:15
+    |
+133 | pub(crate) fn query_free_memory_mb(device: &str) -> u64 {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `kind` and `inference_id` are never read
+  --> Src/Orchestrator/core.rs:41:5
+   |
+40 | struct JobHandle {
+   |        --------- fields in this struct
+41 |     kind: JobKind,
+   |     ^^^^
+42 |     cancel: CancellationToken,
+43 |     inference_id: Option<u64>,
+   |     ^^^^^^^^^^^^
+
+warning: field `lifecycle_tx` is never read
+  --> Src/Orchestrator/core.rs:77:5
+   |
+59 | pub struct Core {
+   |            ---- field in this struct
+...
+77 |     lifecycle_tx: mpsc::Sender<LifecycleEvent>,
+   |     ^^^^^^^^^^^^
+
+warning: method `register_job` is never used
+   --> Src/Orchestrator/core.rs:157:8
+    |
+ 87 | impl Core {
+    | --------- method in this implementation
+...
+157 |     fn register_job(&mut self, job_id: JobId, kind: JobKind) {
+    |        ^^^^^^^^^^^^
+
+warning: static `JOB_ID_COUNTER` is never used
+   --> Src/Orchestrator/core.rs:180:8
+    |
+180 | static JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+    |        ^^^^^^^^^^^^^^
+
+warning: function `generate_id` is never used
+   --> Src/Orchestrator/core.rs:182:15
+    |
+182 | pub(super) fn generate_id() -> u64 {
+    |               ^^^^^^^^^^^
+
+warning: struct `JobExecutor` is never constructed
+  --> Src/Orchestrator/core/job_executor.rs:19:12
+   |
+19 | pub struct JobExecutor {
+   |            ^^^^^^^^^^^
+
+warning: associated items `new` and `run` are never used
+  --> Src/Orchestrator/core/job_executor.rs:28:12
+   |
+27 | impl JobExecutor {
+   | ---------------- associated items in this implementation
+28 |     pub fn new(
+   |            ^^^
+...
+48 |     pub async fn run(self) {
+   |                  ^^^
+
+warning: fields `ml_input_tx` and `ml_output_rx` are never read
+  --> Src/Session_Manager/session.rs:18:16
+   |
+11 | pub(crate) struct Session {
+   |                   ------- fields in this struct
+...
+18 |     pub(crate) ml_input_tx: mpsc::Sender<String>,
+   |                ^^^^^^^^^^^
+19 |     /// ML Thread output 通道的接收端 — create_session 时存入，不再 drop
+20 |     pub(crate) ml_output_rx: mpsc::Receiver<String>,
+   |                ^^^^^^^^^^^^
+
+warning: field `caps` is never read
+  --> Src/VM/network_stream.rs:17:5
+   |
+15 | pub struct NetworkStream {
+   |            ------------- field in this struct
+16 |     pub stream: Mutex<libp2p::Stream>,
+17 |     caps: Arc<Capabilities>,
+   |     ^^^^
+
+warning: `Pleiades` (lib) generated 19 warnings (run `cargo fix --lib -p Pleiades` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
