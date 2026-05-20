@@ -16,22 +16,18 @@ function execute(params)
     caps.print("模型: " .. model_name)
 
     -- 0. 通过 Storage 获取模型路径
-    local handle = caps.storage_acquire_read(model_name)
-    local raw_path = handle:path()
+    local raw_path
+    do
+        local handle = caps.storage_acquire_read(model_name)
+        raw_path = handle:path()
+        handle:release()
+    end
     caps.print("模型路径: " .. raw_path)
 
-    -- 1. 确定 .pgguf 路径（.gguf 先 analyze 转换）
-    local pgguf_path = raw_path
-    if raw_path:match("%.gguf$") then
-        caps.print("检测到 .gguf，正在转换...")
-        ml.analyze_model(raw_path)
-        pgguf_path = raw_path:gsub("%.gguf$", ".pgguf")
-    end
-
-    -- 2. 创建会话
+    -- 1. 创建会话
     local sess = ml.new(device)
     caps.print("加载模型中...")
-    sess:load_model(pgguf_path, 0, 999999)
+    sess:load_model(raw_path, 0, 999999)
     caps.print("模型加载完成")
 
     -- 3. 硬编码 prompt

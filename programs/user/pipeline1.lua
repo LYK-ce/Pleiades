@@ -19,11 +19,15 @@ function execute(params)
     end
 
     -- 0. 通过 Storage 获取模型路径
-    local handle = caps.storage_acquire_read(model)
-    local raw_path = handle:path()
+    local raw_path
+    do
+        local handle = caps.storage_acquire_read(model)
+        raw_path = handle:path()
+        handle:release()
+    end
     caps.print("[pipeline1] 模型文件: " .. raw_path)
 
-    -- 1. 分析模型（自动处理 .gguf→.pgguf 转换）
+    -- 1. 分析模型
     caps.print("[pipeline1] 分析模型...")
     local info = ml.analyze_model(raw_path)
     local N = info.num_layers
@@ -32,16 +36,10 @@ function execute(params)
     caps.print("  总层: " .. total .. " (embedding=0, blocks=1.." .. N .. ", output=" .. total .. ")")
     caps.print("  分段: A[0.." .. mid .. "]  B[" .. (mid+1) .. ".." .. total .. "]")
 
-    -- 2. 确定 .pgguf 路径
-    local pgguf_path = raw_path
-    if raw_path:match("%.gguf$") then
-        pgguf_path = raw_path:gsub("%.gguf$", ".pgguf")
-    end
-
-    -- 3. 创建会话，加载前半模型
+    -- 2. 创建会话，加载前半模型
     local sess = ml.new(device)
     caps.print("[pipeline1] 加载 0.." .. mid)
-    sess:load_model(pgguf_path, 0, mid)
+    sess:load_model(raw_path, 0, mid)
     caps.print("[pipeline1] 模型加载完成 (has_input_head=" .. tostring(sess:has_model()) .. ")")
 
     -- 4. 编码 prompt

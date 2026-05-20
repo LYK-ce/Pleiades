@@ -17,8 +17,12 @@ function execute(params)
     end
 
     -- 0. 通过 Storage 获取模型路径
-    local handle = caps.storage_acquire_read(model)
-    local raw_path = handle:path()
+    local raw_path
+    do
+        local handle = caps.storage_acquire_read(model)
+        raw_path = handle:path()
+        handle:release()
+    end
     caps.print("[pipeline2] 模型文件: " .. raw_path)
 
     -- 1. 分析模型
@@ -30,16 +34,10 @@ function execute(params)
     caps.print("  总层: " .. total .. " (embedding=0, blocks=1.." .. N .. ", output=" .. total .. ")")
     caps.print("  分段: A[0.." .. mid .. "]  B[" .. (mid+1) .. ".." .. total .. "]")
 
-    -- 2. 确定 .pgguf 路径
-    local pgguf_path = raw_path
-    if raw_path:match("%.gguf$") then
-        pgguf_path = raw_path:gsub("%.gguf$", ".pgguf")
-    end
-
-    -- 3. 创建会话，加载后半模型
+    -- 2. 创建会话，加载后半模型
     local sess = ml.new(device)
     caps.print("[pipeline2] 加载 " .. (mid+1) .. ".." .. total)
-    sess:load_model(pgguf_path, mid + 1, total)
+    sess:load_model(raw_path, mid + 1, total)
     caps.print("[pipeline2] 模型加载完成")
 
     -- 4. 建立双流
