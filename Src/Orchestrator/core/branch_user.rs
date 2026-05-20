@@ -44,6 +44,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("set-device cpu|cuda",   "切换计算设备"),
     ("ls",                    "列出存储文件"),
     ("flush",                 "刷新存储索引"),
+    ("set-name <name>",       "设置本地节点名称"),
     ("distribute <model> <peer:0-15> ...", "分发模型分片"),
     ("send <file> <peer>",    "向节点发送文件"),
     ("profile <model>",       "启动 Profile"),
