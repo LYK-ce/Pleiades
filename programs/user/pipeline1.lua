@@ -7,11 +7,7 @@ COMMAND = "pipeline1"
 DESCRIPTION = "流水线并行前半段: embedding + transformer[0..mid-1], 负责采样解码"
 
 function execute(params)
-    local model = params.model
-    if not model then
-        caps.print("[pipeline1] 缺少 model 参数")
-        return
-    end
+    local model = params.model or "test"
     local model_path = "Pleiades_Workspace/" .. model
     local device = params.device or "cpu"
     local temperature = tonumber(params.temperature) or 0.8
