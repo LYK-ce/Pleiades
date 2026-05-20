@@ -18,8 +18,6 @@
  pub enum Peer_Management_Error {
      #[error("Peer not found: {0}")]
      PeerNotFound(String),
-     #[error("Operation timeout")]
-     Timeout,
      #[error("Internal error: {0}")]
      Internal(String),
  }
@@ -32,8 +30,14 @@
 pub trait Peer_Management_Capability: Send + Sync {
      // ─── 查询操作 ──────────────────────────────
 
-     /// 获取远程节点列表（排除本地）
+     /// 获取远程节点列表（排除本地，不含 layer_time）
      async fn Get_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error>;
+
+     /// 获取所有节点列表（含本地，不含 layer_time）
+     async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error>;
+
+     /// 获取本地节点信息
+     async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error>;
 
      /// 获取单个节点信息
      async fn Get_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;
@@ -50,7 +54,7 @@ pub trait Peer_Management_Capability: Send + Sync {
      // ─── 变更操作 ──────────────────────────────
 
      /// 添加或覆盖节点信息
-     async fn Upsert_Peer(&self, peer_info: PeerInfo);
+     async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error>;
 
      /// 移除节点（保护本地节点）
      async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;

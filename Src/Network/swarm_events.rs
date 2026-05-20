@@ -40,7 +40,7 @@ impl Network_Service {
                     peer_id,
                     vec![endpoint.get_remote_address().clone()]
                 );
-                self.peer_handle.Upsert_Peer(peer_info).await;
+                self.peer_handle.Upsert_Peer(peer_info).await.ok();
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
                         "type": "peer_connected",

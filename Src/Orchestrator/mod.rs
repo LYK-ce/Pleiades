@@ -69,21 +69,43 @@ pub(crate) mod test_utils {
 
     // ─── PeerManager stub ──────────────────────────────────
 
-    pub struct StubPeerManager;
+    pub struct StubPeerManager {
+        inner: crate::peer_management::PeerManager,
+    }
+
+    impl StubPeerManager {
+        pub fn new() -> Self {
+            Self { inner: crate::peer_management::PeerManager::new(libp2p::PeerId::random()) }
+        }
+
+        /// 注入 mock 节点数据（可选 peer_id，若为 None 则随机生成）
+        pub async fn inject_peer(&self, peer_id: Option<libp2p::PeerId>, models: Vec<crate::peer_management::SupportedModel>) {
+            let id = peer_id.unwrap_or_else(libp2p::PeerId::random);
+            let mut info = crate::peer_management::PeerInfo::new(id, vec![]);
+            info.update_supported_models(models);
+            self.inner.upsert_peer(info).await;
+        }
+    }
 
     #[async_trait]
     impl Peer_Management_Capability for StubPeerManager {
-        async fn Get_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(vec![]) }
-        async fn Get_Peer(&self, _peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { Err(Peer_Management_Error::PeerNotFound("stub".to_string())) }
-        async fn Contains_Peer(&self, _peer_id: &libp2p::PeerId) -> Result<bool, Peer_Management_Error> { Ok(false) }
-        async fn Count(&self) -> Result<usize, Peer_Management_Error> { Ok(0) }
-        async fn Is_Empty(&self) -> Result<bool, Peer_Management_Error> { Ok(true) }
-        async fn Upsert_Peer(&self, _peer_info: PeerInfo) {}
-        async fn Remove_Peer(&self, _peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { Err(Peer_Management_Error::PeerNotFound("stub".to_string())) }
-        async fn Update_Profile(&self, _peer_id: &libp2p::PeerId, _profile: crate::peer_management::PeerProfile) -> Result<(), Peer_Management_Error> { Ok(()) }
-        async fn Update_Supported_Models(&self, _peer_id: &libp2p::PeerId, _models: Vec<crate::peer_management::SupportedModel>) -> Result<(), Peer_Management_Error> { Ok(()) }
-        async fn Cleanup_Timeout_Peers(&self, _timeout_secs: u64) -> Result<usize, Peer_Management_Error> { Ok(0) }
-        async fn Clear(&self) -> Result<(), Peer_Management_Error> { Ok(()) }
+        async fn Get_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(self.inner.get_peers().await) }
+        async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(self.inner.get_all_peers().await) }
+        async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_local_peer().await.ok_or_else(|| Peer_Management_Error::PeerNotFound("stub".to_string())) }
+        async fn Get_Peer(&self, peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_peer(peer_id).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
+        async fn Contains_Peer(&self, peer_id: &libp2p::PeerId) -> Result<bool, Peer_Management_Error> { Ok(self.inner.contains_peer(peer_id).await) }
+        async fn Count(&self) -> Result<usize, Peer_Management_Error> { Ok(self.inner.count().await) }
+        async fn Is_Empty(&self) -> Result<bool, Peer_Management_Error> { Ok(self.inner.is_empty().await) }
+        async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error> { self.inner.upsert_peer(peer_info).await; Ok(()) }
+        async fn Remove_Peer(&self, peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { self.inner.remove_peer(peer_id).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
+        async fn Update_Profile(&self, peer_id: &libp2p::PeerId, profile: crate::peer_management::PeerProfile) -> Result<(), Peer_Management_Error> {
+            if self.inner.update_profile(peer_id, profile).await { Ok(()) } else { Err(Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
+        }
+        async fn Update_Supported_Models(&self, peer_id: &libp2p::PeerId, models: Vec<crate::peer_management::SupportedModel>) -> Result<(), Peer_Management_Error> {
+            if self.inner.update_supported_models(peer_id, models).await { Ok(()) } else { Err(Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
+        }
+        async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error> { Ok(self.inner.cleanup_timeout_peers(timeout_secs).await) }
+        async fn Clear(&self) -> Result<(), Peer_Management_Error> { self.inner.clear().await; Ok(()) }
     }
 
     // ─── Storage stub ──────────────────────────────────────

@@ -6,11 +6,10 @@
  //! 该模块提供并发安全的节点信息管理，使用读写锁（RwLock）保护节点数据，
  //! 支持异步上下文中的高并发访问。
 
- use std::collections::HashMap;
- use std::sync::Arc;
+use std::collections::HashMap;
 
- use libp2p::PeerId;
- use tokio::sync::RwLock;
+use libp2p::PeerId;
+use tokio::sync::RwLock;
 
  use super::peer_info::{PeerInfo, PeerProfile, SupportedModel};
 
@@ -18,7 +17,7 @@
  ///
  /// 本地节点在构造时自动创建并插入 map，通过 `PeerInfo.local` 标识。
  pub struct PeerManager {
-     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
+     peers: RwLock<HashMap<PeerId, PeerInfo>>,
  }
 
  impl PeerManager {
@@ -27,14 +26,24 @@
          let mut peers = HashMap::new();
          peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id));
          Self {
-             peers: Arc::new(RwLock::new(peers)),
+             peers: RwLock::new(peers),
          }
      }
 
      /// 添加或覆盖节点信息
-     pub async fn upsert_peer(&self, peer_info: PeerInfo) {
+     /// 若节点已存在，仅更新 addresses，保留 last_active / connected_at / profile / supported_models
+     pub async fn upsert_peer(&self, mut peer_info: PeerInfo) -> bool {
          let mut peers = self.peers.write().await;
+         if let Some(old) = peers.get(&peer_info.peer_id) {
+             peer_info.connected_at = old.connected_at;
+             peer_info.last_active = old.last_active;
+             peer_info.profile = old.profile.clone();
+             peer_info.supported_models = old.supported_models.clone();
+             peer_info.local = old.local;
+         }
+         let existed = peers.contains_key(&peer_info.peer_id);
          peers.insert(peer_info.peer_id, peer_info);
+         existed
      }
 
      /// 移除节点（保护本地节点）
@@ -54,18 +63,25 @@
          peers.get(peer_id).cloned()
      }
 
-     /// 获取所有节点信息
+     /// 获取所有节点信息（不含 layer_time 减少 clone 开销）
      pub async fn get_all_peers(&self) -> Vec<PeerInfo> {
          let peers = self.peers.read().await;
-         peers.values().cloned().collect()
+         peers.values().cloned().map(|mut p| { p.profile.layer_time = None; p }).collect()
      }
 
-     /// 获取远程节点列表（排除 local == true）
+     /// 获取本地节点信息
+     pub async fn get_local_peer(&self) -> Option<PeerInfo> {
+         let peers = self.peers.read().await;
+         peers.values().find(|p| p.local).cloned()
+     }
+
+     /// 获取远程节点列表（排除 local == true，不含 layer_time）
      pub async fn get_peers(&self) -> Vec<PeerInfo> {
          let peers = self.peers.read().await;
          peers.values()
              .filter(|p| !p.local)
              .cloned()
+             .map(|mut p| { p.profile.layer_time = None; p })
              .collect()
      }
 

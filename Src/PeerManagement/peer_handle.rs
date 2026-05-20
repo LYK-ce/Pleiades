@@ -43,6 +43,15 @@
          Ok(self.inner.get_peers().await)
      }
 
+     async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> {
+         Ok(self.inner.get_all_peers().await)
+     }
+
+     async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error> {
+         self.inner.get_local_peer().await
+             .ok_or_else(|| Peer_Management_Error::PeerNotFound("local".to_string()))
+     }
+
      async fn Get_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error> {
          self.inner.get_peer(peer_id).await
              .ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string()))
@@ -60,8 +69,9 @@
          Ok(self.inner.is_empty().await)
      }
 
-     async fn Upsert_Peer(&self, peer_info: PeerInfo) {
+     async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error> {
          self.inner.upsert_peer(peer_info).await;
+         Ok(())
      }
 
      async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error> {
