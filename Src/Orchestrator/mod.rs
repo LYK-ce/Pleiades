@@ -75,7 +75,7 @@ pub(crate) mod test_utils {
 
     impl StubPeerManager {
         pub fn new() -> Self {
-            Self { inner: crate::peer_management::PeerManager::new(libp2p::PeerId::random()) }
+            Self { inner: crate::peer_management::PeerManager::new(libp2p::PeerId::random(), String::new()) }
         }
 
         /// 注入 mock 节点数据（可选 peer_id，若为 None 则随机生成）
@@ -92,11 +92,14 @@ pub(crate) mod test_utils {
         async fn Get_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(self.inner.get_peers().await) }
         async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(self.inner.get_all_peers().await) }
         async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_local_peer().await.ok_or_else(|| Peer_Management_Error::PeerNotFound("stub".to_string())) }
+        async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_peer_by_name(name).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(name.to_string())) }
         async fn Get_Peer(&self, peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_peer(peer_id).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
         async fn Contains_Peer(&self, peer_id: &libp2p::PeerId) -> Result<bool, Peer_Management_Error> { Ok(self.inner.contains_peer(peer_id).await) }
         async fn Count(&self) -> Result<usize, Peer_Management_Error> { Ok(self.inner.count().await) }
         async fn Is_Empty(&self) -> Result<bool, Peer_Management_Error> { Ok(self.inner.is_empty().await) }
         async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error> { self.inner.upsert_peer(peer_info).await; Ok(()) }
+        async fn Set_Local_Name(&self, name: &str) -> Result<(), Peer_Management_Error> { self.inner.set_local_name(name.to_string()).await; Ok(()) }
+        async fn Update_Peer_Name(&self, peer_id: &libp2p::PeerId, name: &str) -> Result<(), Peer_Management_Error> { self.inner.update_peer_name(peer_id, name).await; Ok(()) }
         async fn Remove_Peer(&self, peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { self.inner.remove_peer(peer_id).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
         async fn Update_Profile(&self, peer_id: &libp2p::PeerId, profile: crate::peer_management::PeerProfile) -> Result<(), Peer_Management_Error> {
             if self.inner.update_profile(peer_id, profile).await { Ok(()) } else { Err(Peer_Management_Error::PeerNotFound(peer_id.to_string())) }

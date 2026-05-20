@@ -52,6 +52,11 @@
              .ok_or_else(|| Peer_Management_Error::PeerNotFound("local".to_string()))
      }
 
+     async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error> {
+         self.inner.get_peer_by_name(name).await
+             .ok_or_else(|| Peer_Management_Error::PeerNotFound(name.to_string()))
+     }
+
      async fn Get_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error> {
          self.inner.get_peer(peer_id).await
              .ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string()))
@@ -72,6 +77,22 @@
      async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error> {
          self.inner.upsert_peer(peer_info).await;
          Ok(())
+     }
+
+     async fn Set_Local_Name(&self, name: &str) -> Result<(), Peer_Management_Error> {
+         if self.inner.set_local_name(name.to_string()).await {
+             Ok(())
+         } else {
+             Err(Peer_Management_Error::PeerNotFound("local".to_string()))
+         }
+     }
+
+     async fn Update_Peer_Name(&self, peer_id: &PeerId, name: &str) -> Result<(), Peer_Management_Error> {
+         if self.inner.update_peer_name(peer_id, name).await {
+             Ok(())
+         } else {
+             Err(Peer_Management_Error::PeerNotFound(peer_id.to_string()))
+         }
      }
 
      async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error> {

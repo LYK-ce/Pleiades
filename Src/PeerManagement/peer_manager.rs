@@ -22,9 +22,9 @@ use tokio::sync::RwLock;
 
  impl PeerManager {
      /// 创建一个新的节点管理器，自动创建本地 PeerInfo 并插入 map
-     pub fn new(local_peer_id: PeerId) -> Self {
+     pub fn new(local_peer_id: PeerId, name: String) -> Self {
          let mut peers = HashMap::new();
-         peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id));
+         peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id, name));
          Self {
              peers: RwLock::new(peers),
          }
@@ -73,6 +73,34 @@ use tokio::sync::RwLock;
      pub async fn get_local_peer(&self) -> Option<PeerInfo> {
          let peers = self.peers.read().await;
          peers.values().find(|p| p.local).cloned()
+     }
+
+     /// 按名称精确匹配节点（匹配原始 name，非 display_name）
+     pub async fn get_peer_by_name(&self, name: &str) -> Option<PeerInfo> {
+         let peers = self.peers.read().await;
+         peers.values().find(|p| p.name == name).cloned()
+     }
+
+     /// 设置本地节点名称，返回是否成功
+     pub async fn set_local_name(&self, name: String) -> bool {
+         let mut peers = self.peers.write().await;
+         if let Some(info) = peers.values_mut().find(|p| p.local) {
+             info.name = name;
+             true
+         } else {
+             false
+         }
+     }
+
+     /// 更新远程节点名称，返回是否成功
+     pub async fn update_peer_name(&self, peer_id: &PeerId, name: &str) -> bool {
+         let mut peers = self.peers.write().await;
+         if let Some(info) = peers.get_mut(peer_id) {
+             info.name = name.to_string();
+             true
+         } else {
+             false
+         }
      }
 
      /// 获取远程节点列表（排除 local == true，不含 layer_time）
@@ -142,6 +170,6 @@ use tokio::sync::RwLock;
 
  impl Default for PeerManager {
      fn default() -> Self {
-         Self::new(PeerId::random())
+         Self::new(PeerId::random(), String::new())
      }
  }

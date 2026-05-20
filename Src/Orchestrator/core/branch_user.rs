@@ -13,6 +13,7 @@ use crate::vm::capability_binding::{
     register_storage_caps, register_ml_caps,
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
+use std::path::Path;
 
 // ============================================================
 // 本地 HelpEntry（已从 EventBus 中解耦）
@@ -95,18 +96,47 @@ impl Core {
 
             // ─── 查看节点 ──────────────────────────────────
             UserCommand::DisplayPeer => {
-                let text = match self.capabilities.peer_manager.Get_Peers().await {
+                let text = match self.capabilities.peer_manager.Get_All_Peers().await {
                     Ok(peers) => {
                         if peers.is_empty() {
                             "当前无已知节点".to_string()
                         } else {
                             peers.iter()
-                                .map(|p| format!("{} [mem={:?}MB latency={:?}ms]", p.peer_id, p.profile.memory_mb, p.profile.latency_ms))
+                                .map(|p| {
+                                    let name = p.display_name();
+                                    let mut line = format!("{} [mem={:?}MB latency={:?}ms]", name, p.profile.memory_mb, p.profile.latency_ms);
+                                    if !p.supported_models.is_empty() {
+                                        line.push_str(&format!("\n  模型 ({}):", p.supported_models.len()));
+                                        for m in &p.supported_models {
+                                            line.push_str(&format!("\n    {} (id={:08x}) [layers: {}]", m.file_name, m.id, m.layer_range()));
+                                        }
+                                    }
+                                    line
+                                })
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         }
                     }
                     Err(e) => format!("错误: {}", e),
+                };
+                self.capabilities.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(text, true),
+                });
+            }
+
+            // ─── 设置本地节点名称 ──────────────────────────
+            UserCommand::SetName { name } => {
+                let text = match self.capabilities.peer_manager.Set_Local_Name(&name).await {
+                    Ok(()) => {
+                        // 同时持久化到 config
+                        let config_path = Path::new(".config").join("config.toml");
+                        if let Err(e) = crate::config::Set_Peer_Name(&config_path, &name) {
+                            format!("名称已设置为 {}，但持久化失败: {}", name, e)
+                        } else {
+                            format!("节点名称已设置为: {}", name)
+                        }
+                    }
+                    Err(e) => format!("设置名称失败: {}", e),
                 };
                 self.capabilities.event_bus.Publish(Bus_Event::Output {
                     payload: cmd_output(text, true),
@@ -199,6 +229,24 @@ impl Core {
                 tokio::spawn(async move {
                     let text = match caps.storage.flush().await {
                         Ok((added, removed)) => {
+                            // flush 成功后同步 supported_models 到 PeerManager
+                            if let Ok(entries) = caps.storage.list().await {
+                                let models: Vec<_> = entries
+                                    .iter()
+                                    .filter_map(|e| {
+                                        let id = e.model_id?;
+                                        let bitmap = e.layer_bitmap?;
+                                        Some(crate::peer_management::SupportedModel {
+                                            id,
+                                            file_name: e.file_name.clone(),
+                                            layer_bitmap: bitmap,
+                                        })
+                                    })
+                                    .collect();
+                                if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
+                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models).await;
+                                }
+                            }
                             format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
                         }
                         Err(e) => format!("flush 失败: {}", e),

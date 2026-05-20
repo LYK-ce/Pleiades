@@ -53,3 +53,7 @@ strategy = "uniform"
 [Session]
 # 最大并发对话槽位数
 max_slots = 4
+
+[Identity]
+# 节点名称（不含 #XXXX 后缀）
+peer_name = "new_peer"

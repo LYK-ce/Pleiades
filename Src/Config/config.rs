@@ -25,6 +25,7 @@ pub struct Pleiades_Config {
     pub Runtime: Option<Runtime_Config>,
     pub Storage: Option<Storage_Config>,
     pub Session: Option<Session_Config>,
+    pub Identity: Option<Identity_Config>,
 }
 
 /// [Log] 段配置
@@ -71,6 +72,25 @@ pub struct Storage_Config {
 pub struct Session_Config {
     /// 最大并发对话槽位数，默认 4
     pub max_slots: Option<usize>,
+}
+
+/// [Identity] 段配置
+#[derive(Debug, Deserialize)]
+pub struct Identity_Config {
+    /// 节点名称（不含 #XXXX 后缀）
+    pub peer_name: Option<String>,
+}
+
+/// 读取节点名称，默认 "new_peer"
+pub fn Get_Peer_Name(config: &Pleiades_Config) -> String {
+    config.Identity.as_ref()
+        .and_then(|i| i.peer_name.clone())
+        .unwrap_or_else(|| "new_peer".to_string())
+}
+
+/// 持久化节点名称到 config.toml
+pub fn Set_Peer_Name(config_path: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    Update_Config(config_path, "Identity", "peer_name", name)
 }
 
 /// 读取并解析 config.toml 配置文件

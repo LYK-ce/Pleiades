@@ -50,6 +50,8 @@ pub enum UserCommand {
     Help,
     /// 刷新存储索引（扫描磁盘文件，同步 FileEntry）
     Flush,
+    /// 设置本地节点名称
+    SetName { name: String },
 }
 
 // ============================================================

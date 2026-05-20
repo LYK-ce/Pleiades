@@ -19,14 +19,33 @@ use std::time::{Duration, Instant};
 /// 调度时依据此结构决定模型分配：
 /// - `id` 用于跨节点匹配同一模型
 /// - `layer_bitmap` 用于判断节点持有模型的哪些层
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SupportedModel {
     /// 模型唯一标识 — xxhash32(content) → u32
     pub id: u32,
     /// 存储文件名（Storage file_id）
     pub file_name: String,
     /// 256 位层位图，bit N = 1 表示持有第 N 层
+    #[serde(serialize_with = "serialize_bitmap_hex", deserialize_with = "deserialize_bitmap_hex")]
     pub layer_bitmap: [u8; 32],
+}
+
+fn serialize_bitmap_hex<S: serde::Serializer>(bitmap: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+    let hex: String = bitmap.iter().map(|b| format!("{:02x}", b)).collect();
+    s.serialize_str(&hex)
+}
+
+fn deserialize_bitmap_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+    let hex: String = serde::Deserialize::deserialize(d)?;
+    if hex.len() != 64 {
+        return Err(serde::de::Error::custom("layer_bitmap hex must be 64 chars"));
+    }
+    let mut bitmap = [0u8; 32];
+    for i in 0..32 {
+        bitmap[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|e| serde::de::Error::custom(format!("invalid hex: {}", e)))?;
+    }
+    Ok(bitmap)
 }
 
 impl SupportedModel {
@@ -75,6 +94,43 @@ impl SupportedModel {
             .map(|b| b.count_ones() as usize)
             .sum()
     }
+
+    /// 将 layer_bitmap 解码为层范围字符串（如 "0-31" 或 "0-3,5,7-9"）
+    pub fn layer_range(&self) -> String {
+        let mut layers: Vec<usize> = Vec::new();
+        for i in 0..256 {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            if self.layer_bitmap[byte_idx] & (1 << bit_idx) != 0 {
+                layers.push(i);
+            }
+        }
+        if layers.is_empty() {
+            return "none".to_string();
+        }
+        let mut ranges = Vec::new();
+        let mut start = layers[0];
+        let mut end = layers[0];
+        for &l in &layers[1..] {
+            if l == end + 1 {
+                end = l;
+            } else {
+                ranges.push(if start == end {
+                    format!("{}", start)
+                } else {
+                    format!("{}-{}", start, end)
+                });
+                start = l;
+                end = l;
+            }
+        }
+        ranges.push(if start == end {
+            format!("{}", start)
+        } else {
+            format!("{}-{}", start, end)
+        });
+        ranges.join(",")
+    }
 }
 
 /// 节点动态性能画像
@@ -109,6 +165,8 @@ impl Default for PeerProfile {
 pub struct PeerInfo {
     /// 节点 ID
     pub peer_id: PeerId,
+    /// 节点名称（不含 #XXXX 后缀，空字符串表示未知）
+    pub name: String,
     /// 地址列表
     pub addresses: Vec<Multiaddr>,
     /// 是否为本地节点
@@ -124,11 +182,12 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    /// 创建一个新的远程节点信息
+    /// 创建一个新的远程节点信息（名称未知）
     pub fn new(peer_id: PeerId, addresses: Vec<Multiaddr>) -> Self {
         let now = Instant::now();
         Self {
             peer_id,
+            name: String::new(),
             addresses,
             local: false,
             connected_at: now,
@@ -139,10 +198,11 @@ impl PeerInfo {
     }
 
     /// 创建本地节点信息
-    pub fn new_local(peer_id: PeerId) -> Self {
+    pub fn new_local(peer_id: PeerId, name: String) -> Self {
         let now = Instant::now();
         Self {
             peer_id,
+            name,
             addresses: Vec::new(),
             local: true,
             connected_at: now,
@@ -150,6 +210,22 @@ impl PeerInfo {
             profile: PeerProfile::default(),
             supported_models: Vec::new(),
         }
+    }
+
+    /// 显示名称：有 name → "name#XXXX"，否则 "unknown"
+    pub fn display_name(&self) -> String {
+        if self.name.is_empty() {
+            "unknown".to_string()
+        } else {
+            let peer_str = self.peer_id.to_string();
+            let suffix = if peer_str.len() >= 4 { &peer_str[..4] } else { &peer_str };
+            format!("{}#{}", self.name, suffix)
+        }
+    }
+
+    /// 设置节点名称
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     /// Update Profile 更新性能画像，字段为 None 时跳过

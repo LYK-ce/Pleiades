@@ -11,7 +11,7 @@ pub mod config;
 pub mod identity;
 
 pub use config::{
-    Ensure_Config, Log_Config, Network_Config, Pleiades_Config, Read_Config, Runtime_Config,
-    Session_Config, Storage_Config, Update_Config,
+    Ensure_Config, Get_Peer_Name, Identity_Config, Log_Config, Network_Config, Pleiades_Config,
+    Read_Config, Runtime_Config, Session_Config, Set_Peer_Name, Storage_Config, Update_Config,
 };
 pub use identity::Ensure_Identity;

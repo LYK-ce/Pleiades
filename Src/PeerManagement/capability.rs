@@ -39,6 +39,9 @@ pub trait Peer_Management_Capability: Send + Sync {
      /// 获取本地节点信息
      async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error>;
 
+     /// 按名称精确匹配节点（匹配原始 name）
+     async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error>;
+
      /// 获取单个节点信息
      async fn Get_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;
 
@@ -55,6 +58,12 @@ pub trait Peer_Management_Capability: Send + Sync {
 
      /// 添加或覆盖节点信息
      async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<(), Peer_Management_Error>;
+
+     /// 设置本地节点名称
+     async fn Set_Local_Name(&self, name: &str) -> Result<(), Peer_Management_Error>;
+
+     /// 更新远程节点名称
+     async fn Update_Peer_Name(&self, peer_id: &PeerId, name: &str) -> Result<(), Peer_Management_Error>;
 
      /// 移除节点（保护本地节点）
      async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error>;

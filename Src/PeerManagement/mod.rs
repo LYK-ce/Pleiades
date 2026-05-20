@@ -43,8 +43,8 @@ pub use capability::{Peer_Management_Capability, Peer_Management_Error};
  ///
  /// # 返回值
  /// - `(Arc<PeerManager>, Box<dyn Peer_Management_Capability>)` — 管理器和 Capability 的元组
- pub fn create_peer_management(local_peer_id: PeerId) -> (std::sync::Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
-     let manager = std::sync::Arc::new(PeerManager::new(local_peer_id));
+ pub fn create_peer_management(local_peer_id: PeerId, name: String) -> (std::sync::Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
+     let manager = std::sync::Arc::new(PeerManager::new(local_peer_id, name));
      let handle = PeerHandle::new(manager.clone());
      (manager, Box::new(handle))
  }

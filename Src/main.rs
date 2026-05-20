@@ -31,7 +31,7 @@ use tracing::info;
 
 use pleiades::config::{Ensure_Config, Ensure_Identity};
 use pleiades::event_bus::EventBus;
-use pleiades::peer_management::{create_peer_management, PeerHandle};
+use pleiades::peer_management::{create_peer_management, PeerHandle, SupportedModel};
 use pleiades::network::{NetworkConfig, Network_Service};
 use pleiades::storage::StorageManager;
 use pleiades::orchestrator::Capabilities;
@@ -108,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. PeerManagement
     let local_peer_id = PeerId::from(keypair.public());
-    let (peer_manager_arc, peer_capability_for_network) = create_peer_management(local_peer_id);
+    let peer_name = pleiades::config::Get_Peer_Name(&config);
+    let (peer_manager_arc, peer_capability_for_network) = create_peer_management(local_peer_id, peer_name);
     let peer_capability_for_core = Box::new(PeerHandle::new(peer_manager_arc.clone()));
 
     // 7. Storage
@@ -167,13 +168,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 13. 创建 Core
     let core = Core::new(
-        capabilities,
+        capabilities.clone(),
         user_cmd_rx,
         inbound_rx,
         net_event_rx,
     );
 
     info!("Orchestrator Core 初始化完成");
+
+    // ══════════════════════════════════════════════════════
+    // Phase 5.5: 后台刷新 Storage 索引 + 同步到 PeerManager
+    // ══════════════════════════════════════════════════════
+    {
+        let storage = capabilities.storage.clone();
+        let peer_manager = peer_manager_arc.clone();
+        tokio::spawn(async move {
+            if let Ok((added, _removed)) = storage.flush().await {
+                info!("启动后台 flush 完成: 新增 {} 个文件", added);
+                // 同步 supported_models 到 PeerManager
+                if let Ok(entries) = storage.list().await {
+                    let models: Vec<_> = entries.iter().filter_map(|e| {
+                        Some(SupportedModel {
+                            id: e.model_id?,
+                            file_name: e.file_name.clone(),
+                            layer_bitmap: e.layer_bitmap?,
+                        })
+                    }).collect();
+                    let peers = peer_manager.get_local_peer().await;
+                    if let Some(local) = peers {
+                        peer_manager.update_supported_models(&local.peer_id, models).await;
+                    }
+                }
+            }
+        });
+    }
 
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时
