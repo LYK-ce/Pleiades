@@ -140,7 +140,28 @@ impl Core {
                         } else {
                             let mut output = format!("共 {} 个文件:\n", entries.len());
                             for e in &entries {
-                                output.push_str(&format!("  {} ({} bytes)\n", e.file_name, e.size));
+                                let size = if e.size >= 1_073_741_824 {
+                                    format!("{:.1} GB", e.size as f64 / 1_073_741_824.0)
+                                } else if e.size >= 1_048_576 {
+                                    format!("{:.1} MB", e.size as f64 / 1_048_576.0)
+                                } else if e.size >= 1024 {
+                                    format!("{:.1} KB", e.size as f64 / 1024.0)
+                                } else {
+                                    format!("{} B", e.size)
+                                };
+                                if let (Some(arch), Some(layers), Some(id)) =
+                                    (e.architecture.as_ref(), e.num_layers, e.model_id)
+                                {
+                                    output.push_str(&format!(
+                                        "  {:<40} {:>8}  [{} {} layers, id={:08x}]\n",
+                                        e.file_name, size, arch, layers, id
+                                    ));
+                                } else {
+                                    output.push_str(&format!(
+                                        "  {:<40} {:>8}\n",
+                                        e.file_name, size
+                                    ));
+                                }
                             }
                             output
                         }
