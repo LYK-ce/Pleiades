@@ -7,7 +7,7 @@ COMMAND = "pipeline1"
 DESCRIPTION = "流水线并行前半段: embedding + transformer[0..mid-1], 负责采样解码"
 
 function execute(params)
-    local model = params.model or "test.gguf"
+    local model = params.model or "test.pgguf"
     local model_path = "Pleiades_Workspace/" .. model
     local device = params.device or "cpu"
     local temperature = tonumber(params.temperature) or 0.8
