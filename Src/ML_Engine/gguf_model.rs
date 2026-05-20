@@ -99,9 +99,31 @@ pub fn GGUF_Load_Model(
     model_path: &Path,
     device: &Device,
 ) -> Result<GGUF_Model> {
-    // 0. 自动 GGUF → PGGUF 转换（仅首次，已转换的文件零开销跳过）
-    //    转换后 model_path 指向实际文件（可能是 .pgguf）
-    let (_arch_info, actual_path) = GGUF_Analyze_And_Convert(model_path)?;
+    // 0. 路径解析：直接路径不存在时，自动尝试 .pgguf / .gguf 后缀
+    let resolved = if model_path.exists() {
+        model_path.to_path_buf()
+    } else {
+        let pgguf = model_path.with_extension("pgguf");
+        if pgguf.exists() {
+            pgguf
+        } else {
+            let gguf = model_path.with_extension("gguf");
+            if gguf.exists() {
+                gguf
+            } else {
+                anyhow::bail!(
+                    "Model file not found: '{}', '{}.pgguf', or '{}.gguf'",
+                    model_path.display(),
+                    model_path.display(),
+                    model_path.display()
+                )
+            }
+        }
+    };
+
+    // 1. 自动 GGUF → PGGUF 转换（仅首次，已转换的文件零开销跳过）
+    //    转换后 resolved 指向实际文件（可能是 .pgguf）
+    let (_arch_info, actual_path) = GGUF_Analyze_And_Convert(&resolved)?;
     let model_path = &actual_path;
 
     // 1. 打开文件并解析 GGUF Content（仅此一次）

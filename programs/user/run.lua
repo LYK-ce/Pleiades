@@ -4,10 +4,10 @@
 -- 单机推理脚本
 
 COMMAND = "run"
-DESCRIPTION = "单机推理 (硬编码 prompt, 模型默认 Pleiades_Workspace/test.gguf)"
+DESCRIPTION = "单机推理 (硬编码 prompt, 模型默认 Pleiades_Workspace/test → .pgguf 或 .gguf)"
 
 function execute(params)
-    local model_name = params.model or "test.gguf"
+    local model_name = params.model or "test"
     local model_path = "Pleiades_Workspace/" .. model_name
     local device = params.device or "cpu"
     local temperature = tonumber(params.temperature) or 0.8
