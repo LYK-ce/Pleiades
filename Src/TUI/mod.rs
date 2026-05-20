@@ -674,7 +674,26 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
-    // ---- set-name <name> ----\n\n    if let Some(name) = trimmed.strip_prefix("set-name ") {\n        let name = name.trim();\n        if name.is_empty() {\n            app.command_output.output_text =\n                "错误: 名称不能为空\n用法: set-name <name>".to_string();\n            app.command_output.completed = true;\n            return;\n        }\n        let cmd = UserCommand::SetName { name: name.to_string() };\n        app.Add_Log(format!("执行命令: set-name {}", name));\n        if user_cmd_tx.blocking_send(cmd).is_err() {\n            app.Add_Log("[错误] Orchestrator 已关闭".to_string());\n            app.should_quit = true;\n        }\n        return;\n    }\n\n    // ---- send <file> <peer> ----
+    // ---- set-name <name> ----
+
+    if let Some(name) = trimmed.strip_prefix("set-name ") {
+        let name = name.trim();
+        if name.is_empty() {
+            app.command_output.output_text =
+                "错误: 名称不能为空\n用法: set-name <name>".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+        let cmd = UserCommand::SetName { name: name.to_string() };
+        app.Add_Log(format!("执行命令: set-name {}", name));
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+        }
+        return;
+    }
+
+    // ---- send <file> <peer> ----
 
     if trimmed.starts_with("send ") {
         let args: Vec<&str> = trimmed
