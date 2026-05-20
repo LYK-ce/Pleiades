@@ -39,7 +39,7 @@ pub trait Peer_Management_Capability: Send + Sync {
      /// 获取本地节点信息
      async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error>;
 
-     /// 按名称精确匹配节点（匹配原始 name）
+     /// 按显示名称精确匹配节点（匹配 name#XXXX）
      async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error>;
 
      /// 获取单个节点信息

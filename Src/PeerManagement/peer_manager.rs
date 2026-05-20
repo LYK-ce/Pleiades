@@ -75,10 +75,10 @@ use tokio::sync::RwLock;
          peers.values().find(|p| p.local).cloned()
      }
 
-     /// 按名称精确匹配节点（匹配原始 name，非 display_name）
+     /// 按显示名称精确匹配节点（匹配 display_name，即 name#XXXX）
      pub async fn get_peer_by_name(&self, name: &str) -> Option<PeerInfo> {
          let peers = self.peers.read().await;
-         peers.values().find(|p| p.name == name).cloned()
+         peers.values().find(|p| p.display_name() == name).cloned()
      }
 
      /// 设置本地节点名称，返回是否成功
