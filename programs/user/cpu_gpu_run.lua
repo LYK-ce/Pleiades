@@ -66,13 +66,14 @@ function execute(params)
     local eos = cpu:get_eos()
     local generated = 0
     local offset = #tokens
+    local text = ""
 
     if tok == eos then
         caps.print("<eos>")
         goto cleanup
     end
 
-    local text = cpu:decode(tok)
+    text = cpu:decode(tok)
     caps.print(text)
     generated = 1
 
