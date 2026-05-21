@@ -57,12 +57,7 @@ function execute(params)
     -- 发送 hidden → worker
     local hidden_bytes = hidden:to_bytes()
     caps.print("[coord] 发送 hidden (" .. #hidden_bytes .. " bytes)...")
-    local ok, err = pcall(local_tensor.send_tensor, fwd, hidden_bytes, 0)
-    if not ok then
-        caps.print("[coord] send_tensor 失败: " .. tostring(err))
-        sess:unload()
-        return
-    end
+    local_tensor.send_tensor(fwd, hidden_bytes, 0)
     caps.print("[coord] hidden 已发送")
     local offset = #tokens
 
@@ -70,12 +65,7 @@ function execute(params)
     local eos = sess:get_eos()
 
     caps.print("[coord] 等待 logits...")
-    local ok2, result = pcall(local_tensor.recv_tensor, bwd)
-    if not ok2 then
-        caps.print("[coord] recv_tensor 失败: " .. tostring(result))
-        sess:unload()
-        return
-    end
+    local result = local_tensor.recv_tensor(bwd)
     local logits = ml.tensor_from_bytes(result.data, device)
     local tok = sess:sample(logits, temperature)
 
