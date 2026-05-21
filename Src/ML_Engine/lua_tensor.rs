@@ -103,9 +103,10 @@ impl mlua::UserData for LuaTensor {
             Ok(t)
         });
 
-        methods.add_method("to_bytes", |_, this, (): ()| {
+        methods.add_method("to_bytes", |lua, this, (): ()| {
             let bytes = this.to_bytes().map_err(|e| mlua::Error::runtime(e))?;
-            Ok(bytes)
+            lua.create_string(&bytes)
+                .map_err(|e| mlua::Error::runtime(e.to_string()))
         });
 
         methods.add_method("to_device", |_, this, device_str: String| {
