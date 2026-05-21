@@ -31,6 +31,15 @@ impl LuaTensor {
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         tensor_to_bytes(&self.0)
     }
+
+    /// 将 Tensor 迁移到指定设备（接受字符串）。
+    pub fn to_device_str(&self, s: &str) -> Result<LuaTensor, String> {
+        let device = parse_device_str(s)?;
+        self.0
+            .to_device(&device)
+            .map(LuaTensor)
+            .map_err(|e| format!("to_device: {e}"))
+    }
 }
 
 /// 将 Tensor 序列化为字节数组（含 shape header）。
@@ -92,35 +101,19 @@ pub fn bytes_to_tensor(data: &[u8], device: &Device) -> Result<Tensor, String> {
         .map_err(|e| format!("tensor from_vec: {e}"))
 }
 
-impl mlua::UserData for LuaTensor {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("dims", |lua, this, (): ()| {
-            let dims = this.dims();
-            let t = lua.create_table()?;
-            for (i, &d) in dims.iter().enumerate() {
-                t.set(i + 1, d)?;
-            }
-            Ok(t)
-        });
+// ─── Device 解析 ──────────────────────────────────────────
 
-        methods.add_method("to_bytes", |lua, this, (): ()| {
-            let bytes = this.to_bytes().map_err(|e| mlua::Error::runtime(e))?;
-            lua.create_string(&bytes)
-                .map_err(|e| mlua::Error::runtime(e.to_string()))
-        });
-
-        methods.add_method("to_device", |_, this, device_str: String| {
-            let device = match device_str.to_lowercase().as_str() {
-                "cpu" => Device::Cpu,
-                "cuda" => match Device::new_cuda(0) {
-                    Ok(d) => d,
-                    Err(e) => return Err(mlua::Error::runtime(format!("cuda unavailable: {e}"))),
-                },
-                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
-            };
-            let moved = this.to_device(&device)
-                .map_err(|e| mlua::Error::runtime(format!("to_device: {e}")))?;
-            Ok(LuaTensor(moved))
-        });
+/// 将 Lua 设备字符串解析为 candle Device。
+pub(crate) fn parse_device_str(s: &str) -> Result<Device, String> {
+    match s.to_lowercase().as_str() {
+        "cpu" => Ok(Device::Cpu),
+        "cuda" => Device::new_cuda(0).map_err(|e| format!("cuda unavailable: {e}")),
+        other => Err(format!("unknown device: {other}")),
     }
+}
+
+/// bytes_to_tensor 的字符串入口 — 供绑定层使用。
+pub fn bytes_to_tensor_str(data: &[u8], device_str: &str) -> Result<Tensor, String> {
+    let device = parse_device_str(device_str)?;
+    bytes_to_tensor(data, &device)
 }

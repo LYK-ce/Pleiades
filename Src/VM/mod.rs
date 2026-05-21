@@ -11,3 +11,4 @@ pub mod capability_binding;
 pub mod network_stream;
 pub mod storage_handle;
 pub mod local_stream;
+pub mod lua_tensor_binding;

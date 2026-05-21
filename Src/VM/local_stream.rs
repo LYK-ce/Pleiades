@@ -13,7 +13,7 @@ use tokio::io::DuplexStream;
 use crate::orchestrator::local_tensor_stream::frames;
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 use crate::network::tensor_stream::protocol::Tensor_Buffer;
-use crate::ml_engine::lua_tensor::{LuaTensor, tensor_to_bytes, bytes_to_tensor};
+use crate::ml_engine::lua_tensor::{LuaTensor, tensor_to_bytes, bytes_to_tensor_str};
 
 /// Lua 可见的本地流句柄
 pub struct LocalTensorStream {
@@ -96,14 +96,6 @@ pub fn register_local_stream_caps(
         "recv_tensor",
         lua.create_async_function(
             move |_, (stream, device_str): (mlua::AnyUserData, String)| async move {
-                let device = match device_str.to_lowercase().as_str() {
-                    "cpu" => candle_core::Device::Cpu,
-                    "cuda" => match candle_core::Device::new_cuda(0) {
-                        Ok(d) => d,
-                        Err(e) => return Err(mlua::Error::runtime(format!("cuda: {}", e))),
-                    },
-                    other => return Err(mlua::Error::runtime(format!("unknown device: {}", other))),
-                };
                 let stream_ud = stream
                     .borrow::<LocalTensorStream>()
                     .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {}", e)))?;
@@ -122,7 +114,7 @@ pub fn register_local_stream_caps(
                 drop(stream_ud);
                 tracing::info!("[local_stream] recv_tensor 完成 (offset={}, len={})",
                     offset, buf.As_Slice().len());
-                let tensor = bytes_to_tensor(buf.As_Slice(), &device)
+                let tensor = bytes_to_tensor_str(buf.As_Slice(), &device_str)
                     .map_err(|e| mlua::Error::runtime(e))?;
                 Ok((LuaTensor(tensor), offset))
             },

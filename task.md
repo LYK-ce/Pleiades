@@ -10,7 +10,7 @@
 > 背景：项目已完成 Lua 迁移重构（Vm_Base / ML_VM / Orchestrator_VM 删除，TOML→Lua，Src/Lua/→Src/VM/）。
 > 代码库中存在大量引用已删除组件的过时文档，需要系统性清理。
 
-### 1.1 清理 archived_docs/ 中已完全过时的文档（直接删除）
+### 1.1 清理 archived_docs/ 中已完全过时的文档（直接删除） [x]
 
 以下文件描述已删除的 VM 架构，无保留价值：
 
@@ -44,7 +44,7 @@
 | `archived_docs/优化编译方案.md` | 已过时 |
 | `Src/Orchestrator/scheduler.md` | Scheduler 已删除 |
 
-### 1.2 修正 docs/ 中 STALE 文档（路径更新）
+### 1.2 修正 docs/ 中 STALE 文档（路径更新） [x]
 
 以下文档内容仍然有效，但引用路径 `Src/Lua/` 需改为 `Src/VM/`：
 
@@ -58,7 +58,7 @@
 | `docs/capabilities.md` | 若含 `Src/Lua` 引用则修正 |
 | `docs/event_bus_reforge.md` | 若含 `Src/Lua` 引用则修正 |
 
-### 1.3 归档 STALE 历史文档（docs/ → archived_docs/）
+### 1.3 归档 STALE 历史文档（docs/ → archived_docs/） [x]
 
 以下文档是迁移前/中的历史记录，保留但移入 archived_docs：
 
@@ -70,7 +70,7 @@
 | `docs/orchestrator_reforge.md` | 已完成的重构计划 |
 | `docs/ml_engine_code_review.md` | 旧 ML_VM 代码审查 |
 
-### 1.4 处理 Pleiades_doc.md（根目录空文件）
+### 1.4 处理 Pleiades_doc.md（根目录空文件） [x]
 
 `Pleiades_doc.md` 内容为空，`docs/design_doc/pleiades_overview.md` 已是最新总览。删除空文件，若有需要后续以符号链接或 README 替代。
 
@@ -89,7 +89,7 @@
 > - (B) 已完成的琐碎任务便条 — 直接删除
 > - 清理后 `Src/` 不应包含任何 `.md` 文档
 
-### 2.1 移入 archived_docs/（归档，保留历史参考）
+### 2.1 移入 archived_docs/（归档，保留历史参考） [x]
 
 | 文件 | 行数 | 过时原因 |
 |------|------|---------|
@@ -101,7 +101,7 @@
 | `Src/TUI/TUI_reforge.md` | 415 | 旧 TUI 重设计（LLM_IO_Broker/IoFrontend/双输入框） |
 | `Src/EventBus/Event_Bus_design.md` | 294 | 旧 EventBus 事件枚举（当前 4-type 简化版已不同） |
 
-### 2.2 直接删除（无保留价值）
+### 2.2 直接删除（无保留价值） [x]
 
 | 文件 | 原因 |
 |------|------|

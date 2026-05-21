@@ -11,7 +11,7 @@ use mlua::Lua;
 use libp2p::PeerId;
 use crate::storage::StorageCapability;
 use crate::ml_engine::{MlSession, capability};
-use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor, tensor_to_bytes};
+use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor_str, tensor_to_bytes};
 use crate::vm::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
@@ -212,15 +212,7 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     ml.set(
         "tensor_from_bytes",
         lua.create_function(|_, (bytes, device): (mlua::String, String)| {
-            let device = match device.to_lowercase().as_str() {
-                "cpu" => candle_core::Device::Cpu,
-                "cuda" => match candle_core::Device::new_cuda(0) {
-                    Ok(d) => d,
-                    Err(e) => return Err(mlua::Error::runtime(format!("cuda: {e}"))),
-                },
-                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
-            };
-            let tensor = bytes_to_tensor(&bytes.as_bytes(), &device)
+            let tensor = bytes_to_tensor_str(bytes.as_bytes().as_ref(), &device)
                 .map_err(|e| mlua::Error::runtime(e))?;
             Ok(LuaTensor(tensor))
         })?,
@@ -425,14 +417,6 @@ pub fn register_network_caps(
     // ─── recv_tensor ─────────────────────────────────────
     network.set("recv_tensor", lua.create_async_function(move |_, (stream, device): (mlua::AnyUserData, String)| {
         async move {
-            let device = match device.to_lowercase().as_str() {
-                "cpu" => candle_core::Device::Cpu,
-                "cuda" => match candle_core::Device::new_cuda(0) {
-                    Ok(d) => d,
-                    Err(e) => return Err(mlua::Error::runtime(format!("cuda: {e}"))),
-                },
-                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
-            };
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
             let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
@@ -444,7 +428,7 @@ pub fn register_network_caps(
             if offset == crate::network::tensor_stream::protocol::TENSOR_EOF_OFFSET {
                 return Err(mlua::Error::runtime("recv_tensor: received EOF"));
             }
-            let tensor = bytes_to_tensor(buffer.As_Slice(), &device)
+            let tensor = bytes_to_tensor_str(buffer.As_Slice(), &device)
                 .map_err(|e| mlua::Error::runtime(e))?;
             Ok((LuaTensor(tensor), offset))
         }
