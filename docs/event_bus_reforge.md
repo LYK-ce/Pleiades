@@ -28,7 +28,7 @@ pub enum NotifyLevel { Info, Warn, Error }
 | 5 | `Src/Orchestrator/core/branch_lifecycle.rs` | 生产者 | 1 处 Publish 改写 |
 | 6 | `Src/Orchestrator/core/branch_stream.rs` | 生产者 | 1 处 Publish 改写 |
 | 7 | `Src/Network/swarm_events.rs` | 生产者 | 4 处 Publish 改写 |
-| 8 | `Src/Lua/capability_binding.rs` | 生产者 | 1 处 Publish 改写 |
+| 8 | `Src/VM/capability_binding.rs` | 生产者 | 1 处 Publish 改写 |
 | 9 | `Src/TUI/mod.rs` | 消费者 | Handle_Bus_Event 14分支→4分支+JSON解析 |
 | 10 | `tests/t03_event_bus_integration.rs` | 测试 | 全部 event 构造改写 |
 | 11 | `tests/t09_lua_integration.rs` | 测试 | event 构造改写 (如有) |
@@ -148,7 +148,7 @@ serde_json = "1"
 | 6 | `Src/Orchestrator/core/branch_lifecycle.rs` | 生产者 | 1 处 Publish 改写 |
 | 7 | `Src/Orchestrator/core/branch_stream.rs` | 生产者 | 1 处 Publish 改写 |
 | 8 | `Src/Network/swarm_events.rs` | 生产者 | 4 处 Publish 改写 |
-| 9 | `Src/Lua/capability_binding.rs` | 生产者 | 1 处 Publish 改写 |
+| 9 | `Src/VM/capability_binding.rs` | 生产者 | 1 处 Publish 改写 |
 | 10 | `Src/TUI/mod.rs` | 消费者 | Handle_Bus_Event 14分支→4分支+JSON解析 |
 | 11 | `tests/t03_event_bus_integration.rs` | 测试 | 全部 event 构造改写 |
 

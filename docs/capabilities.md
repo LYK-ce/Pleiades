@@ -311,6 +311,16 @@ caps.network.send_eof(stream)
 |------|------|------|
 | `tensor:dims()` | `table` `{dim1, dim2, ...}` | 获取张量各维度大小（1-indexed） |
 | `tensor:to_bytes()` | `string` | 序列化为字节数组（含 shape header） |
+| `tensor:to_device(device)` | `LuaTensor` | 将张量移动到指定设备（`"cpu"` / `"cuda"`），直接设备间拷贝 |
+
+```lua
+-- CPU/GPU 混合推理示例
+local hidden = cpu:forward(t, offset)          -- hidden 在 CPU 上
+local hidden_gpu = hidden:to_device("cuda")     -- 搬到 GPU
+local logits = gpu:forward(hidden_gpu, offset)  -- GPU 推理
+local logits_cpu = logits:to_device("cpu")      -- 搬回 CPU
+local tok = cpu:sample(logits_cpu, temperature)
+```
 
 ---
 

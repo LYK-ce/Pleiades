@@ -194,7 +194,7 @@ caps.network.send_eof(stream_ud)
 
 ### NetworkStream UserData
 
-定义于 `Src/Lua/network_stream.rs`，包装 `Mutex<libp2p::Stream>` + `Arc<Capabilities>`：
+定义于 `Src/VM/network_stream.rs`，包装 `Mutex<libp2p::Stream>` + `Arc<Capabilities>`：
 
 ```rust
 pub struct NetworkStream {

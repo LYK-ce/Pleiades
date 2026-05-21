@@ -19,10 +19,10 @@
 | 组件 | 状态 |
 |------|------|
 | mlua 依赖 (Cargo.toml) | ✅ `0.12.0-rc.1`, features: lua54+vendored+async |
-| `Src/Lua/engine.rs` | ✅ `LuaContext::new()` 沙箱, 2 tests |
-| `Src/Lua/registry.rs` | ✅ `ProgramRegistry::scan()`, 1 test |
+| `Src/VM/engine.rs` | ✅ `LuaContext::new()` 沙箱, 2 tests |
+| `Src/VM/registry.rs` | ✅ `ProgramRegistry::scan()`, 1 test |
 | `programs/hello.lua` | ✅ 演示脚本 (COMMAND + DESCRIPTION + execute) |
-| `Src/Lua/capability_binding.rs` | ❌ 不存在 — Rust→Lua 函数桥接缺失 |
+| `Src/VM/capability_binding.rs` | ❌ 不存在 — Rust→Lua 函数桥接缺失 |
 | 业务 Lua 脚本 | ❌ pipeline.lua / run.lua / profile.lua 均未编写 |
 | Core 路由简化 | ❌ branch_user.rs 仍为硬编码分支 |
 
@@ -69,7 +69,7 @@
 
 #### 3.1.1 新增测试
 
-**位置：** `Src/Lua/engine.rs`（追加测试）
+**位置：** `Src/VM/engine.rs`（追加测试）
 
 **测试用例：**
 
@@ -119,7 +119,7 @@ cargo test --lib lua
 
 #### 3.1.1 新建文件
 
-`Src/Lua/capability_binding.rs`
+`Src/VM/capability_binding.rs`
 
 #### 3.1.2 实现内容
 
@@ -334,8 +334,8 @@ Rust 内部: storage.acquire_read(path) → network.open_file_stream(peer) → n
 | Phase | 测试类型 | 位置 | 新增测试数 |
 |-------|---------|------|-----------|
 | 0 | — | `docs/lua_design.md` | 设计文档 |
-| 1 | 单元测试 | `Src/Lua/engine.rs` | +3 |
-| 2 | 单元测试 | `Src/Lua/capability_binding.rs` | +3 |
+| 1 | 单元测试 | `Src/VM/engine.rs` | +3 |
+| 2 | 单元测试 | `Src/VM/capability_binding.rs` | +3 |
 | 3 | 集成测试 | `tests/t09_lua_integration.rs` | +2 |
 | 4 | 集成测试 | `tests/t09_lua_integration.rs` | +3 |
 | 5 | 现有测试回归 | `cargo test --lib orchestrator` | — |
@@ -351,9 +351,9 @@ Rust 内部: storage.acquire_read(path) → network.open_file_stream(peer) → n
 | Phase | 文件 | 操作 |
 |-------|------|------|
 | 0 | `docs/lua_design.md` | **新建** |
-| 1 | `Src/Lua/engine.rs` | 追加测试 |
-| 2 | `Src/Lua/capability_binding.rs` | **新建** |
-| 2 | `Src/Lua/mod.rs` | 添加 `pub mod capability_binding` |
+| 1 | `Src/VM/engine.rs` | 追加测试 |
+| 2 | `Src/VM/capability_binding.rs` | **新建** |
+| 2 | `Src/VM/mod.rs` | 添加 `pub mod capability_binding` |
 | 3 | `tests/t09_lua_integration.rs` | **新建** |
 | 4 | `programs/pipeline.lua` | **新建** |
 | 4 | `programs/run.lua` | **新建** |

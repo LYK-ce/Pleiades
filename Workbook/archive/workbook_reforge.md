@@ -37,3 +37,16 @@ cargo check --no-default-features: 0 errors, 19 pre-existing warnings
 cargo check --no-default-features: 0 errors, 20 warnings (1 fixed: unused io import)
 cargo test --lib local_tensor_stream: 4 passed, 0 failed
 Lua API: local.open_stream(id), local.accept_stream(id, timeout), local.send_tensor(s, data, offset), local.recv_tensor(s), local.send_eof(s)
+
+## 2026-05-21 会话初始化
+- 切换 reforge 分支 (跟踪 origin/reforge, commit 19997f9)
+- SSH 初始化: 权限 OK (600/644), 认证 OK (LYK-ce), remote → git@github.com:LYK-ce/Pleiades.git
+
+## 2026-05-21 任务重构
+- 清理旧 task.md（Lua 迁移 4 阶段 + Bug 修复 + 性能优化 全部移除）
+- 新建 Task 1: 文档清理与重组
+  - 1.1 删除 classified_docs/ 中 26 个完全过时文件（描述已删除 VM 架构）
+  - 1.2 修正 docs/ 中 ~7 个 STALE 文件的路径引用（Src/Lua/ → Src/VM/）
+  - 1.3 归档 5 个历史文档（docs/ → classified_docs/）
+  - 1.4 删除空文件 Pleiades_doc.md
+  - 1.5 最终 grep 验证无残留引用

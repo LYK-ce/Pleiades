@@ -22,10 +22,10 @@ Date ： 2026-05-17
 | **Orchestrator** | 命令路由与组件编排 | 10 | 0 | ⚠️ |
 | **Network** | P2P 网络通信 | 4 | 8(ignore) | ⚠️ |
 | **ML_Engine** | ML 推理引擎 | 2 | 0 | ❌ |
-| **Lua** | Lua 脚本沙箱 | 3 | 0 | ⚠️ |
+| **V​M** | Lua 脚本沙箱 | 19 | 4 | ✅ |
 | **Config** | 配置解析与身份管理 | 0 | 0 | ❌ |
 | **TUI** | 终端图形界面 | 0 | 0 | ❌ |
-| **Vm_Base** | VM 执行骨架 | 47 | 0 | ⚠️ 计划移除 |
+| **Vm_Base** | VM 执行骨架 | — | — | 🗑️ 已移除 |
 | **Scheduler** | 分布式拓扑调度 | — | — | 🗑️ 已移除 |
 
 ---
@@ -232,11 +232,9 @@ Date ： 2026-05-17
 
 ---
 
-### 3.11 Vm_Base — VM 执行骨架 ⚠️
+### 3.11 Vm_Base — VM 执行骨架 🗑️
 
-**功能**：提供 SlotFile（键值存储）和 VM 指令（Const/Move/Add/Sub/Jump/JumpIf/Timer）。原用于 Orchestrator_VM 指令分发，现已解耦。
-
-**状态**：47 测试全过。**计划移除**。
+已随 Lua 迁移移除（原提供 SlotFile 键值存储和 7 条基础 VM 指令，被 Lua 替代）。
 
 ---
 
@@ -258,7 +256,6 @@ Date ： 2026-05-17
 
 ## 5. 待办事项
 
-- [ ] 移除 Vm_Base 模块
 - [ ] SessionManager 跨层消息路由（batching）
 - [ ] `Take_Frontend` 完整实现
 - [ ] Orchestrator route_inbound/route_stream 实现

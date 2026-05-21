@@ -1,131 +1,177 @@
 # Pleiades 任务列表
 
 > Presented by KeJi
-> Date: 2026-05-16
+> Date: 2026-05-21
 
 ---
 
-## Lua 脚本引擎迁移
+## Task 1: 文档清理与重组
 
-> 用 mlua 替代全部自研 VM（Vm_Base + ML_VM + Orchestrator_VM）和 TOML 模板系统。
-> 详见 docs/lua.md
+> 背景：项目已完成 Lua 迁移重构（Vm_Base / ML_VM / Orchestrator_VM 删除，TOML→Lua，Src/Lua/→Src/VM/）。
+> 代码库中存在大量引用已删除组件的过时文档，需要系统性清理。
 
-### Lua 基础设施搭建 (Phase 1)
+### 1.1 清理 archived_docs/ 中已完全过时的文档（直接删除）
 
-- [ ] Cargo.toml 添加 mlua 依赖
-- [ ] 实现 Lua 沙箱环境 (sandbox)
-- [ ] 实现 ProgramRegistry 脚本扫描
-- [ ] 注册示范能力函数 (get_available_peers + analyze_model + plan_uniform)
-- [ ] 编写 programs/pipeline.lua 替代 Pipeline.tmpl
-- [ ] cargo test 全量通过验证
+以下文件描述已删除的 VM 架构，无保留价值：
 
-### 能力函数迁移 (Phase 2)
+| 文件 | 过时原因 |
+|------|---------|
+| `archived_docs/orchestrator_vm_design.md` | 描述已删除的 Orchestrator_VM |
+| `archived_docs/ml_vm_design.md` | 描述已删除的 ML_VM |
+| `archived_docs/profiler_design.md` | 基于已删除 VM 的 profiler 设计 |
+| `archived_docs/scheduler_design.md` | 已删除的 Scheduler 模块 |
+| `archived_docs/ML_design.md` | 基于已删除 VM 的旧 ML 设计 |
+| `archived_docs/core_instruction_handler.md` | 旧 TaskEngine 指令处理器 |
+| `archived_docs/core_instruction.md` | 旧 TaskInstruction 枚举 |
+| `archived_docs/ML_Engine_reforge.md` | 已完成的迁移文档 |
+| `archived_docs/ML Engine new design.md` | 已被 Lua 方案取代 |
+| `archived_docs/report_4.30.md` | 引用已删除的旧 executor |
+| `archived_docs/中期总结.md` | 引用已删除的旧架构 |
+| `archived_docs/instruction.md` | 旧指令设计 |
+| `archived_docs/executor.md` | 旧 executor 设计 |
+| `archived_docs/slot.md` | Vm_Base slot 系统 |
+| `archived_docs/register.md` | 旧寄存器设计 |
+| `archived_docs/control.md` | 旧控制流设计 |
+| `archived_docs/Orchestrator.md` | 旧 Orchestrator 设计 |
+| `archived_docs/Pleiades_Design_Document_v2.md` | 旧架构设计文档 |
+| `archived_docs/Pleiades设计文档.md` | 旧架构设计文档（中文） |
+| `archived_docs/problems.md` | 被 `problem.md` 取代 |
+| `archived_docs/modification.md` | 旧修改记录 |
+| `archived_docs/IO.md` | 旧 LLM_IO 设计 |
+| `archived_docs/stream.md` | 旧流协议设计 |
+| `archived_docs/portal.md` | 旧 portal 设计 |
+| `archived_docs/传输层设计探讨 .md` | 已过时 |
+| `archived_docs/优化编译方案.md` | 已过时 |
+| `Src/Orchestrator/scheduler.md` | Scheduler 已删除 |
 
-- [ ] 注册全部 A/B/C/D 级能力函数到 Lua
-- [ ] 迁移全部 TOML 模板 → .lua 脚本
-- [ ] Core::route_user 简化为统一执行分支
-- [ ] JobKind 精简
-- [ ] 删除 program_selector.rs + TOML 模板
+### 1.2 修正 docs/ 中 STALE 文档（路径更新）
 
-### TUI 集成 (Phase 3)
+以下文档内容仍然有效，但引用路径 `Src/Lua/` 需改为 `Src/VM/`：
 
-- [ ] 命令补全数据源切换为 ProgramRegistry::command_names()
-- [x] reload 命令实现
-  - [x] `Src/Orchestrator/command.rs` — 新增 `UserCommand::Reload`
-  - [x] `Src/Orchestrator/core/branch_user.rs` — `route_user` 处理 Reload，调用 `program_registry.reload_user()`，通过 `Bus_Event::Output` 返回结果
-  - [x] `Src/TUI/mod.rs` — `Handle_Command_Input` 新增 `"reload"` 分支，发送 `UserCommand::Reload`
-- [ ] Commands_Reloaded 事件通知 TUI 刷新
+| 文件 | 需要修正的内容 |
+|------|---------------|
+| `docs/code_review_lua_integration.md` | `Src/Lua/` → `Src/VM/`（engine.rs, registry.rs, capability_binding.rs） |
+| `docs/capabilities_detail.md` | `Src/Lua/` → `Src/VM/`（network_stream.rs, capability_binding.rs） |
+| `docs/lua_design.md` | `Src/Lua/` → `Src/VM/`（全局替换） |
+| `docs/lua_integration_plan.md` | `Src/Lua/` → `Src/VM/`（全局替换） |
+| `docs/summary.md` | 移除 Vm_Base 条目，修正 `Src/Lua` → `Src/VM` |
+| `docs/capabilities.md` | 若含 `Src/Lua` 引用则修正 |
+| `docs/event_bus_reforge.md` | 若含 `Src/Lua` 引用则修正 |
 
-### 遗留代码清理 (Phase 4)
+### 1.3 归档 STALE 历史文档（docs/ → archived_docs/）
 
-- [ ] 删除 Vm_Base/ 整个目录
-- [ ] 删除 ML_VM/ 中 instruction.rs / engine.rs / slots.rs
-- [ ] 删除 Orchestrator_VM/ 中 instruction.rs / engine.rs / slots.rs
-- [ ] 整理 Capabilities 结构体
-- [ ] 全量测试回归
+以下文档是迁移前/中的历史记录，保留但移入 archived_docs：
 
----
+| 文件 | 原因 |
+|------|------|
+| `docs/lua.md` | 原始 Lua 设计方案（561行），已被 `lua_design.md` 取代，但包含完整设计思路 |
+| `docs/Pleiades_v0.2.md` | 迁移计划文档（已完成） |
+| `docs/lua_migration_summary.md` | 迁移前基线记录 |
+| `docs/orchestrator_reforge.md` | 已完成的重构计划 |
+| `docs/ml_engine_code_review.md` | 旧 ML_VM 代码审查 |
 
-## Pipeline 端到端联调
+### 1.4 处理 Pleiades_doc.md（根目录空文件）
 
-- [ ] Coordinator + Worker 完整推理流程验证
-- [ ] Core 分支完整拆分 (branch_user / command / stream / lifecycle)
-- [ ] Relay Job 指令完善 (compile_relay)
-- [ ] 模型分片分发端到端实现 (Distribute Job)
+`Pleiades_doc.md` 内容为空，`docs/design_doc/pleiades_overview.md` 已是最新总览。删除空文件，若有需要后续以符号链接或 README 替代。
 
----
+### 1.5 最终验证
 
-## Bug 修复 & 优化
-
-### GGUF 模型加载优化
-
-> 改用 Layer_Weights::New() 替代 From_Extracted()，单次打开文件顺序加载。
-> 详见 classified_docs/problem.md 问题14
-
-- [ ] 修改 gguf_model.rs 中 GGUF_Load_Model 函数
-- [ ] 创建全局 Gguf 读取器，直接调用 Layer_Weights::New()
-
-### GGUF_Model_Inference 接口修正
-
-> 签名从 (model, &[u8], offset) 改为 (model, &Tensor, offset)。
-> 详见 classified_docs/problem.md 问题13
-
-- [ ] 修改 GGUF_Model_Inference 签名
-- [ ] 移除 Token_Ids_To_Bytes() 辅助函数
-- [ ] 更新 ml_thread_engine.rs 中 Prefill/Inference 指令执行逻辑
-- [ ] 更新相关测试
-
-### 心跳故障处理
-
-> 详见 classified_docs/problem.md 问题15
-
-- [ ] 滑动窗口机制：连续 N 次失败才标记 Disconnected
-- [ ] 超时自动重连：指数退避重试
-- [ ] 推理任务影响处理：通知 Control 层中断/重分配
-- [ ] 心跳成功率监控统计
-- [ ] 与 ConnectionClosed 事件协调（避免重复处理）
-
-### PeerStore 提取
-
-> 将 connected_peers 提取为 Arc<RwLock<HashMap>> 共享组件。
-> 详见 classified_docs/problem.md 问题8
-
-- [ ] 新建 PeerStore 组件 (Arc<std::sync::RwLock<HashMap<PeerId, PeerInfo>>>)
-- [ ] Network_Service 持有写锁
-- [ ] NodeHandle / Control / TUI 持有读锁
-- [ ] 移除 NodeCommand::GetPeers / GetPeerInfo
-- [ ] Get_Peers / Get_Peer_Info 改为同步方法
-
-### pending_responses 超时清理
-
-> 详见 classified_docs/problem.md 问题9
-
-- [ ] pending 条目附带 created_at 时间戳
-- [ ] Register/Route 操作时扫描清理过期条目
-- [ ] 过期 pending_responses 通过 oneshot 发送超时错误
-- [ ] 过期 pending_replies 直接丢弃 ResponseChannel
+- [x] `grep_search` 全项目搜索 `Src/Lua/` 引用，确认为 0
+- [x] `grep_search` 搜索 `Vm_Base` / `ML_VM` / `Orchestrator_VM` / `program_selector` 确认仅在历史归档中出现
+- [x] 确认所有保留文档中的路径与实际代码结构一致
 
 ---
 
-## 性能优化
+## Task 2: 清理 Src/ 目录中的文档文件
 
-### ML Engine 推理路径优化
+> 背景：`Src/` 目录下共 9 个 `.md` 文件，分为三类：
+> - (A) 旧架构设计文档，引用已删除的 VM/compiler/JobExecutor 组件 — 移入 `archived_docs/` 归档
+> - (B) 已完成的琐碎任务便条 — 直接删除
+> - 清理后 `Src/` 不应包含任何 `.md` 文档
 
-> 数据平面与控制平面分离 + 零拷贝张量传输。
-> 详见 classified_docs/problem.md 问题11
+### 2.1 移入 archived_docs/（归档，保留历史参考）
 
-- [ ] 专用 Tensor Stream 通道 (与 problem 5 合并实施)
-- [ ] Control 内部 fast-path (inference pipeline task)
-- [ ] 零拷贝优化：bytes::Bytes 引用计数共享
-- [ ] 零拷贝优化：bytemuck::cast_slice reinterpret
-- [ ] 预分配 send_buffer 减少 GPU→CPU 转换
+| 文件 | 行数 | 过时原因 |
+|------|------|---------|
+| `Src/Orchestrator/orchestrator_implementation.md` | 769 | 旧 VM 架构（TaskEngine/SlotFile/instruction/handler_*），全部组件已删除 |
+| `Src/Orchestrator/pipeline.md` | 597 | 旧 编译/指令/JobExecutor 分布式流水线设计 |
+| `Src/Orchestrator/core_job.md` | 334 | 旧 Core select! 设计（compiler/SlotFile/JobExecutor） |
+| `Src/Orchestrator/test_command.md` | 120 | 旧 handler_*/task_engine 测试命令 |
+| `Src/Orchestrator/advance.md` | 210 | 旧架构演进讨论（JobExecutor/SlotFile/Handler） |
+| `Src/TUI/TUI_reforge.md` | 415 | 旧 TUI 重设计（LLM_IO_Broker/IoFrontend/双输入框） |
+| `Src/EventBus/Event_Bus_design.md` | 294 | 旧 EventBus 事件枚举（当前 4-type 简化版已不同） |
 
-### mDNS 服务名自定义
+### 2.2 直接删除（无保留价值）
 
-> 避免发现不相关的 Pleiades 实例。
-> 详见 classified_docs/problem.md 问题12
+| 文件 | 原因 |
+|------|------|
+| `Src/TUI/task.md` | 3 行已完成任务便条 |
+| `Src/EventBus/task.md` | 1 行已完成任务便条 |
 
-- [ ] 自定义 mDNS 服务名或集群标识机制
+### 2.3 最终验证
+
+- [x] `file_search Src/**/*.md` 确认为 0
+
+---
+
+## Task 3: CPU/GPU 混合推理（单脚本顺序流水线）
+
+> 目标：单 Lua 脚本中创建两个 `MlSession`（CPU + CUDA），加载同一模型的不同层范围，顺序执行。
+> 核心思路：`cpu:forward() → to_device("cuda") → gpu:forward() → to_device("cpu") → sample`
+
+### 背景分析
+
+当前已有的基础设施：
+- `MlSession::load_model(path, start, end)` — 支持加载指定层范围的模型 ✅
+- `MlSession::forward(tensor, offset)` — 支持显式 offset，不自动递增 ✅
+- `pipeline1.lua` / `pipeline2.lua` — 已验证的层拆分 forward 模式 ✅
+
+唯一缺失的环节：
+- `LuaTensor` 缺少 `to_device("cpu"|"cuda")` 方法 — 无法将 CPU forward 产出的 hidden tensor 搬到 GPU，反之亦然
+
+### 3.1 Rust：LuaTensor 增加 to_device 方法
+
+- [x] `Src/ML_Engine/lua_tensor.rs` — `LuaTensor` UserData 新增 `to_device(device_str)` 方法，调用 `candle_core::Tensor::to_device()`
+- [x] 同步更新 `cargo test` 中相关测试
+
+### 3.2 Lua 脚本：cpu_gpu_run.lua
+
+- [x] `programs/user/cpu_gpu_run.lua` — 单脚本实现：
+  ```lua
+  cpu = ml.new("cpu"); gpu = ml.new("cuda")
+  cpu:load_model(path, 0, mid); gpu:load_model(path, mid+1, total)
+  
+  -- prefill
+  t = cpu:tensorize(tokens)
+  hidden = cpu:forward(t, 0)
+  hidden_gpu = hidden:to_device("cuda")
+  logits = gpu:forward(hidden_gpu, 0)
+  logits_cpu = logits:to_device("cpu")
+  tok = cpu:sample(logits_cpu, temp)
+  
+  -- autoregressive loop
+  for i = 2, max_tokens do
+      t = cpu:tensorize({tok})
+      hidden = cpu:forward(t, offset)
+      hidden_gpu = hidden:to_device("cuda")
+      logits = gpu:forward(hidden_gpu, offset)
+      logits_cpu = logits:to_device("cpu")
+      tok = cpu:sample(logits_cpu, temp)
+      if tok == eos then break end
+      cpu:decode(tok) → print
+      offset = offset + 1
+  end
+  ```
+
+### 3.3 文档更新
+
+- [x] `docs/capabilities.md` — 更新 `ml` 表，补充 `LuaTensor:to_device()` 方法说明和 CPU/GPU 混合推理示例
+
+### 3.4 端到端验证
+
+- [x] `cargo test` 全量通过 (103 passed, 0 failed)
+- [ ] 在 CPU-only 设备上验证 `cpu_gpu_run.lua`（两个 session 都用 CPU）
+- [ ] 在有 GPU 设备上验证 CPU+CUDA 混合推理
 
 ---
 

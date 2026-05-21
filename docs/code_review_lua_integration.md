@@ -11,10 +11,10 @@
 
 | 文件 | 操作 | 行数 |
 |------|------|------|
-| `Src/Lua/engine.rs` | 修改 (+3 tests) | 111 |
-| `Src/Lua/capability_binding.rs` | **新建** | 371 |
-| `Src/Lua/registry.rs` | 未修改 | — |
-| `Src/Lua/mod.rs` | 修改 (+1 mod) | 10 |
+| `Src/VM/engine.rs` | 修改 (+3 tests) | 111 |
+| `Src/VM/capability_binding.rs` | **新建** | 371 |
+| `Src/VM/registry.rs` | 未修改 | — |
+| `Src/VM/mod.rs` | 修改 (+1 mod) | 10 |
 | `Src/ML_Engine/context.rs` | 重写 | 423 |
 | `Src/Orchestrator/core.rs` | 修改 (+ProgramRegistry) | 174 |
 | `Src/Orchestrator/core/branch_user.rs` | 修改 (+execute_lua_script) | 145 |
@@ -61,7 +61,7 @@ register_ml_caps()     — ML Engine 桥接 (ml.new)
 
 #### P0-1: `register_storage_caps` 覆盖 `caps` 表
 
-**文件:** `Src/Lua/capability_binding.rs:73`
+**文件:** `Src/VM/capability_binding.rs:73`
 
 ```rust
 let caps: mlua::Table = lua.globals().get("caps")

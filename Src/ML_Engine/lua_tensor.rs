@@ -107,5 +107,19 @@ impl mlua::UserData for LuaTensor {
             let bytes = this.to_bytes().map_err(|e| mlua::Error::runtime(e))?;
             Ok(bytes)
         });
+
+        methods.add_method("to_device", |_, this, device_str: String| {
+            let device = match device_str.to_lowercase().as_str() {
+                "cpu" => Device::Cpu,
+                "cuda" => match Device::new_cuda(0) {
+                    Ok(d) => d,
+                    Err(e) => return Err(mlua::Error::runtime(format!("cuda unavailable: {e}"))),
+                },
+                other => return Err(mlua::Error::runtime(format!("unknown device: {other}"))),
+            };
+            let moved = this.to_device(&device)
+                .map_err(|e| mlua::Error::runtime(format!("to_device: {e}")))?;
+            Ok(LuaTensor(moved))
+        });
     }
 }
