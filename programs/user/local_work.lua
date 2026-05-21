@@ -43,20 +43,19 @@ function execute(params)
 
     -- 4. 循环: 收 hidden → forward → 发 logits
     while true do
-        local ok, result = pcall(function()
-            return local_tensor.recv_tensor(fwd)
+        local ok, hidden, recv_offset = pcall(function()
+            return local_tensor.recv_tensor(fwd, device)
         end)
         if not ok then
             caps.print("[work] 流结束 (收到 EOF), 退出")
             break
         end
 
-        caps.print("[work] 收到 hidden offset=" .. result.offset)
+        caps.print("[work] 收到 hidden offset=" .. recv_offset)
 
-        local hidden = ml.tensor_from_bytes(result.data, device)
-        local logits = sess:forward(hidden, result.offset)
+        local logits = sess:forward(hidden, recv_offset)
 
-        local_tensor.send_tensor(bwd, logits:to_bytes(), sess:get_offset())
+        local_tensor.send_tensor(bwd, logits, sess:get_offset())
     end
 
     sess:unload()

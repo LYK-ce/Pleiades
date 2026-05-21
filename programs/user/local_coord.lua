@@ -55,9 +55,7 @@ function execute(params)
     caps.print("[coord] hidden dims: [" .. table.concat(hidden:dims(), ", ") .. "]")
 
     -- 发送 hidden → worker
-    local hidden_bytes = hidden:to_bytes()
-    caps.print("[coord] 发送 hidden (" .. #hidden_bytes .. " bytes)...")
-    local_tensor.send_tensor(fwd, hidden_bytes, 0)
+    local_tensor.send_tensor(fwd, hidden, 0)
     caps.print("[coord] hidden 已发送")
     local offset = #tokens
 
@@ -65,8 +63,7 @@ function execute(params)
     local eos = sess:get_eos()
 
     caps.print("[coord] 等待 logits...")
-    local result = local_tensor.recv_tensor(bwd)
-    local logits = ml.tensor_from_bytes(result.data, device)
+    local logits, _logits_offset = local_tensor.recv_tensor(bwd, device)
     local tok = sess:sample(logits, temperature)
 
     if tok == eos then
@@ -84,11 +81,10 @@ function execute(params)
     for i = 2, max_tokens do
         local next_t = sess:tensorize({tok})
         hidden = sess:forward(next_t, offset)
-        local_tensor.send_tensor(fwd, hidden:to_bytes(), offset)
+        local_tensor.send_tensor(fwd, hidden, offset)
         offset = offset + 1
 
-        result = local_tensor.recv_tensor(bwd)
-        logits = ml.tensor_from_bytes(result.data, device)
+        logits, _ = local_tensor.recv_tensor(bwd, device)
         tok = sess:sample(logits, temperature)
 
         if tok == eos then

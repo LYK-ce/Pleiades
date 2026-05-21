@@ -373,8 +373,8 @@ sess:unload()
 |------|------|------|
 | `local_tensor.open_stream(id)` | `LocalTensorStream` | 创建流对，返回左半（发起端） |
 | `local_tensor.accept_stream(id, timeout_ms)` | `LocalTensorStream` | 阻塞等待右半，超时抛出错误（接收端） |
-| `local_tensor.send_tensor(stream, data, offset)` | `nil` | 发送序列化张量（`tensor:to_bytes()` 输出） |
-| `local_tensor.recv_tensor(stream)` | `{offset, data}` | 接收张量，`data` 可用 `ml.tensor_from_bytes()` 重建 |
+| `local_tensor.send_tensor(stream, tensor, offset)` | `nil` | 发送 `LuaTensor`（自动序列化传输） |
+| `local_tensor.recv_tensor(stream, device)` | `LuaTensor, number` | 接收张量，返回 (tensor, offset) |
 | `local_tensor.send_eof(stream)` | `nil` | 发送 EOF 哨兵，对端 `recv_tensor` 抛出错误 |
 
 ### 使用示例
@@ -384,11 +384,10 @@ sess:unload()
 local fwd = local_tensor.open_stream("fwd")
 local bwd = local_tensor.accept_stream("bwd", 60000)
 
-local bytes = hidden:to_bytes()
-local_tensor.send_tensor(fwd, bytes, offset)
+local_tensor.send_tensor(fwd, hidden, 0)
 
-local result = local_tensor.recv_tensor(bwd)
-local logits = ml.tensor_from_bytes(result.data, "cpu")
+local logits, _ = local_tensor.recv_tensor(bwd, "cpu")
+local tok = sess:sample(logits, 0.8)
 ```
 
 ```lua
@@ -396,14 +395,13 @@ local logits = ml.tensor_from_bytes(result.data, "cpu")
 local fwd = local_tensor.accept_stream("fwd", 120000)
 local bwd = local_tensor.open_stream("bwd")
 
-local result = local_tensor.recv_tensor(fwd)
-local hidden = ml.tensor_from_bytes(result.data, "cpu")
-local logits = sess:forward(hidden, result.offset)
+local hidden, recv_offset = local_tensor.recv_tensor(fwd, "cpu")
+local logits = sess:forward(hidden, recv_offset)
 
-local_tensor.send_tensor(bwd, logits:to_bytes(), offset)
+local_tensor.send_tensor(bwd, logits, sess:get_offset())
 ```
 
-> **注意**：`send_tensor` / `recv_tensor` 使用序列化后的字节数据（`tensor:to_bytes()` / `ml.tensor_from_bytes()`），与 `caps.network.send_tensor`（自动序列化 `LuaTensor`）接口不同。
+> **接口已与 `caps.network` 对齐**：`send_tensor` 直接接受 `LuaTensor`（内部自动 `tensor_to_bytes`），`recv_tensor` 直接返回 `LuaTensor`（内部自动 `bytes_to_tensor`），无需手动序列化。
 
 ---
 

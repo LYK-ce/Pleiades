@@ -13,6 +13,7 @@ use tokio::io::DuplexStream;
 use crate::orchestrator::local_tensor_stream::frames;
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 use crate::network::tensor_stream::protocol::Tensor_Buffer;
+use crate::ml_engine::lua_tensor::{LuaTensor, tensor_to_bytes, bytes_to_tensor};
 
 /// Lua 可见的本地流句柄
 pub struct LocalTensorStream {
@@ -64,7 +65,11 @@ pub fn register_local_stream_caps(
     local.set(
         "send_tensor",
         lua.create_async_function(
-            move |_, (stream, data, offset): (mlua::AnyUserData, String, u64)| async move {
+            move |_, (stream, tensor, offset): (mlua::AnyUserData, mlua::AnyUserData, u64)| async move {
+                let t = tensor.borrow::<LuaTensor>()
+                    .map_err(|e| mlua::Error::runtime(format!("send_tensor: {}", e)))?;
+                let bytes = tensor_to_bytes(&t)
+                    .map_err(|e| mlua::Error::runtime(e))?;
                 let stream_ud = stream
                     .borrow::<LocalTensorStream>()
                     .map_err(|e| mlua::Error::runtime(format!("send_tensor: {}", e)))?;
@@ -72,8 +77,8 @@ pub fn register_local_stream_caps(
                     .stream
                     .lock()
                     .map_err(|e| mlua::Error::runtime(format!("send_tensor: {}", e)))?;
-                let data_len = data.len();
-                frames::local_send_frame(&mut *guard, offset, data.as_bytes())
+                let data_len = bytes.len();
+                frames::local_send_frame(&mut *guard, offset, &bytes)
                     .await
                     .map_err(|e| {
                         tracing::error!("[local_stream] send_tensor 失败 (offset={}, len={}): {}",
@@ -90,7 +95,15 @@ pub fn register_local_stream_caps(
     local.set(
         "recv_tensor",
         lua.create_async_function(
-            move |lua, stream: mlua::AnyUserData| async move {
+            move |_, (stream, device_str): (mlua::AnyUserData, String)| async move {
+                let device = match device_str.to_lowercase().as_str() {
+                    "cpu" => candle_core::Device::Cpu,
+                    "cuda" => match candle_core::Device::new_cuda(0) {
+                        Ok(d) => d,
+                        Err(e) => return Err(mlua::Error::runtime(format!("cuda: {}", e))),
+                    },
+                    other => return Err(mlua::Error::runtime(format!("unknown device: {}", other))),
+                };
                 let stream_ud = stream
                     .borrow::<LocalTensorStream>()
                     .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {}", e)))?;
@@ -107,13 +120,11 @@ pub fn register_local_stream_caps(
                     })?;
                 drop(guard);
                 drop(stream_ud);
-                tracing::debug!("[local_stream] recv_tensor 完成 (offset={}, len={})",
+                tracing::info!("[local_stream] recv_tensor 完成 (offset={}, len={})",
                     offset, buf.As_Slice().len());
-                let data = String::from_utf8_lossy(buf.As_Slice()).to_string();
-                let tbl = lua.create_table()?;
-                tbl.set("offset", offset)?;
-                tbl.set("data", data)?;
-                Ok(tbl)
+                let tensor = bytes_to_tensor(buf.As_Slice(), &device)
+                    .map_err(|e| mlua::Error::runtime(e))?;
+                Ok((LuaTensor(tensor), offset))
             },
         )?,
     )?;
