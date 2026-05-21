@@ -80,7 +80,7 @@ pub fn register_local_stream_caps(
                             offset, data_len, e);
                         mlua::Error::runtime(format!("send_tensor: {}", e))
                     })?;
-                tracing::debug!("[local_stream] send_tensor 完成 (offset={}, len={})", offset, data_len);
+                tracing::info!("[local_stream] send_tensor 完成 (offset={}, len={})", offset, data_len);
                 Ok(())
             },
         )?,
