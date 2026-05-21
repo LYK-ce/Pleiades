@@ -64,11 +64,22 @@ impl Core {
             // ─── 通用 Lua 脚本执行 (fire-and-forget) ─────
             UserCommand::Execute { command, mut params } => {
                 let Some(entry) = self.program_registry.get_user(&command).cloned() else {
+                    let available: Vec<_> = self.program_registry.command_names()
+                        .iter().map(|s| s.as_str()).collect();
+                    tracing::warn!(
+                        "[Execute] 未知命令: '{}', 可用: {:?}",
+                        command, available
+                    );
                     self.capabilities.event_bus.Publish(Bus_Event::Output {
                         payload: cmd_output(format!("未知命令: {}", command), true),
                     });
                     return;
                 };
+                tracing::info!(
+                    "[Execute] 执行脚本: {} (命令: {})",
+                    entry.path.display(),
+                    command
+                );
                 // 解析 peer 参数：name → peer_id
                 if let Some(peer_val) = params.get("peer") {
                     if let Ok(info) = self.capabilities.peer_manager.Get_Peer_By_Name(peer_val).await {

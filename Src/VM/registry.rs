@@ -36,12 +36,24 @@ impl ProgramRegistry {
     pub fn new() -> mlua::Result<Self> {
         let builtin = Self::scan_dir(Path::new(BUILTIN_DIR));
         let user = Self::scan_dir(Path::new(USER_DIR));
+        tracing::info!(
+            "[ProgramRegistry] 初始化: builtin={}, user={}, 命令={}",
+            builtin.len(),
+            user.len(),
+            builtin.len() + user.iter().filter(|(k, _)| !builtin.contains_key(*k)).count()
+        );
         Ok(Self { builtin, user })
     }
 
     /// 重新扫描 user 目录（热加载），保留 builtin 不变。
     pub fn reload_user(&mut self) {
+        let before = self.user.len();
         self.user = Self::scan_dir(Path::new(USER_DIR));
+        tracing::info!(
+            "[ProgramRegistry] reload_user: {} → {} 个用户脚本",
+            before,
+            self.user.len()
+        );
     }
 
     /// 返回所有命令名（user 优先，去重）。
@@ -86,6 +98,7 @@ impl ProgramRegistry {
 
     fn collect_scripts(dir: &Path, map: &mut HashMap<String, ProgramEntry>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
+            tracing::warn!("[ProgramRegistry] 无法读取目录: {}", dir.display());
             return;
         };
         for entry in entries.flatten() {
@@ -93,20 +106,46 @@ impl ProgramRegistry {
             if path.is_dir() {
                 Self::collect_scripts(&path, map);
             } else if path.extension().map_or(false, |ext| ext == "lua") {
-                if let Some(entry) = Self::parse_script(&path) {
-                    map.insert(entry.command.clone(), entry);
+                match Self::parse_script(&path) {
+                    Some(entry) => {
+                        tracing::info!(
+                            "[ProgramRegistry] 发现脚本: {} → 命令: {}",
+                            path.display(),
+                            entry.command
+                        );
+                        map.insert(entry.command.clone(), entry);
+                    }
+                    None => {
+                        tracing::warn!("[ProgramRegistry] 跳过无效脚本: {}", path.display());
+                    }
                 }
             }
         }
     }
 
     fn parse_script(path: &Path) -> Option<ProgramEntry> {
-        let script = std::fs::read_to_string(path).ok()?;
+        let script = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("[ProgramRegistry] 读取脚本失败 {}: {}", path.display(), e);
+                return None;
+            }
+        };
+
         let lua = Lua::new();
-        lua.load(&script).eval::<()>().ok()?;
+        if let Err(e) = lua.load(&script).eval::<()>() {
+            tracing::warn!("[ProgramRegistry] Lua 解析失败 {}: {}", path.display(), e);
+            return None;
+        }
 
         let globals = lua.globals();
-        let command: String = globals.get("COMMAND").ok()?;
+        let command: String = match globals.get("COMMAND") {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!("[ProgramRegistry] 脚本缺少 COMMAND 变量: {}", path.display());
+                return None;
+            }
+        };
         let description: String = globals.get("DESCRIPTION").unwrap_or_default();
 
         Some(ProgramEntry {
