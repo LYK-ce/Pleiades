@@ -19,6 +19,34 @@ Date ： Current date
 2. 函数 采用Pascal snake case规范进行命名
 3. 常数 采用Upper snake case规范进行命名
 
+## Lua 绑定规范
+1. 禁止在 mlua 闭包（`create_function`、`create_async_function`、`add_method`、`add_method_mut`）内编写业务逻辑。
+2. 所有业务逻辑必须提取为独立的 Rust 函数（`fn` 或 `impl` 方法），闭包仅负责：
+   - Lua 类型 → Rust 类型转换（`AnyUserData::borrow`、参数解包）
+   - 调用提取好的 Rust 函数
+   - `map_err` 转换为 `mlua::Error`
+3. 正例：
+   ```rust
+   // MlSession 独立实现
+   impl MlSession {
+       pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> { ... }
+   }
+   // 闭包只做薄胶水
+   methods.add_method("encode", |_, sess, text: String| {
+       sess.encode(&text).map_err(|e| mlua::Error::runtime(e))
+   });
+   ```
+4. 反例：
+   ```rust
+   // ❌ 17 行业务逻辑直接写在闭包内
+   methods.add_method("analyze_model", |lua, path: String| {
+       let info = ...;  let t = lua.create_table()?;
+       t.set("architecture", info.architecture)?;
+       t.set("num_layers", info.num_layers)?;  // 共 15 个字段
+       ...
+   });
+   ```
+
 
 # 工作流程
 在根目录下包含以下内容：

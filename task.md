@@ -222,6 +222,45 @@
 
 ---
 
+## Task 5: Lua 绑定重构 — 提取内联逻辑为独立 Rust 函数
+
+> 背景：参见 AGENTS.md「Lua 绑定规范」。当前大量 mlua 闭包内直接写了业务逻辑（设备解析、表构造、序列化等），违反分离原则。
+> 目标：将 15 处内联逻辑提取为独立 `fn`，闭包降为薄胶水。
+
+### 5.1 提取公共工具函数
+
+- [ ] `Src/ML_Engine/lua_tensor.rs` 或新文件 — 提取 `parse_device_str(s: &str) -> Result<Device, String>`（当前 3 处重复）
+
+### 5.2 capability_binding.rs 重构（9 处重度内联）
+
+- [ ] `ml.analyze_model`（17 行）→ `fn build_model_info_table(lua, info) -> Table`
+- [ ] `network.recv_tensor`（12 行）→ `fn recv_tensor_impl(stream, device) -> (LuaTensor, u64)`
+- [ ] `network.send_data`（10 行）→ `fn send_data_impl(...) -> Table`
+- [ ] `ml.tensor_from_bytes`（8 行）→ 提取 device 解析，其余已薄
+- [ ] `network.send_tensor`（6 行）→ `fn send_tensor_impl(stream, tensor, offset)`
+- [ ] `storage_list`（7 行）→ `fn build_file_list_table(lua, entries) -> Table`
+- [ ] `storage_checksum`（5 行）→ `fn parse_checksum_algo(s) -> Option<ChecksumAlgorithm>`
+- [ ] `storage_flush`（4 行）→ 内联逻辑简单，可保留或轻提
+- [ ] `network.send_eof`（4 行）→ 可保留
+
+### 5.3 local_stream.rs 重构（3 处重度内联）
+
+- [ ] `send_tensor`（10 行）→ `fn send_tensor_impl(stream, tensor, offset)`
+- [ ] `recv_tensor`（15 行）→ `fn recv_tensor_impl(stream, device_str) -> (LuaTensor, u64)`
+- [ ] `send_eof`（5 行）→ 可保留或轻提
+
+### 5.4 lua_tensor.rs 重构（2 处）
+
+- [ ] `to_device`（7 行）→ 共用 `parse_device_str`，剩余 ≤3 行
+- [ ] `dims`（4 行）→ `fn dims_to_table(lua, tensor) -> Table`
+
+### 5.5 验证
+
+- [ ] `cargo test` 全量通过
+- [ ] 闭包内超过 4 行的业务逻辑归零
+
+---
+
 ## 人类评审
 
 <!-- 在此区域写下评审意见 -->
