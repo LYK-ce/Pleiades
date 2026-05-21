@@ -30,7 +30,7 @@ pub fn register_local_stream_caps(
     lua: &Lua,
     hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
 ) -> mlua::Result<()> {
-    crate::orchestrator::local_tensor_stream::lua_binding::register_local_stream_caps(lua, hub)
+    crate::vm::local_stream::register_local_stream_caps(lua, hub)
 }
 
 // ============================================================

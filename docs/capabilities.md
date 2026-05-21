@@ -359,6 +359,54 @@ sess:unload()
 
 ---
 
+## LocalTensorStream — 本地线程间张量流
+
+通过 `local_tensor` 表访问，用于同进程内两个 Lua 线程间的张量传输。
+
+### 配对机制
+
+基于 `LocalStreamHub` 的 `open/accept` 模式：一端调用 `open_stream(id)` 创建流对并拿到左半，另一端调用 `accept_stream(id, timeout_ms)` 阻塞等待右半出现。
+
+### API
+
+| 函数 | 返回 | 说明 |
+|------|------|------|
+| `local_tensor.open_stream(id)` | `LocalTensorStream` | 创建流对，返回左半（发起端） |
+| `local_tensor.accept_stream(id, timeout_ms)` | `LocalTensorStream` | 阻塞等待右半，超时抛出错误（接收端） |
+| `local_tensor.send_tensor(stream, data, offset)` | `nil` | 发送序列化张量（`tensor:to_bytes()` 输出） |
+| `local_tensor.recv_tensor(stream)` | `{offset, data}` | 接收张量，`data` 可用 `ml.tensor_from_bytes()` 重建 |
+| `local_tensor.send_eof(stream)` | `nil` | 发送 EOF 哨兵，对端 `recv_tensor` 抛出错误 |
+
+### 使用示例
+
+```lua
+-- 线程 A (协调端)
+local fwd = local_tensor.open_stream("fwd")
+local bwd = local_tensor.accept_stream("bwd", 60000)
+
+local bytes = hidden:to_bytes()
+local_tensor.send_tensor(fwd, bytes, offset)
+
+local result = local_tensor.recv_tensor(bwd)
+local logits = ml.tensor_from_bytes(result.data, "cpu")
+```
+
+```lua
+-- 线程 B (工作端)
+local fwd = local_tensor.accept_stream("fwd", 120000)
+local bwd = local_tensor.open_stream("bwd")
+
+local result = local_tensor.recv_tensor(fwd)
+local hidden = ml.tensor_from_bytes(result.data, "cpu")
+local logits = sess:forward(hidden, result.offset)
+
+local_tensor.send_tensor(bwd, logits:to_bytes(), offset)
+```
+
+> **注意**：`send_tensor` / `recv_tensor` 使用序列化后的字节数据（`tensor:to_bytes()` / `ml.tensor_from_bytes()`），与 `caps.network.send_tensor`（自动序列化 `LuaTensor`）接口不同。
+
+---
+
 ## Demo — 示例函数
 
 | 函数 | 参数 | 返回 | 说明 |

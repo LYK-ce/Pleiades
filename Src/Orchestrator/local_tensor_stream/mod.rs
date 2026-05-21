@@ -7,7 +7,6 @@
 //! 与网络 Tensor Stream 共享帧格式，完全绕过 libp2p。
 
 pub mod frames;
-pub mod lua_binding;
 
 use std::collections::HashMap;
 use std::io;

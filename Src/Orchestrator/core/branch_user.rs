@@ -471,6 +471,20 @@ fn spawn_lua_script(
                 return;
             }
 
+            // 3.5 注册本地张量流能力
+            if let Err(e) = crate::vm::local_stream::register_local_stream_caps(
+                &lua,
+                caps.local_stream_hub.clone(),
+            ) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册 LocalStream 能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+
             // 4. 编译脚本
             if let Err(e) = lua.load(&script).eval::<()>() {
                 caps.event_bus.Publish(Bus_Event::Output {

@@ -161,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: Box::new(net_capability),
         peer_manager: peer_capability_for_core,
         event_bus: event_bus.clone(),
+        local_stream_hub: Arc::new(pleiades::orchestrator::local_tensor_stream::LocalStreamHub::new()),
     });
 
     // 12. 用户命令通道 (TUI → Core)

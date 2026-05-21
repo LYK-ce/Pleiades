@@ -12,6 +12,7 @@ use crate::network::Network_Capability;
 use crate::peer_management::Peer_Management_Capability;
 use crate::storage::StorageCapability;
 use crate::event_bus::EventBus;
+use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 
 // ============================================================
 // Capabilities — 统一的组件能力容器
@@ -33,6 +34,8 @@ pub struct Capabilities {
     pub peer_manager: Box<dyn Peer_Management_Capability>,
     /// 事件总线
     pub event_bus: Arc<EventBus>,
+    /// 本地张量流配对 Hub
+    pub local_stream_hub: Arc<LocalStreamHub>,
 }
 
 // ============================================================

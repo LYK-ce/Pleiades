@@ -1,17 +1,17 @@
 //Presented by KeJi
-//Date ： 2026-05-20
+//Date ： 2026-05-21
 
 //! Lua 能力注册 — 独立本地流
 //!
-//! 向 Lua 注册 `local` 全局表，提供同进程线程间的张量流通信。
+//! 向 Lua 注册 `local_tensor` 全局表，提供同进程线程间的张量流通信。
 
 use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, UserData};
 use tokio::io::DuplexStream;
 
-use super::frames;
-use super::LocalStreamHub;
+use crate::orchestrator::local_tensor_stream::frames;
+use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 use crate::network::tensor_stream::protocol::Tensor_Buffer;
 
 /// Lua 可见的本地流句柄
