@@ -64,6 +64,9 @@ function execute(params)
     local tok = cpu:sample(logits_cpu, temperature)
 
     local eos = cpu:get_eos()
+    local generated = 0
+    local offset = #tokens
+
     if tok == eos then
         caps.print("<eos>")
         goto cleanup
@@ -71,8 +74,7 @@ function execute(params)
 
     local text = cpu:decode(tok)
     caps.print(text)
-    local generated = 1
-    local offset = #tokens
+    generated = 1
 
     -- 5. 自回归循环
     for i = 2, max_tokens do
