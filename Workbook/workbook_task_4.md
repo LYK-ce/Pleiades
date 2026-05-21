@@ -2,28 +2,24 @@
 
 > start: 2026-05-21 | end: 2026-05-21 | status: ✅ done
 
-## 方案
+## 执行记录
 
-两个 `exec` 命令启动两个 Lua 线程，共享同一个 `Arc<LocalStreamHub>`，通过流 ID 匹配。
+### 4.1 重构: lua_binding.rs → VM/local_stream.rs
+- 与 network_stream.rs, storage_handle.rs 并列
 
-```
-TUI> exec local_work    (spin up thread B first, waiting to accept)
-TUI> exec local_coord   (thread A opens, both connect and start)
-```
+### 4.2 LocalStreamHub 注入 Capabilities
+- Capabilities +local_stream_hub, main.rs 创建, spawn 注册
 
-### 数据流
-```
-Thread A (coord):                      Thread B (work):
-  open_stream("fwd") ──Hub──→          accept_stream("fwd")
-  accept_stream("bwd") ←──Hub──        open_stream("bwd")
-  
-  forward → send_tensor(fwd)           recv_tensor(fwd) → forward
-  recv_tensor(bwd) → sample/decode     send_tensor(bwd)
-```
+### 4.3 local_coord.lua + local_work.lua
+- 新建脚本, 本地双线程流水线
 
-### 改动清单
-- **4.1** 重构: lua_binding.rs 从 Orchestrator/local_tensor_stream/ → VM/local_stream.rs
-  - 新建 VM/local_stream.rs, VM/mod.rs +pub mod, 删除旧文件
-- **4.2** Capabilities +local_stream_hub, main.rs 创建, spawn 注册
-- **4.3** programs/user/local_coord.lua + local_work.lua (新建)
-- **4.4** docs/capabilities.md +local_tensor API 文档
+### 4.4 API 对齐 network (后续改进)
+- send_tensor: (stream, LuaTensor, offset) 直接接受 tensor
+- recv_tensor: (stream, device) → (LuaTensor, offset) 直接返回 tensor
+- 移除手动 to_bytes/to_tensor 样板
+
+### 调试记录
+- duplex buffer 64KB→16MB (hidden tensor ~106KB)
+- pcall 不适用于 async 函数 (Future 未 poll 直接 drop → early eof)
+- to_bytes Vec<u8>→Lua table 问题 → lua.create_string 显式转换
+- 最终: API 对齐 network 接口, 端点验证通过 ✅

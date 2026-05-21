@@ -218,7 +218,7 @@
 ### 4.5 验证
 
 - [x] `cargo test` 全量通过 (103 passed, 0 failed)
-- [ ] 单设备 `exec local_coord` + `exec local_work` 端到端推理
+- [x] 单设备 `exec local_coord` + `exec local_work` 端到端推理
 
 ---
 
