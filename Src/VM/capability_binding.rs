@@ -20,6 +20,20 @@ use crate::orchestrator::Capabilities;
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
 // ============================================================
+// 注册独立本地流能力函数
+// ============================================================
+
+/// 将独立本地流暴露给 Lua，注册 `local_tensor` 全局表。
+///
+/// 与 `network.*` 平行，用于同进程线程间的张量流通信。
+pub fn register_local_stream_caps(
+    lua: &Lua,
+    hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
+) -> mlua::Result<()> {
+    crate::orchestrator::local_tensor_stream::lua_binding::register_local_stream_caps(lua, hub)
+}
+
+// ============================================================
 // 注册测试用能力函数
 // ============================================================
 

@@ -23,3 +23,17 @@
 - Src/Orchestrator/core/branch_user.rs: route_user 处理 Reload → program_registry.reload_user() → Bus_Event::Output 返回结果; BUILTIN_COMMANDS + ("reload", "重新加载用户 Lua 脚本")
 - Src/TUI/mod.rs: Handle_Command_Input + "reload" 分支 → UserCommand::Reload
 cargo check --no-default-features: 0 errors, 19 pre-existing warnings
+
+## 独立本地流实现 (completed)
+开始: 2026-05-20 | 结束: 2026-05-20
+新增文件:
+- Src/Orchestrator/local_tensor_stream/mod.rs: LocalStreamHub (open/accept 配对 + 2 tests)
+- Src/Orchestrator/local_tensor_stream/frames.rs: 泛型帧函数 local_send_frame/recv_frame/send_eof + 2 tests
+- Src/Orchestrator/local_tensor_stream/lua_binding.rs: LocalTensorStream userdata, register_local_stream_caps
+- docs/design_doc/local_tensor_stream_design.md: 完整设计文档
+修改文件:
+- Src/Orchestrator/mod.rs: +pub mod local_tensor_stream
+- Src/VM/capability_binding.rs: +register_local_stream_caps 导出
+cargo check --no-default-features: 0 errors, 20 warnings (1 fixed: unused io import)
+cargo test --lib local_tensor_stream: 4 passed, 0 failed
+Lua API: local.open_stream(id), local.accept_stream(id, timeout), local.send_tensor(s, data, offset), local.recv_tensor(s), local.send_eof(s)

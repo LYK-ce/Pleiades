@@ -5,6 +5,7 @@ pub mod core;
 pub mod job;
 pub mod command;
 pub mod inference_id;
+pub mod local_tensor_stream;
 
 use std::sync::Arc;
 use crate::network::Network_Capability;
