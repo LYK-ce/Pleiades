@@ -545,6 +545,7 @@ fn spawn_lua_script(
                     });
                 }
                 Err(e) => {
+                    tracing::error!("[{}] 执行失败: {}", label, e);
                     caps.event_bus.Publish(Bus_Event::Output {
                         payload: cmd_output(
                             format!("[{}] 执行失败: {}", label, e),
