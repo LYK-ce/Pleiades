@@ -261,6 +261,69 @@
 
 ---
 
+## Task 6: 会话管理 — 服务型 ML 推理
+
+> 目标：实现 Session Manager，支持本地/远程客户端通过流连接到 ML 推理服务。
+>
+> ⚠️ **必须在 `session_manager_implementation` 分支上进行所有开发，禁止修改其他分支。**
+
+### 6.1 创建开发分支
+
+- [ ] 从 `reforge` 创建 `session_manager_implementation` 分支
+
+### 6.2 IO Stream 协议实现
+
+> 参考 Tensor_Stream 和 LocalTensorStream 的设计，新增 IO Stream（网络）和 Local IO Stream（本地）。
+> 帧协议：`[len: u32 LE][payload: UTF-8 bytes]`，最简形式。
+
+- [ ] `Src/Network/IO_Stream/` — 参考 Tensor_Stream/ 结构，实现 IO Stream 帧协议
+- [ ] `Src/Orchestrator/local_io_stream/` — 参考 local_tensor_stream/ 结构，实现 Local IO Stream
+- [ ] 两端协议对齐（帧格式、帧类型），支持 open/accept/send/recv
+- [ ] `Network_Capability` trait 新增 `open_io_stream(peer)` / `accept_io_stream(id, timeout)` 方法
+- [ ] `Network_Service_Capability` 实现上述方法
+- [ ] Lua 绑定：`LocalIOStream` UserData，方法 `send_str(text)` / `recv_str() -> String`
+
+### 6.3 实现 Session Manager
+
+> Session Manager 作为 Rust tokio task，负责连接管理、slot 分配、encode/decode、请求路由。
+
+- [ ] Session Manager 加载 tokenizer（不加载模型权重）
+- [ ] select! 主循环：接收连接请求 → 分配 slot → 接收 prompt → encode → 转发 ML → 收 ML 回复 → decode → 回复
+- [ ] slot 管理：分配/释放，满员时拒绝新连接
+- [ ] 通过 local_tensor（双工）与 ML Inference 通信
+- [ ] 通过 IO Stream / Local IO Stream 与客户端通信
+- [ ] Core ↔ SessionManager 通信：`Arc<SessionManagerHandle>` + `Mutex<VecDeque>` + `Notify`，避免额外 mpsc
+
+### 6.4 实现 ML Inference 脚本
+
+- [ ] `programs/user/inference.lua` — recv tensor → forward → sample → send token
+- [ ] 通过 local_tensor 与 Session Manager 双向通信
+
+### 6.5 实现本地 chat 前端
+
+- [ ] `programs/user/chat.lua` — stdin/stdout 交互，通过 Local IO Stream 连接 Session Manager
+
+### 6.6 集成 Core
+
+- [ ] Core B1 新增 `run` 内置指令：
+  - 启动 Session Manager (Rust tokio task)
+  - spawn ML Inference Lua 脚本 (`inference.lua`)
+  - 仅本机运行，不涉及远程节点
+- [ ] Core B1 新增 `chat` 内置指令：spawn chat Lua 脚本 (`chat.lua`)，连接本地 Session Manager
+- [ ] `branch_stream.rs` 新增 IO Stream 入站分支处理，读帧后转发给 Session Manager
+
+### 6.7 集成 Network_Service
+
+- [ ] network_service 新增 IO Stream 入站处理（发事件给 Core）
+- [ ] Network_Inbound_Event 新增 IOStreamArrived 变体
+
+### 6.8 验证
+
+- [ ] `cargo test` 全量通过
+- [ ] 本地 chat → Session Manager → ML Inference 端到端推理
+
+---
+
 ## 人类评审
 
 <!-- 在此区域写下评审意见 -->
