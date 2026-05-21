@@ -30,9 +30,9 @@ impl LocalStreamHub {
         }
     }
 
-    /// 发起方调用：创建一对 duplex（64KB buffer），左半返回，右半存入 pending。
+    /// 发起方调用：创建一对 duplex（16MB buffer），左半返回，右半存入 pending。
     pub fn open(&self, id: &str) -> io::Result<DuplexStream> {
-        let (local, remote) = duplex(64 * 1024);
+        let (local, remote) = duplex(16 * 1024 * 1024);
         self.pending
             .lock()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?

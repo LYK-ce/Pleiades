@@ -72,9 +72,15 @@ pub fn register_local_stream_caps(
                     .stream
                     .lock()
                     .map_err(|e| mlua::Error::runtime(format!("send_tensor: {}", e)))?;
+                let data_len = data.len();
                 frames::local_send_frame(&mut *guard, offset, data.as_bytes())
                     .await
-                    .map_err(|e| mlua::Error::runtime(format!("send_tensor: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("[local_stream] send_tensor 失败 (offset={}, len={}): {}",
+                            offset, data_len, e);
+                        mlua::Error::runtime(format!("send_tensor: {}", e))
+                    })?;
+                tracing::debug!("[local_stream] send_tensor 完成 (offset={}, len={})", offset, data_len);
                 Ok(())
             },
         )?,
@@ -95,9 +101,14 @@ pub fn register_local_stream_caps(
                 let mut buf = Tensor_Buffer::New(16 * 1024 * 1024);
                 let offset = frames::local_recv_frame(&mut *guard, &mut buf)
                     .await
-                    .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("[local_stream] recv_tensor 失败: {}", e);
+                        mlua::Error::runtime(format!("recv_tensor: {}", e))
+                    })?;
                 drop(guard);
                 drop(stream_ud);
+                tracing::debug!("[local_stream] recv_tensor 完成 (offset={}, len={})",
+                    offset, buf.As_Slice().len());
                 let data = String::from_utf8_lossy(buf.As_Slice()).to_string();
                 let tbl = lua.create_table()?;
                 tbl.set("offset", offset)?;

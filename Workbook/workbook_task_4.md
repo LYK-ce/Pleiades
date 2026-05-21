@@ -1,6 +1,6 @@
 # Task 4: 验证 LocalTensorStream
 
-> start: 2026-05-21 | status: pending
+> start: 2026-05-21 | end: 2026-05-21 | status: ✅ done
 
 ## 方案
 

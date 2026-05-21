@@ -194,30 +194,30 @@
 
 ### 4.1 重构：lua_binding 移入 VM/
 
-- [ ] 新建 `Src/VM/local_stream.rs` — 内容从 `Src/Orchestrator/local_tensor_stream/lua_binding.rs` 迁移
-- [ ] `Src/VM/mod.rs` — 新增 `pub mod local_stream`
-- [ ] 删除 `Src/Orchestrator/local_tensor_stream/lua_binding.rs`
-- [ ] `Src/Orchestrator/local_tensor_stream/mod.rs` — 移除 `pub mod lua_binding`
-- [ ] 所有 `use crate::orchestrator::local_tensor_stream::lua_binding` → `use crate::vm::local_stream`
+- [x] 新建 `Src/VM/local_stream.rs` — 内容从 `Src/Orchestrator/local_tensor_stream/lua_binding.rs` 迁移
+- [x] `Src/VM/mod.rs` — 新增 `pub mod local_stream`
+- [x] 删除 `Src/Orchestrator/local_tensor_stream/lua_binding.rs`
+- [x] `Src/Orchestrator/local_tensor_stream/mod.rs` — 移除 `pub mod lua_binding`
+- [x] 所有 `use crate::orchestrator::local_tensor_stream::lua_binding` → `use crate::vm::local_stream`
 
 ### 4.2 Rust：LocalStreamHub 注入 Capabilities
 
-- [ ] `Src/Orchestrator/mod.rs` — `Capabilities` 新增 `local_stream_hub: Arc<LocalStreamHub>` 字段
-- [ ] `Src/main.rs` — 创建 `Arc<LocalStreamHub>` 注入 `Capabilities`
-- [ ] `Src/Orchestrator/core/branch_user.rs` — `spawn_lua_script()` 调用 `register_local_stream_caps(&lua, caps.local_stream_hub.clone())`，import 使用 `crate::vm::local_stream`
+- [x] `Src/Orchestrator/mod.rs` — `Capabilities` 新增 `local_stream_hub: Arc<LocalStreamHub>` 字段
+- [x] `Src/main.rs` — 创建 `Arc<LocalStreamHub>` 注入 `Capabilities`
+- [x] `Src/Orchestrator/core/branch_user.rs` — `spawn_lua_script()` 调用 `register_local_stream_caps(&lua, caps.local_stream_hub.clone())`，import 使用 `crate::vm::local_stream`
 
 ### 4.3 Lua 脚本
 
-- [ ] `programs/user/local_coord.lua` — 协调端：open_stream("fwd") + accept_stream("bwd") → 同 pipeline1 逻辑
-- [ ] `programs/user/local_work.lua` — 工作端：accept_stream("fwd") + open_stream("bwd") → 同 pipeline2 逻辑
+- [x] `programs/user/local_coord.lua` — 协调端：open_stream("fwd") + accept_stream("bwd") → 同 pipeline1 逻辑
+- [x] `programs/user/local_work.lua` — 工作端：accept_stream("fwd") + open_stream("bwd") → 同 pipeline2 逻辑
 
 ### 4.4 文档
 
-- [ ] `docs/capabilities.md` — 补充 `local_tensor` API 参考（当前缺失）
+- [x] `docs/capabilities.md` — 补充 `local_tensor` API 参考
 
 ### 4.5 验证
 
-- [ ] `cargo test` 全量通过
+- [x] `cargo test` 全量通过 (103 passed, 0 failed)
 - [ ] 单设备 `exec local_coord` + `exec local_work` 端到端推理
 
 ---
