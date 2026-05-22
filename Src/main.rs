@@ -34,6 +34,7 @@ use pleiades::event_bus::EventBus;
 use pleiades::peer_management::{create_peer_management, PeerHandle, SupportedModel};
 use pleiades::network::{NetworkConfig, Network_Service};
 use pleiades::storage::StorageManager;
+use pleiades::session::SessionManager;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
@@ -119,6 +120,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Storage 初始化完成: dir={}", workspace_dir.display());
 
+    // 8. SessionManager
+    let max_slots = config.Session.as_ref()
+        .and_then(|s| s.max_slots)
+        .unwrap_or(4);
+    let session_mgr = SessionManager::new(max_slots as usize);
+    let session_handle = Arc::new(session_mgr.handle());
+
+    info!("SessionManager 初始化完成: max_slots={}", max_slots);
+
     // ══════════════════════════════════════════════════════
     // Phase 4: 创建服务组件
     // ══════════════════════════════════════════════════════
@@ -162,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peer_manager: peer_capability_for_core,
         event_bus: event_bus.clone(),
         local_stream_hub: Arc::new(pleiades::orchestrator::local_tensor_stream::LocalStreamHub::new()),
+        session_manager: session_handle.clone(),
     });
 
     // 12. 用户命令通道 (TUI → Core)
@@ -208,20 +219,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 6: 启动运行时
     // ══════════════════════════════════════════════════════
 
-    // 14. 启动 Network 事件循环
+    // 14. 启动 SessionManager 主循环
+    tokio::spawn(async move {
+        session_mgr.run().await;
+    });
+    info!("SessionManager 主循环已启动");
+
+    // 15. 启动 Network 事件循环
     tokio::spawn(async move {
         if let Err(e) = network_service.Start().await {
             tracing::error!("Network 事件循环异常退出: {}", e);
         }
     });
 
-    // 15. 启动 TUI
+    // 16. 启动 TUI
     let event_rx = event_bus.Subscribe();
     tokio::task::spawn_blocking(move || {
         TUI_Loop(event_rx, user_cmd_tx);
     });
 
-    // 16. Core 主循环
+    // 17. Core 主循环
     info!("进入 Orchestrator 主循环");
     core.run().await;
 

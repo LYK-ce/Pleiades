@@ -34,21 +34,47 @@ impl std::error::Error for Session_Error {}
 /// 接入方通过 `submit()` 发 prompt，通过 `recv_token()` 收 token。
 /// Handle drop 时自动释放槽位。
 pub struct SlotHandle {
-    pub prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
+    session_id: String,
+    slot_id: usize,
+    prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
     pub token_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl SlotHandle {
+    pub fn new(
+        session_id: String,
+        slot_id: usize,
+        prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
+        token_rx: mpsc::UnboundedReceiver<String>,
+    ) -> Self {
+        SlotHandle { session_id, slot_id, prompt_tx, token_rx }
+    }
+
     /// 发送 prompt（自动带 session_id + slot_id）
-    pub fn submit(&self, session_id: &str, slot_id: usize, text: String) {
+    pub fn submit(&self, text: String) {
         self.prompt_tx
-            .send((session_id.to_string(), slot_id, text))
+            .send((self.session_id.clone(), self.slot_id, text))
             .ok();
     }
 
     /// 异步读取下一个 token
     pub async fn recv_token(&mut self) -> Option<String> {
         self.token_rx.recv().await
+    }
+
+    /// session_id
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// slot_id
+    pub fn slot_id(&self) -> usize {
+        self.slot_id
+    }
+
+    /// 取出 token_rx（消费 handle）
+    pub fn take_token_rx(self) -> mpsc::UnboundedReceiver<String> {
+        self.token_rx
     }
 }
 
@@ -75,8 +101,8 @@ mod tests {
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let mut handle = SlotHandle { prompt_tx, token_rx };
-        handle.submit("sess-7", 2, "hello".into());
+        let mut handle = SlotHandle::new("sess-7".into(), 2, prompt_tx, token_rx);
+        handle.submit("hello".into());
 
         let (sid, slot_id, text) = prompt_rx.recv().await.unwrap();
         assert_eq!(sid, "sess-7");

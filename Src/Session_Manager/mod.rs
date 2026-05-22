@@ -13,11 +13,12 @@ pub mod capability;
 pub mod manager;
 pub mod session;
 pub mod slot;
+pub mod batch;
 
 // ─── 聚合导出 ───────────────────────────────────────────────
 
 pub use capability::{Session_Error, SlotHandle};
-pub use manager::SessionManager;
+pub use manager::{SessionManager, SessionManagerHandle};
 pub use session::SessionInfo;
 pub use slot::{Slot, SlotState};
 

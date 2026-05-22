@@ -87,7 +87,7 @@ async fn tc05_slot_handle_submit_to_channel() {
     let handle = mgr.allocate_slot(&sess_id).expect("allocate");
 
     // submit 应该把数据放到 shared_prompt_rx 里
-    handle.submit(&sess_id, 0, "hello".into());
+    handle.submit("hello".into());
 
     // 验证 shared_prompt_rx 收到了
     let (sid, slot, text) = mgr.shared_prompt_rx.recv().await.unwrap();

@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 use super::capability::{Session_Error, SlotHandle};
 use super::session::Session;
+use super::batch::{BatchRequest, BatchResult, assemble_batch, sample_batch};
 
 // ─── 消息类型 ───────────────────────────────────────────────
 
@@ -31,6 +32,20 @@ pub(crate) struct OpenSlotRequest {
 pub(crate) struct CloseSlotRequest {
     pub session_id: String,
     pub slot_id: usize,
+}
+
+// ─── SessionManagerHandle ───────────────────────────────────
+
+/// SessionManager 的外部句柄（可安全放入 Arc 供多组件共享）
+///
+/// 持有所有通道的发送端，不包含主循环状态。
+pub struct SessionManagerHandle {
+    /// open_slot 请求通道
+    pub open_slot_tx: mpsc::UnboundedSender<OpenSlotRequest>,
+    /// close_slot 请求通道
+    pub close_slot_tx: mpsc::UnboundedSender<CloseSlotRequest>,
+    /// 注入 ML Thread 返回 logits（供外部模拟或桥接）
+    pub logits_tx: mpsc::Sender<BatchResult>,
 }
 
 // ─── SessionManager ─────────────────────────────────────────
@@ -51,11 +66,13 @@ pub struct SessionManager {
     close_slot_tx: mpsc::UnboundedSender<CloseSlotRequest>,
     close_slot_rx: mpsc::UnboundedReceiver<CloseSlotRequest>,
 
-    /// ML thread — batch 输入（Task 6.3 对接，当前占位）
-    #[allow(dead_code)]
-    batch_tx: mpsc::Sender<(Vec<u32>, Vec<(String, usize)>)>,
-    #[allow(dead_code)]
-    logits_rx: mpsc::Receiver<(Vec<u32>, Vec<(String, usize)>)>,
+    /// ML thread — batch 输入
+    batch_tx: mpsc::Sender<BatchRequest>,
+    batch_rx: mpsc::Receiver<BatchRequest>,
+
+    /// ML thread — logits 输出
+    logits_tx: mpsc::Sender<BatchResult>,
+    logits_rx: mpsc::Receiver<BatchResult>,
 
     /// 全局最大槽位数（每个 Session）
     max_slots: usize,
@@ -72,8 +89,8 @@ impl SessionManager {
         let (shared_prompt_tx, shared_prompt_rx) = mpsc::unbounded_channel();
         let (open_slot_tx, open_slot_rx) = mpsc::unbounded_channel();
         let (close_slot_tx, close_slot_rx) = mpsc::unbounded_channel();
-        let (batch_tx, _batch_rx) = mpsc::channel(1);
-        let (_logits_tx, logits_rx) = mpsc::channel(1);
+        let (batch_tx, batch_rx) = mpsc::channel(1);
+        let (logits_tx, logits_rx) = mpsc::channel(1);
 
         SessionManager {
             sessions: HashMap::new(),
@@ -84,6 +101,8 @@ impl SessionManager {
             close_slot_tx,
             close_slot_rx,
             batch_tx,
+            batch_rx,
+            logits_tx,
             logits_rx,
             max_slots,
             session_counter: 1,
@@ -99,6 +118,25 @@ impl SessionManager {
     /// 获取 close_slot 的发送端
     pub fn close_slot_sender(&self) -> mpsc::UnboundedSender<CloseSlotRequest> {
         self.close_slot_tx.clone()
+    }
+
+    /// 获取 batch 接收端（供 ML Thread 或测试使用）
+    pub fn take_batch_rx(&mut self) -> mpsc::Receiver<BatchRequest> {
+        std::mem::replace(&mut self.batch_rx, mpsc::channel(1).1)
+    }
+
+    /// 获取 logits 发送端（供 ML Thread 或测试使用）
+    pub fn logits_tx(&self) -> mpsc::Sender<BatchResult> {
+        self.logits_tx.clone()
+    }
+
+    /// 创建外部句柄，供其他组件（Core、Network）使用
+    pub fn handle(&self) -> SessionManagerHandle {
+        SessionManagerHandle {
+            open_slot_tx: self.open_slot_tx.clone(),
+            close_slot_tx: self.close_slot_tx.clone(),
+            logits_tx: self.logits_tx.clone(),
+        }
     }
 
     /// 创建 Session
@@ -147,14 +185,16 @@ impl SessionManager {
 
         let (token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let _slot_id = session
+        let slot_id = session
             .allocate(token_tx)
             .ok_or_else(|| Session_Error::SlotExhausted(session_id.to_string()))?;
 
-        Ok(SlotHandle {
-            prompt_tx: self.shared_prompt_tx.clone(),
+        Ok(SlotHandle::new(
+            session_id.to_string(),
+            slot_id,
+            self.shared_prompt_tx.clone(),
             token_rx,
-        })
+        ))
     }
 
     pub fn close_slot(&mut self, session_id: &str, slot_id: usize) {
@@ -184,12 +224,62 @@ impl SessionManager {
         slot.dirty = true;
     }
 
-    /// 分支 C+D: 目前占位（Task 6.3 实现）
+    /// 分支 C+D: flush batch 组装 + 发送；分发结果
     async fn flush_and_dispatch(&mut self) {
-        // TODO: Task 6.3 — 收集 dirty slots，拼 batch，送 ML thread
-        // TODO: Task 6.3 — 接收 logits，sample，decode，分发
-        let _ = &self.batch_tx;
-        let _ = &mut self.logits_rx;
+        // ── 收集 dirty slots ──
+        let mut dirty: Vec<(String, usize, Vec<u32>)> = Vec::new();
+        for (sess_id, session) in self.sessions.iter() {
+            for (slot_id, state) in session.slots.iter().enumerate() {
+                if let super::slot::SlotState::Occupied(ref slot) = state {
+                    if slot.dirty && !slot.token_buf.is_empty() {
+                        dirty.push((sess_id.clone(), slot_id, slot.token_buf.clone()));
+                    }
+                }
+            }
+        }
+
+        if let Some(batch) = assemble_batch(&dirty) {
+            // 发送到 ML Thread
+            if self.batch_tx.send(batch).await.is_ok() {
+                // 清空已发送的 slot token_buf + dirty 标记
+                for (sess_id, slot_id, _) in &dirty {
+                    if let Some(session) = self.sessions.get_mut(sess_id) {
+                        if let Some(slot) = session.get_slot_mut(*slot_id) {
+                            slot.token_buf.clear();
+                            slot.dirty = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 分支 D: 接收 logits，sample + decode + 分发
+    async fn dispatch_logits(&mut self, result: BatchResult) {
+        // 收集各 slot 的 temperature
+        let mut temperatures = std::collections::HashMap::new();
+        for (sess_id, slot_id) in &result.slot_order {
+            if let Some(session) = self.sessions.get(sess_id) {
+                if let Some(slot) = session.get_slot(*slot_id) {
+                    temperatures.insert((sess_id.clone(), *slot_id), slot.temperature);
+                }
+            }
+        }
+
+        let tokens = sample_batch(&result, &temperatures);
+
+        for ((sess_id, slot_id), token) in tokens {
+            // decode — 占位：把 token 当字符输出
+            let text = format!("[{}]", token);
+
+            if let Some(session) = self.sessions.get_mut(&sess_id) {
+                if let Some(slot) = session.get_slot_mut(slot_id) {
+                    slot.token_tx.send(text).ok();
+                    // 追加 token 到历史（为下一轮 prefill 做准备）
+                    slot.token_buf.push(token);
+                }
+            }
+        }
     }
 
     // ══════════════════════════════════════════════════════════
@@ -222,9 +312,9 @@ impl SessionManager {
                     self.flush_and_dispatch().await;
                 }
 
-                // D — 收 Logits（占位，logits channel 暂无数据，不会被触发）
-                _result = self.logits_rx.recv(), if false => {
-                    // TODO: Task 6.3
+                // D — 收 Logits → sample + decode + 分发
+                Some(result) = self.logits_rx.recv() => {
+                    self.dispatch_logits(result).await;
                 }
 
                 // F — 销毁 slot
@@ -279,7 +369,7 @@ mod tests {
         let sess_id = mgr.create_session("qwen3");
 
         let handle = mgr.allocate_slot(&sess_id).expect("should allocate");
-        handle.submit(&sess_id, 0, "hello".into());
+        handle.submit("hello".into());
         // slot 0 被占用
         assert_eq!(mgr.list_sessions()[0].occupied_slots, 1);
     }
@@ -335,5 +425,80 @@ mod tests {
         let slot = session.get_slot(0).unwrap();
         assert!(!slot.token_buf.is_empty());
         assert!(slot.dirty);
+    }
+
+    // ─── Batch 流程测试 ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_flush_assembles_and_sends_batch() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
+        mgr.allocate_slot(&sess_id).unwrap();
+        mgr.allocate_slot(&sess_id).unwrap();
+
+        // 往 slot 0 和 slot 1 各写入 tokens
+        mgr.handle_prompt(&sess_id, 0, "a");
+        mgr.handle_prompt(&sess_id, 1, "bc");
+
+        let mut batch_rx = mgr.take_batch_rx();
+        mgr.flush_and_dispatch().await;
+
+        // 应该收到一个 BatchRequest
+        let req = batch_rx.try_recv().expect("should receive batch");
+        assert_eq!(req.slot_order.len(), 2);
+        // 验证 slot 的 token_buf 已清空
+        let session = mgr.sessions.get(&sess_id).unwrap();
+        assert!(session.get_slot(0).unwrap().token_buf.is_empty());
+        assert!(!session.get_slot(0).unwrap().dirty);
+        assert!(session.get_slot(1).unwrap().token_buf.is_empty());
+        assert!(!session.get_slot(1).unwrap().dirty);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_logits_sends_tokens_to_slots() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
+        mgr.allocate_slot(&sess_id).unwrap();  // slot 0
+        mgr.allocate_slot(&sess_id).unwrap();  // slot 1
+
+        // 注入 mock result
+        let result = BatchResult {
+            logits_batches: vec![
+                vec![0.1, 0.9, 0.0],   // slot 0 → 几乎一定是 index 1
+                vec![0.5, 0.1, 0.4],   // slot 1 → 几乎一定是 index 0
+            ],
+            slot_order: vec![
+                (sess_id.clone(), 0),
+                (sess_id.clone(), 1),
+            ],
+        };
+
+        // 设置低温度使 sample 确定
+        {
+            let session = mgr.sessions.get_mut(&sess_id).unwrap();
+            session.get_slot_mut(0).unwrap().temperature = 0.01;
+            session.get_slot_mut(1).unwrap().temperature = 0.01;
+        }
+
+        mgr.dispatch_logits(result).await;
+
+        // 验证 token 被追加到 token_buf
+        let session = mgr.sessions.get(&sess_id).unwrap();
+        let s0 = session.get_slot(0).unwrap();
+        let s1 = session.get_slot(1).unwrap();
+        assert_eq!(s0.token_buf, vec![1]);  // index 1
+        assert_eq!(s1.token_buf, vec![0]);  // index 0
+    }
+
+    #[tokio::test]
+    async fn test_flush_no_dirty_slots_sends_nothing() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
+
+        let mut batch_rx = mgr.take_batch_rx();
+        mgr.flush_and_dispatch().await;
+
+        // 没有 dirty slot → 不应该有 batch
+        assert!(batch_rx.try_recv().is_err());
     }
 }
