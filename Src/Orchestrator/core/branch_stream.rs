@@ -98,9 +98,9 @@ impl Core {
 
 /// 桥接 libp2p stream ↔ SlotHandle
 ///
-/// 方向 1: stream → prompt（从远端读文本，submit 到 Session Manager）
-/// 方向 2: token → stream（从 Session Manager 收 token，写回远端）
-fn spawn_session_bridge(stream: libp2p::Stream, handle: crate::session::SlotHandle) {
+/// 入站（远端→本端）：读到什么就是一整句 prompt → submit
+/// 出站（本端→远端）：Session Manager 产 token → 逐 token 写回流
+fn spawn_session_bridge(stream: libp2p::Stream, mut handle: crate::session::SlotHandle) {
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use futures::AsyncReadExt;
@@ -109,31 +109,40 @@ fn spawn_session_bridge(stream: libp2p::Stream, handle: crate::session::SlotHand
     let stream = Arc::new(Mutex::new(stream));
     let sess_id = handle.session_id().to_string();
     let slot_id = handle.slot_id();
-    let mut token_rx = handle.take_token_rx();
-
-    // prompt send: 通过 open_slot_tx 直接发
-    // But we don't have the tx directly... 
-    // The bridge reads from stream and would need to submit prompt.
-    // For now, the bridge is just a transport; reading from stream needs
-    // a way to push data into the SessionManager's prompt channel.
-    // The stream side reads input and should submit via shared_prompt_tx.
-    // Since we don't have access to that, we use a simple workaround:
-    // the remote side pushes tokens directly into the token_rx for text exchange.
-    // 
-    // For now: bridge handles token direction only. Prompt direction 
-    // will be added when the stream protocol defines in-band prompt format.
 
     tokio::spawn(async move {
-        // 方向 2: token → stream (primary direction)
+        let mut buf = [0u8; 4096];
         loop {
             tokio::select! {
-                Some(token) = token_rx.recv() => {
+                // 入站：远端发来一整句 prompt
+                read_result = {
+                    let stream = stream.clone();
+                    let mut local_buf = [0u8; 4096];
+                    async move {
+                        let mut s = stream.lock().await;
+                        let n = s.read(&mut local_buf).await?;
+                        Ok::<_, std::io::Error>((n, local_buf))
+                    }
+                } => {
+                    match read_result {
+                        Ok((0, _)) => break,  // EOF
+                        Ok((n, buf)) => {
+                            let text = String::from_utf8_lossy(&buf[..n]);
+                            handle.submit(text.to_string());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Session bridge read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                // 出站：逐 token 流式写回远端
+                Some(token) = handle.recv_token() => {
                     let mut s = stream.lock().await;
                     if s.write_all(token.as_bytes()).await.is_err() {
                         break;
                     }
                 }
-                else => break,
             }
         }
         tracing::info!("Session bridge ended: sess={}, slot={}", sess_id, slot_id);
