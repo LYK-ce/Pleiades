@@ -28,12 +28,6 @@ pub(crate) struct OpenSlotRequest {
     pub reply_tx: tokio::sync::oneshot::Sender<Result<SlotHandle, Session_Error>>,
 }
 
-/// close_slot 请求
-pub(crate) struct CloseSlotRequest {
-    pub session_id: String,
-    pub slot_id: usize,
-}
-
 // ─── SessionManagerHandle ───────────────────────────────────
 
 /// SessionManager 的外部句柄（可安全放入 Arc 供多组件共享）
@@ -42,8 +36,6 @@ pub(crate) struct CloseSlotRequest {
 pub struct SessionManagerHandle {
     /// open_slot 请求通道
     pub open_slot_tx: mpsc::UnboundedSender<OpenSlotRequest>,
-    /// close_slot 请求通道
-    pub close_slot_tx: mpsc::UnboundedSender<CloseSlotRequest>,
     /// 注入 ML Thread 返回 logits（供外部模拟或桥接）
     pub logits_tx: mpsc::Sender<BatchResult>,
 }
@@ -63,8 +55,8 @@ pub struct SessionManager {
     open_slot_rx: mpsc::UnboundedReceiver<OpenSlotRequest>,
 
     /// close_slot 请求通道
-    close_slot_tx: mpsc::UnboundedSender<CloseSlotRequest>,
-    close_slot_rx: mpsc::UnboundedReceiver<CloseSlotRequest>,
+    close_slot_tx: mpsc::UnboundedSender<(String, usize)>,
+    close_slot_rx: mpsc::UnboundedReceiver<(String, usize)>,
 
     /// ML thread — batch 输入
     batch_tx: mpsc::Sender<BatchRequest>,
@@ -116,7 +108,7 @@ impl SessionManager {
     }
 
     /// 获取 close_slot 的发送端
-    pub fn close_slot_sender(&self) -> mpsc::UnboundedSender<CloseSlotRequest> {
+    pub fn close_slot_sender(&self) -> mpsc::UnboundedSender<(String, usize)> {
         self.close_slot_tx.clone()
     }
 
@@ -134,7 +126,6 @@ impl SessionManager {
     pub fn handle(&self) -> SessionManagerHandle {
         SessionManagerHandle {
             open_slot_tx: self.open_slot_tx.clone(),
-            close_slot_tx: self.close_slot_tx.clone(),
             logits_tx: self.logits_tx.clone(),
         }
     }
@@ -193,6 +184,7 @@ impl SessionManager {
             session_id.to_string(),
             slot_id,
             self.shared_prompt_tx.clone(),
+            self.close_slot_tx.clone(),
             token_rx,
         ))
     }
@@ -318,8 +310,8 @@ impl SessionManager {
                 }
 
                 // F — 销毁 slot
-                Some(req) = self.close_slot_rx.recv() => {
-                    self.close_slot(&req.session_id, req.slot_id);
+                Some((session_id, slot_id)) = self.close_slot_rx.recv() => {
+                    self.close_slot(&session_id, slot_id);
                 }
             }
         }

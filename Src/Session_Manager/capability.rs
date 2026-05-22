@@ -32,12 +32,13 @@ impl std::error::Error for Session_Error {}
 /// 返回给接入方的槽位句柄
 ///
 /// 接入方通过 `submit()` 发 prompt，通过 `recv_token()` 收 token。
-/// Handle drop 时自动释放槽位。
+/// Handle drop 时自动发送 CloseSlotRequest 释放槽位。
 pub struct SlotHandle {
     session_id: String,
     slot_id: usize,
     prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
-    pub token_rx: mpsc::UnboundedReceiver<String>,
+    close_slot_tx: Option<mpsc::UnboundedSender<(String, usize)>>,
+    token_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl SlotHandle {
@@ -45,9 +46,16 @@ impl SlotHandle {
         session_id: String,
         slot_id: usize,
         prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
+        close_slot_tx: mpsc::UnboundedSender<(String, usize)>,
         token_rx: mpsc::UnboundedReceiver<String>,
     ) -> Self {
-        SlotHandle { session_id, slot_id, prompt_tx, token_rx }
+        SlotHandle {
+            session_id,
+            slot_id,
+            prompt_tx,
+            close_slot_tx: Some(close_slot_tx),
+            token_rx: Some(token_rx),
+        }
     }
 
     /// 发送 prompt（自动带 session_id + slot_id）
@@ -59,7 +67,10 @@ impl SlotHandle {
 
     /// 异步读取下一个 token
     pub async fn recv_token(&mut self) -> Option<String> {
-        self.token_rx.recv().await
+        match &mut self.token_rx {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
     }
 
     /// session_id
@@ -72,9 +83,19 @@ impl SlotHandle {
         self.slot_id
     }
 
-    /// 取出 token_rx（消费 handle）
-    pub fn take_token_rx(self) -> mpsc::UnboundedReceiver<String> {
-        self.token_rx
+    /// 取出 token_rx（消费 handle，失去自动释放能力）
+    pub fn take_token_rx(mut self) -> mpsc::UnboundedReceiver<String> {
+        // 取消 Drop 自动释放（由调用方负责手动释放）
+        self.close_slot_tx.take();
+        self.token_rx.take().expect("token_rx already taken")
+    }
+}
+
+impl Drop for SlotHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = &self.close_slot_tx {
+            tx.send((self.session_id.clone(), self.slot_id)).ok();
+        }
     }
 }
 
@@ -99,9 +120,10 @@ mod tests {
     #[tokio::test]
     async fn test_slot_handle_submit_and_recv() {
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (close_tx, _close_rx) = mpsc::unbounded_channel();
         let (token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let mut handle = SlotHandle::new("sess-7".into(), 2, prompt_tx, token_rx);
+        let mut handle = SlotHandle::new("sess-7".into(), 2, prompt_tx, close_tx, token_rx);
         handle.submit("hello".into());
 
         let (sid, slot_id, text) = prompt_rx.recv().await.unwrap();
@@ -110,6 +132,33 @@ mod tests {
         assert_eq!(text, "hello");
 
         token_tx.send("world".into()).unwrap();
-        assert_eq!(handle.token_rx.recv().await, Some("world".into()));
+        assert_eq!(handle.recv_token().await, Some("world".into()));
+    }
+
+    #[test]
+    fn test_slot_handle_drop_sends_close() {
+        let (close_tx, mut close_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+        let (_token_tx, token_rx) = mpsc::unbounded_channel();
+
+        let handle = SlotHandle::new("sess-9".into(), 3, prompt_tx, close_tx, token_rx);
+        drop(handle);
+
+        let (sid, slot) = close_rx.try_recv().expect("Drop should send close");
+        assert_eq!(sid, "sess-9");
+        assert_eq!(slot, 3);
+    }
+
+    #[test]
+    fn test_take_token_rx_prevents_drop_close() {
+        let (close_tx, mut close_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+        let (_token_tx, token_rx) = mpsc::unbounded_channel();
+
+        let handle = SlotHandle::new("sess-9".into(), 3, prompt_tx, close_tx, token_rx);
+        let _rx = handle.take_token_rx();  // handle consumed, take_token_rx clears close_slot_tx
+
+        // close_rx should be empty since Drop was prevented
+        assert!(close_rx.try_recv().is_err());
     }
 }
