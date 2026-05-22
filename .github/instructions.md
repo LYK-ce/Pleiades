@@ -49,17 +49,29 @@ Date ： Current date
 
 
 # 工作流程
-在根目录下包含以下内容：
-1. task.md  此文件指定agent需要执行的任务，agent只有在人类同意的情况下才能进行修改。
-2. Workbook目录 此目录中包含workbook文件，每个文件命名方式为workbook_xxx_task.md，每一个任务都有一个独立的workbook文件，用于agent记录工作进度，作为工作上下文，agent在完成每一项任务后必须记录必要信息和重要细节。若文件不存在，agent应创建一个。采用最高效,最精简的记录方式,无需考虑人类可读性。确保workbook.md若启动新的agent，其可快速切换至当前工作上下文，并基于现有的 workbook.md 文件继续工作。
-3. docs目录，用于存放设计文档，说明文档等内容
 
-Agents 必须按照如下的工作流程进行工作
-1. 阅读task.md，并根据其中的完成情况，人类评审意见决定下一项任务
-2. 更新workbook.md，记录任务的开始时间
-3. 根据人类的要求，执行task.md中的特定任务
-4. 更新workbook.md，任务的依赖关系，结束时间，并使用最精简的方式记录必要信息。
-5. 结束任务
+## 目录结构
+- `Task/` — 当前待执行/进行中的任务文件
+  - `archived task/` — 已完成的任务归档
+- `Workbook/` — 工作记录（命名格式 `wb_{id}_{description}.md`）
+- `docs/` — 设计文档、说明文档
+
+## 任务文件规范
+每个任务文件命名格式：`task_{id}_{description}.md`，存储在 `Task/` 目录下。
+- 例如：`Task/task_6_session_manager.md`
+- 已完成的任务移入 `Task/archived task/`
+- agent 只有在人类同意的情况下才能对任务文件进行修改。
+
+## Workbook 规范
+Workbook 目录中的工作记录文件与任务文件一一对应，命名方式为 `wb_{id}_{description}.md`（与 `task_{id}_{description}.md` 共享相同的 id 和 description）。用于 agent 记录工作进度，作为工作上下文。agent 在完成每一项任务后必须记录必要信息和重要细节。若文件不存在，agent 应创建一个。采用最高效、最精简的记录方式，无需考虑人类可读性。确保若启动新的 agent，其可基于现有 workbook 文件快速切换至当前工作上下文。
+
+## Agent 工作流程
+1. 阅读 `Task/` 目录下的任务文件，根据完成情况和人类评审意见决定下一项任务
+2. 更新对应 workbook，记录任务开始时间
+3. 根据人类的要求执行特定任务
+4. 更新 workbook，记录依赖关系、结束时间，使用最精简的方式记录必要信息
+5. 若任务完成，将任务文件移入 `Task/archived task/`
+6. 结束任务
 
 
 

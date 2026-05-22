@@ -226,103 +226,43 @@
 
 > 背景：参见 AGENTS.md「Lua 绑定规范」。当前大量 mlua 闭包内直接写了业务逻辑（设备解析、表构造、序列化等），违反分离原则。
 > 目标：将 15 处内联逻辑提取为独立 `fn`，闭包降为薄胶水。
+>
+> **判定标准（2026-05-22 修订）**：只要业务逻辑不放在 Lua binding 闭包内处理即视为合格。允许闭包内保留以下薄胶水：Lua 类型 ↔ Rust 类型转换（borrow、参数解包）、构造 Lua Table 返回格式化数据、调用已提取的 Rust 函数/协议函数、`map_err` 转换、tracing。设备枚举判断、算法实现、模型操作等具备业务语义的逻辑必须提取为独立 `fn`。
 
 ### 5.1 提取公共工具函数
 
-- [ ] `Src/ML_Engine/lua_tensor.rs` 或新文件 — 提取 `parse_device_str(s: &str) -> Result<Device, String>`（当前 3 处重复）
+- [x] `Src/ML_Engine/lua_tensor.rs` 或新文件 — 提取 `parse_device_str(s: &str) -> Result<Device, String>`（当前 3 处重复）
 
 ### 5.2 capability_binding.rs 重构（9 处重度内联）
 
-- [ ] `ml.analyze_model`（17 行）→ `fn build_model_info_table(lua, info) -> Table`
-- [ ] `network.recv_tensor`（12 行）→ `fn recv_tensor_impl(stream, device) -> (LuaTensor, u64)`
-- [ ] `network.send_data`（10 行）→ `fn send_data_impl(...) -> Table`
-- [ ] `ml.tensor_from_bytes`（8 行）→ 提取 device 解析，其余已薄
-- [ ] `network.send_tensor`（6 行）→ `fn send_tensor_impl(stream, tensor, offset)`
-- [ ] `storage_list`（7 行）→ `fn build_file_list_table(lua, entries) -> Table`
-- [ ] `storage_checksum`（5 行）→ `fn parse_checksum_algo(s) -> Option<ChecksumAlgorithm>`
-- [ ] `storage_flush`（4 行）→ 内联逻辑简单，可保留或轻提
-- [ ] `network.send_eof`（4 行）→ 可保留
+- [x] `ml.analyze_model`（17 行）→ `fn build_model_info_table(lua, info) -> Table`
+- [x] `network.recv_tensor`（12 行）→ `fn recv_tensor_impl(stream, device) -> (LuaTensor, u64)`
+- [x] `network.send_data`（10 行）→ `fn send_data_impl(...) -> Table`
+- [x] `ml.tensor_from_bytes`（8 行）→ 提取 device 解析，其余已薄
+- [x] `network.send_tensor`（6 行）→ `fn send_tensor_impl(stream, tensor, offset)`
+- [x] `storage_list`（7 行）→ `fn build_file_list_table(lua, entries) -> Table`
+- [x] `storage_checksum`（5 行）→ `fn parse_checksum_algo(s) -> Option<ChecksumAlgorithm>`
+- [x] `storage_flush`（4 行）→ 内联逻辑简单，可保留或轻提
+- [x] `network.send_eof`（4 行）→ 可保留
 
 ### 5.3 local_stream.rs 重构（3 处重度内联）
 
-- [ ] `send_tensor`（10 行）→ `fn send_tensor_impl(stream, tensor, offset)`
-- [ ] `recv_tensor`（15 行）→ `fn recv_tensor_impl(stream, device_str) -> (LuaTensor, u64)`
-- [ ] `send_eof`（5 行）→ 可保留或轻提
+- [x] `send_tensor`（10 行）→ `fn send_tensor_impl(stream, tensor, offset)`
+- [x] `recv_tensor`（15 行）→ `fn recv_tensor_impl(stream, device_str) -> (LuaTensor, u64)`
+- [x] `send_eof`（5 行）→ 可保留或轻提
 
 ### 5.4 lua_tensor.rs 重构（2 处）
 
-- [ ] `to_device`（7 行）→ 共用 `parse_device_str`，剩余 ≤3 行
-- [ ] `dims`（4 行）→ `fn dims_to_table(lua, tensor) -> Table`
+- [x] `to_device`（7 行）→ 共用 `parse_device_str`，剩余 ≤3 行
+- [x] `dims`（4 行）→ `fn dims_to_table(lua, tensor) -> Table`
 
 ### 5.5 验证
 
-- [ ] `cargo test` 全量通过
-- [ ] 闭包内超过 4 行的业务逻辑归零
+- [x] `cargo test` 全量通过
+- [x] 闭包内超过 4 行的业务逻辑归零
 
 ---
 
-## Task 6: 会话管理 — 服务型 ML 推理
-
-> 目标：实现 Session Manager，支持本地/远程客户端通过流连接到 ML 推理服务。
->
-> ⚠️ **必须在 `session_manager_implementation` 分支上进行所有开发，禁止修改其他分支。**
-
-### 6.1 创建开发分支
-
-- [ ] 从 `reforge` 创建 `session_manager_implementation` 分支
-
-### 6.2 IO Stream 协议实现
-
-> 参考 Tensor_Stream 和 LocalTensorStream 的设计，新增 IO Stream（网络）和 Local IO Stream（本地）。
-> 帧协议：`[len: u32 LE][payload: UTF-8 bytes]`，最简形式。
-
-- [ ] `Src/Network/IO_Stream/` — 参考 Tensor_Stream/ 结构，实现 IO Stream 帧协议
-- [ ] `Src/Orchestrator/local_io_stream/` — 参考 local_tensor_stream/ 结构，实现 Local IO Stream
-- [ ] 两端协议对齐（帧格式、帧类型），支持 open/accept/send/recv
-- [ ] `Network_Capability` trait 新增 `open_io_stream(peer)` / `accept_io_stream(id, timeout)` 方法
-- [ ] `Network_Service_Capability` 实现上述方法
-- [ ] Lua 绑定：`LocalIOStream` UserData，方法 `send_str(text)` / `recv_str() -> String`
-
-### 6.3 实现 Session Manager
-
-> Session Manager 作为 Rust tokio task，负责连接管理、slot 分配、encode/decode、请求路由。
-
-- [ ] Session Manager 加载 tokenizer（不加载模型权重）
-- [ ] select! 主循环：接收连接请求 → 分配 slot → 接收 prompt → encode → 转发 ML → 收 ML 回复 → decode → 回复
-- [ ] slot 管理：分配/释放，满员时拒绝新连接
-- [ ] 通过 local_tensor（双工）与 ML Inference 通信
-- [ ] 通过 IO Stream / Local IO Stream 与客户端通信
-- [ ] Core ↔ SessionManager 通信：`Arc<SessionManagerHandle>` + `Mutex<VecDeque>` + `Notify`，避免额外 mpsc
-
-### 6.4 实现 ML Inference 脚本
-
-- [ ] `programs/user/inference.lua` — recv tensor → forward → sample → send token
-- [ ] 通过 local_tensor 与 Session Manager 双向通信
-
-### 6.5 实现本地 chat 前端
-
-- [ ] `programs/user/chat.lua` — stdin/stdout 交互，通过 Local IO Stream 连接 Session Manager
-
-### 6.6 集成 Core
-
-- [ ] Core B1 新增 `run` 内置指令：
-  - 启动 Session Manager (Rust tokio task)
-  - spawn ML Inference Lua 脚本 (`inference.lua`)
-  - 仅本机运行，不涉及远程节点
-- [ ] Core B1 新增 `chat` 内置指令：spawn chat Lua 脚本 (`chat.lua`)，连接本地 Session Manager
-- [ ] `branch_stream.rs` 新增 IO Stream 入站分支处理，读帧后转发给 Session Manager
-
-### 6.7 集成 Network_Service
-
-- [ ] network_service 新增 IO Stream 入站处理（发事件给 Core）
-- [ ] Network_Inbound_Event 新增 IOStreamArrived 变体
-
-### 6.8 验证
-
-- [ ] `cargo test` 全量通过
-- [ ] 本地 chat → Session Manager → ML Inference 端到端推理
-
----
 
 ## 人类评审
 
