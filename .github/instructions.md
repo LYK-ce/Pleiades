@@ -19,6 +19,34 @@ Date ： Current date
 2. 函数 采用Pascal snake case规范进行命名
 3. 常数 采用Upper snake case规范进行命名
 
+## Lua 绑定规范
+1. 禁止在 mlua 闭包（`create_function`、`create_async_function`、`add_method`、`add_method_mut`）内编写业务逻辑。
+2. 所有业务逻辑必须提取为独立的 Rust 函数（`fn` 或 `impl` 方法），闭包仅负责：
+   - Lua 类型 → Rust 类型转换（`AnyUserData::borrow`、参数解包）
+   - 调用提取好的 Rust 函数
+   - `map_err` 转换为 `mlua::Error`
+3. 正例：
+   ```rust
+   // MlSession 独立实现
+   impl MlSession {
+       pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> { ... }
+   }
+   // 闭包只做薄胶水
+   methods.add_method("encode", |_, sess, text: String| {
+       sess.encode(&text).map_err(|e| mlua::Error::runtime(e))
+   });
+   ```
+4. 反例：
+   ```rust
+   // ❌ 17 行业务逻辑直接写在闭包内
+   methods.add_method("analyze_model", |lua, path: String| {
+       let info = ...;  let t = lua.create_table()?;
+       t.set("architecture", info.architecture)?;
+       t.set("num_layers", info.num_layers)?;  // 共 15 个字段
+       ...
+   });
+   ```
+
 
 # 工作流程
 在根目录下包含以下内容：
@@ -38,9 +66,16 @@ Agents 必须按照如下的工作流程进行工作
 
 
 
+
 # 初始化
 
-Agent 在首次启动时必须执行以下 Git SSH 环境初始化步骤：
+Agent 在首次启动时必须执行以下初始化步骤：
+
+0. **阅读架构文档** — 读取 `Architecture/Pleiades_Architecture.md`，理解项目整体架构、各模块职责、关键 API 以及常见错误。重点理解：
+   - Storage API 是文件访问的唯一入口，禁止绕过直接使用 `std::fs`
+   - PGGUF = 原始 GGUF + 元信息，**不是** split model 的残缺产物
+   - 层编号规则：0=embedding, 1..N=transformer blocks, N+1=output
+   - Lua 脚本可用的全部 API 表：`caps`, `ml`, `caps.storage_*`, `caps.network.*`, `local_tensor.*`
 
 1. **检查 SSH 密钥权限** — 私钥文件（如 `~/.ssh/id_ed25519`）权限必须为 `600`，公钥为 `644`。若权限不正确，执行 `chmod 600 ~/.ssh/id_ed25519` 修复。若 `.ssh` 目录以只读方式挂载导致无法修改权限，则将密钥复制到可写目录（如 `~/.ssh-local/`）并修复权限。
 
