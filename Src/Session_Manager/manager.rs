@@ -1,137 +1,244 @@
 //Presented by KeJi
-//Date ： 2026-05-14
+//Date ： 2026-05-22
+
+//! SessionManager — 会话槽位管理器
+//!
+//! 持有所有 Session，通过 tokio::select! 主循环处理六类事件：
+//! - A: 本地 open_slot
+//! - B: 收 Prompt → tokenize 存入 slot token_buf
+//! - C: Flush batch → 拼 tensor 送 ML thread
+//! - D: 收 Logits → sample + decode + 分发
+//! - E: 网络 open_slot（Task 6.4）
+//! - F: 销毁 slot
+//!
+//! ML thread 接口暂留 stub，后续 Task 6.3 实现。
 
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 
-use super::capability::{IoFrontend, IoHandle, Session_Capability, Session_Error};
-use super::session::{Session, SessionInfo};
-use super::slot::SlotState;
-use crate::orchestrator::job::JobId;
+use super::capability::{Session_Error, SlotHandle};
+use super::session::Session;
 
-// ─── 常量 ───────────────────────────────────────────────────
+// ─── 消息类型 ───────────────────────────────────────────────
 
-const CHANNEL_BUFFER_SIZE: usize = 64;
+/// open_slot 请求
+pub(crate) struct OpenSlotRequest {
+    pub session_id: String,
+    pub reply_tx: tokio::sync::oneshot::Sender<Result<SlotHandle, Session_Error>>,
+}
+
+/// close_slot 请求
+pub(crate) struct CloseSlotRequest {
+    pub session_id: String,
+    pub slot_id: usize,
+}
 
 // ─── SessionManager ─────────────────────────────────────────
 
-/// Session 管理器，负责会话生命周期、槽位分配和 IO 通道管理。
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, Session>>,
+    /// session_id → Session
+    pub sessions: HashMap<String, Session>,
+
+    /// 共享 prompt 通道 — 所有 SlotHandle 共用发送端
+    shared_prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
+    pub shared_prompt_rx: mpsc::UnboundedReceiver<(String, usize, String)>,
+
+    /// open_slot 请求通道
+    open_slot_tx: mpsc::UnboundedSender<OpenSlotRequest>,
+    open_slot_rx: mpsc::UnboundedReceiver<OpenSlotRequest>,
+
+    /// close_slot 请求通道
+    close_slot_tx: mpsc::UnboundedSender<CloseSlotRequest>,
+    close_slot_rx: mpsc::UnboundedReceiver<CloseSlotRequest>,
+
+    /// ML thread — batch 输入（Task 6.3 对接，当前占位）
+    #[allow(dead_code)]
+    batch_tx: mpsc::Sender<(Vec<u32>, Vec<(String, usize)>)>,
+    #[allow(dead_code)]
+    logits_rx: mpsc::Receiver<(Vec<u32>, Vec<(String, usize)>)>,
+
+    /// 全局最大槽位数（每个 Session）
     max_slots: usize,
+
+    /// Session ID 计数器
+    session_counter: u64,
+
+    /// 是否正在运行
+    running: bool,
 }
 
 impl SessionManager {
     pub fn new(max_slots: usize) -> Self {
+        let (shared_prompt_tx, shared_prompt_rx) = mpsc::unbounded_channel();
+        let (open_slot_tx, open_slot_rx) = mpsc::unbounded_channel();
+        let (close_slot_tx, close_slot_rx) = mpsc::unbounded_channel();
+        let (batch_tx, _batch_rx) = mpsc::channel(1);
+        let (_logits_tx, logits_rx) = mpsc::channel(1);
+
         SessionManager {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: HashMap::new(),
+            shared_prompt_tx,
+            shared_prompt_rx,
+            open_slot_tx,
+            open_slot_rx,
+            close_slot_tx,
+            close_slot_rx,
+            batch_tx,
+            logits_rx,
             max_slots,
+            session_counter: 1,
+            running: false,
         }
     }
 
-    /// 按 JobId 获取推理会话的前端端点（stub，待实现）
-    pub async fn Take_Frontend(&self, job_id: JobId) -> Result<IoFrontend, Session_Error> {
-        let _ = job_id;
-        Err(Session_Error::Internal("Take_Frontend not yet implemented".into()))
+    /// 获取 open_slot 的发送端（供外部调用）
+    pub fn open_slot_sender(&self) -> mpsc::UnboundedSender<OpenSlotRequest> {
+        self.open_slot_tx.clone()
     }
-}
 
-#[async_trait::async_trait]
-impl Session_Capability for SessionManager {
-    async fn create_session(
-        &self,
-        model_id: String,
-    ) -> Result<(String, IoHandle), Session_Error> {
-        let session_id = generate_session_id();
+    /// 获取 close_slot 的发送端
+    pub fn close_slot_sender(&self) -> mpsc::UnboundedSender<CloseSlotRequest> {
+        self.close_slot_tx.clone()
+    }
 
-        let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-        let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
+    /// 创建 Session
+    pub fn create_session(&mut self, model_id: &str) -> String {
+        let session_id = format!("sess-{}", self.session_counter);
+        self.session_counter += 1;
 
-        let io_handle = IoHandle { input_rx, output_tx };
-        // 对端存入 Session，不再 drop
+        // TODO: Task 6.3 — 加载 tokenizer，获取 eos_token_id
         let session = Session::new(
             session_id.clone(),
-            model_id,
+            model_id.to_string(),
             self.max_slots,
-            input_tx,
-            output_rx,
+            1, // placeholder eos
         );
 
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(session_id.clone(), session);
-
-        Ok((session_id, io_handle))
+        self.sessions.insert(session_id.clone(), session);
+        session_id
     }
 
-    async fn destroy_session(&self, session_id: &str) -> Result<(), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        sessions.remove(session_id);
+    /// 销毁 Session
+    pub fn destroy_session(&mut self, session_id: &str) -> Result<(), Session_Error> {
+        self.sessions.remove(session_id);
         Ok(())
     }
 
-    async fn connect(&self, session_id: &str) -> Result<(u32, IoFrontend), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.get_mut(session_id).ok_or_else(|| {
-            Session_Error::SessionNotFound(session_id.to_string())
-        })?;
-
-        if session.slot_counter as usize >= session.max_slots {
-            return Err(Session_Error::SlotExhausted(session_id.to_string()));
-        }
-
-        let slot_id = session.slot_counter;
-        session.slots[slot_id as usize].state = SlotState::Occupied {
-            owner: format!("frontend-{}", slot_id),
-        };
-        session.slot_counter += 1;
-
-        let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-        let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-
-        // 对端存入 Session，不再 drop
-        session.frontend_pairs.push((input_rx, output_tx));
-
-        Ok((slot_id, IoFrontend { input_tx, output_rx }))
-    }
-
-    fn list_sessions(&self) -> Vec<SessionInfo> {
-        if let Ok(sessions) = self.sessions.try_lock() {
-            sessions.values().map(|s| SessionInfo {
+    /// 列出所有 Session
+    pub fn list_sessions(&self) -> Vec<super::session::SessionInfo> {
+        self.sessions
+            .values()
+            .map(|s| super::session::SessionInfo {
                 session_id: s.session_id.clone(),
                 model_id: s.model_id.clone(),
                 total_slots: s.max_slots,
                 occupied_slots: s.occupied_count(),
-            }).collect()
-        } else {
-            Vec::new()
+            })
+            .collect()
+    }
+
+    // ─── 内部方法 ────────────────────────────────────────────
+
+    pub fn allocate_slot(&mut self, session_id: &str) -> Result<SlotHandle, Session_Error> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| Session_Error::SessionNotFound(session_id.to_string()))?;
+
+        let (token_tx, token_rx) = mpsc::unbounded_channel();
+
+        let _slot_id = session
+            .allocate(token_tx)
+            .ok_or_else(|| Session_Error::SlotExhausted(session_id.to_string()))?;
+
+        Ok(SlotHandle {
+            prompt_tx: self.shared_prompt_tx.clone(),
+            token_rx,
+        })
+    }
+
+    pub fn close_slot(&mut self, session_id: &str, slot_id: usize) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.release(slot_id);
         }
     }
 
-    async fn release_slot(&self, session_id: &str, slot_id: u32) -> Result<(), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.get_mut(session_id).ok_or_else(|| {
-            Session_Error::SessionNotFound(session_id.to_string())
-        })?;
+    // ─── 主循环分支方法 ──────────────────────────────────────
 
-        if (slot_id as usize) >= session.slots.len() {
-            return Err(Session_Error::Internal(format!(
-                "slot_id {} out of range (max {})",
-                slot_id,
-                session.slots.len()
-            )));
-        }
+    /// 分支 B: 处理 prompt
+    pub fn handle_prompt(&mut self, session_id: &str, slot_id: usize, text: &str) {
+        let session = match self.sessions.get_mut(session_id) {
+            Some(s) => s,
+            None => return,
+        };
 
-        session.slots[slot_id as usize].state = SlotState::Vacant;
-        Ok(())
+        let slot = match session.get_slot_mut(slot_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // TODO: 接入 tokenizer 做真实 encode
+        // 占位：简单按字节转 u32
+        let tokens: Vec<u32> = text.bytes().map(|b| b as u32).collect();
+        slot.token_buf.extend(tokens);
+        slot.dirty = true;
     }
-}
 
-fn generate_session_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("sess-{}", id)
+    /// 分支 C+D: 目前占位（Task 6.3 实现）
+    async fn flush_and_dispatch(&mut self) {
+        // TODO: Task 6.3 — 收集 dirty slots，拼 batch，送 ML thread
+        // TODO: Task 6.3 — 接收 logits，sample，decode，分发
+        let _ = &self.batch_tx;
+        let _ = &mut self.logits_rx;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 主循环
+    // ══════════════════════════════════════════════════════════
+
+    pub async fn run(mut self) {
+        self.running = true;
+        let mut flush_timer = tokio::time::interval(std::time::Duration::from_millis(100));
+
+        loop {
+            if !self.running {
+                break;
+            }
+
+            tokio::select! {
+                // A — 本地 open_slot
+                Some(req) = self.open_slot_rx.recv() => {
+                    let result = self.allocate_slot(&req.session_id);
+                    req.reply_tx.send(result).ok();
+                }
+
+                // B — 收 Prompt
+                Some((session_id, slot_id, text)) = self.shared_prompt_rx.recv() => {
+                    self.handle_prompt(&session_id, slot_id, &text);
+                }
+
+                // C — Flush Batch（占位）
+                _ = flush_timer.tick() => {
+                    self.flush_and_dispatch().await;
+                }
+
+                // D — 收 Logits（占位，logits channel 暂无数据，不会被触发）
+                _result = self.logits_rx.recv(), if false => {
+                    // TODO: Task 6.3
+                }
+
+                // F — 销毁 slot
+                Some(req) = self.close_slot_rx.recv() => {
+                    self.close_slot(&req.session_id, req.slot_id);
+                }
+            }
+        }
+    }
+
+    /// 停止主循环
+    pub fn stop(&mut self) {
+        self.running = false;
+    }
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────
@@ -140,69 +247,93 @@ fn generate_session_id() -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_create_session() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        assert!(session_id.starts_with("sess-"));
+    fn make_mgr() -> SessionManager {
+        SessionManager::new(4)
     }
 
-    #[tokio::test]
-    async fn test_list_sessions_empty() {
-        let mgr = SessionManager::new(4);
+    #[test]
+    fn test_create_and_list_sessions() {
+        let mut mgr = make_mgr();
+        let id = mgr.create_session("qwen3");
+        assert!(id.starts_with("sess-"));
+
+        let list = mgr.list_sessions();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].session_id, id);
+        assert_eq!(list[0].model_id, "qwen3");
+        assert_eq!(list[0].total_slots, 4);
+        assert_eq!(list[0].occupied_slots, 0);
+    }
+
+    #[test]
+    fn test_destroy_session() {
+        let mut mgr = make_mgr();
+        let id = mgr.create_session("qwen3");
+        mgr.destroy_session(&id).unwrap();
         assert!(mgr.list_sessions().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_list_sessions_after_create() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let infos = mgr.list_sessions();
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].session_id, session_id);
-        assert_eq!(infos[0].total_slots, 4);
-        assert_eq!(infos[0].occupied_slots, 0);
-    }
+    #[test]
+    fn test_open_slot_success() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
 
-    #[tokio::test]
-    async fn test_connect_allocates_slot() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let (slot_id, _frontend) = mgr.connect(&session_id).await.unwrap();
-        assert_eq!(slot_id, 0);
+        let handle = mgr.allocate_slot(&sess_id).expect("should allocate");
+        handle.submit(&sess_id, 0, "hello".into());
+        // slot 0 被占用
         assert_eq!(mgr.list_sessions()[0].occupied_slots, 1);
     }
 
-    #[tokio::test]
-    async fn test_connect_slot_exhausted() {
-        let mgr = SessionManager::new(2);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        mgr.connect(&session_id).await.unwrap();
-        mgr.connect(&session_id).await.unwrap();
-        let result = mgr.connect(&session_id).await;
-        assert!(matches!(result, Err(Session_Error::SlotExhausted(_))));
+    #[test]
+    fn test_open_slot_session_not_found() {
+        let mut mgr = make_mgr();
+        let result = mgr.allocate_slot("no-such");
+        assert!(matches!(result, Err(Session_Error::SessionNotFound(_))));
     }
 
-    #[tokio::test]
-    async fn test_connect_session_not_found() {
-        let mgr = SessionManager::new(4);
-        assert!(matches!(mgr.connect("no-such").await, Err(Session_Error::SessionNotFound(_))));
+    #[test]
+    fn test_open_slot_exhausted() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
+
+        // max_slots = 4, allocate 4 times
+        assert!(mgr.allocate_slot(&sess_id).is_ok());
+        assert!(mgr.allocate_slot(&sess_id).is_ok());
+        assert!(mgr.allocate_slot(&sess_id).is_ok());
+        assert!(mgr.allocate_slot(&sess_id).is_ok());
+        // 第 5 次应该失败
+        assert!(matches!(
+            mgr.allocate_slot(&sess_id),
+            Err(Session_Error::SlotExhausted(_))
+        ));
     }
 
-    #[tokio::test]
-    async fn test_destroy_session() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        mgr.destroy_session(&session_id).await.unwrap();
-        assert!(mgr.list_sessions().is_empty());
-    }
+    #[test]
+    fn test_close_slot_and_reallocate() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
 
-    #[tokio::test]
-    async fn test_release_slot() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let (slot_id, _frontend) = mgr.connect(&session_id).await.unwrap();
-        mgr.release_slot(&session_id, slot_id).await.unwrap();
+        mgr.allocate_slot(&sess_id).unwrap(); // slot 0
+        assert_eq!(mgr.list_sessions()[0].occupied_slots, 1);
+
+        mgr.close_slot(&sess_id, 0);
         assert_eq!(mgr.list_sessions()[0].occupied_slots, 0);
+
+        // slot 0 重新可用
+        assert!(mgr.allocate_slot(&sess_id).is_ok());
+    }
+
+    #[test]
+    fn test_handle_prompt_appends_tokens() {
+        let mut mgr = make_mgr();
+        let sess_id = mgr.create_session("qwen3");
+        mgr.allocate_slot(&sess_id).unwrap();
+
+        mgr.handle_prompt(&sess_id, 0, "hi");
+
+        let session = mgr.sessions.get(&sess_id).unwrap();
+        let slot = session.get_slot(0).unwrap();
+        assert!(!slot.token_buf.is_empty());
+        assert!(slot.dirty);
     }
 }

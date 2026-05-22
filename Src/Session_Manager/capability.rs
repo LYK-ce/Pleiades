@@ -1,20 +1,17 @@
 //Presented by KeJi
-//Date ： 2026-05-14
+//Date ： 2026-05-22
 
-use async_trait::async_trait;
+//! Session 能力定义 — 错误类型 + SlotHandle
+
 use std::fmt;
 use tokio::sync::mpsc;
 
 // ─── 错误类型 ───────────────────────────────────────────────
 
-/// Session 模块错误枚举
 #[derive(Debug)]
 pub enum Session_Error {
-    /// session_id 不存在
     SessionNotFound(String),
-    /// 槽位已满（已达 max_slots 上限）
     SlotExhausted(String),
-    /// 内部错误
     Internal(String),
 }
 
@@ -30,50 +27,29 @@ impl fmt::Display for Session_Error {
 
 impl std::error::Error for Session_Error {}
 
-// ─── 通道结构 ───────────────────────────────────────────────
+// ─── SlotHandle ─────────────────────────────────────────────
 
-/// 前端持有的外侧端点
-#[derive(Debug)]
-pub struct IoFrontend {
-    /// 发送 Prompt
-    pub input_tx: mpsc::Sender<String>,
-    /// 接收 Completion
-    pub output_rx: mpsc::Receiver<String>,
+/// 返回给接入方的槽位句柄
+///
+/// 接入方通过 `submit()` 发 prompt，通过 `recv_token()` 收 token。
+/// Handle drop 时自动释放槽位。
+pub struct SlotHandle {
+    pub prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
+    pub token_rx: mpsc::UnboundedReceiver<String>,
 }
 
-/// ML 侧端点（传给 ML Engine 启动推理线程）
-#[derive(Debug)]
-pub struct IoHandle {
-    /// 接收 Prompt
-    pub input_rx: mpsc::Receiver<String>,
-    /// 发送 Completion
-    pub output_tx: mpsc::Sender<String>,
-}
+impl SlotHandle {
+    /// 发送 prompt（自动带 session_id + slot_id）
+    pub fn submit(&self, session_id: &str, slot_id: usize, text: String) {
+        self.prompt_tx
+            .send((session_id.to_string(), slot_id, text))
+            .ok();
+    }
 
-// ─── Trait 定义 ─────────────────────────────────────────────
-
-/// Session 能力 trait
-#[async_trait]
-pub trait Session_Capability: Send + Sync {
-    /// 创建 Session（分配槽位 + channel pair），返回 (session_id, IoHandle)
-    /// 调用方自行将 IoHandle 传给 ML Engine 启动线程
-    async fn create_session(&self, model_id: String)
-        -> Result<(String, IoHandle), Session_Error>;
-
-    /// 销毁 Session，清理所有通道和槽位
-    async fn destroy_session(&self, session_id: &str)
-        -> Result<(), Session_Error>;
-
-    /// 申请槽位，返回 (slot_id, IoFrontend)
-    async fn connect(&self, session_id: &str)
-        -> Result<(u32, IoFrontend), Session_Error>;
-
-    /// 列出所有活跃 Session
-    fn list_sessions(&self) -> Vec<super::session::SessionInfo>;
-
-    /// 释放槽位（v1 空实现，预留接口）
-    async fn release_slot(&self, session_id: &str, slot_id: u32)
-        -> Result<(), Session_Error>;
+    /// 异步读取下一个 token
+    pub async fn recv_token(&mut self) -> Option<String> {
+        self.token_rx.recv().await
+    }
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────
@@ -95,10 +71,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_io_endpoints_construct() {
-        let (input_tx, input_rx) = mpsc::channel::<String>(64);
-        let (output_tx, output_rx) = mpsc::channel::<String>(64);
-        let _frontend = IoFrontend { input_tx, output_rx };
-        let _ml_side = IoHandle { input_rx, output_tx };
+    async fn test_slot_handle_submit_and_recv() {
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (token_tx, token_rx) = mpsc::unbounded_channel();
+
+        let mut handle = SlotHandle { prompt_tx, token_rx };
+        handle.submit("sess-7", 2, "hello".into());
+
+        let (sid, slot_id, text) = prompt_rx.recv().await.unwrap();
+        assert_eq!(sid, "sess-7");
+        assert_eq!(slot_id, 2);
+        assert_eq!(text, "hello");
+
+        token_tx.send("world".into()).unwrap();
+        assert_eq!(handle.token_rx.recv().await, Some("world".into()));
     }
 }

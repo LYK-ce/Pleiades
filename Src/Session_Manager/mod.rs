@@ -1,22 +1,22 @@
 // Presented by KeJi
-// Date ： 2026-05-14
+// Date ： 2026-05-22
 
 //! Session 模块 — 推理会话管理器
 //!
-//! 负责管理推理会话的生命周期、槽位分配和文本 IO 通道。
-//! - `create_session` — 创建会话 + channel pair
-//! - `connect` — 申请槽位，获取 IoFrontend
-//! - `destroy_session` — 销毁会话，回收资源
+//! 负责管理推理会话的生命周期、槽位分配和批处理调度。
+//! - `create_session` — 创建 Session（模型级容器）
+//! - `open_slot` — 分配 Slot（对话级隔离单元）
+//! - `close_slot` — 释放 Slot
+//! - run() 主循环 — prompt 录入 / batch flush / token 分发
 
 pub mod capability;
 pub mod manager;
-
-pub mod slot;
 pub mod session;
+pub mod slot;
 
 // ─── 聚合导出 ───────────────────────────────────────────────
 
-pub use capability::{Session_Capability, Session_Error, IoFrontend, IoHandle};
+pub use capability::{Session_Error, SlotHandle};
 pub use manager::SessionManager;
 pub use session::SessionInfo;
 pub use slot::{Slot, SlotState};
@@ -30,26 +30,23 @@ mod tests {
     #[test]
     fn test_module_imports_compile() {
         let _: fn(usize) -> SessionManager = SessionManager::new;
-        fn _assert_trait_object(_: &dyn Session_Capability) {}
         let _ = Session_Error::SessionNotFound("test".to_string());
         let _ = Session_Error::SlotExhausted("test".to_string());
     }
 
     #[test]
-    fn test_session_info_fields() {
-        let info = SessionInfo {
-            session_id: "sess-1".to_string(),
-            model_id: "qwen3".to_string(),
-            total_slots: 4,
-            occupied_slots: 1,
+    fn test_slot_state_roundtrip() {
+        use tokio::sync::mpsc;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let slot = Slot {
+            id: 0,
+            token_buf: vec![1, 2, 3],
+            token_tx: tx,
+            dirty: true,
+            temperature: 0.8,
         };
-        assert_eq!(info.session_id, "sess-1");
-        assert_eq!(info.occupied_slots, 1);
-    }
-
-    #[test]
-    fn test_slot_create() {
-        let slot = Slot::new(0);
-        assert_eq!(slot.slot_id, 0);
+        assert_eq!(slot.id, 0);
+        assert_eq!(slot.token_buf.len(), 3);
+        assert!(slot.dirty);
     }
 }
