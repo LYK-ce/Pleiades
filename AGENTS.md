@@ -69,7 +69,13 @@ Agents 必须按照如下的工作流程进行工作
 
 # 初始化
 
-Agent 在首次启动时必须执行以下 Git SSH 环境初始化步骤：
+Agent 在首次启动时必须执行以下初始化步骤：
+
+0. **阅读架构文档** — 读取 `Architecture/Pleiades_Architecture.md`，理解项目整体架构、各模块职责、关键 API 以及常见错误。重点理解：
+   - Storage API 是文件访问的唯一入口，禁止绕过直接使用 `std::fs`
+   - PGGUF = 原始 GGUF + 元信息，**不是** split model 的残缺产物
+   - 层编号规则：0=embedding, 1..N=transformer blocks, N+1=output
+   - Lua 脚本可用的全部 API 表：`caps`, `ml`, `caps.storage_*`, `caps.network.*`, `local_tensor.*`
 
 1. **检查 SSH 密钥权限** — 私钥文件（如 `~/.ssh/id_ed25519`）权限必须为 `600`，公钥为 `644`。若权限不正确，执行 `chmod 600 ~/.ssh/id_ed25519` 修复。若 `.ssh` 目录以只读方式挂载导致无法修改权限，则将密钥复制到可写目录（如 `~/.ssh-local/`）并修复权限。
 
