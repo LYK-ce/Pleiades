@@ -37,6 +37,10 @@ use super::bandwidth_stream::protocol::{
     BANDWIDTH_STREAM_PROTOCOL, DEFAULT_DURATION_SECS,
     Run_Bandwidth_Test,
 };
+use super::session_stream::protocol::{
+    SESSION_STREAM_PROTOCOL,
+    Write_Session_Stream_Handshake,
+};
 
 // ===== 错误类型 =====
 
@@ -268,6 +272,22 @@ pub trait Network_Capability: Send + Sync {
     ) -> Result<libp2p::Stream, Network_Error>;
 
     // ========================================
+    // 会话流（直接操作 stream::Control）
+    // ========================================
+
+    /// 打开到目标节点的会话流（自动写入 handshake）
+    ///
+    /// # 参数
+    /// - `peer`: 目标节点 ID
+    /// - `session_id`: 目标 Session ID，写入 handshake 供对端分配 slot
+    ///
+    /// # 返回
+    /// 已打开并完成 handshake 的 `libp2p::Stream`
+    async fn open_session_stream(
+        &self, peer: PeerId, session_id: &str,
+    ) -> Result<libp2p::Stream, Network_Error>;
+
+    // ========================================
     // DHT（委托 NodeHandle）
     // ========================================
 
@@ -323,8 +343,9 @@ pub trait Network_Capability: Send + Sync {
 /// - 连接建立/断开 → peer_handle.Upsert_Peer / Remove_Peer
 ///
 /// ## 复杂事件（转发给 Orchestrator）
-/// - 入站文件流 → `FileStreamArrived`
-/// - 入站张量流 → `TensorStreamArrived`
+    /// - 入站文件流 → `FileStreamArrived`
+    /// - 入站张量流 → `TensorStreamArrived`
+    /// - 入站会话流 → `SessionStreamArrived`
 pub enum Network_Inbound_Event {
     /// 入站文件流（远端节点主动发送文件）
     ///
@@ -345,6 +366,18 @@ pub enum Network_Inbound_Event {
         peer: PeerId,
         /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
         stream: libp2p::Stream,
+    },
+    /// 入站会话流（远端节点申请会话槽位）
+    ///
+    /// Orchestrator 收到后调用 SessionManager.open_slot，
+    /// 分配 slot 并 spawn 桥接协程。
+    SessionStreamArrived {
+        /// 发送方节点 ID
+        peer: PeerId,
+        /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
+        stream: libp2p::Stream,
+        /// 目标 Session ID（从 handshake 读取）
+        session_id: String,
     },
 }
 
@@ -368,6 +401,8 @@ pub struct Network_Service_Capability {
     tensor_stream_control: stream::Control,
     /// 带宽测试流直接 open（不经过 Network_Service 事件循环）
     bandwidth_stream_control: stream::Control,
+    /// 会话流直接 open（不经过 Network_Service 事件循环）
+    session_stream_control: stream::Control,
     /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
     tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
     /// 事件总线（文件传输进度上报等）
@@ -382,6 +417,7 @@ impl Network_Service_Capability {
     /// - `file_stream_control`: 文件流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_stream_control`: 张量流的 stream::Control（由 Network_Service::Init 创建）
     /// - `bandwidth_stream_control`: 带宽测试流的 stream::Control（由 Network_Service::Init 创建）
+    /// - `session_stream_control`: 会话流的 stream::Control（由 Network_Service::Init 创建）
     /// - `tensor_rendezvous`: RendezvousMap（与 Network_Service Event Loop 共享）
     /// - `event_bus`: 事件总线（文件传输进度上报等）
     pub fn New(
@@ -389,6 +425,7 @@ impl Network_Service_Capability {
         file_stream_control: stream::Control,
         tensor_stream_control: stream::Control,
         bandwidth_stream_control: stream::Control,
+        session_stream_control: stream::Control,
         tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
         event_bus: Arc<EventBus>,
     ) -> Self {
@@ -397,6 +434,7 @@ impl Network_Service_Capability {
             file_stream_control,
             tensor_stream_control,
             bandwidth_stream_control,
+            session_stream_control,
             tensor_rendezvous,
             event_bus,
         }
@@ -539,6 +577,26 @@ impl Network_Capability for Network_Service_Capability {
     }
 
     // ========================================
+    // 会话流（直接操作 stream::Control）
+    // ========================================
+
+    async fn open_session_stream(
+        &self, peer: PeerId, session_id: &str,
+    ) -> Result<libp2p::Stream, Network_Error> {
+        let mut stream = self.session_stream_control
+            .clone()
+            .open_stream(peer, StreamProtocol::new(SESSION_STREAM_PROTOCOL))
+            .await
+            .map_err(|e| Network_Error::StreamOpenFailed(format!("session stream: {}", e)))?;
+
+        Write_Session_Stream_Handshake(&mut stream, session_id)
+            .await
+            .map_err(|e| Network_Error::StreamIoError(format!("handshake: {}", e)))?;
+
+        Ok(stream)
+    }
+
+    // ========================================
     // DHT（委托 NodeHandle）
     // ========================================
 
@@ -628,8 +686,9 @@ mod tests {
         // 此测试仅验证类型和 match 臂的编译正确性
         fn _match_event(event: Network_Inbound_Event) {
             match event {
-                Network_Inbound_Event::FileStreamArrived { peer: _, stream: _ } => {}
-                Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {}
+            Network_Inbound_Event::FileStreamArrived { peer: _, stream: _ } => {}
+            Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {}
+            Network_Inbound_Event::SessionStreamArrived { peer: _, stream: _, session_id: _ } => {}
             }
         }
     }

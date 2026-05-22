@@ -60,6 +60,15 @@ impl Core {
             Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {
                 tracing::warn!("TensorStreamArrived: 尚未实现");
             }
+
+            Network_Inbound_Event::SessionStreamArrived { peer, stream, session_id } => {
+                tracing::info!(
+                    "SessionStreamArrived: peer={}, session_id={} (Task 6.4 集成)",
+                    peer, session_id
+                );
+                // TODO: Task 6.4 — 调用 SessionManager.open_slot + spawn 桥接
+                drop((peer, stream, session_id));
+            }
         }
     }
 }
