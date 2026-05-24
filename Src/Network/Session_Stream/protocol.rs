@@ -33,9 +33,10 @@ pub async fn Write_Session_Stream_Handshake(
     session_id: &str,
 ) -> io::Result<()> {
     let id_bytes = session_id.as_bytes();
-    let id_len = id_bytes.len() as u8;
+    // session_id 超过 255 字节时截断（实际 ID 为 "sess-N"，远小于此限制）
+    let id_len = (id_bytes.len().min(255)) as u8;
     stream.write_all(&[id_len]).await?;
-    stream.write_all(id_bytes).await?;
+    stream.write_all(&id_bytes[..id_len as usize]).await?;
     stream.flush().await?;
     Ok(())
 }

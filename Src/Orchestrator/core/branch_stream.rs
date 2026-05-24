@@ -64,10 +64,8 @@ impl Core {
                 );
                 let caps = self.capabilities.clone();
                 tokio::spawn(async move {
-                    let handle = caps.session_manager.clone();
-                    // 通过 open_slot_tx 申请 slot
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    let _ = handle.open_slot_tx.send(
+                    let _ = caps.session_manager.open_slot_tx.send(
                         crate::session::manager::OpenSlotRequest {
                             session_id: session_id.clone(),
                             reply_tx,
@@ -109,7 +107,6 @@ fn spawn_session_bridge(stream: libp2p::Stream, mut handle: crate::session::Slot
     let slot_id = handle.slot_id();
 
     tokio::spawn(async move {
-        let mut buf = [0u8; 4096];
         loop {
             tokio::select! {
                 // 入站：远端发来一整句 prompt
