@@ -167,31 +167,27 @@ pub struct Session {
 | `RendezvousMap` 新增 `register_notify(id, tx)` — 通知模式 ✅ | `Src/Network/Tensor_Stream/rendezvous.rs` |
 | `RendezvousMap::insert_inbound` 加优先级分发：notifier → oneshot → pending ✅ | 同上 |
 
-### 阶段 4: Session ↔ 前端直连（本阶段 — 不含 ML Thread）
+### 阶段 4: Session ↔ 前端直连 ✅ 已完成
 
 **目标**：前端通过 TUI 命令 `session` / `chat` 与 Session 建立连接，Session 用 EventBus 打印收到的 prompt。
 
 **数据流**：
 
 ```
-TUI: chat 15 你好
-  │
-  ▼
-Core: open_tensor_stream(local_peer_id, inference_id=15)
-  │  → handshake [8B 15]
-  │  → Send_Tensor_Frame(stream, offset=0, data="你好")
-  │
-  ▼
-Network loop: 收到 loopback stream → read handshake(15)
-  → rendezvous.insert_inbound(15, stream)
-  → notifiers[15].send(stream)  // push 给 Session
-  │
-  ▼
-Session.select!:
-  Some(stream) = notify_rx.recv()
-  → recv_frame(stream) → extract prompt
-  → event_bus.Publish("Session 15: 你好")
+TUI: session create qwen3
+  → SessionManager.create_session → 1
+  → Session.spawn() → accept_async("session-1") → waiting
+
+TUI: chat 1 你好
+  → hub.open("session-1") → 发现 notifier → 配对
+  → local_send_frame(stream, "你好")
+  → Session recv_frame → EventBus "Session 1: 你好"
 ```
+
+**实现备注**：
+- libp2p 拒绝自环（相同 PeerId），本地改用 LocalStreamHub（内存 duplex）
+- LocalStreamHub 新增 `accept_async()` + `notifiers` 字段，不阻塞 tokio
+- 远端接入待后续 Task（RendezvousMap register_notify + Tensor Stream）
 
 **改动清单**：
 
