@@ -39,7 +39,7 @@ use super::bandwidth_stream::protocol::{
 };
 use super::session_stream::protocol::{
     SESSION_STREAM_PROTOCOL,
-    Write_Session_Stream_Handshake,
+    Write_Session_Stream_Handshake, Read_Session_Stream_Ack,
 };
 
 // ===== 错误类型 =====
@@ -344,7 +344,6 @@ pub trait Network_Capability: Send + Sync {
 ///
 /// ## 复杂事件（转发给 Orchestrator）
     /// - 入站文件流 → `FileStreamArrived`
-    /// - 入站张量流 → `TensorStreamArrived`
     /// - 入站会话流 → `SessionStreamArrived`
 pub enum Network_Inbound_Event {
     /// 入站文件流（远端节点主动发送文件）
@@ -352,16 +351,6 @@ pub enum Network_Inbound_Event {
     /// Orchestrator 收到后 compile 接收作业 → spawn Job，
     /// 将 stream 存入 SlotFile 供 Executor 使用。
     FileStreamArrived {
-        /// 发送方节点 ID
-        peer: PeerId,
-        /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
-        stream: libp2p::Stream,
-    },
-    /// 入站张量流（远端节点建立 pipeline 连接）
-    ///
-    /// Orchestrator 收到后保存入站 tensor stream，
-    /// 供后续 Job 构建 `Tensor_IO_Handle` 使用。
-    TensorStreamArrived {
         /// 发送方节点 ID
         peer: PeerId,
         /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
@@ -593,6 +582,16 @@ impl Network_Capability for Network_Service_Capability {
             .await
             .map_err(|e| Network_Error::StreamIoError(format!("handshake: {}", e)))?;
 
+        let accepted = Read_Session_Stream_Ack(&mut stream)
+            .await
+            .map_err(|e| Network_Error::StreamIoError(format!("ack read: {}", e)))?;
+
+        if !accepted {
+            return Err(Network_Error::StreamOpenFailed(
+                format!("session slot rejected: {}", session_id)
+            ));
+        }
+
         Ok(stream)
     }
 
@@ -686,9 +685,8 @@ mod tests {
         // 此测试仅验证类型和 match 臂的编译正确性
         fn _match_event(event: Network_Inbound_Event) {
             match event {
-            Network_Inbound_Event::FileStreamArrived { peer: _, stream: _ } => {}
-            Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {}
-            Network_Inbound_Event::SessionStreamArrived { peer: _, stream: _, session_id: _ } => {}
+                Network_Inbound_Event::FileStreamArrived { peer: _, stream: _ } => {}
+                Network_Inbound_Event::SessionStreamArrived { peer: _, stream: _, session_id: _ } => {}
             }
         }
     }

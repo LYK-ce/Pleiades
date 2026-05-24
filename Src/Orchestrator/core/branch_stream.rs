@@ -7,7 +7,7 @@
 //! 接收文件由 Rust 直接处理（基础设施操作），不经过 Lua。
 
 use super::Core;
-use crate::network::{Network_Inbound_Event, Read_File_Stream_Header};
+use crate::network::{Network_Inbound_Event, Read_File_Stream_Header, Write_Session_Stream_Ack};
 use crate::event_bus::{Bus_Event, NotifyLevel};
 
 impl Core {
@@ -57,11 +57,7 @@ impl Core {
                 // _guard drop → 释放写锁，文件注册到 Storage 索引
             }
 
-            Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {
-                tracing::warn!("TensorStreamArrived: 尚未实现");
-            }
-
-            Network_Inbound_Event::SessionStreamArrived { peer, stream, session_id } => {
+            Network_Inbound_Event::SessionStreamArrived { peer, mut stream, session_id } => {
                 tracing::info!(
                     "SessionStreamArrived: peer={}, session_id={}",
                     peer, session_id
@@ -80,14 +76,16 @@ impl Core {
                     match reply_rx.await {
                         Ok(Ok(slot_handle)) => {
                             tracing::info!("Session slot granted: session_id={}", session_id);
-                            // spawn 桥接协程
+                            Write_Session_Stream_Ack(&mut stream, true).await.ok();
                             spawn_session_bridge(stream, slot_handle);
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("Session slot rejected: session_id={}, error={}", session_id, e);
+                            Write_Session_Stream_Ack(&mut stream, false).await.ok();
                         }
                         Err(_) => {
                             tracing::warn!("Session slot request dropped: session_id={}", session_id);
+                            Write_Session_Stream_Ack(&mut stream, false).await.ok();
                         }
                     }
                 });
