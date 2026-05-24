@@ -358,7 +358,7 @@ pub struct Network_Service_Capability {
     /// 带宽测试流直接 open（不经过 Network_Service 事件循环）
     bandwidth_stream_control: stream::Control,
     /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
-    tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
+    pub tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
     /// 事件总线（文件传输进度上报等）
     event_bus: Arc<EventBus>,
 }

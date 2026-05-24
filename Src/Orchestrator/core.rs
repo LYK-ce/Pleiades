@@ -80,6 +80,9 @@ pub struct Core {
     // --- Lua 脚本引擎 ---
     program_registry: ProgramRegistry,
 
+    // --- Session Manager ---
+    pub(crate) session_mgr: std::sync::Arc<std::sync::Mutex<crate::session::SessionManager>>,
+
     // --- 偏好设置 ---
     device_preference: String,
 }
@@ -91,6 +94,7 @@ impl Core {
         user_cmd_rx: mpsc::Receiver<UserCommand>,
         inbound_rx: mpsc::Receiver<InboundRequest>,
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
+        rendezvous: std::sync::Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
         let program_registry = ProgramRegistry::new()
@@ -98,6 +102,9 @@ impl Core {
                 tracing::warn!("ProgramRegistry 初始化失败: {}，使用空注册表", e);
                 ProgramRegistry::default()
             });
+        let session_mgr = crate::session::SessionManager::new(
+            4, rendezvous, capabilities.event_bus.clone(),
+        );
         Core {
             registry: HashMap::new(),
             shutting_down: false,
@@ -108,6 +115,7 @@ impl Core {
             lifecycle_tx,
             lifecycle_rx,
             program_registry,
+            session_mgr,
             device_preference: String::new(),
         }
     }

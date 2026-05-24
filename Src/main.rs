@@ -155,7 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 5: 组装 Orchestrator
     // ══════════════════════════════════════════════════════
 
-    // 11. 组装 Capabilities
+    // 11. 组装 Capabilities（先取 rendezvous，再装箱）
+    let rendezvous = net_capability.tensor_rendezvous.clone();
     let capabilities = Arc::new(Capabilities {
         storage,
         network: Box::new(net_capability),
@@ -173,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_cmd_rx,
         inbound_rx,
         net_event_rx,
+        rendezvous,
     );
 
     info!("Orchestrator Core 初始化完成");

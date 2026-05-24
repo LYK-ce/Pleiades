@@ -552,6 +552,50 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     app.command_output = Command_Output::New();
     app.command_scroll = 0;
 
+    // ---- session create <model> ----
+
+    if trimmed.starts_with("session create ") {
+        let model = trimmed.strip_prefix("session create ").unwrap_or("").trim();
+        if model.is_empty() {
+            app.command_output.output_text =
+                "错误: 缺少 model 参数\n用法: session create <model_name>".to_string();
+        } else {
+            app.command_output.output_text = format!("正在创建 Session: {}...", model);
+            let cmd = UserCommand::Session { model_id: model.to_string() };
+            if user_cmd_tx.blocking_send(cmd).is_err() {
+                app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            }
+        }
+        return;
+    }
+
+    // ---- chat <session_id> <prompt> ----
+
+    if trimmed.starts_with("chat ") {
+        let args: Vec<&str> = trimmed.strip_prefix("chat ").unwrap_or("").splitn(2, ' ').collect();
+        if args.len() < 2 {
+            app.command_output.output_text =
+                "错误: 参数不足\n用法: chat <session_id> <prompt>".to_string();
+        } else {
+            let sid = args[0].parse::<u64>();
+            match sid {
+                Ok(session_id) => {
+                    app.command_output.output_text =
+                        format!("正在发送 prompt 到 Session {}...", session_id);
+                    let cmd = UserCommand::Chat { session_id, prompt: args[1].to_string() };
+                    if user_cmd_tx.blocking_send(cmd).is_err() {
+                        app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                    }
+                }
+                Err(_) => {
+                    app.command_output.output_text =
+                        format!("错误: '{}' 不是有效的 session_id", args[0]);
+                }
+            }
+        }
+        return;
+    }
+
     // ---- run <model_path> ----
 
     if trimmed.starts_with("run ") {

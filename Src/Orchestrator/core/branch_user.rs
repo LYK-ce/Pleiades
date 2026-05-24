@@ -366,6 +366,48 @@ impl Core {
                     payload: serde_json::json!({"type":"help","text":text}).to_string(),
                 });
             }
+            // ════════════════════════════════════════════════
+            // Session / Chat (v2)
+            // ════════════════════════════════════════════════
+            UserCommand::Session { model_id } => {
+                let session_mgr = self.session_mgr.clone();
+                let event_bus = self.capabilities.event_bus.clone();
+                tokio::spawn(async move {
+                    let id = session_mgr.lock().unwrap().create_session(&model_id);
+                    event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                        level: crate::event_bus::NotifyLevel::Info,
+                        message: format!("Session {} created (model: {})", id, model_id),
+                    });
+                });
+            }
+            UserCommand::Chat { session_id, prompt } => {
+                let caps = self.capabilities.clone();
+                let local_peer = caps.network.get_local_peer_id();
+                tokio::spawn(async move {
+                    match caps.network.open_tensor_stream(
+                        local_peer,
+                        session_id,
+                    ).await {
+                        Ok(mut stream) => {
+                            let data = prompt.as_bytes();
+                            if let Err(e) = crate::network::tensor_stream::protocol::Send_Tensor_Frame(
+                                &mut stream, 0, data,
+                            ).await {
+                                caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                                    level: crate::event_bus::NotifyLevel::Error,
+                                    message: format!("chat send error: {}", e),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                                level: crate::event_bus::NotifyLevel::Error,
+                                message: format!("chat connect error: {}", e),
+                            });
+                        }
+                    }
+                });
+            }
         }
     }
 }

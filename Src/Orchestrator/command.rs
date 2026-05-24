@@ -54,6 +54,10 @@ pub enum UserCommand {
     SetName { name: String },
     /// 重新加载 programs/user/ 目录下的 Lua 脚本
     Reload,
+    /// 创建推理 Session
+    Session { model_id: String },
+    /// 向指定 Session 发送 prompt
+    Chat { session_id: u64, prompt: String },
 }
 
 // ============================================================
