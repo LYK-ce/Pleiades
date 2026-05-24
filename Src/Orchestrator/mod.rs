@@ -13,7 +13,6 @@ use crate::peer_management::Peer_Management_Capability;
 use crate::storage::StorageCapability;
 use crate::event_bus::EventBus;
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
-use crate::session::SessionManagerHandle;
 
 // ============================================================
 // Capabilities — 统一的组件能力容器
@@ -37,8 +36,6 @@ pub struct Capabilities {
     pub event_bus: Arc<EventBus>,
     /// 本地张量流配对 Hub
     pub local_stream_hub: Arc<LocalStreamHub>,
-    /// 会话管理器句柄
-    pub session_manager: Arc<SessionManagerHandle>,
 }
 
 // ============================================================
@@ -68,7 +65,6 @@ pub(crate) mod test_utils {
         async fn send_file(&self, _peer: libp2p::PeerId, _path: &std::path::Path) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn open_tensor_stream(&self, _peer: libp2p::PeerId, _inference_id: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn accept_tensor_stream(&self, _inference_id: u64, _timeout_secs: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
-        async fn open_session_stream(&self, _peer: libp2p::PeerId, _session_id: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn get_record(&self, _key: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         fn get_local_peer_id(&self) -> libp2p::PeerId { libp2p::PeerId::random() }

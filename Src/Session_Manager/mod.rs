@@ -13,14 +13,13 @@ pub mod capability;
 pub mod manager;
 pub mod session;
 pub mod slot;
-pub mod batch;
 
 // ─── 聚合导出 ───────────────────────────────────────────────
 
 pub use capability::{Session_Error, SlotHandle};
-pub use manager::{SessionManager, SessionManagerHandle};
+pub use manager::SessionManager;
 pub use session::SessionInfo;
-pub use slot::{Slot, SlotState};
+pub use slot::Slot;
 
 // ─── 模块级集成测试 ─────────────────────────────────────────
 
@@ -30,9 +29,10 @@ mod tests {
 
     #[test]
     fn test_module_imports_compile() {
-        let _: fn(usize) -> SessionManager = SessionManager::new;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        let _: fn(usize) -> Arc<Mutex<SessionManager>> = SessionManager::new;
         let _ = Session_Error::SessionNotFound("test".to_string());
-        let _ = Session_Error::SlotExhausted("test".to_string());
     }
 
     #[test]

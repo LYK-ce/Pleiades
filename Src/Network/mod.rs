@@ -41,8 +41,6 @@ pub mod file_stream;
 pub mod tensor_stream;
 #[path = "Bandwidth_Stream/mod.rs"]
 pub mod bandwidth_stream;
-#[path = "Session_Stream/mod.rs"]
-pub mod session_stream;
 mod command_handler;
 mod swarm_events;
 
@@ -70,11 +68,5 @@ pub use bandwidth_stream::{
     Send_Bandwidth_Test, Receive_And_Count,
     Write_Bandwidth_Result, Read_Bandwidth_Result,
     Run_Bandwidth_Test,
-};
-pub use session_stream::{
-    SESSION_STREAM_PROTOCOL,
-    SESSION_ACK_ACCEPT, SESSION_ACK_REJECT,
-    Write_Session_Stream_Handshake, Read_Session_Stream_Handshake,
-    Write_Session_Stream_Ack, Read_Session_Stream_Ack,
 };
 

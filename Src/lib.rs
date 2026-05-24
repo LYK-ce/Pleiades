@@ -88,8 +88,7 @@ pub use peer_management::{
 pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
 // Session模块类型导出（原 LLM_IO，已升级为 SessionManager）
-pub use session::{Session_Error, SessionManager, SessionInfo, SlotHandle, SessionManagerHandle};
-pub use session::batch::{BatchRequest, BatchResult};
+pub use session::{Session_Error, SessionManager, SessionInfo, SlotHandle};
 
 
 
