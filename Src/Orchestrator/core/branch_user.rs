@@ -381,29 +381,22 @@ impl Core {
                 });
             }
             UserCommand::Chat { session_id, prompt } => {
-                let caps = self.capabilities.clone();
-                let local_peer = caps.network.get_local_peer_id();
+                let hub = self.capabilities.local_stream_hub.clone();
                 tokio::spawn(async move {
-                    match caps.network.open_tensor_stream(
-                        local_peer,
-                        session_id,
-                    ).await {
+                    let stream_id = format!("session-{}", session_id);
+                    tracing::info!("chat: opening LocalStream '{}'", stream_id);
+                    match hub.open(&stream_id) {
                         Ok(mut stream) => {
                             let data = prompt.as_bytes();
-                            if let Err(e) = crate::network::tensor_stream::protocol::Send_Tensor_Frame(
+                            tracing::info!("chat: sending {} bytes", data.len());
+                            if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
                                 &mut stream, 0, data,
                             ).await {
-                                caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
-                                    level: crate::event_bus::NotifyLevel::Error,
-                                    message: format!("chat send error: {}", e),
-                                });
+                                tracing::warn!("chat send error: {}", e);
                             }
                         }
                         Err(e) => {
-                            caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
-                                level: crate::event_bus::NotifyLevel::Error,
-                                message: format!("chat connect error: {}", e),
-                            });
+                            tracing::warn!("chat open error: {}", e);
                         }
                     }
                 });

@@ -3,16 +3,13 @@
 
 //! Session 结构 — 模型级会话容器
 //!
-//! 每个 Session spawn 自己的 select! 任务，监听外部 Tensor Stream 连接。
+//! 每个 Session spawn 自己的 select! 任务，通过 LocalStreamHub 等待连接。
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use futures::AsyncReadExt;
 
 use super::slot::{Slot, SlotState};
 use crate::event_bus::EventBus;
-use crate::network::tensor_stream::rendezvous::RendezvousMap;
-use crate::network::tensor_stream::protocol::Tensor_Buffer;
+use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 
 /// 会话容器（对应一个模型）
 pub struct Session {
@@ -35,34 +32,39 @@ impl Session {
     /// 收到后读帧 → EventBus 发布。
     pub fn spawn(
         &self,
-        rendezvous: Arc<RendezvousMap>,
+        stream_hub: Arc<LocalStreamHub>,
         event_bus: Arc<EventBus>,
     ) {
         let session_id = self.session_id;
-        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
-        rendezvous.register_notify(session_id, notify_tx);
+        let stream_id = format!("session-{}", session_id);
 
         tokio::spawn(async move {
-            // 等前端连进来
-            let mut stream = match notify_rx.recv().await {
-                Some(s) => s,
-                None => return,
+            tracing::info!("Session {} waiting on LocalStream '{}'", session_id, stream_id);
+            let mut stream = match stream_hub.accept_async(&stream_id, 30_000).await {
+                Ok(s) => {
+                    tracing::info!("Session {} connected", session_id);
+                    s
+                }
+                Err(e) => {
+                    tracing::warn!("Session {} accept error: {}", session_id, e);
+                    return;
+                }
             };
 
-            // 读第一帧（prompt）
-            let mut buf = Tensor_Buffer::New(4096);
-            match crate::network::tensor_stream::protocol::Receive_Tensor_Frame(
+            let mut buf = crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
+            match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                 &mut stream, &mut buf,
             ).await {
                 Ok(_offset) => {
                     let text = String::from_utf8_lossy(buf.As_Slice());
+                    tracing::info!("Session {} received: {}", session_id, text);
                     event_bus.Publish(crate::event_bus::Bus_Event::Notify {
                         level: crate::event_bus::NotifyLevel::Info,
                         message: format!("Session {}: {}", session_id, text),
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("Session {} recv_frame error: {}", session_id, e);
+                    tracing::warn!("Session {} recv error: {}", session_id, e);
                 }
             }
         });

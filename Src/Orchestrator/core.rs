@@ -94,7 +94,6 @@ impl Core {
         user_cmd_rx: mpsc::Receiver<UserCommand>,
         inbound_rx: mpsc::Receiver<InboundRequest>,
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
-        rendezvous: std::sync::Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
         let program_registry = ProgramRegistry::new()
@@ -103,7 +102,7 @@ impl Core {
                 ProgramRegistry::default()
             });
         let session_mgr = crate::session::SessionManager::new(
-            4, rendezvous, capabilities.event_bus.clone(),
+            4, capabilities.local_stream_hub.clone(), capabilities.event_bus.clone(),
         );
         Core {
             registry: HashMap::new(),

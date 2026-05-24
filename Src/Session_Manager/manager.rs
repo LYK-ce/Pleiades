@@ -13,7 +13,6 @@ use super::session::Session;
 pub struct SessionManager {
     sessions: HashMap<u64, Session>,
     pub stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
-    pub rendezvous: Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
     pub event_bus: Arc<crate::event_bus::EventBus>,
     max_slots: usize,
     counter: u64,
@@ -22,13 +21,12 @@ pub struct SessionManager {
 impl SessionManager {
     pub fn new(
         max_slots: usize,
-        rendezvous: Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
+        stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
         event_bus: Arc<crate::event_bus::EventBus>,
     ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(SessionManager {
             sessions: HashMap::new(),
-            stream_hub: Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
-            rendezvous,
+            stream_hub,
             event_bus,
             max_slots,
             counter: 1,
@@ -40,7 +38,7 @@ impl SessionManager {
         self.counter += 1;
 
         let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1);
-        session.spawn(self.rendezvous.clone(), self.event_bus.clone());
+        session.spawn(self.stream_hub.clone(), self.event_bus.clone());
         self.sessions.insert(session_id, session);
         session_id
     }
@@ -102,7 +100,7 @@ mod tests {
     fn make_mgr() -> Arc<Mutex<SessionManager>> {
         SessionManager::new(
             4,
-            Arc::new(crate::network::tensor_stream::rendezvous::RendezvousMap::new()),
+            Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
             Arc::new(crate::event_bus::EventBus::New(16)),
         )
     }

@@ -30,10 +30,9 @@ mod tests {
     #[test]
     fn test_module_imports_compile() {
         use std::sync::Arc;
-        use std::sync::Mutex;
-        let rendezvous = Arc::new(crate::network::tensor_stream::rendezvous::RendezvousMap::new());
+        let hub = Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new());
         let event_bus = Arc::new(crate::event_bus::EventBus::New(16));
-        let _ = SessionManager::new(4, rendezvous, event_bus);
+        let _ = SessionManager::new(4, hub, event_bus);
         let _ = Session_Error::SessionNotFound("test".to_string());
     }
 
