@@ -17,6 +17,11 @@ pub(crate) struct OpenSlotRequest {
     pub reply_tx: tokio::sync::oneshot::Sender<Result<SlotHandle, Session_Error>>,
 }
 
+pub(crate) struct CreateSessionRequest {
+    pub model_id: String,
+    pub reply_tx: tokio::sync::oneshot::Sender<u64>,
+}
+
 // ─── SessionManagerHandle ───────────────────────────────────
 
 pub struct SessionManagerHandle {
