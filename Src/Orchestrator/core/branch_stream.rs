@@ -67,7 +67,7 @@ impl Core {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = caps.session_manager.open_slot_tx.send(
                         crate::session::manager::OpenSlotRequest {
-                            session_id: session_id.clone(),
+                            session_id,
                             reply_tx,
                         }
                     );
@@ -103,7 +103,7 @@ fn spawn_session_bridge(stream: libp2p::Stream, mut handle: crate::session::Slot
     use futures::AsyncWriteExt;
 
     let stream = Arc::new(Mutex::new(stream));
-    let sess_id = handle.session_id().to_string();
+    let sess_id = handle.session_id();
     let slot_id = handle.slot_id();
 
     tokio::spawn(async move {

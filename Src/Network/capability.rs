@@ -284,7 +284,7 @@ pub trait Network_Capability: Send + Sync {
     /// # 返回
     /// 已打开并完成 handshake 的 `libp2p::Stream`
     async fn open_session_stream(
-        &self, peer: PeerId, session_id: &str,
+        &self, peer: PeerId, session_id: u64,
     ) -> Result<libp2p::Stream, Network_Error>;
 
     // ========================================
@@ -366,7 +366,7 @@ pub enum Network_Inbound_Event {
         /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
         stream: libp2p::Stream,
         /// 目标 Session ID（从 handshake 读取）
-        session_id: String,
+        session_id: u64,
     },
 }
 
@@ -570,7 +570,7 @@ impl Network_Capability for Network_Service_Capability {
     // ========================================
 
     async fn open_session_stream(
-        &self, peer: PeerId, session_id: &str,
+        &self, peer: PeerId, session_id: u64,
     ) -> Result<libp2p::Stream, Network_Error> {
         let mut stream = self.session_stream_control
             .clone()

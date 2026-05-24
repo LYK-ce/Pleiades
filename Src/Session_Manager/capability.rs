@@ -29,24 +29,20 @@ impl std::error::Error for Session_Error {}
 
 // ─── SlotHandle ─────────────────────────────────────────────
 
-/// 返回给接入方的槽位句柄
-///
-/// 接入方通过 `submit()` 发 prompt，通过 `recv_token()` 收 token。
-/// Handle drop 时自动发送 CloseSlotRequest 释放槽位。
 pub struct SlotHandle {
-    session_id: String,
+    session_id: u64,
     slot_id: usize,
-    prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
-    close_slot_tx: Option<mpsc::UnboundedSender<(String, usize)>>,
+    prompt_tx: mpsc::UnboundedSender<(u64, usize, String)>,
+    close_slot_tx: Option<mpsc::UnboundedSender<(u64, usize)>>,
     token_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl SlotHandle {
     pub fn new(
-        session_id: String,
+        session_id: u64,
         slot_id: usize,
-        prompt_tx: mpsc::UnboundedSender<(String, usize, String)>,
-        close_slot_tx: mpsc::UnboundedSender<(String, usize)>,
+        prompt_tx: mpsc::UnboundedSender<(u64, usize, String)>,
+        close_slot_tx: mpsc::UnboundedSender<(u64, usize)>,
         token_rx: mpsc::UnboundedReceiver<String>,
     ) -> Self {
         SlotHandle {
@@ -58,14 +54,12 @@ impl SlotHandle {
         }
     }
 
-    /// 发送 prompt（自动带 session_id + slot_id）
     pub fn submit(&self, text: String) {
         self.prompt_tx
-            .send((self.session_id.clone(), self.slot_id, text))
+            .send((self.session_id, self.slot_id, text))
             .ok();
     }
 
-    /// 异步读取下一个 token
     pub async fn recv_token(&mut self) -> Option<String> {
         match &mut self.token_rx {
             Some(rx) => rx.recv().await,
@@ -73,19 +67,15 @@ impl SlotHandle {
         }
     }
 
-    /// session_id
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    pub fn session_id(&self) -> u64 {
+        self.session_id
     }
 
-    /// slot_id
     pub fn slot_id(&self) -> usize {
         self.slot_id
     }
 
-    /// 取出 token_rx（消费 handle，失去自动释放能力）
     pub fn take_token_rx(mut self) -> mpsc::UnboundedReceiver<String> {
-        // 取消 Drop 自动释放（由调用方负责手动释放）
         self.close_slot_tx.take();
         self.token_rx.take().expect("token_rx already taken")
     }
@@ -94,7 +84,7 @@ impl SlotHandle {
 impl Drop for SlotHandle {
     fn drop(&mut self) {
         if let Some(tx) = &self.close_slot_tx {
-            tx.send((self.session_id.clone(), self.slot_id)).ok();
+            tx.send((self.session_id, self.slot_id)).ok();
         }
     }
 }
@@ -123,11 +113,11 @@ mod tests {
         let (close_tx, _close_rx) = mpsc::unbounded_channel();
         let (token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let mut handle = SlotHandle::new("sess-7".into(), 2, prompt_tx, close_tx, token_rx);
+        let mut handle = SlotHandle::new(7, 2, prompt_tx, close_tx, token_rx);
         handle.submit("hello".into());
 
         let (sid, slot_id, text) = prompt_rx.recv().await.unwrap();
-        assert_eq!(sid, "sess-7");
+        assert_eq!(sid, 7);
         assert_eq!(slot_id, 2);
         assert_eq!(text, "hello");
 
@@ -141,11 +131,11 @@ mod tests {
         let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
         let (_token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let handle = SlotHandle::new("sess-9".into(), 3, prompt_tx, close_tx, token_rx);
+        let handle = SlotHandle::new(9, 3, prompt_tx, close_tx, token_rx);
         drop(handle);
 
         let (sid, slot) = close_rx.try_recv().expect("Drop should send close");
-        assert_eq!(sid, "sess-9");
+        assert_eq!(sid, 9);
         assert_eq!(slot, 3);
     }
 
@@ -155,10 +145,9 @@ mod tests {
         let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
         let (_token_tx, token_rx) = mpsc::unbounded_channel();
 
-        let handle = SlotHandle::new("sess-9".into(), 3, prompt_tx, close_tx, token_rx);
-        let _rx = handle.take_token_rx();  // handle consumed, take_token_rx clears close_slot_tx
+        let handle = SlotHandle::new(9, 3, prompt_tx, close_tx, token_rx);
+        let _rx = handle.take_token_rx();
 
-        // close_rx should be empty since Drop was prevented
         assert!(close_rx.try_recv().is_err());
     }
 }

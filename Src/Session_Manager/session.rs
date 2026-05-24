@@ -11,7 +11,7 @@ use super::slot::{Slot, SlotState};
 /// 会话容器（对应一个模型）
 pub struct Session {
     /// 全局唯一标识（atomic generate）
-    pub session_id: String,
+    pub session_id: u64,
     /// 模型标识
     pub model_id: String,
     /// 最大槽位数
@@ -23,7 +23,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(session_id: String, model_id: String, max_slots: usize, eos_token_id: u32) -> Self {
+    pub fn new(session_id: u64, model_id: String, max_slots: usize, eos_token_id: u32) -> Self {
         let slots = (0..max_slots).map(|_| SlotState::Vacant).collect();
         Session { session_id, model_id, max_slots, slots, eos_token_id }
     }
@@ -77,7 +77,7 @@ impl Session {
 /// 会话公开视图
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
-    pub session_id: String,
+    pub session_id: u64,
     pub model_id: String,
     pub total_slots: usize,
     pub occupied_slots: usize,
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn test_session_new_all_vacant() {
-        let sess = Session::new("sess-1".into(), "qwen3".into(), 4, 1);
-        assert_eq!(sess.session_id, "sess-1");
+        let sess = Session::new(1, "qwen3".into(), 4, 1);
+        assert_eq!(sess.session_id, 1);
         assert_eq!(sess.max_slots, 4);
         assert_eq!(sess.slots.len(), 4);
         assert_eq!(sess.occupied_count(), 0);
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_allocate_and_release() {
-        let mut sess = Session::new("sess-2".into(), "qwen3".into(), 4, 1);
+        let mut sess = Session::new(2, "qwen3".into(), 4, 1);
         let (tx, _rx) = mpsc::unbounded_channel();
 
         let id = sess.allocate(tx).expect("should allocate");
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_allocate_exhausts_slots() {
-        let mut sess = Session::new("sess-3".into(), "qwen3".into(), 2, 1);
+        let mut sess = Session::new(3, "qwen3".into(), 2, 1);
 
         let (tx1, _rx1) = mpsc::unbounded_channel();
         let (tx2, _rx2) = mpsc::unbounded_channel();
@@ -125,30 +125,29 @@ mod tests {
 
         assert!(sess.allocate(tx1).is_some());
         assert!(sess.allocate(tx2).is_some());
-        assert!(sess.allocate(tx3).is_none());  // 满了
+        assert!(sess.allocate(tx3).is_none());
         assert_eq!(sess.occupied_count(), 2);
     }
 
     #[test]
     fn test_allocate_after_release() {
-        let mut sess = Session::new("sess-4".into(), "qwen3".into(), 2, 1);
+        let mut sess = Session::new(4, "qwen3".into(), 2, 1);
 
         let (tx1, _rx1) = mpsc::unbounded_channel();
         let (tx2, _rx2) = mpsc::unbounded_channel();
         let (tx3, _rx3) = mpsc::unbounded_channel();
 
-        sess.allocate(tx1);  // slot 0
-        sess.allocate(tx2);  // slot 1
-        sess.release(0);     // slot 0 释放
+        sess.allocate(tx1);
+        sess.allocate(tx2);
+        sess.release(0);
 
-        // slot 0 又重新可用
         let id = sess.allocate(tx3).expect("should allocate");
         assert_eq!(id, 0);
     }
 
     #[test]
     fn test_slot_token_buf_operations() {
-        let mut sess = Session::new("sess-5".into(), "qwen3".into(), 2, 1);
+        let mut sess = Session::new(5, "qwen3".into(), 2, 1);
         let (tx, _rx) = mpsc::unbounded_channel();
         sess.allocate(tx);
 
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_get_slot_out_of_bounds() {
-        let sess = Session::new("sess-6".into(), "qwen3".into(), 2, 1);
+        let sess = Session::new(6, "qwen3".into(), 2, 1);
         assert!(sess.get_slot(5).is_none());
         let mut sess = sess;
         assert!(sess.get_slot_mut(5).is_none());

@@ -8,7 +8,7 @@
 //!
 //! ## Handshake 帧格式
 //! ```text
-//! Sender → Receiver: [1B id_len][session_id UTF-8]
+//! Sender → Receiver: [8B session_id u64 LE]
 //! Receiver → Sender: [1B ACK]  (0x01=ACCEPT, 0x00=REJECT)
 //! ```
 //! 之后文本自由双向流动：prompt 方向 + token 方向。
@@ -27,35 +27,25 @@ pub const SESSION_ACK_REJECT: u8 = 0x00;
 
 /// 写入 Session Stream Handshake（发起方在 open_session_stream 后调用）
 ///
-/// 格式: `[1B id_len][session_id UTF-8]`
+/// 格式: `[8B session_id u64 LE]`
 pub async fn Write_Session_Stream_Handshake(
     stream: &mut libp2p::Stream,
-    session_id: &str,
+    session_id: u64,
 ) -> io::Result<()> {
-    let id_bytes = session_id.as_bytes();
-    // session_id 超过 255 字节时截断（实际 ID 为 "sess-N"，远小于此限制）
-    let id_len = (id_bytes.len().min(255)) as u8;
-    stream.write_all(&[id_len]).await?;
-    stream.write_all(&id_bytes[..id_len as usize]).await?;
+    stream.write_all(&session_id.to_le_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
 
 /// 读取 Session Stream Handshake（接收方收到入站流后调用）
 ///
-/// 格式: `[1B id_len][session_id UTF-8]`
+/// 格式: `[8B session_id u64 LE]`
 pub async fn Read_Session_Stream_Handshake(
     stream: &mut libp2p::Stream,
-) -> io::Result<String> {
-    let mut len_buf = [0u8; 1];
-    stream.read_exact(&mut len_buf).await?;
-    let id_len = len_buf[0] as usize;
-
-    let mut id_buf = vec![0u8; id_len];
-    stream.read_exact(&mut id_buf).await?;
-    String::from_utf8(id_buf).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("session_id 非 UTF-8: {}", e))
-    })
+) -> io::Result<u64> {
+    let mut buf = [0u8; 8];
+    stream.read_exact(&mut buf).await?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 /// 写入 ACK 字节（接收方分配 slot 后调用）
