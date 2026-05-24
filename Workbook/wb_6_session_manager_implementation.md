@@ -1,40 +1,51 @@
 # wb_6
 
 > start: 2026-05-22
-> end: 2026-05-22
+> end: 2026-05-24
 > branch: session-manager-reforge
 
 ## State
-ALL DONE. Tasks 6.1~6.4 complete. 123 tests pass. Code review done — 20 gaps identified, 3 critical fixed.
+ALL DONE. Tasks 6.1~6.4 + 6.1.i complete. 125 tests pass.
 
-## Gaps found & resolved
+## Task 6.1.i: Session Stream ACK 补全 + 死代码清理 (2026-05-24)
 
-### Critical (fixed)
-- GAP 6: SlotHandle missing Drop → FIXED: added Drop impl that sends CloseSlotRequest
-- GAP 7: Branch E not in main loop → BY DESIGN: network path goes Core→open_slot_tx→Branch A, not a separate branch
-- GAP 16: Bridge unidirectional → DEFERRED: needs in-band prompt format definition in Session Stream protocol
+### 问题
+Session Stream 协议定义了 ACK 握手但未使用。
+远端不知道 slot 分配成功还是失败。
+TensorStreamArrived 变体从未被构造，纯死代码。
 
-### Medium
-- GAP 1: ACK handshake defined but unused → protocol defined, flow will use when stream→slot response needed
-- GAP 3: No Tokenizer in Session → placeholder byte-to-u32, real tokenizer in future task
-- GAP 9: eos_token_id hardcoded → placeholder, real tokenizer will provide
-- GAP 10/11: Vec<Vec<u32/f32>> not candle Tensor → deliberately simplified, real Tensor when ML Thread implemented
-- GAP 12: No attention mask → zero-padding works for prefill, real mask when ML implemented
-- GAP 17: No ACK on slot allocation → same as GAP 1
-- GAP 18: Missing open_slot_network on handle → using OpenSlotRequest channel directly, equivalent function
-- GAP 19: Core constructs OpenSlotRequest → same as GAP 18
+### 修复
+- `open_session_stream`: handshake 后读 ACK，REJECT→Err
+- `branch_stream.rs`: slot 分配后写 ACCEPT/REJECT
+- 删除 `TensorStreamArrived` 变体（3 处：enum/macth/test）
 
-### Low
-- GAP 2: Naming deviation → accept-control vs stream-control, consistent internally
-- GAP 4/5: sync vs async signatures → SessionManager is single-threaded (owned by run()), sync is correct
-- GAP 8: Vec instead of fixed array → runtime max_slots is more flexible
-- GAP 13: top_p/top_k not declared → deferred
-- GAP 14: fast_random bad RNG → acceptable for v0, PRNG later
-- GAP 15: flush_interval not from config → hardcoded for now
+### 讨论：Network Stream 架构
+讨论了是否要统一四种流的处理方式。
+结论：不改。File 和 Session 走 Core（需要业务能力），
+Bandwidth 和 Tensor 在 Network 层自闭环（纯网络机制）。
+只有 2 种走 Core，不值得抽 StreamHandler trait。
+
+## Gaps resolved
+
+### Fixed (post-review)
+- GAP 1: ACK handshake → FIXED: open_session_stream 读 ACK, Core 写 ACK
+- GAP 6: SlotHandle Drop → FIXED: auto-send CloseSlotRequest on drop
+- GAP 16: Bridge unidirectional → FIXED: bidirectional select! (入站 submit + 出站 recv_token)
+- GAP 17: No ACK on slot allocation → FIXED: same as GAP 1
+
+### Still open
+- GAP 3: No Tokenizer → placeholder byte-to-u32
+- GAP 9: eos_token_id hardcoded → placeholder
+- GAP 10/11: Vec<Vec<>> not candle Tensor
+- GAP 12: No attention mask
+- GAP 14: fast_random bad RNG
+- GAP 15: flush_interval hardcoded
 
 ## Architecture notes
-- SessionManager.run() owns &mut self → single-threaded, no locks needed internally
+- SessionManager.run() owns &mut self → single-threaded, no locks
 - SessionManagerHandle holds cloned sender halves → safe for Arc sharing
-- Network sessions go: SessionStreamArrived → Core spawn_route → handle.open_slot_tx → Main loop Branch A
-- Local sessions go: any component → handle.open_slot_tx → Main loop Branch A
-- Branch E from task doc (network open_slot) merged into Branch A via unified request channel
+- Network sessions: SessionStreamArrived → Core → open_slot_tx → Main loop Branch A
+- Local sessions: any component → open_slot_tx → Main loop Branch A
+- ACK flow: open→handshake→ACK(ACCEPT)→stream ready / ACK(REJECT)→error
+- 4 network streams, 2 go to Core (File+Session), 2 stay in Network (Bandwidth+Tensor)
+- 6 tokio channels: 3 unbounded (prompt/open/close), 2 bounded(1) (batch/logits for ML Thread)
