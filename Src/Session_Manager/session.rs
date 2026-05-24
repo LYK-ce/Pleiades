@@ -1,24 +1,25 @@
 //Presented by KeJi
-//Date ： 2026-05-22
+//Date ： 2026-05-24
 
 //! Session 结构 — 模型级会话容器
 //!
-//! 一个 Session 对应一个已加载的模型，内部包含固定数量的 Slot。
-//! 持 tokenizer，负责各 Slot 的 encode/decode。
+//! 每个 Session spawn 自己的 select! 任务，监听外部 Tensor Stream 连接。
+
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use futures::AsyncReadExt;
 
 use super::slot::{Slot, SlotState};
+use crate::event_bus::EventBus;
+use crate::network::tensor_stream::rendezvous::RendezvousMap;
+use crate::network::tensor_stream::protocol::Tensor_Buffer;
 
 /// 会话容器（对应一个模型）
 pub struct Session {
-    /// 全局唯一标识（atomic generate）
     pub session_id: u64,
-    /// 模型标识
     pub model_id: String,
-    /// 最大槽位数
     pub max_slots: usize,
-    /// 槽位数组（index = slot_id, 0..max_slots）
     pub slots: Vec<SlotState>,
-    /// EOS token id
     pub eos_token_id: u32,
 }
 
@@ -28,7 +29,45 @@ impl Session {
         Session { session_id, model_id, max_slots, slots, eos_token_id }
     }
 
-    /// 分配空闲槽位 → 返回 slot_id
+    /// 启动 Session 的 select! 任务
+    ///
+    /// 注册 notifier 到 RendezvousMap，等前端通过 Tensor Stream 发来 prompt。
+    /// 收到后读帧 → EventBus 发布。
+    pub fn spawn(
+        &self,
+        rendezvous: Arc<RendezvousMap>,
+        event_bus: Arc<EventBus>,
+    ) {
+        let session_id = self.session_id;
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+        rendezvous.register_notify(session_id, notify_tx);
+
+        tokio::spawn(async move {
+            // 等前端连进来
+            let mut stream = match notify_rx.recv().await {
+                Some(s) => s,
+                None => return,
+            };
+
+            // 读第一帧（prompt）
+            let mut buf = Tensor_Buffer::New(4096);
+            match crate::network::tensor_stream::protocol::Receive_Tensor_Frame(
+                &mut stream, &mut buf,
+            ).await {
+                Ok(_offset) => {
+                    let text = String::from_utf8_lossy(buf.As_Slice());
+                    event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                        level: crate::event_bus::NotifyLevel::Info,
+                        message: format!("Session {}: {}", session_id, text),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Session {} recv_frame error: {}", session_id, e);
+                }
+            }
+        });
+    }
+
     pub fn allocate(&mut self, token_tx: tokio::sync::mpsc::UnboundedSender<String>) -> Option<usize> {
         for (i, state) in self.slots.iter_mut().enumerate() {
             if matches!(state, SlotState::Vacant) {

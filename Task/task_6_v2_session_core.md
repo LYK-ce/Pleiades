@@ -160,45 +160,61 @@ pub struct Session {
 | `SessionManager` 加 `Arc<Mutex<>>` 包裹 | `manager.rs` |
 | `allocate_slot` 改为直接创建 DuplexStream + 返回 | `manager.rs` |
 
-### 阶段 3: Tensor Stream 适配
+### 阶段 3: Tensor Stream 适配 ✅ 已完成
 
 | 操作 | 文件 |
 |------|------|
-| `RendezvousMap` 新增 `register_notify(id, tx)` — 通知模式 | `Src/Network/Tensor_Stream/rendezvous.rs` |
-| `RendezvousMap::insert_inbound` 加优先级分发：notifier → oneshot → pending | 同上 |
-| Tensor Stream 到达后，读第一帧 (offset=0) 判断是 session_id 还是推理 tensor | 分析现有流程 |
-| 新增自环 dial 支持（libp2p loopback） | 后续 task |
+| `RendezvousMap` 新增 `register_notify(id, tx)` — 通知模式 ✅ | `Src/Network/Tensor_Stream/rendezvous.rs` |
+| `RendezvousMap::insert_inbound` 加优先级分发：notifier → oneshot → pending ✅ | 同上 |
 
-**RendezvousMap 改动详情：**
+### 阶段 4: Session ↔ 前端直连（本阶段 — 不含 ML Thread）
 
-当前 `RendezvousMap` 只支持「流先到等人取」(`pending_inbound`) 和「人先到等流」(`pending_accept` + oneshot) 两种被动模式。新增第三种：**通知模式**。
+**目标**：前端通过 TUI 命令 `session` / `chat` 与 Session 建立连接，Session 用 EventBus 打印收到的 prompt。
 
-```rust
-// 新增字段
-notifiers: HashMap<u64, mpsc::UnboundedSender<libp2p::Stream>>,
+**数据流**：
 
-// Session 侧注册通知
-pub fn register_notify(&self, id: u64, tx: mpsc::UnboundedSender<libp2p::Stream>);
-
-// insert_inbound 改为三级优先级分发
-pub fn insert_inbound(&self, id: u64, stream: libp2p::Stream) {
-    // 1. 优先: 通知模式 — Session.select! 等着
-    if let Some(tx) = self.notifiers.remove(&id) { tx.send(stream); return; }
-    // 2. 其次: oneshot 模式 — Pipeline accept 阻塞等
-    if let Some(tx) = self.pending_accept.remove(&id) { tx.send(stream); return; }
-    // 3. 兜底: 存货架 — 等后续 accept 来取
-    self.pending_inbound.insert(id, stream);
-}
+```
+TUI: chat 15 你好
+  │
+  ▼
+Core: open_tensor_stream(local_peer_id, inference_id=15)
+  │  → handshake [8B 15]
+  │  → Send_Tensor_Frame(stream, offset=0, data="你好")
+  │
+  ▼
+Network loop: 收到 loopback stream → read handshake(15)
+  → rendezvous.insert_inbound(15, stream)
+  → notifiers[15].send(stream)  // push 给 Session
+  │
+  ▼
+Session.select!:
+  Some(stream) = notify_rx.recv()
+  → recv_frame(stream) → extract prompt
+  → event_bus.Publish("Session 15: 你好")
 ```
 
-三种模式共存，Pipeline 不受影响。
+**改动清单**：
 
-### 阶段 4: 测试
+| 操作 | 文件 |
+|------|------|
+| `Session` 新增 `spawn()` — 启动 select! task，注册 notifier，等 stream | `session.rs` |
+| 新增 `session create <model>` TUI 命令 | `Src/TUI/` 或 Core 路由 |
+| 新增 `chat <session_id> <prompt>` TUI 命令 | `Src/TUI/` 或 Core 路由 |
+| `chat` 命令实现：获取 local_peer_id → open_tensor_stream → write Tensor frame | `branch_user.rs` 或新增 |
+| `Session.spawn()` 内：select! 只监听 notify_rx，收到 stream 后读帧 → event_bus.Publish | `session.rs` |
+
+**不在本阶段**：
+- Session ↔ ML Thread 连接
+- Tokenize / decode / sample
+- 多 Session 并发 select!
+
+### 阶段 5: 测试
 
 | 操作 |
 |------|
-| 单 Session 创建 → open_slot → prompt → token 返回 |
-| 多 Session 并发 |
+| `session create qwen3` → 返回 session_id → EventBus 打印 |
+| `chat 15 你好` → EventBus 打印 "Session 15: 你好" |
+| `chat 999 你好` → 报错 session not found |
 
 ---
 

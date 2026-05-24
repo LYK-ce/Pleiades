@@ -13,15 +13,23 @@ use super::session::Session;
 pub struct SessionManager {
     sessions: HashMap<u64, Session>,
     pub stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
+    pub rendezvous: Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
+    pub event_bus: Arc<crate::event_bus::EventBus>,
     max_slots: usize,
     counter: u64,
 }
 
 impl SessionManager {
-    pub fn new(max_slots: usize) -> Arc<Mutex<Self>> {
+    pub fn new(
+        max_slots: usize,
+        rendezvous: Arc<crate::network::tensor_stream::rendezvous::RendezvousMap>,
+        event_bus: Arc<crate::event_bus::EventBus>,
+    ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(SessionManager {
             sessions: HashMap::new(),
             stream_hub: Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
+            rendezvous,
+            event_bus,
             max_slots,
             counter: 1,
         }))
@@ -32,6 +40,7 @@ impl SessionManager {
         self.counter += 1;
 
         let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1);
+        session.spawn(self.rendezvous.clone(), self.event_bus.clone());
         self.sessions.insert(session_id, session);
         session_id
     }
@@ -91,27 +100,31 @@ mod tests {
     use super::*;
 
     fn make_mgr() -> Arc<Mutex<SessionManager>> {
-        SessionManager::new(4)
+        SessionManager::new(
+            4,
+            Arc::new(crate::network::tensor_stream::rendezvous::RendezvousMap::new()),
+            Arc::new(crate::event_bus::EventBus::New(16)),
+        )
     }
 
-    #[test]
-    fn test_create_and_list_sessions() {
+    #[tokio::test]
+    async fn test_create_and_list_sessions() {
         let mgr = make_mgr();
         let id = mgr.lock().unwrap().create_session("qwen3");
         assert!(id > 0);
         assert_eq!(mgr.lock().unwrap().list_sessions().len(), 1);
     }
 
-    #[test]
-    fn test_destroy_session() {
+    #[tokio::test]
+    async fn test_destroy_session() {
         let mgr = make_mgr();
         let id = mgr.lock().unwrap().create_session("qwen3");
         mgr.lock().unwrap().destroy_session(id).unwrap();
         assert!(mgr.lock().unwrap().list_sessions().is_empty());
     }
 
-    #[test]
-    fn test_open_slot_exhausted() {
+    #[tokio::test]
+    async fn test_open_slot_exhausted() {
         let mgr = make_mgr();
         let sess_id = mgr.lock().unwrap().create_session("qwen3");
 
@@ -123,8 +136,8 @@ mod tests {
         assert!(matches!(lock.allocate_slot(sess_id), Err(Session_Error::SlotExhausted(_))));
     }
 
-    #[test]
-    fn test_close_slot_and_reallocate() {
+    #[tokio::test]
+    async fn test_close_slot_and_reallocate() {
         let mgr = make_mgr();
         let sess_id = mgr.lock().unwrap().create_session("qwen3");
 
