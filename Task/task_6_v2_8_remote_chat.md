@@ -96,14 +96,153 @@ Handshake (远端→本地):
 
 ### 阶段 4: remote chat 命令
 
-| 步骤 | 文件 |
-|------|------|
-| `UserCommand` 加 `RemoteChat { peer_name: String, session_id: u64 }` | `command.rs` |
-| TUI 解析 `remote chat alice 1` | `TUI/mod.rs` |
-| `route_user()` 加 RemoteChat 分支 | `branch_user.rs` |
-| 分支逻辑: PeerManager 解析 name → PeerId → `network.open_session_stream(peer, session_id)` → spawn relay tasks | `branch_user.rs` |
-| relay 1: subscribe `prompt_tx` → `write_session_frame(&mut stream, prompt)` | `branch_user.rs` |
-| relay 2: `read_session_frame(&mut stream)` → EventBus::Stream token | `branch_user.rs` |
+**命令格式**: `remote chat <peer_name> <session_id>`
+
+**数据流**（本地发起 → 远端 Session）:
+
+```
+本地 TUI                               远端 (peer_name=alice)
+───────                               ────────────────────────
+remote chat alice 1                   (alice 已运行 session create + inference)
+  │
+  ├─ PeerManager: "alice" → PeerId
+  ├─ open_session_stream(alice, session_id=1)
+  │                                         accept → SessionStreamArrived → Core B3
+  │                                         → allocate_slot → bridge task
+  │  ═══ [8B session_id=1] ═══════════►    ╔══════════════════╗
+  │                                         ║ stream ↔ mpsc    ║
+  │                                         ║   prompt → slot  ║→ Session.select!
+  │  ═══ [prompt "你好"] ═════════════►    ║                   ║
+  │                     ◄══ [token "你"] ══ ║ token ← slot     ║
+  │                     ◄══ [token "好"] ══ ║                   ║
+  │  → EventBus::Stream token              ╚══════════════════╝
+```
+
+#### 4.1 TUI 命令解析
+
+**文件**: `Src/TUI/mod.rs` — `Parse_Command()` 中新增匹配
+
+```rust
+// 匹配 "remote chat alice 1"
+Some("remote") => match parts.next() {
+    Some("chat") => {
+        let peer_name = parts.next()?.to_string();
+        let session_id: u64 = parts.next()?.parse().ok()?;
+        return Some(UserCommand::RemoteChat { peer_name, session_id });
+    }
+    _ => None,
+}
+```
+
+#### 4.2 UserCommand 变体
+
+**文件**: `Src/Orchestrator/command.rs`
+
+```rust
+pub enum UserCommand {
+    // ... 现有变体 ...
+    RemoteChat {
+        peer_name: String,
+        session_id: u64,
+    },
+}
+```
+
+#### 4.3 Core handler
+
+**文件**: `Src/Orchestrator/core/branch_user.rs`
+
+```rust
+UserCommand::RemoteChat { peer_name, session_id } => {
+    let caps = self.capabilities.clone();
+    let event_bus = caps.event_bus.clone();
+    let mut prompt_rx = self.prompt_tx.subscribe();
+
+    tokio::spawn(async move {
+        // 1. 解析 peer name → PeerId
+        let peer_id = match caps.peer_manager.Get_Peer_By_Name(&peer_name).await {
+            Ok(info) => info.peer_id,
+            Err(e) => {
+                event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Error,
+                    message: format!("remote chat: 找不到节点 '{}': {}", peer_name, e),
+                });
+                return;
+            }
+        };
+
+        // 2. 打开 session stream
+        let mut stream = match caps.network.open_session_stream(&peer_id, session_id).await {
+            Ok(s) => {
+                tracing::info!("remote chat: connected to {} session {}", peer_name, session_id);
+                s
+            }
+            Err(e) => {
+                event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Error,
+                    message: format!("remote chat: 连接失败: {}", e),
+                });
+                return;
+            }
+        };
+
+        // 3. prompt 上行: broadcast → session stream
+        let mut send_stream = stream.clone();  // 需要 clone（libp2p::Stream 不支持）
+        // 实际方案: 用 Arc<Mutex<Stream>> 共享，或用 read/write half
+        let stream_ref = Arc::new(tokio::sync::Mutex::new(stream));
+        let stream_ref_send = stream_ref.clone();
+        let stream_ref_recv = stream_ref;
+
+        // prompt 转发 task
+        tokio::spawn(async move {
+            loop {
+                match prompt_rx.recv().await {
+                    Ok(prompt) => {
+                        let mut s = stream_ref_send.lock().await;
+                        if write_session_frame(&mut *s, &prompt).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("remote chat: lagged {}", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // 4. token 下行: session stream → EventBus
+        event_bus.Publish(Bus_Event::Output {
+            payload: json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+        });
+        loop {
+            let mut s = stream_ref_recv.lock().await;
+            match read_session_frame(&mut *s).await {
+                Ok(token) => {
+                    event_bus.Publish(Bus_Event::Stream {
+                        payload: json!({"type":"token","text":token}).to_string(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("remote chat: recv error: {}", e);
+                    break;
+                }
+            }
+        }
+        event_bus.Publish(Bus_Event::Output {
+            payload: json!({"type":"cmd_result","text":"","completed":true}).to_string(),
+        });
+    });
+}
+```
+
+> **注意**: libp2p::Stream 不实现 Clone。共享方案：① `Arc<Mutex<Stream>>` ② 用 `tokio::io::split` 分离读写。具体实现时选择方案 ②（零锁开销）。
+
+#### 4.4 对端 (alice) 的处理
+
+alice 侧无需任何新命令。当本地 `open_session_stream` 发出连接请求时，alice 的网络层通过 `incoming_session_streams` 接收，解析 handshake（session_id=1），构造 `SessionStreamArrived` 事件发给 Core。Core B3（阶段 3）自动分配 slot 建立 bridge。
+
+
 
 ---
 
