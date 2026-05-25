@@ -79,6 +79,40 @@ Workbook 目录中的工作记录文件与任务文件一一对应，命名方�
 
 
 
+# 核心架构原则
+
+## Core 主循环设计原则
+
+Core 的 `tokio::select!` 主循环（5 个 branch）**必须是纯路由层**：
+
+- **只做匹配 + spawn**：每个 branch 只负责识别事件类型并分发，不得在此执行任何业务逻辑或 I/O 操作。
+- **毫秒级返回**：任何可能阻塞的操作（文件 I/O、网络传输、模型加载等）必须通过 `tokio::spawn`（或 `std::thread::spawn`）异步化。
+- **锁的持有时间最短**：若需持有 `Mutex`，只在 HashMap 插入/删除等瞬时操作期间持有，不得在持有锁期间做 I/O。
+
+```rust
+// ✅ 正确：主循环只做路由
+UserCommand::Session { model_id } => {
+    let session_mgr = self.session_mgr.clone();
+    tokio::spawn(async move {
+        let id = session_mgr.lock().unwrap().create_session(&model_id);
+        // ...
+    });
+}
+
+// ✅ 正确：Stream 接收也 spawn 出去
+Network_Inbound_Event::FileStreamArrived { peer, stream } => {
+    let caps = self.capabilities.clone();
+    tokio::spawn(async move {
+        // 文件接收的全部 I/O 在这里
+    });
+}
+
+// ❌ 错误：在主循环内做网络 I/O
+Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
+    Read_File_Stream_Header(&mut stream).await;   // 阻塞主循环！
+}
+```
+
 # 初始化
 
 Agent 在首次启动时必须执行以下初始化步骤：
