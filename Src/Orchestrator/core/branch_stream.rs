@@ -74,21 +74,17 @@ impl Core {
                     let prompt_tx = handle.prompt_tx;
                     let mut token_rx = handle.token_rx;
 
-                    // 2. 双向 bridge: stream ↔ mpsc
-                    // libp2p::Stream 不实现 tokio AsyncRead/AsyncWrite，用 Arc<Mutex> 共享
-                    let stream = std::sync::Arc::new(tokio::sync::Mutex::new(stream));
-
-                    // prompt 上行: stream → prompt_tx
-                    let stream_read = stream.clone();
+                    // 2. 双向 bridge: stream ↔ mpsc (串行，避免 Mutex 死锁)
+                    // 读 prompt → 处理 → token_rx.recv → 写 token → 循环
+                    let mut stream = stream;
                     let sid = session_id;
-                    let read_task = tokio::spawn(async move {
-                        tracing::info!("Session {} bridge: read task started", sid);
+
+                    tokio::spawn(async move {
                         loop {
-                            let mut s = stream_read.lock().await;
-                            match read_session_frame(&mut *s).await {
+                            // 读 prompt 来自 stream
+                            match read_session_frame(&mut stream).await {
                                 Ok(prompt) => {
                                     tracing::info!("Session {} bridge: recv prompt '{}'", sid, prompt);
-                                    drop(s);
                                     if prompt_tx.send(prompt).is_err() {
                                         tracing::warn!("Session {} bridge: prompt_tx closed", sid);
                                         break;
@@ -99,30 +95,18 @@ impl Core {
                                     break;
                                 }
                             }
-                        }
-                        tracing::info!("Session {} bridge: read task ended", sid);
-                    });
 
-                    // token 下行: token_rx → stream
-                    let stream_write = stream.clone();
-                    let write_task = tokio::spawn(async move {
-                        tracing::info!("Session {} bridge: write task started", sid);
-                        while let Some(token) = token_rx.recv().await {
-                            tracing::info!("Session {} bridge: send token '{}'", sid, token);
-                            let mut s = stream_write.lock().await;
-                            if write_session_frame(&mut *s, &token).await.is_err() {
-                                tracing::warn!("Session {} bridge: write error", sid);
-                                break;
+                            // 写 token 到 stream（token 由 Session 推理产生）
+                            while let Some(token) = token_rx.recv().await {
+                                tracing::info!("Session {} bridge: send token '{}'", sid, token);
+                                if write_session_frame(&mut stream, &token).await.is_err() {
+                                    tracing::warn!("Session {} bridge: write error", sid);
+                                    break;
+                                }
                             }
                         }
-                        tracing::info!("Session {} bridge: write task ended", sid);
+                        tracing::info!("Session {} bridge: ended", sid);
                     });
-
-                    // 等任一侧断开后清理
-                    tokio::select! {
-                        _ = read_task => {}
-                        _ = write_task => {}
-                    }
                 });
             }
         }
