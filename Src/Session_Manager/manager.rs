@@ -73,14 +73,12 @@ impl SessionManager {
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
 
-        // 通知 spawn task：slot 已分配（仅第一次生效）
-        if let Some(tx) = session.slot_ready_tx.take() {
-            let _ = tx.send((prompt_rx, token_tx.clone()));
-        }
-
         let slot_id = session
-            .allocate(token_tx)
+            .allocate(token_tx.clone())
             .ok_or_else(|| Session_Error::SlotExhausted(session_id.to_string()))?;
+
+        // 通知 spawn task：新 slot 已分配
+        let _ = session.slot_notify_tx.send((slot_id, prompt_rx, token_tx));
 
         Ok(SlotHandle {
             session_id,

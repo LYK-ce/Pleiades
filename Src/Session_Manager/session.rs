@@ -21,24 +21,24 @@ pub struct Session {
     pub max_slots: usize,
     pub slots: Vec<SlotState>,
     pub eos_token_id: u32,
-    /// oneshot: allocate_slot 时把 (prompt_rx, token_tx) 发给 spawn task
-    pub slot_ready_tx: Option<tokio::sync::oneshot::Sender<(mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>>,
-    /// oneshot receiver: spawn task 用它等待 slot 分配
-    pub slot_ready_rx: std::cell::RefCell<Option<tokio::sync::oneshot::Receiver<(mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>>>,
+    /// slot_notify_tx: allocate_slot 时把 (slot_id, prompt_rx, token_tx) 发给 spawn task
+    pub slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
+    /// slot_notify_rx: spawn task 接收新 slot
+    pub slot_notify_rx: std::cell::RefCell<Option<mpsc::UnboundedReceiver<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>>>,
 }
 
 impl Session {
     pub fn new(session_id: u64, model_id: String, max_slots: usize, eos_token_id: u32) -> Self {
         let slots = (0..max_slots).map(|_| SlotState::Vacant).collect();
-        let (slot_ready_tx, slot_ready_rx) = tokio::sync::oneshot::channel();
+        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel();
         Session {
             session_id,
             model_id,
             max_slots,
             slots,
             eos_token_id,
-            slot_ready_tx: Some(slot_ready_tx),
-            slot_ready_rx: std::cell::RefCell::new(Some(slot_ready_rx)),
+            slot_notify_tx,
+            slot_notify_rx: std::cell::RefCell::new(Some(slot_notify_rx)),
         }
     }
 
@@ -56,8 +56,8 @@ impl Session {
         let session_id = self.session_id;
         let model_path = self.model_id.clone();
         let ml_stream_id = format!("ml-{}", session_id);
-        let slot_ready_rx = self.slot_ready_rx.borrow_mut().take()
-            .expect("spawn called without slot_ready_rx");
+        let slot_notify_rx = self.slot_notify_rx.borrow_mut().take()
+            .expect("spawn called without slot_notify_rx");
 
         tokio::spawn(async move {
             // ── 1. 加载 tokenizer ──────────────────────────
@@ -105,15 +105,22 @@ impl Session {
                 }
             };
 
-            // ── 3. 等 slot 分配 (allocate_slot 发来 prompt_rx + token_tx) ──
-            let (mut prompt_rx, token_tx) = match slot_ready_rx.await {
-                Ok(pair) => pair,
-                Err(_) => {
-                    tracing::warn!("Session {} slot ready channel closed", session_id);
+            // ── 3. 等 slot 分配 ──────────────────────────
+            // 第一个 slot: 阻塞等待
+            let mut slot_notify_rx = slot_notify_rx;
+            let (mut slot_id, mut prompt_rx, token_tx) = match slot_notify_rx.recv().await {
+                Some(info) => info,
+                None => {
+                    tracing::warn!("Session {} slot notify channel closed", session_id);
                     return;
                 }
             };
-            tracing::info!("Session {} slot allocated", session_id);
+            tracing::info!("Session {} slot {} allocated", session_id, slot_id);
+
+            // 后续可动态增加 slot，用 HashMap 管理
+            use std::collections::HashMap;
+            let mut slot_tokens: HashMap<usize, mpsc::UnboundedSender<String>> = HashMap::new();
+            slot_tokens.insert(slot_id, token_tx);
 
             // ── 4. select! loop ────────────────────────────
             let mut context_len: usize = 0;
@@ -121,7 +128,15 @@ impl Session {
                 crate::network::tensor_stream::protocol::Tensor_Buffer::New(16 * 1024 * 1024);
 
             loop {
-                // 收 prompt 来自 slot mpsc
+                // 检查是否有新 slot 注册
+                while let Ok((new_id, new_rx, new_tx)) = slot_notify_rx.try_recv() {
+                    tracing::info!("Session {} slot {} allocated (dynamic)", session_id, new_id);
+                    slot_tokens.insert(new_id, new_tx);
+                    slot_id = new_id;
+                    prompt_rx = new_rx;
+                }
+
+                // 收 prompt 来自当前 slot mpsc
                 match prompt_rx.recv().await {
                     Some(text) => {
                         tracing::info!("Session {} chat: {}", session_id, text);
@@ -209,10 +224,10 @@ impl Session {
                             }
 
                             match ml.decode(token_id) {
-                                Ok(text) => {
-                                    tracing::info!("Session {} output: {}", session_id, text);
-                                    let _ = token_tx.send(text);
-                                }
+                                        Ok(text) => {
+                                            tracing::info!("Session {} output: {}", session_id, text);
+                                            let _ = slot_tokens[&slot_id].send(text);
+                                        }
                                 Err(e) => {
                                     tracing::warn!("Session {} decode error: {}", session_id, e);
                                 }
