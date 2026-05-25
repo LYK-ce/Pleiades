@@ -4,17 +4,12 @@
 COMMAND = "inference"
 DESCRIPTION = "启动 ML Thread，连接到指定 Session 并执行 forward"
 
--- 用法: exec inference session_id=<id> model_path=<path>
--- 示例: exec inference session_id=1 model_path=test.pgguf
+-- 内置命令: session inference <session_id> <model_path>
+-- 由 Core 直接查找并调用，用户不可直接 exec
 
 function execute(params)
     local session_id = params.session_id
     local model_path = params.model_path
-
-    if not session_id or not model_path then
-        caps.print("inference: 缺少参数 session_id 或 model_path")
-        return
-    end
 
     -- 1. 通过 Storage 获取模型文件路径
     caps.print("inference: 读取模型 " .. model_path .. " ...")

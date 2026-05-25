@@ -592,6 +592,36 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- session inference <session_id> <model_path> ----
+
+    if trimmed.starts_with("session inference ") {
+        let rest = trimmed.strip_prefix("session inference ").unwrap_or("").trim();
+        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            app.command_output.output_text =
+                "错误: 参数不足\n用法: session inference <session_id> <model_path>".to_string();
+        } else {
+            match parts[0].parse::<u64>() {
+                Ok(session_id) => {
+                    app.command_output.output_text =
+                        format!("正在启动 ML Thread -> Session {} (模型: {})...", session_id, parts[1]);
+                    let cmd = UserCommand::SessionInference {
+                        session_id,
+                        model_path: parts[1].to_string(),
+                    };
+                    if user_cmd_tx.blocking_send(cmd).is_err() {
+                        app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                    }
+                }
+                Err(_) => {
+                    app.command_output.output_text =
+                        format!("错误: '{}' 不是有效的 session_id", parts[0]);
+                }
+            }
+        }
+        return;
+    }
+
     // ---- run <model_path> ----
 
     if trimmed.starts_with("run ") {

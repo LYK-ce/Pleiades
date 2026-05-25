@@ -58,6 +58,8 @@ pub enum UserCommand {
     Session { model_id: String },
     /// 向指定 Session 建立持久连接
     Chat { session_id: u64 },
+    /// 启动 ML Thread，连接到指定 Session
+    SessionInference { session_id: u64, model_path: String },
 }
 
 // ============================================================

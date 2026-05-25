@@ -381,6 +381,25 @@ impl Core {
                     });
                 });
             }
+            UserCommand::SessionInference { session_id, model_path } => {
+                let Some(entry) = self.program_registry.get("inference").cloned() else {
+                    tracing::error!("SessionInference: builtin 'inference' script not found");
+                    self.capabilities.event_bus.Publish(Bus_Event::Notify {
+                        level: NotifyLevel::Error,
+                        message: "ML Thread: builtin inference.lua 未找到".to_string(),
+                    });
+                    return;
+                };
+                let mut params = std::collections::HashMap::new();
+                params.insert("session_id".into(), session_id.to_string());
+                params.insert("model_path".into(), model_path);
+                spawn_lua_script(
+                    entry.path,
+                    params,
+                    self.capabilities.clone(),
+                    format!("inference session {}", session_id),
+                );
+            }
             UserCommand::Chat { session_id } => {
                 let hub = self.capabilities.local_stream_hub.clone();
                 let event_bus = self.capabilities.event_bus.clone();
