@@ -30,6 +30,7 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 | fix | tensor_to_bytes 支持 U32 dtype | fcb6d0d |
 | v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | 8565f44 |
 | v2.6 | reply 流式输出: Stream token → Command Output 区 + Output 起止标记 | 97244f8 |
+| v2.7 | Slot 化: mpsc 通道对替代 local_tensor_stream (chat ↔ Session) | c768b07 |
 
 ## 架构笔记（更新）
 
@@ -44,6 +45,10 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 - ML Thread side: Lua 脚本，通过 spawn_lua_script 在独立线程运行
 - reply 流式: Bus_Event::Stream { type: token } → TUI handle_stream → command_output.push_str
 - 起止标记: Bus_Event::Output { completed: false/true } 清空/标记
+- Slot 连接: allocate_slot → (prompt_tx, token_rx) mpsc 通道对 → oneshot 通知 spawn task
+- Session.spawn(): 去 chat_stream accept → slot_ready_rx.await → select! prompt_rx.recv()
+- Chat relay: broadcast prompt → prompt_tx.send(); token_rx.recv() → EventBus::Stream
+- Session ↔ ML: local_tensor_stream 保持（传 tensor/offset 语义匹配）
 
 ## 已知问题
 
