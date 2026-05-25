@@ -18,14 +18,8 @@ pub enum SlotState {
 pub struct Slot {
     /// 在当前 Session 内的索引
     pub id: usize,
-    /// 累积的 token 历史（下一轮 flush 送入 ML）
-    pub token_buf: Vec<u32>,
     /// 返回 token 给接入方
     pub token_tx: mpsc::UnboundedSender<String>,
-    /// token_buf 有新内容，等待 flush
-    pub dirty: bool,
-    /// 采样温度
-    pub temperature: f64,
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────
@@ -39,14 +33,9 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let slot = Slot {
             id: 0,
-            token_buf: Vec::new(),
             token_tx: tx,
-            dirty: false,
-            temperature: 0.8,
         };
         assert_eq!(slot.id, 0);
-        assert!(!slot.dirty);
-        assert_eq!(slot.temperature, 0.8);
     }
 
     #[test]
@@ -57,18 +46,12 @@ mod tests {
 
         state = SlotState::Occupied(Slot {
             id: 1,
-            token_buf: vec![101, 204],
             token_tx: tx,
-            dirty: true,
-            temperature: 0.3,
         });
 
         match state {
             SlotState::Occupied(ref s) => {
                 assert_eq!(s.id, 1);
-                assert_eq!(s.token_buf, vec![101, 204]);
-                assert!(s.dirty);
-                assert_eq!(s.temperature, 0.3);
             }
             _ => panic!("expected Occupied"),
         }

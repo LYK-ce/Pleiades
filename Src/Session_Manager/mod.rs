@@ -57,13 +57,8 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let slot = Slot {
             id: 0,
-            token_buf: vec![1, 2, 3],
             token_tx: tx,
-            dirty: true,
-            temperature: 0.8,
         };
         assert_eq!(slot.id, 0);
-        assert_eq!(slot.token_buf.len(), 3);
-        assert!(slot.dirty);
     }
 }

@@ -401,34 +401,36 @@ impl Core {
                 );
             }
             UserCommand::Chat { session_id } => {
-                let hub = self.capabilities.local_stream_hub.clone();
+                let session_mgr = self.session_mgr.clone();
                 let event_bus = self.capabilities.event_bus.clone();
                 let mut prompt_rx = self.prompt_tx.subscribe();
-                tokio::spawn(async move {
-                    let stream_id = format!("session-{}", session_id);
-                    let mut stream = match hub.open(&stream_id) {
-                        Ok(s) => {
-                            tracing::info!("chat: connected to Session {} via LocalStream", session_id);
-                            s
-                        }
+
+                // allocate slot → 拿到 mpsc 通道对
+                let handle = {
+                    let mut mgr = session_mgr.lock().unwrap();
+                    match mgr.allocate_slot(session_id) {
+                        Ok(h) => h,
                         Err(e) => {
-                            tracing::warn!("chat open error: {}", e);
-                            event_bus.Publish(crate::event_bus::Bus_Event::Notify {
-                                level: crate::event_bus::NotifyLevel::Error,
-                                message: format!("chat: 无法连接 Session {}: {}", session_id, e),
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("chat: 分配 slot 失败: {}", e),
                             });
                             return;
                         }
-                    };
+                    }
+                };
 
+                let prompt_tx = handle.prompt_tx;
+                let mut token_rx = handle.token_rx;
+
+                // prompt 转发 task: broadcast → slot.prompt_tx
+                let prompt_tx_clone = prompt_tx.clone();
+                tokio::spawn(async move {
                     loop {
                         match prompt_rx.recv().await {
                             Ok(prompt) => {
                                 tracing::info!("chat: sending to Session {}: {}", session_id, prompt);
-                                if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                                    &mut stream, 0, prompt.as_bytes(),
-                                ).await {
-                                    tracing::warn!("chat send error: {}", e);
+                                if prompt_tx_clone.send(prompt).is_err() {
                                     break;
                                 }
                             }
@@ -441,6 +443,21 @@ impl Core {
                             }
                         }
                     }
+                });
+
+                // token 接收 task: slot.token_rx → EventBus::Stream
+                tokio::spawn(async move {
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                    });
+                    while let Some(token) = token_rx.recv().await {
+                        event_bus.Publish(Bus_Event::Stream {
+                            payload: serde_json::json!({"type":"token","text":token}).to_string(),
+                        });
+                    }
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
+                    });
                 });
             }
         }

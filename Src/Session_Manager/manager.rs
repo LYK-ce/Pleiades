@@ -70,14 +70,23 @@ impl SessionManager {
             .get_mut(&session_id)
             .ok_or_else(|| Session_Error::SessionNotFound(session_id.to_string()))?;
 
-        let (token_tx, token_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
 
-        let _slot_id = session
+        // 通知 spawn task：slot 已分配（仅第一次生效）
+        if let Some(tx) = session.slot_ready_tx.take() {
+            let _ = tx.send((prompt_rx, token_tx.clone()));
+        }
+
+        let slot_id = session
             .allocate(token_tx)
             .ok_or_else(|| Session_Error::SlotExhausted(session_id.to_string()))?;
 
         Ok(SlotHandle {
-            token_rx: Some(token_rx),
+            session_id,
+            slot_id,
+            prompt_tx,
+            token_rx,
         })
     }
 
@@ -85,13 +94,6 @@ impl SessionManager {
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.release(slot_id);
         }
-    }
-}
-
-impl Drop for SlotHandle {
-    fn drop(&mut self) {
-        // v2: SlotHandle no longer auto-closes via channel.
-        // close_slot is called directly by SessionManager.
     }
 }
 
