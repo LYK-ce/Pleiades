@@ -259,6 +259,8 @@ impl Session {
                             offset += 1;
                         }
                         context_len = offset;
+                        // 空哨兵: 本轮结束，通知 bridge 发送空帧给远端
+                        let _ = slot_tokens[&slot_id].send(String::new());
                     }
                     None => {
                         tracing::warn!("Session {} prompt channel closed", session_id);

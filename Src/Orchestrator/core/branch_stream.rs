@@ -98,6 +98,11 @@ impl Core {
 
                             // 写 token 到 stream（token 由 Session 推理产生）
                             while let Some(token) = token_rx.recv().await {
+                                if token.is_empty() {
+                                    // 空哨兵: 本轮结束
+                                    let _ = write_session_frame(&mut stream, "").await;
+                                    break;
+                                }
                                 tracing::info!("Session {} bridge: send token '{}'", sid, token);
                                 if write_session_frame(&mut stream, &token).await.is_err() {
                                     tracing::warn!("Session {} bridge: write error", sid);

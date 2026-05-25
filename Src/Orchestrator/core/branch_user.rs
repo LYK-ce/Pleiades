@@ -452,6 +452,7 @@ impl Core {
                         payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
                     });
                     while let Some(token) = token_rx.recv().await {
+                        if token.is_empty() { continue; }  // skip sentinel
                         event_bus.Publish(Bus_Event::Stream {
                             payload: serde_json::json!({"type":"token","text":token}).to_string(),
                         });
@@ -518,6 +519,10 @@ impl Core {
                                     loop {
                                         match read_session_frame(&mut stream).await {
                                             Ok(token) => {
+                                                if token.is_empty() {
+                                                    // 空哨兵: 本轮结束
+                                                    break;
+                                                }
                                                 tracing::info!("remote chat: recv token '{}'", token);
                                                 event_bus.Publish(Bus_Event::Stream {
                                                     payload: serde_json::json!({"type":"token","text":token}).to_string(),
