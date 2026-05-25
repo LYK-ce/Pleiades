@@ -179,7 +179,7 @@ impl Session {
                                         }
                                     };
 
-                                    let token_id = match ml.sample(&logits, 0.8) {
+                                    let token_id = match ml.sample(&logits, 0.0) {
                                         Ok(t) => t,
                                         Err(e) => {
                                             tracing::warn!("Session {} sample error: {}", session_id, e);
