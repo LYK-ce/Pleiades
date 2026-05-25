@@ -8,8 +8,10 @@
 use std::sync::Arc;
 
 use super::slot::{Slot, SlotState};
-use crate::event_bus::EventBus;
+use crate::event_bus::{Bus_Event, EventBus, NotifyLevel};
+use crate::ml_engine::context::MlSession;
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
+use crate::storage::StorageCapability;
 
 /// 会话容器（对应一个模型）
 pub struct Session {
@@ -26,20 +28,56 @@ impl Session {
         Session { session_id, model_id, max_slots, slots, eos_token_id }
     }
 
-    /// 启动 Session 的 select! 任务
+    /// 启动 Session 的 task
     ///
-    /// 注册 notifier 到 RendezvousMap，等前端通过 Tensor Stream 发来 prompt。
-    /// 收到后读帧 → EventBus 发布。
+    /// Task 内部：加载 tokenizer → 等 TUI 连接 → 收 prompt → encode
+    /// 所有 I/O 在 task 内完成，不阻塞调用方。
     pub fn spawn(
         &self,
         stream_hub: Arc<LocalStreamHub>,
         event_bus: Arc<EventBus>,
+        storage: Arc<dyn StorageCapability>,
     ) {
         let session_id = self.session_id;
+        let model_path = self.model_id.clone();
         let stream_id = format!("session-{}", session_id);
 
         tokio::spawn(async move {
-            tracing::info!("Session {} waiting on LocalStream '{}'", session_id, stream_id);
+            // ── 1. 加载 tokenizer ──────────────────────────
+            let (path, _guard) = match storage.acquire_read(&model_path).await {
+                Ok(p) => p,
+                Err(e) => {
+                    event_bus.Publish(Bus_Event::Notify {
+                        level: NotifyLevel::Error,
+                        message: format!("Session {} storage error: {}", session_id, e),
+                    });
+                    return;
+                }
+            };
+
+            let mut ml = match MlSession::new("cpu") {
+                Ok(s) => s,
+                Err(e) => {
+                    event_bus.Publish(Bus_Event::Notify {
+                        level: NotifyLevel::Error,
+                        message: format!("Session {} ml init error: {}", session_id, e),
+                    });
+                    return;
+                }
+            };
+
+            if let Err(e) = ml.load_tokenizer(&path) {
+                event_bus.Publish(Bus_Event::Notify {
+                    level: NotifyLevel::Error,
+                    message: format!("Session {} tokenizer error: {}", session_id, e),
+                });
+                return;
+            }
+            drop(_guard); // 释放 Storage 读锁
+
+            tracing::info!("Session {} tokenizer loaded from {}", session_id, model_path);
+
+            // ── 2. 等 TUI 连接 ──────────────────────────────
             let mut stream = match stream_hub.accept_async(&stream_id, 30_000).await {
                 Ok(s) => {
                     tracing::info!("Session {} connected", session_id);
@@ -51,6 +89,7 @@ impl Session {
                 }
             };
 
+            // ── 3. 收 prompt → encode → 发布 ───────────────
             let mut buf = crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
             match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                 &mut stream, &mut buf,
@@ -58,10 +97,22 @@ impl Session {
                 Ok(_offset) => {
                     let text = String::from_utf8_lossy(buf.As_Slice());
                     tracing::info!("Session {} received: {}", session_id, text);
-                    event_bus.Publish(crate::event_bus::Bus_Event::Notify {
-                        level: crate::event_bus::NotifyLevel::Info,
-                        message: format!("Session {}: {}", session_id, text),
-                    });
+
+                    match ml.encode(&text) {
+                        Ok(token_ids) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!("Session {}: {} ({} tokens)",
+                                    session_id, text, token_ids.len()),
+                            });
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("Session {} encode failed: {}", session_id, e),
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Session {} recv error: {}", session_id, e);

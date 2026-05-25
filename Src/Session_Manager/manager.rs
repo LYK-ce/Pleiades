@@ -9,11 +9,13 @@ use tokio::sync::mpsc;
 
 use super::capability::{Session_Error, SlotHandle};
 use super::session::Session;
+use crate::storage::StorageCapability;
 
 pub struct SessionManager {
     sessions: HashMap<u64, Session>,
     pub stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
     pub event_bus: Arc<crate::event_bus::EventBus>,
+    storage: Arc<dyn StorageCapability>,
     max_slots: usize,
     counter: u64,
 }
@@ -23,11 +25,13 @@ impl SessionManager {
         max_slots: usize,
         stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
         event_bus: Arc<crate::event_bus::EventBus>,
+        storage: Arc<dyn StorageCapability>,
     ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(SessionManager {
             sessions: HashMap::new(),
             stream_hub,
             event_bus,
+            storage,
             max_slots,
             counter: 1,
         }))
@@ -38,7 +42,7 @@ impl SessionManager {
         self.counter += 1;
 
         let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1);
-        session.spawn(self.stream_hub.clone(), self.event_bus.clone());
+        session.spawn(self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
         self.sessions.insert(session_id, session);
         session_id
     }
@@ -98,10 +102,35 @@ mod tests {
     use super::*;
 
     fn make_mgr() -> Arc<Mutex<SessionManager>> {
+        use crate::storage::StorageCapability;
+        use crate::storage::StorageError;
+        use crate::storage::FileEntry;
+        use crate::storage::ChecksumAlgorithm;
+        use crate::storage::ReadGuard;
+        use crate::storage::WriteGuard;
+        use async_trait::async_trait;
+
+        struct StubStorage;
+        #[async_trait]
+        impl StorageCapability for StubStorage {
+            async fn acquire_read(&self, _file_id: &str) -> Result<(std::path::PathBuf, ReadGuard), StorageError> {
+                unimplemented!("stub")
+            }
+            async fn acquire_write(&self, _file_id: &str) -> Result<(std::path::PathBuf, WriteGuard), StorageError> {
+                unimplemented!("stub")
+            }
+            async fn remove(&self, _file_id: &str) -> Result<(), StorageError> { unimplemented!("stub") }
+            async fn exists(&self, _file_id: &str) -> Result<bool, StorageError> { unimplemented!("stub") }
+            async fn list(&self) -> Result<Vec<FileEntry>, StorageError> { Ok(vec![]) }
+            async fn checksum(&self, _file_id: &str, _algo: Option<ChecksumAlgorithm>) -> Result<String, StorageError> { unimplemented!("stub") }
+            async fn flush(&self) -> Result<(usize, usize), StorageError> { Ok((0, 0)) }
+        }
+
         SessionManager::new(
             4,
             Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
             Arc::new(crate::event_bus::EventBus::New(16)),
+            Arc::new(StubStorage),
         )
     }
 

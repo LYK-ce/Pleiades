@@ -103,6 +103,7 @@ impl Core {
             });
         let session_mgr = crate::session::SessionManager::new(
             4, capabilities.local_stream_hub.clone(), capabilities.event_bus.clone(),
+            capabilities.storage.clone(),
         );
         Core {
             registry: HashMap::new(),
