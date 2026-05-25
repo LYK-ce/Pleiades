@@ -31,6 +31,7 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 | v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | 8565f44 |
 | v2.6 | reply 流式输出: Stream token → Command Output 区 + Output 起止标记 | 97244f8 |
 | v2.7 | Slot 化: mpsc 通道对替代 local_tensor_stream (chat ↔ Session) | c768b07 |
+| v2.8 | 远端 Chat: Session 流协议 + remote chat + 空哨兵多轮 | 5914ac1..de9e247 |
 
 ## 架构笔记（更新）
 
@@ -49,6 +50,12 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 - Session.spawn(): 去 chat_stream accept → slot_ready_rx.await → select! prompt_rx.recv()
 - Chat relay: broadcast prompt → prompt_tx.send(); token_rx.recv() → EventBus::Stream
 - Session ↔ ML: local_tensor_stream 保持（传 tensor/offset 语义匹配）
+- 远端 Chat: /pleiades/session/1.0.0 流协议 → handshake(session_id) → [4B len][UTF-8] 帧
+- 入站: Network_Inbound_Event::SessionStreamArrived → Core B3 → allocate_slot → bridge
+- 出站: remote chat <peer> <id> → open_session_stream → prompt 上行/token 下行 串行
+- 多轮: 空帧哨兵 (len=0) 作轮次分隔 → bridge 转发 → 远端退出 recv loop 回到 prompt 等待
+- 死锁修复: Arc<Mutex<Stream>> → 单 task 串行读写
+- slot_notify: oneshot → mpsc unbounded (支持多 slot 动态注册)
 
 ## 已知问题
 
