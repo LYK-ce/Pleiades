@@ -227,3 +227,74 @@ TUI: chat 1 你好
 
 <!-- 在此区域写下评审意见 -->
 
+
+---
+
+## 演进设计（v2.7+）
+
+### Slot 连接统一：mpsc 通道对
+
+原有设计中，Chat ↔ Session 通过 local_tensor_stream（DuplexStream + rendezvous）连接。这与 prompt/token 的文本语义不匹配（local_tensor_stream 设计目的是传 tensor）。**Slot 机制统一为 mpsc 通道对**：
+
+```
+allocate_slot(session_id) → SlotHandle {
+    prompt_tx: Sender<String>,   // Chat → Session
+    token_rx:  Receiver<String>, // Session → Chat
+}
+
+Session.slots[slot_id] = Slot {
+    prompt_rx: Receiver<String>,
+    token_tx:  Sender<String>,
+    context_len: usize,
+}
+```
+
+### 本地 vs 远端：统一入口、不同网络层
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Chat 客户端                          │
+│                                                         │
+│  本地 Chat ── mpsc ──► slot[0].prompt_tx                │
+│  远端 Chat ── Tensor_Stream ──► relay ──► slot[1].prompt_tx │
+│                                      ◄── slot[1].token_rx  │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  Session.spawn()                                        │
+│                                                         │
+│  loop {                                                 │
+│    select! {                                            │
+│      slots[*].prompt_rx.recv() → encode → prefill      │
+│      ml_stream.recv() → forward result → 自回归          │
+│    }                                                    │
+│    → 生成的 token: slots[*].token_tx.send(text)         │
+│  }                                                      │
+└──────────────────────┬──────────────────────────────────┘
+                       │  local_tensor_stream (保持不变)
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  ML Thread                                              │
+│  loop { recv tensor → forward → send logits }           │
+└─────────────────────────────────────────────────────────┘
+```
+
+**设计要点**：
+- Session 内部统一看 mpsc，不关心来源是本地还是远端
+- 本地 Chat：`allocate_slot` → 直接持有 `(prompt_tx, token_rx)`
+- 远端 Chat：`allocate_slot` → relay task 桥接 Tensor_Stream ↔ slot mpsc
+- Session ↔ ML Thread：保持 local_tensor_stream（传 tensor/offset 语义匹配）
+- 不再需要 `accept_async("session-{id}")` / `open("session-{id}")` 这种 rendezvous
+
+### SlotHandle 最终形态
+
+```rust
+pub struct SlotHandle {
+    pub session_id: u64,
+    pub slot_id: usize,
+    pub prompt_tx: UnboundedSender<String>,
+    pub token_rx: UnboundedReceiver<String>,
+}
+```
+
