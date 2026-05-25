@@ -104,6 +104,7 @@ impl Session {
             };
 
             // ── 4. select! loop ────────────────────────────
+            let mut context_len: usize = 0;
             let mut chat_buf =
                 crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
             let mut ml_buf =
@@ -148,14 +149,24 @@ impl Session {
                                     }
                                 };
 
+                                // ── context 截断 (max 4096 tokens) ──────
+                                if context_len + token_ids.len() > 4096 {
+                                    tracing::info!(
+                                        "Session {} context overflow ({} → 4096+), resetting",
+                                        session_id, context_len
+                                    );
+                                    context_len = 0;
+                                }
+
                                 if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                                    &mut ml_stream, 0, &data,
+                                    &mut ml_stream, context_len as u64, &data,
                                 ).await {
                                     tracing::warn!("Session {} send tensor error: {}", session_id, e);
                                     break;
                                 }
+                                context_len += token_ids.len();
 
-                                let mut offset = token_ids.len();
+                                let mut offset = context_len;
                                 let eos = ml.get_eos();
 
                                 // ── 自回归生成 loop ───────────────────
@@ -230,6 +241,7 @@ impl Session {
                                     }
                                     offset += 1;
                                 }
+                                context_len = offset;
                             }
                             Err(e) => {
                                 tracing::warn!("Session {} chat recv error: {}", session_id, e);

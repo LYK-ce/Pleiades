@@ -5,12 +5,12 @@
 > branch: session-tokenizer
 
 ## State
-Task 6 v2 全部子任务完成。端到端推理闭环验证通过。105 tests pass。
+Task 6 v2.5 完成。多轮对话实现：Session 维持 token 上下文 + 增量 prefill + KV Cache 复用。
 
 ```
 session create test.pgguf → chat 1 → session inference 1 test.pgguf
-  → Prompt> 你好 → encode → prefill → forward loop (0..120)
-  → sample (temp=0.0) → decode → EventBus → EOS stop
+  → Prompt> 你好 → 回复
+  → Prompt> 刚才说了什么？ → 基于上文回复
 ```
 
 ---
@@ -28,13 +28,17 @@ session create test.pgguf → chat 1 → session inference 1 test.pgguf
 | fix | Core 设计原则写入 instructions.md | fc30142 |
 | fix | Prompt 框渲染修复 | 20e686c |
 | fix | tensor_to_bytes 支持 U32 dtype | fcb6d0d |
+| v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | — |
 
 ## 架构笔记（更新）
 
 - Session.spawn(): load_tokenizer → accept_async("session-{id}") → accept_async("ml-{id}") → select!
 - Chat 持久: broadcast::channel(16) → prompt_tx.subscribe() → loop → local_send_frame
 - ML Thread: builtin/inference.lua → storage_acquire_read → load_model → open_stream("ml-{id}") → forward loop
-- 自回归: chat 分支内 prefll + for 0..120 { recv ML → sample(0.0) → decode → EOS check → send next }
+- 自回归: chat 分支内 prefill + for 0..300 { recv ML → sample(0.0) → decode → EOS check → send next }
+- 多轮: context_len 追踪 token 总数 → prefill offset=context_len → 每轮结束 context_len=offset
+- 截断: context_len + new_tokens > 4096 → reset context_len=0
+- ML Thread 无需改动，inference.lua 的 forward loop 已支持 offset 增量
 - tensor 序列化: 1B dtype + header + data, dtype 0=F32 1=U32
 - ML Thread side: Lua 脚本，通过 spawn_lua_script 在独立线程运行
 
@@ -50,5 +54,6 @@ session create test.pgguf → chat 1 → session inference 1 test.pgguf
 - ML Thread 侧 sample（消除 logits 传输开销）
 - reply 通道（TUI Command Output 区显示生成文本）
 - 多 slot 支持
+- KV Cache 滑动窗口截断（替代当前 reset 策略）
 - 远端接入
 
