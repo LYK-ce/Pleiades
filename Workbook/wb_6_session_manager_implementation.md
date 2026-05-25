@@ -5,12 +5,12 @@
 > branch: session-tokenizer
 
 ## State
-Task 6 v2.5 完成。多轮对话实现：Session 维持 token 上下文 + 增量 prefill + KV Cache 复用。
+Task 6 v2.5 完成并验证通过。多轮对话：Session 维持 token 上下文 + 增量 prefill + KV Cache 复用。
 
 ```
-session create test.pgguf → chat 1 → session inference 1 test.pgguf
+session create model.pgguf → chat 1 → session inference 1 model.pgguf
   → Prompt> 你好 → 回复
-  → Prompt> 刚才说了什么？ → 基于上文回复
+  → Prompt> 你刚才说了什么？ → 基于上文回复 ✅
 ```
 
 ---
@@ -28,7 +28,7 @@ session create test.pgguf → chat 1 → session inference 1 test.pgguf
 | fix | Core 设计原则写入 instructions.md | fc30142 |
 | fix | Prompt 框渲染修复 | 20e686c |
 | fix | tensor_to_bytes 支持 U32 dtype | fcb6d0d |
-| v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | — |
+| v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | 8565f44 |
 
 ## 架构笔记（更新）
 
