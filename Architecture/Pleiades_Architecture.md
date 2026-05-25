@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-05-22
+> **最后更新**: 2026-05-25
 
 ---
 
@@ -36,6 +36,10 @@
 │   ├── EventBus/               ← 广播事件总线
 │   ├── ML_Engine/              ← ML 推理引擎 (GGUF/PGGUF)
 │   ├── Network/                ← P2P 网络 (libp2p)
+│   ├── Session_Stream/     ← Session 流协议 (远端 Chat)
+│   ├── Tensor_Stream/      ← 张量流协议
+│   ├── File_Stream/        ← 文件流协议
+│   └── ...
 │   ├── Orchestrator/           ← 任务编排核心
 │   ├── PeerManagement/         ← 节点发现与管理
 │   ├── Session_Manager/        ← 推理会话槽位
@@ -235,23 +239,53 @@ impl MlSession {
 
 libp2p 协议栈：TCP + Noise 加密 + Yamux 多路复用 + mDNS 发现 + Kademlia DHT + Request-Response + Stream + Ping。
 
+**流协议一览**:
+
+| 协议 | 用途 | 入站路由 |
+|------|------|---------|
+| `/pleiades/tensor/1.0.0` | Pipeline 张量传输 | RendezvousMap（直接匹配，不经过 Core） |
+| `/pleiades/file-stream/1.0.0` | 文件传输 | `Network_Inbound_Event::FileStreamArrived` → Core B3 |
+| `/pleiades/session/1.0.0` | 远端 Chat ↔ Session | `Network_Inbound_Event::SessionStreamArrived` → Core B3 |
+| `/pleiades/bandwidth/1.0.0` | 带宽测试 | 网络层内部处理 |
+
+**Session 流协议**:
+```
+Handshake: [8B BE u64 session_id]
+数据帧:    [4B BE u32 len][UTF-8 payload]
+空帧哨兵:  [4B len=0] — 标记一轮推理结束
+```
+
 ```rust
 #[async_trait]
 pub trait Network_Capability {
+    // 请求-响应
     async fn Send_Data(&self, peer: PeerId, data_type: &str, payload: &[u8]) -> Result<Vec<u8>>;
+    // 连接管理
     async fn Dial(&self, addr: &str) -> Result<()>;
     async fn Disconnect(&self, peer: &PeerId) -> Result<()>;
-    async fn Test_Bandwidth(&self, peer: &PeerId) -> Result<()>;
+    // 文件流
     async fn Send_File(&self, peer: &PeerId, path: &Path) -> Result<()>;
-    async fn Open_Tensor_Stream(&self, peer: &PeerId, inference_id: &str) -> Result<NetworkStream>;
-    async fn Accept_Tensor_Stream(&self, inference_id: &str, timeout: Duration) -> Result<NetworkStream>;
-    async fn Send_Tensor(&self, stream: &mut NetworkStream, tensor: &Tensor, offset: u64) -> Result<()>;
-    async fn Recv_Tensor(&self, stream: &mut NetworkStream, device: &Device) -> Result<(Tensor, u64)>;
-    async fn Send_Eof(&self, stream: &mut NetworkStream) -> Result<()>;
+    // 张量流
+    async fn Open_Tensor_Stream(&self, peer: &PeerId, inference_id: u64) -> Result<Stream>;
+    async fn Accept_Tensor_Stream(&self, inference_id: u64, timeout_secs: u64) -> Result<Stream>;
+    // Session 流（远端 Chat）
+    async fn open_session_stream(&self, peer: &PeerId, session_id: u64) -> Result<Stream>;
+    // DHT
+    async fn put_record(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
+    async fn get_record(&self, key: Vec<u8>) -> Result<()>;
+    // 工具
+    fn get_local_peer_id(&self) -> PeerId;
+    async fn test_bandwidth(&self, peer: &PeerId) -> Result<u64>;
 }
 ```
 
-**Tensor 流协议**: `[offset: u64][len: u64][data: bytes]...`，EOF = `[u64::MAX][0]`
+**入站事件**: `Network_Inbound_Event` 枚举通过 mpsc 通道发送给 Core：
+```rust
+pub enum Network_Inbound_Event {
+    FileStreamArrived { peer: PeerId, stream: Stream },
+    SessionStreamArrived { peer: PeerId, session_id: u64, stream: Stream },
+}
+```
 
 ---
 
@@ -263,11 +297,35 @@ pub trait Network_Capability {
 
 | 分支 | 功能 |
 |------|------|
-| B1 | `route_user()` — 用户命令 → 查找/执行 Lua 脚本 |
-| B2 | `route_inbound()` — 解析 NetworkProtocol (ESTABLISH_TENSOR_STREAM, JOIN_PIPELINE 等) |
-| B3 | `route_stream()` — FileStreamArrived, TensorStreamArrived |
+| B1 | `route_user()` — 用户命令路由 (含 `session create/chat/inference`, `remote chat`) |
+| B2 | `route_inbound()` — 解析 NetworkProtocol |
+| B3 | `route_stream()` — FileStreamArrived, SessionStreamArrived → 分配 slot + bridge |
 | B4 | `route_lifecycle()` — JobExecutor 完成回调 |
 | B5 | `route_eventbus()` — EventBus 事件 → TUI 更新 |
+
+**Session/Slot 机制**:
+
+```rust
+// SessionManager::allocate_slot → mpsc 通道对
+pub struct SlotHandle {
+    pub session_id: u64,
+    pub slot_id: usize,
+    pub prompt_tx: mpsc::UnboundedSender<String>,
+    pub token_rx: mpsc::UnboundedReceiver<String>,
+}
+
+// Session.spawn() 内 select! 监听 slot prompt_rx
+// 推理结果通过 slot.token_tx 返回
+// 空哨兵 "\0" 标记一轮结束
+```
+
+**本地 Chat vs 远端 Chat**:
+
+```
+本地: Chat → allocate_slot → prompt_tx/token_rx mpsc → Session.spawn()
+远端: remote chat <peer> <id> → open_session_stream → prompt 上行/token 下行串行
+      对端收到 SessionStreamArrived → Core B3 → allocate_slot → bridge (stream↔mpsc)
+```
 
 **Capabilities 容器**:
 ```rust
@@ -390,6 +448,8 @@ ratatui + crossterm。双输入框布局：
 
 **内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`
 
+**Session 命令**: `session create <model>`, `session inference <id> <model>`, `chat <id>`, `remote chat <peer> <id>`
+
 ---
 
 ## 4. 关键工作流
@@ -454,6 +514,41 @@ Thread A: exec local_coord         Thread B: exec local_work
   → network.receive_file_data(stream, dest_path, file_size)
   → guard drop → 自动注册到 Storage 索引
 ```
+
+### 4.5 Session 推理 + 远端 Chat
+
+**单机**:
+```
+pleiades> session create model.pgguf      → Session.spawn() 启动
+pleiades> session inference 1 model.pgguf → Lua ML Thread 加载模型
+pleiades> chat 1                          → allocate_slot → mpsc 通道对
+[Prompt>] 你好                            → encode → prefill → 自回归 → token 流式输出
+```
+
+**远端**:
+```
+alice (Session 宿主机)                          bob (远端)
+─────────────────                              ────────
+session create + inference
+                                                remote chat alice 1
+                                                  → open_session_stream
+  ← SessionStreamArrived → allocate_slot → bridge
+  ═══ stream read ── prompt ──────────────────────
+  → Session 推理
+  ═══ stream write ── token ──► EventBus::Stream
+  ═══ stream write ── 空帧 ──► (本轮结束)
+                                                → 回到 Prompt 等待下一轮
+```
+
+**Session ↔ ML Thread**（始终走 local_tensor_stream）:
+```
+Session.spawn()                       ML Thread (Lua)
+  accept_async("ml-{id}")  ◄──配对──  open_stream("ml-{id}")
+  local_send_frame(tensor, offset) →  recv_tensor → forward
+  ← recv_frame(logits)                  send_tensor(logits)
+```
+
+**多轮对话**: Session 维护 `context_len`，每轮 prefill offset = context_len，KV Cache 增量复用。超过 4096 tokens 时 reset。
 
 ---
 
