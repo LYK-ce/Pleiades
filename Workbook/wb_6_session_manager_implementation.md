@@ -29,6 +29,7 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 | fix | Prompt 框渲染修复 | 20e686c |
 | fix | tensor_to_bytes 支持 U32 dtype | fcb6d0d |
 | v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | 8565f44 |
+| v2.6 | reply 流式输出: Stream token → Command Output 区 + Output 起止标记 | 97244f8 |
 
 ## 架构笔记（更新）
 
@@ -41,6 +42,8 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 - ML Thread 无需改动，inference.lua 的 forward loop 已支持 offset 增量
 - tensor 序列化: 1B dtype + header + data, dtype 0=F32 1=U32
 - ML Thread side: Lua 脚本，通过 spawn_lua_script 在独立线程运行
+- reply 流式: Bus_Event::Stream { type: token } → TUI handle_stream → command_output.push_str
+- 起止标记: Bus_Event::Output { completed: false/true } 清空/标记
 
 ## 已知问题
 
@@ -52,7 +55,6 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 ## 待做
 
 - ML Thread 侧 sample（消除 logits 传输开销）
-- reply 通道（TUI Command Output 区显示生成文本）
 - 多 slot 支持
 - KV Cache 滑动窗口截断（替代当前 reset 策略）
 - 远端接入
