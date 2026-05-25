@@ -60,6 +60,8 @@ pub enum UserCommand {
     Chat { session_id: u64 },
     /// 启动 ML Thread，连接到指定 Session
     SessionInference { session_id: u64, model_path: String },
+    /// 远端 Chat — 连接到指定节点的 Session
+    RemoteChat { peer_name: String, session_id: u64 },
 }
 
 // ============================================================

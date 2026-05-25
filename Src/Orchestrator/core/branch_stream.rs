@@ -7,8 +7,9 @@
 //! 文件接收等耗时操作在 spawn 的 task 内完成，避免阻塞 Core 主循环。
 
 use super::Core;
-use crate::network::{Network_Inbound_Event, Read_File_Stream_Header};
+use crate::network::{Network_Inbound_Event, Read_File_Stream_Header, read_session_frame, write_session_frame};
 use crate::event_bus::{Bus_Event, NotifyLevel};
+use crate::session::capability::SlotHandle;
 
 impl Core {
     /// 路由 Stream 入站事件 (B3)。
@@ -50,6 +51,70 @@ impl Core {
                         level: NotifyLevel::Info,
                         message: format!("接收文件完成: {} ({} bytes) from {}", file_name, file_size, peer_str),
                     });
+                });
+            }
+            Network_Inbound_Event::SessionStreamArrived { peer, session_id, mut stream } => {
+                let session_mgr = self.session_mgr.clone();
+                let peer_str = peer.to_base58();
+                tracing::info!("收到入站 Session 流 from {}, session={}", peer_str, session_id);
+
+                tokio::spawn(async move {
+                    // 1. 分配 slot
+                    let handle: SlotHandle = {
+                        let mut mgr = session_mgr.lock().unwrap();
+                        match mgr.allocate_slot(session_id) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                tracing::error!("Session {} bridge: slot 分配失败: {}", session_id, e);
+                                return;
+                            }
+                        }
+                    };
+
+                    let prompt_tx = handle.prompt_tx;
+                    let mut token_rx = handle.token_rx;
+
+                    // 2. 双向 bridge: stream ↔ mpsc
+                    // libp2p::Stream 不实现 tokio AsyncRead/AsyncWrite，用 Arc<Mutex> 共享
+                    let stream = std::sync::Arc::new(tokio::sync::Mutex::new(stream));
+
+                    // prompt 上行: stream → prompt_tx
+                    let stream_read = stream.clone();
+                    let sid = session_id;
+                    let read_task = tokio::spawn(async move {
+                        loop {
+                            let mut s = stream_read.lock().await;
+                            match read_session_frame(&mut *s).await {
+                                Ok(prompt) => {
+                                    drop(s);
+                                    if prompt_tx.send(prompt).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Session {} bridge read error: {}", sid, e);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+
+                    // token 下行: token_rx → stream
+                    let stream_write = stream.clone();
+                    let write_task = tokio::spawn(async move {
+                        while let Some(token) = token_rx.recv().await {
+                            let mut s = stream_write.lock().await;
+                            if write_session_frame(&mut *s, &token).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    // 等任一侧断开后清理
+                    tokio::select! {
+                        _ = read_task => {}
+                        _ = write_task => {}
+                    }
                 });
             }
         }

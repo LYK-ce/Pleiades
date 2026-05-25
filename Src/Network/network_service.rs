@@ -156,6 +156,8 @@ pub struct Network_Service {
 
     /// 带宽测试流控制 — accept 入站测试流
     pub(crate) bandwidth_accept_control: stream::Control,
+    /// Session 流控制 — accept 入站 session 流
+    pub(crate) session_accept_control: stream::Control,
 
     // ===== Tensor Stream Rendezvous =====
 
@@ -266,6 +268,8 @@ impl Network_Service {
         let tensor_open_control = node_swarm.behaviour().stream.new_control();
         let bandwidth_accept_control = node_swarm.behaviour().stream.new_control();
         let bandwidth_stream_control = node_swarm.behaviour().stream.new_control();
+        let session_accept_control = node_swarm.behaviour().stream.new_control();
+        let session_stream_control = node_swarm.behaviour().stream.new_control();
 
         // 6. 创建入站请求管理器和出站响应路由管理器
         let inbound_manager = Inbound_Manager::New(inbound_tx);
@@ -283,6 +287,7 @@ impl Network_Service {
             file_open_control,
             tensor_open_control,
             bandwidth_stream_control,
+            session_stream_control,
             rendezvous.clone(),
             event_bus.clone(),
         );
@@ -301,6 +306,7 @@ impl Network_Service {
             file_accept_control,
             tensor_accept_control,
             bandwidth_accept_control,
+            session_accept_control,
             rendezvous,
         };
 
@@ -347,6 +353,10 @@ impl Network_Service {
         let mut incoming_bandwidth_streams = self.bandwidth_accept_control
             .accept(StreamProtocol::new(BANDWIDTH_STREAM_PROTOCOL))
             .expect("带宽测试流协议注册失败");
+
+        let mut incoming_session_streams = self.session_accept_control
+            .accept(StreamProtocol::new(super::session_stream::protocol::SESSION_STREAM_PROTOCOL))
+            .expect("Session 流协议注册失败");
 
         // 4. 进入事件循环（使用select!同时监听网络事件、命令和入站流）
         info!("进入网络事件循环");
@@ -399,6 +409,25 @@ impl Network_Service {
                         }
                         Err(e) => {
                             warn!("带宽测试入站失败 from {}: {}", peer_id, e);
+                        }
+                    }
+                }
+                // 处理入站 Session 流 → 读 handshake → 转发给 Orchestrator
+                Some((peer_id, mut stream)) = incoming_session_streams.next() => {
+                    info!("收到入站 Session 流 from {}", peer_id);
+                    match super::session_stream::protocol::Read_Session_Handshake(&mut stream).await {
+                        Ok(session_id) => {
+                            info!("Session 流 handshake: session_id={}", session_id);
+                            let _ = self.orchestrator_event_tx.send(
+                                Network_Inbound_Event::SessionStreamArrived {
+                                    peer: peer_id,
+                                    session_id,
+                                    stream,
+                                }
+                            ).await;
+                        }
+                        Err(e) => {
+                            warn!("Session 流 handshake 读取失败 from {}: {}", peer_id, e);
                         }
                     }
                 }

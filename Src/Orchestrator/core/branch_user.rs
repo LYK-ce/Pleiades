@@ -13,6 +13,7 @@ use crate::vm::capability_binding::{
     register_storage_caps, register_ml_caps,
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
+use crate::network::{write_session_frame, read_session_frame};
 use std::path::Path;
 use tokio::sync::broadcast;
 
@@ -458,6 +459,91 @@ impl Core {
                     event_bus.Publish(Bus_Event::Output {
                         payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
                     });
+                });
+            }
+            // ════════════════════════════════════════════════
+            // Remote Chat（远端 Session 连接）
+            // ════════════════════════════════════════════════
+            UserCommand::RemoteChat { peer_name, session_id } => {
+                let caps = self.capabilities.clone();
+                let event_bus = caps.event_bus.clone();
+                let mut prompt_rx = self.prompt_tx.subscribe();
+
+                tokio::spawn(async move {
+                    // 1. 解析 peer name → PeerId
+                    let peer_id = match caps.peer_manager.Get_Peer_By_Name(&peer_name).await {
+                        Ok(info) => info.peer_id,
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("remote chat: 找不到节点 '{}': {}", peer_name, e),
+                            });
+                            return;
+                        }
+                    };
+
+                    // 2. 打开 Session stream (含 handshake)
+                    let stream = match caps.network.open_session_stream(&peer_id, session_id).await {
+                        Ok(s) => {
+                            tracing::info!("remote chat: connected to {} session {}", peer_name, session_id);
+                            s
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("remote chat: 连接失败: {}", e),
+                            });
+                            return;
+                        }
+                    };
+
+                    // 3. prompt 上行: broadcast → session stream
+                    // libp2p::Stream 不实现 tokio AsyncRead/AsyncWrite，用 Arc<Mutex> 共享
+                    let stream = std::sync::Arc::new(tokio::sync::Mutex::new(stream));
+                    let stream_send = stream.clone();
+                    let send_task = tokio::spawn(async move {
+                        loop {
+                            match prompt_rx.recv().await {
+                                Ok(prompt) => {
+                                    let mut s = stream_send.lock().await;
+                                    if write_session_frame(&mut *s, &prompt).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::warn!("remote chat: lagged {}", n);
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    });
+
+                    // 4. token 下行: session stream → EventBus
+                    let stream_recv = stream;
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                    });
+                    loop {
+                        let mut s = stream_recv.lock().await;
+                        match read_session_frame(&mut *s).await {
+                            Ok(token) => {
+                                drop(s);
+                                event_bus.Publish(Bus_Event::Stream {
+                                    payload: serde_json::json!({"type":"token","text":token}).to_string(),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("remote chat: recv error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
+                    });
+
+                    // 清理 send task
+                    send_task.abort();
                 });
             }
         }

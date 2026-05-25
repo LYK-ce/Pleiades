@@ -592,6 +592,33 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- remote chat <peer_name> <session_id> ----
+
+    if trimmed.starts_with("remote chat ") {
+        let args = trimmed.strip_prefix("remote chat ").unwrap_or("");
+        let mut parts = args.split_whitespace();
+        let peer_name = parts.next();
+        let sid_str = parts.next();
+        match (peer_name, sid_str.and_then(|s| s.parse::<u64>().ok())) {
+            (Some(name), Some(session_id)) => {
+                app.command_output.output_text =
+                    format!("已连接到远端 {} Session {}", name, session_id);
+                let cmd = UserCommand::RemoteChat {
+                    peer_name: name.to_string(),
+                    session_id,
+                };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                }
+            }
+            _ => {
+                app.command_output.output_text =
+                    "用法: remote chat <peer_name> <session_id>".to_string();
+            }
+        }
+        return;
+    }
+
     // ---- session inference <session_id> <model_path> ----
 
     if trimmed.starts_with("session inference ") {
