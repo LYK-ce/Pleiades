@@ -1013,7 +1013,6 @@ fn Render(frame: &mut Frame, app: &mut App) {
 /// - 无活跃 session：灰色 + "无活跃会话" 提示
 fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.focus == InputFocus::Prompt;
-    let has_session = app.Has_Active_Session();
 
     let border_color = if is_focused {
         Color::Cyan
@@ -1025,40 +1024,28 @@ fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
-    if has_session {
-        let input_text = Line::from(vec![
-            Span::styled(
-                "Prompt> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                app.prompt_buffer.as_str(),
-                Style::default().fg(Color::White),
-            ),
-        ]);
-        let paragraph = Paragraph::new(input_text).block(block);
-        frame.render_widget(paragraph, area);
+    let input_text = Line::from(vec![
+        Span::styled(
+            "Prompt> ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.prompt_buffer.as_str(),
+            Style::default().fg(Color::White),
+        ),
+    ]);
+    let paragraph = Paragraph::new(input_text).block(block);
+    frame.render_widget(paragraph, area);
 
-        // 设置光标位置（仅当 Prompt 获得焦点时）
-        if is_focused {
-            let cursor_x = area.x + 1 + "Prompt> ".len() as u16 + app.prompt_cursor as u16;
-            let cursor_y = area.y + 1;
-            if cursor_x < area.x + area.width - 1 {
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
+    // 设置光标位置（仅当 Prompt 获得焦点时）
+    if is_focused {
+        let cursor_x = area.x + 1 + "Prompt> ".len() as u16 + app.prompt_cursor as u16;
+        let cursor_y = area.y + 1;
+        if cursor_x < area.x + area.width - 1 {
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
-    } else {
-        let hint_text = Line::from(vec![
-            Span::styled("Prompt> ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "无活跃会话 (先执行 run <model>)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        let paragraph = Paragraph::new(hint_text).block(block);
-        frame.render_widget(paragraph, area);
     }
 }
 
