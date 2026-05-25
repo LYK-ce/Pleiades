@@ -502,20 +502,27 @@ impl Core {
                     let stream = std::sync::Arc::new(tokio::sync::Mutex::new(stream));
                     let stream_send = stream.clone();
                     let send_task = tokio::spawn(async move {
+                        tracing::info!("remote chat: send task started");
                         loop {
                             match prompt_rx.recv().await {
                                 Ok(prompt) => {
+                                    tracing::info!("remote chat: sending prompt '{}'", prompt);
                                     let mut s = stream_send.lock().await;
                                     if write_session_frame(&mut *s, &prompt).await.is_err() {
+                                        tracing::warn!("remote chat: send error");
                                         break;
                                     }
                                 }
                                 Err(broadcast::error::RecvError::Lagged(n)) => {
                                     tracing::warn!("remote chat: lagged {}", n);
                                 }
-                                Err(broadcast::error::RecvError::Closed) => break,
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    tracing::info!("remote chat: prompt channel closed");
+                                    break;
+                                }
                             }
                         }
+                        tracing::info!("remote chat: send task ended");
                     });
 
                     // 4. token 下行: session stream → EventBus
@@ -527,6 +534,7 @@ impl Core {
                         let mut s = stream_recv.lock().await;
                         match read_session_frame(&mut *s).await {
                             Ok(token) => {
+                                tracing::info!("remote chat: recv token '{}'", token);
                                 drop(s);
                                 event_bus.Publish(Bus_Event::Stream {
                                     payload: serde_json::json!({"type":"token","text":token}).to_string(),

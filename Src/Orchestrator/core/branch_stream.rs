@@ -82,12 +82,15 @@ impl Core {
                     let stream_read = stream.clone();
                     let sid = session_id;
                     let read_task = tokio::spawn(async move {
+                        tracing::info!("Session {} bridge: read task started", sid);
                         loop {
                             let mut s = stream_read.lock().await;
                             match read_session_frame(&mut *s).await {
                                 Ok(prompt) => {
+                                    tracing::info!("Session {} bridge: recv prompt '{}'", sid, prompt);
                                     drop(s);
                                     if prompt_tx.send(prompt).is_err() {
+                                        tracing::warn!("Session {} bridge: prompt_tx closed", sid);
                                         break;
                                     }
                                 }
@@ -97,17 +100,22 @@ impl Core {
                                 }
                             }
                         }
+                        tracing::info!("Session {} bridge: read task ended", sid);
                     });
 
                     // token 下行: token_rx → stream
                     let stream_write = stream.clone();
                     let write_task = tokio::spawn(async move {
+                        tracing::info!("Session {} bridge: write task started", sid);
                         while let Some(token) = token_rx.recv().await {
+                            tracing::info!("Session {} bridge: send token '{}'", sid, token);
                             let mut s = stream_write.lock().await;
                             if write_session_frame(&mut *s, &token).await.is_err() {
+                                tracing::warn!("Session {} bridge: write error", sid);
                                 break;
                             }
                         }
+                        tracing::info!("Session {} bridge: write task ended", sid);
                     });
 
                     // 等任一侧断开后清理
