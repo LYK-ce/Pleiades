@@ -170,6 +170,9 @@ impl Session {
                                 let eos = ml.get_eos();
 
                                 // ── 自回归生成 loop ───────────────────
+                                event_bus.Publish(Bus_Event::Output {
+                                    payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                                });
                                 for _ in 0..300 {
                                     // recv logits from ML
                                     match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
@@ -206,9 +209,8 @@ impl Session {
                                     match ml.decode(token_id) {
                                         Ok(text) => {
                                             tracing::info!("Session {} output: {}", session_id, text);
-                                            event_bus.Publish(Bus_Event::Notify {
-                                                level: NotifyLevel::Info,
-                                                message: format!("Session {}: {}", session_id, text),
+                                            event_bus.Publish(Bus_Event::Stream {
+                                                payload: serde_json::json!({"type":"token","text":text}).to_string(),
                                             });
                                         }
                                         Err(e) => {
@@ -242,6 +244,9 @@ impl Session {
                                     offset += 1;
                                 }
                                 context_len = offset;
+                                event_bus.Publish(Bus_Event::Output {
+                                    payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
+                                });
                             }
                             Err(e) => {
                                 tracing::warn!("Session {} chat recv error: {}", session_id, e);
