@@ -1,172 +1,62 @@
-# Task 6 v2.4: ML Thread 接入 — 单轮对话闭环
+# Task 6 v2.4: ML Thread 接入 — 自回归推理闭环 ✅
 
 > Presented by KeJi
 > Date: 2026-05-25
 
 ---
 
-## 背景
+## 状态：已完成
 
-当前链路：
-
-```
-✅ Chat → Session: prompt 输入 → encode → EventBus 打印 token count
-❌ Session → ML Thread: 不存在
-```
-
-本阶段目标：**闭合单轮推理链路**。
-
-```
-Prompt> 你好
-  → Chat ──"chat-{id}"──► Session
-                             ├─ encode → tokens
-                             ├─ tensorize → Tensor
-                             └─ send_frame("ml-{id}") ──► ML Thread
-                                                            ├─ recv tensor
-                                                            ├─ forward → logits
-                                                            └─ send_frame ──► Session
-                                                                                ├─ sample → token
-                                                                                ├─ decode → text
-                                                                                └─ EventBus 发布
-```
+端到端推理链路全部闭合并验证通过。105 tests pass。
 
 ---
 
-## 设计
-
-### 连接架构
+## 最终链路
 
 ```
-                    LocalStreamHub
-                         │
-         ┌───────────────┼───────────────┐
-         │               │               │
-  "chat-{id}"            │        "ml-{id}"
-  (chat task open)       │   (ML Thread open, Session accept_async)
-                          │
-                     Session.spawn()
-                     task (select!)
+pleiades> session create test.pgguf
+  → Session.spawn() → load_tokenizer → accept_async("session-{id}") + accept_async("ml-{id}")
+
+pleiades> chat 1
+  → chat task → subscribe(prompt_tx) → open("session-1") → loop { send prompt }
+
+pleiades> session inference 1 test.pgguf
+  → Core 查 builtin/inference.lua → spawn_lua_script
+  → storage_acquire_read → load_model → open_stream("ml-1") → forward loop
+
+[Tab] Prompt> 你好
+  → prompt_tx.send → chat task → local_send_frame → Session
+  → Session: encode → tensorize (U32) → tensor_to_bytes → send (prefill, offset=0)
+  → ML Thread: recv → bytes_to_tensor (U32) → forward → tensor_to_bytes (F32) → send
+  → Session: recv → bytes_to_tensor (F32) → sample (temp=0.0) → decode → EventBus
+  → loop 0..120: send next token → recv logits → sample → decode → EOS? → break
 ```
 
-Session 同时管理两条流：一条收 prompt，一条收 logits。ML Thread 通过 Lua 脚本启动。
+## 实际改动
 
-### Lua 脚本：`inference.lua`
-
-```lua
-COMMAND = "inference"
-DESCRIPTION = "启动 ML Thread，连接到指定 Session 并执行 forward"
-
--- 用法: exec inference session_id=<id> model_path=<path>
-function execute(params)
-    local session_id = params.session_id
-    local model_path = params.model_path
-
-    -- 1. 通过 Storage 获取模型路径
-    local handle = caps.storage_acquire_read(model_path)
-    local path = handle:path()
-
-    -- 2. 加载模型
-    local sess = ml.new("cpu")
-    sess:load_model(path, 0, 999999)
-
-    handle:release()
-
-    -- 3. 连接 Session
-    local stream = local_tensor.open_stream("ml-" .. session_id)
-
-    -- 4. forward loop
-    while true do
-        local tensor, offset = local_tensor.recv_tensor(stream, "cpu")
-        local logits = sess:forward(tensor, offset)
-        local_tensor.send_tensor(stream, logits, offset)
-    end
-end
-```
-
-### Session.spawn() 改动
-
-当前：`loop { recv from chat → encode → EventBus }`
-
-改为：`select! { chat.recv, ml.accept/recv }`
-
-```rust
-tokio::spawn(async move {
-    // 1. 加载 tokenizer（不变）
-    // 2. accept_async("chat-{id}") — 等 chat（不变）
-
-    // 3. 等 ML Thread 连接
-    let ml_id = format!("ml-{}", session_id);
-    let mut ml_stream = stream_hub.accept_async(&ml_id, 60_000).await?;
-
-    // 4. select! loop
-    let mut buf = Tensor_Buffer::New(4096);
-    let mut ml_buf = Tensor_Buffer::New(1024 * 1024);
-    loop {
-        select! {
-            // 收 prompt 来自 chat
-            result = local_recv_frame(&mut chat_stream, &mut buf) => {
-                let text = ...;
-                let tokens = ml.encode(&text)?;
-                let tensor = ml.tensorize(&tokens)?;
-                // 序列化 tensor → bytes → send to ml_stream
-                local_send_frame(&mut ml_stream, 0, &tensor_bytes).await?;
-            }
-
-            // 收 logits 来自 ML Thread
-            result = local_recv_frame(&mut ml_stream, &mut ml_buf) => {
-                let logits_tensor = deserialize(ml_buf);
-                let token = ml.sample(&logits_tensor, 0.8)?;
-                let text = ml.decode(token)?;
-                event_bus.Publish("Session {id}: {text}");
-            }
-        }
-    }
-});
-```
-
----
-
-## 改动清单
-
-### 1. `session.rs` — spawn() 改为 select! + ML 流
-
-| 改动 | 说明 |
+| 文件 | 改动 |
 |------|------|
-| 签名不变 | `spawn(stream_hub, event_bus, storage)` |
-| 新增 `accept_async("ml-{id}")` | 等 ML Thread 连入 |
-| `loop { recv }` → `select! { chat, ml }` | 双向收发 |
-| chat 分支 | encode → tensorize → 序列化 tensor → send ML |
-| ml 分支 | 反序列化 logits → sample → decode → EventBus |
+| `session.rs` | spawn() 加 accept_async("ml-{id}") + chat 分支自回归 loop (max 120 tokens, EOS 检测) |
+| `programs/builtin/inference.lua` | 新建：Storage 读模型 → load_model → open_stream → forward loop |
+| `command.rs` | 新增 `UserCommand::SessionInference` |
+| `TUI/mod.rs` | 新增 `session inference <id> <path>` 命令解析 |
+| `branch_user.rs` | SessionInference handler：查 builtin/inference.lua → spawn_lua_script |
+| `lua_tensor.rs` | tensor_to_bytes/bytes_to_tensor 加 dtype 支持 (0=F32, 1=U32) |
 
-> **tensor 序列化**：Session 调用 `tensorize()` 得到 `candle_core::Tensor` 后需要序列化为 bytes 才能通过 `local_send_frame` 发送。可以复用已有的 `LuaTensor` 序列化机制（`to_vec` → bytes），ML Thread 侧用 `tensor_from_bytes` 反序列化。
+## 已知问题
 
-### 2. `programs/user/inference.lua` — 新 Lua 脚本
+| 问题 | 说明 | 优先级 |
+|------|------|:--:|
+| logits 传输开销 | 每 token 传输 600KB logits（整个词表），应改为 ML Thread 侧 sample，只回传 token_id | 高 |
+| 无 stop string 检测 | temperature=0 时 EOS 正常工作，但非 greedy 时需要 stop string 检测兜底 | 中 |
+| Core 设计原则 | 已写入 instructions.md | ✅ |
+| B3 route_stream 阻塞 | 已修复为 spawn 模式 | ✅ |
 
-新建文件，内容如上设计。
+## 后续（未做）
 
-### 3. TUI 不需要改动
-
-用户通过 `exec inference session_id=1 model_path=test.pgguf` 触发。
-
----
-
-## 实施步骤
-
-| 步骤 | 内容 | 文件 |
-|:--:|------|------|
-| 1 | 创建 `ml-thread` 分支 | — |
-| 2 | 写 `inference.lua` | `programs/user/inference.lua` |
-| 3 | 改造 `Session::spawn()` — select! + ML 流 | `session.rs` |
-| 4 | `cargo test --lib` 全量通过 | — |
-| 5 | 合并回 `session-manager-reforge` | — |
-
----
-
-## 后续（本阶段不做）
-
-- 自回归多 token 生成
-- EOS 检测停止
-- reply 通道：ML 结果返回 chat task 显示在 Command Output 区
+- ML Thread 侧 sample（解决 600KB/logits 传输问题）
+- stop string 检测 (`<|im_end|>` 等)
+- reply 通道：token 返回 chat task 显示在 Command Output 区
 - 多 slot 支持
 - 远端 ML Thread 接入
 

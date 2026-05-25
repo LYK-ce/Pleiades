@@ -1,74 +1,54 @@
 # wb_6
 
 > start: 2026-05-22
-> end: 2026-05-24
-> branch: session-manager-reforge
+> end: 2026-05-25
+> branch: session-tokenizer
 
 ## State
-Task 6 v2 Phase 1-4 完成。104 tests pass。端到端验证通过（session create + chat → EventBus 打印）。
+Task 6 v2 全部子任务完成。端到端推理闭环验证通过。105 tests pass。
 
----
-
-## v2 设计总结
-
-### 架构变更
-v1 (集中式) → v2 (分布式):
-- 删除 SessionManager::run() 全局 loop + 6 组 mpsc channel
-- 删除 SessionManagerHandle、BatchRequest/BatchResult、assemble_batch/sample_batch
-- 删除 Session Stream 协议（/pleiades/session/1.0.0）及其全部代码
-- SessionManager 退化为 `Arc<Mutex<HashMap<u64, Session>>>` + 简单方法
-- 每 Session 独立 spawn task，通过 LocalStreamHub 等待连接
-
-### 连接方案
-- **本地**: TUI → LocalStreamHub (accept_async + notifier) → Session
-- **远端**: 待后续 Task（用 RendezvousMap register_notify + Tensor Stream）
-- libp2p 拒绝自环（相同 PeerId），因此本地不走 Tensor Stream
-
-### LocalStreamHub 增强
-- 新增 `accept_async()` — 用 oneshot + tokio::time::timeout，不阻塞 tokio
-- 新增 `notifiers` 字段 — open 时优先通知异步等的人
-- 旧 `accept()` 保持同步兼容
-
-### 已验证链路
 ```
-session create qwen3 → Session 1 spawned → accept_async waiting
-chat 1 你好 → hub.open → notifier paired → send_frame → 
-  Session recv_frame → EventBus "Session 1: hello"
+session create test.pgguf → chat 1 → session inference 1 test.pgguf
+  → Prompt> 你好 → encode → prefill → forward loop (0..120)
+  → sample (temp=0.0) → decode → EventBus → EOS stop
 ```
 
 ---
 
-## v2 实施记录
+## v2 子任务记录
 
-| 阶段 | 内容 | commit |
-|------|------|--------|
-| 1 | 删旧代码: Session_Stream, batch.rs, run(), mpsc, SessionManagerHandle | 9073ba1 |
-| 2 | SessionManager Arc<Mutex<>> | 9073ba1 |
-| 3 | RendezvousMap register_notify | 6129025 |
-| 4 | Session.spawn() + TUI 命令 session/chat | f2a35f9, 3ea8272, 46f4cb2 |
-| fix | chat 从 Tensor Stream 改 LocalStreamHub + accept_async | 46f4cb2 |
+| 子任务 | 内容 | commit |
+|--------|------|--------|
+| v2 | Session 核心重构 (Phase 1-4) | 9073ba1..46f4cb2 |
+| v2.1 | MlContext 拆分 model/tokenizer + load_tokenizer() | 6f6b147 |
+| v2.2 | Session 集成 tokenizer (Storage + load_tokenizer) | dd19536 |
+| v2.3 | Chat 持久连接 + Session loop + Prompt broadcast 通道 | de8f524 |
+| v2.4 | ML Thread 接入 + 自回归 loop (max 120, temp=0.0, EOS) | 26ef191..ceb5028 |
+| fix | B3 route_stream spawn 化 | fc30142 |
+| fix | Core 设计原则写入 instructions.md | fc30142 |
+| fix | Prompt 框渲染修复 | 20e686c |
+| fix | tensor_to_bytes 支持 U32 dtype | fcb6d0d |
 
----
+## 架构笔记（更新）
 
-## v1 遗留（已弃用）
-- GAP 1: ACK handshake — Session Stream 协议已删除，无此 gap
-- GAP 6: SlotHandle Drop — SlotHandle 已大幅简化，v2 不自动释放
-- GAP 16: Bridge unidirectional — Session Stream 已删除
-- GAP 17: ACK on slot — 同上
+- Session.spawn(): load_tokenizer → accept_async("session-{id}") → accept_async("ml-{id}") → select!
+- Chat 持久: broadcast::channel(16) → prompt_tx.subscribe() → loop → local_send_frame
+- ML Thread: builtin/inference.lua → storage_acquire_read → load_model → open_stream("ml-{id}") → forward loop
+- 自回归: chat 分支内 prefll + for 0..120 { recv ML → sample(0.0) → decode → EOS check → send next }
+- tensor 序列化: 1B dtype + header + data, dtype 0=F32 1=U32
+- ML Thread side: Lua 脚本，通过 spawn_lua_script 在独立线程运行
 
-## v2 待做
-- Session↔ML Thread 连接（local_tensor_stream rendezvous）
-- 远端接入（RendezvousMap register_notify + Tensor Stream）
-- Tokenizer 接入
-- EOS 检测
-- 多 Session 支持验证
+## 已知问题
 
----
+- logits 传输: 每 token ~600KB，应 ML Thread 侧 sample → 只回传 token_id (4B)
+- 无 stop string 检测: temp=0 时 EOS OK，非 greedy 需兜底
+- slot 机制未启用: chat 一对一 session，多 slot 未挂接
+- 远端 ML Thread 未实现
 
-## 架构笔记
-- SessionManager: Arc<Mutex<>> — 共享同一个 LocalStreamHub
-- Session.spawn(): tokio::spawn → accept_async → recv_frame → EventBus
-- LocalStreamHub: open() 优先 notifier → 否则 pending
-- accept_async(): 先查 pending → 注册 oneshot → tokio::time::timeout
-- accept(): 保持同步，用于 Lua 绑定等旧代码
-- RendezvousMap.register_notify: 保留，远端接入时使用
+## 待做
+
+- ML Thread 侧 sample（消除 logits 传输开销）
+- reply 通道（TUI Command Output 区显示生成文本）
+- 多 slot 支持
+- 远端接入
+
