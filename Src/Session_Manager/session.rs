@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::slot::{Slot, SlotState};
 use crate::event_bus::{Bus_Event, EventBus, NotifyLevel};
 use crate::ml_engine::context::MlSession;
+use crate::ml_engine::lua_tensor::{bytes_to_tensor, tensor_to_bytes};
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 use crate::storage::StorageCapability;
 
@@ -28,10 +29,11 @@ impl Session {
         Session { session_id, model_id, max_slots, slots, eos_token_id }
     }
 
-    /// 启动 Session 的 task
+    /// 启动 Session 的 task，管理 chat 和 ML 两条流。
     ///
-    /// Task 内部：加载 tokenizer → 等 TUI 连接 → 收 prompt → encode
-    /// 所有 I/O 在 task 内完成，不阻塞调用方。
+    /// `select!` 分支：
+    /// - chat 流收到 prompt → encode → tensorize → send to ML
+    /// - ML 流收到 logits → sample → decode → EventBus
     pub fn spawn(
         &self,
         stream_hub: Arc<LocalStreamHub>,
@@ -40,7 +42,8 @@ impl Session {
     ) {
         let session_id = self.session_id;
         let model_path = self.model_id.clone();
-        let stream_id = format!("session-{}", session_id);
+        let chat_stream_id = format!("session-{}", session_id);
+        let ml_stream_id = format!("ml-{}", session_id);
 
         tokio::spawn(async move {
             // ── 1. 加载 tokenizer ──────────────────────────
@@ -73,51 +76,128 @@ impl Session {
                 });
                 return;
             }
-            drop(_guard); // 释放 Storage 读锁
-
+            drop(_guard);
             tracing::info!("Session {} tokenizer loaded from {}", session_id, model_path);
 
-            // ── 2. 等 TUI 连接 ──────────────────────────────
-            let mut stream = match stream_hub.accept_async(&stream_id, 30_000).await {
+            // ── 2. 等 chat 连接 ────────────────────────────
+            let mut chat_stream = match stream_hub.accept_async(&chat_stream_id, 30_000).await {
                 Ok(s) => {
-                    tracing::info!("Session {} connected", session_id);
+                    tracing::info!("Session {} chat connected", session_id);
                     s
                 }
                 Err(e) => {
-                    tracing::warn!("Session {} accept error: {}", session_id, e);
+                    tracing::warn!("Session {} chat accept error: {}", session_id, e);
                     return;
                 }
             };
 
-            // ── 3. 收 prompt → encode → 发布（loop）──────
-            let mut buf = crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
-            loop {
-                match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
-                    &mut stream, &mut buf,
-                ).await {
-                    Ok(_offset) => {
-                        let text = String::from_utf8_lossy(buf.As_Slice());
-                        tracing::info!("Session {} received: {}", session_id, text);
+            // ── 3. 等 ML Thread 连接 ──────────────────────
+            let mut ml_stream = match stream_hub.accept_async(&ml_stream_id, 120_000).await {
+                Ok(s) => {
+                    tracing::info!("Session {} ML connected", session_id);
+                    s
+                }
+                Err(e) => {
+                    tracing::warn!("Session {} ML accept error: {}", session_id, e);
+                    return;
+                }
+            };
 
-                        match ml.encode(&text) {
-                            Ok(token_ids) => {
-                                event_bus.Publish(Bus_Event::Notify {
-                                    level: NotifyLevel::Info,
-                                    message: format!("Session {}: {} ({} tokens)",
-                                        session_id, text, token_ids.len()),
-                                });
+            // ── 4. select! loop ────────────────────────────
+            let mut chat_buf =
+                crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
+            let mut ml_buf =
+                crate::network::tensor_stream::protocol::Tensor_Buffer::New(16 * 1024 * 1024);
+
+            loop {
+                tokio::select! {
+                    // 收 prompt 来自 chat
+                    result = crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
+                        &mut chat_stream, &mut chat_buf,
+                    ) => {
+                        match result {
+                            Ok(_offset) => {
+                                let text = String::from_utf8_lossy(chat_buf.As_Slice());
+                                tracing::info!("Session {} chat: {}", session_id, text);
+
+                                // encode → tensorize → send to ML
+                                match ml.encode(&text) {
+                                    Ok(token_ids) => {
+                                        match ml.tensorize(&token_ids) {
+                                            Ok(tensor) => {
+                                                match tensor_to_bytes(&tensor) {
+                                                    Ok(data) => {
+                                                        if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
+                                                            &mut ml_stream, 0, &data,
+                                                        ).await {
+                                                            tracing::warn!("Session {} send tensor error: {}", session_id, e);
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("Session {} tensor_to_bytes error: {}", session_id, e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Session {} tensorize error: {}", session_id, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        event_bus.Publish(Bus_Event::Notify {
+                                            level: NotifyLevel::Error,
+                                            message: format!("Session {} encode failed: {}", session_id, e),
+                                        });
+                                    }
+                                }
                             }
                             Err(e) => {
-                                event_bus.Publish(Bus_Event::Notify {
-                                    level: NotifyLevel::Error,
-                                    message: format!("Session {} encode failed: {}", session_id, e),
-                                });
+                                tracing::warn!("Session {} chat recv error: {}", session_id, e);
+                                break;
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Session {} recv error: {}", session_id, e);
-                        break;
+
+                    // 收 logits 来自 ML Thread
+                    result = crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
+                        &mut ml_stream, &mut ml_buf,
+                    ) => {
+                        match result {
+                            Ok(_offset) => {
+                                // deserialize → sample → decode
+                                match bytes_to_tensor(ml_buf.As_Slice(), &candle_core::Device::Cpu) {
+                                    Ok(logits) => {
+                                        match ml.sample(&logits, 0.8) {
+                                            Ok(token_id) => {
+                                                match ml.decode(token_id) {
+                                                    Ok(text) => {
+                                                        tracing::info!("Session {} output: {}", session_id, text);
+                                                        event_bus.Publish(Bus_Event::Notify {
+                                                            level: NotifyLevel::Info,
+                                                            message: format!("Session {}: {}", session_id, text),
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("Session {} decode error: {}", session_id, e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Session {} sample error: {}", session_id, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Session {} bytes_to_tensor error: {}", session_id, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Session {} ML recv error: {}", session_id, e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
