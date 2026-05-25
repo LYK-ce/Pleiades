@@ -159,7 +159,7 @@ impl Session {
                                 let eos = ml.get_eos();
 
                                 // ── 自回归生成 loop ───────────────────
-                                for _ in 0..120 {
+                                for _ in 0..300 {
                                     // recv logits from ML
                                     match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                                         &mut ml_stream, &mut ml_buf,
