@@ -98,7 +98,7 @@ impl Core {
 
                             // 写 token 到 stream（token 由 Session 推理产生）
                             while let Some(token) = token_rx.recv().await {
-                                if token.is_empty() {
+                                if token == "\0" {
                                     // 空哨兵: 本轮结束
                                     let _ = write_session_frame(&mut stream, "").await;
                                     break;

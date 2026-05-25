@@ -452,7 +452,7 @@ impl Core {
                         payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
                     });
                     while let Some(token) = token_rx.recv().await {
-                        if token.is_empty() { continue; }  // skip sentinel
+                        if token == "\0" { continue; }  // skip sentinel
                         event_bus.Publish(Bus_Event::Stream {
                             payload: serde_json::json!({"type":"token","text":token}).to_string(),
                         });
