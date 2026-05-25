@@ -11,6 +11,7 @@
 
 use crate::orchestrator::job::JobId;
 use ratatui::layout::Rect;
+use tokio::sync::broadcast;
 
 // ============================================================
 // 视图模式
@@ -192,11 +193,15 @@ pub struct App {
     pub log_area: Rect,
     /// Command 面板区域
     pub command_area: Rect,
+
+    // ===== Prompt 通道 =====
+    /// Prompt 输入广播通道（TUI 初始化时创建，chat task 订阅）
+    pub prompt_tx: broadcast::Sender<String>,
 }
 
 impl App {
     /// 创建新的 App 实例
-    pub fn New() -> Self {
+    pub fn New(prompt_tx: broadcast::Sender<String>) -> Self {
         Self {
             view_mode: View_Mode::Idle,
             device: "cpu".to_string(),
@@ -210,6 +215,7 @@ impl App {
             cursor_position: 0,
             prompt_buffer: String::new(),
             prompt_cursor: 0,
+            prompt_tx,
             focus: InputFocus::Command,
             active_job_id: None,
             should_quit: false,

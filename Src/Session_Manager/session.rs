@@ -89,33 +89,36 @@ impl Session {
                 }
             };
 
-            // ── 3. 收 prompt → encode → 发布 ───────────────
+            // ── 3. 收 prompt → encode → 发布（loop）──────
             let mut buf = crate::network::tensor_stream::protocol::Tensor_Buffer::New(4096);
-            match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
-                &mut stream, &mut buf,
-            ).await {
-                Ok(_offset) => {
-                    let text = String::from_utf8_lossy(buf.As_Slice());
-                    tracing::info!("Session {} received: {}", session_id, text);
+            loop {
+                match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
+                    &mut stream, &mut buf,
+                ).await {
+                    Ok(_offset) => {
+                        let text = String::from_utf8_lossy(buf.As_Slice());
+                        tracing::info!("Session {} received: {}", session_id, text);
 
-                    match ml.encode(&text) {
-                        Ok(token_ids) => {
-                            event_bus.Publish(Bus_Event::Notify {
-                                level: NotifyLevel::Info,
-                                message: format!("Session {}: {} ({} tokens)",
-                                    session_id, text, token_ids.len()),
-                            });
-                        }
-                        Err(e) => {
-                            event_bus.Publish(Bus_Event::Notify {
-                                level: NotifyLevel::Error,
-                                message: format!("Session {} encode failed: {}", session_id, e),
-                            });
+                        match ml.encode(&text) {
+                            Ok(token_ids) => {
+                                event_bus.Publish(Bus_Event::Notify {
+                                    level: NotifyLevel::Info,
+                                    message: format!("Session {}: {} ({} tokens)",
+                                        session_id, text, token_ids.len()),
+                                });
+                            }
+                            Err(e) => {
+                                event_bus.Publish(Bus_Event::Notify {
+                                    level: NotifyLevel::Error,
+                                    message: format!("Session {} encode failed: {}", session_id, e),
+                                });
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("Session {} recv error: {}", session_id, e);
+                    Err(e) => {
+                        tracing::warn!("Session {} recv error: {}", session_id, e);
+                        break;
+                    }
                 }
             }
         });

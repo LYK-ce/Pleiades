@@ -75,6 +75,7 @@ use crate::orchestrator::job::JobId;
 pub fn TUI_Loop(
     mut event_rx: broadcast::Receiver<Bus_Event>,
     user_cmd_tx: mpsc::Sender<UserCommand>,
+    prompt_tx: broadcast::Sender<String>,
 ) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
@@ -82,7 +83,7 @@ pub fn TUI_Loop(
     // 启用鼠标捕获（滚轮等事件）
     crossterm::execute!(std::io::stdout(), EnableMouseCapture).ok();
 
-    let mut app = App::New();
+    let mut app = App::New(prompt_tx);
     app.Add_Log("Pleiades TUI 已启动".to_string());
 
     // 2. 事件循环
@@ -482,7 +483,7 @@ fn Handle_Prompt_Submit(app: &mut App) {
     if prompt.is_empty() {
         return;
     }
-    app.Add_Log("[提示] 无活跃推理会话，请先执行 run <model_path>".to_string());
+    let _ = app.prompt_tx.send(prompt);
 }
 
 // ============================================================
@@ -569,28 +570,23 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
-    // ---- chat <session_id> <prompt> ----
+    // ---- chat <session_id> ----
 
     if trimmed.starts_with("chat ") {
-        let args: Vec<&str> = trimmed.strip_prefix("chat ").unwrap_or("").splitn(2, ' ').collect();
-        if args.len() < 2 {
-            app.command_output.output_text =
-                "错误: 参数不足\n用法: chat <session_id> <prompt>".to_string();
-        } else {
-            let sid = args[0].parse::<u64>();
-            match sid {
-                Ok(session_id) => {
-                    app.command_output.output_text =
-                        format!("正在发送 prompt 到 Session {}...", session_id);
-                    let cmd = UserCommand::Chat { session_id, prompt: args[1].to_string() };
-                    if user_cmd_tx.blocking_send(cmd).is_err() {
-                        app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-                    }
+        let sid_str = trimmed.strip_prefix("chat ").unwrap_or("").trim();
+        let sid = sid_str.parse::<u64>();
+        match sid {
+            Ok(session_id) => {
+                app.command_output.output_text =
+                    format!("已连接到 Session {}，请切换到 Prompt 框输入", session_id);
+                let cmd = UserCommand::Chat { session_id };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
                 }
-                Err(_) => {
-                    app.command_output.output_text =
-                        format!("错误: '{}' 不是有效的 session_id", args[0]);
-                }
+            }
+            Err(_) => {
+                app.command_output.output_text =
+                    format!("错误: '{}' 不是有效的 session_id\n用法: chat <session_id>", sid_str);
             }
         }
         return;

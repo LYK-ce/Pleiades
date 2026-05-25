@@ -56,8 +56,8 @@ pub enum UserCommand {
     Reload,
     /// 创建推理 Session
     Session { model_id: String },
-    /// 向指定 Session 发送 prompt
-    Chat { session_id: u64, prompt: String },
+    /// 向指定 Session 建立持久连接
+    Chat { session_id: u64 },
 }
 
 // ============================================================

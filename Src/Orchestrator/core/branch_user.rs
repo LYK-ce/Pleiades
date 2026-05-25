@@ -14,6 +14,7 @@ use crate::vm::capability_binding::{
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
 use std::path::Path;
+use tokio::sync::broadcast;
 
 // ============================================================
 // 本地 HelpEntry（已从 EventBus 中解耦）
@@ -380,23 +381,45 @@ impl Core {
                     });
                 });
             }
-            UserCommand::Chat { session_id, prompt } => {
+            UserCommand::Chat { session_id } => {
                 let hub = self.capabilities.local_stream_hub.clone();
+                let event_bus = self.capabilities.event_bus.clone();
+                let mut prompt_rx = self.prompt_tx.subscribe();
                 tokio::spawn(async move {
                     let stream_id = format!("session-{}", session_id);
-                    tracing::info!("chat: opening LocalStream '{}'", stream_id);
-                    match hub.open(&stream_id) {
-                        Ok(mut stream) => {
-                            let data = prompt.as_bytes();
-                            tracing::info!("chat: sending {} bytes", data.len());
-                            if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                                &mut stream, 0, data,
-                            ).await {
-                                tracing::warn!("chat send error: {}", e);
-                            }
+                    let mut stream = match hub.open(&stream_id) {
+                        Ok(s) => {
+                            tracing::info!("chat: connected to Session {} via LocalStream", session_id);
+                            s
                         }
                         Err(e) => {
                             tracing::warn!("chat open error: {}", e);
+                            event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                                level: crate::event_bus::NotifyLevel::Error,
+                                message: format!("chat: 无法连接 Session {}: {}", session_id, e),
+                            });
+                            return;
+                        }
+                    };
+
+                    loop {
+                        match prompt_rx.recv().await {
+                            Ok(prompt) => {
+                                tracing::info!("chat: sending to Session {}: {}", session_id, prompt);
+                                if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
+                                    &mut stream, 0, prompt.as_bytes(),
+                                ).await {
+                                    tracing::warn!("chat send error: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!("chat: lagged {} messages", n);
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                tracing::info!("chat: prompt channel closed, exiting");
+                                break;
+                            }
                         }
                     }
                 });
