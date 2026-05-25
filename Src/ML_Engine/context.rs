@@ -21,7 +21,7 @@ use std::path::Path;
 use candle_core::{Device, Tensor};
 
 use super::gguf_model::{
-    GGUF_Decode, GGUF_Encode, GGUF_Load_Model, GGUF_Model, GGUF_Model_Inference, GGUF_Unload_Model,
+    GGUF_Load_Model, GGUF_Model, GGUF_Model_Inference, GGUF_Unload_Model,
 };
 use super::lua_tensor::LuaTensor;
 
@@ -60,8 +60,10 @@ pub struct MlSession {
 // ============================================================
 
 struct MlContext {
-    /// 模型权重 + tokenizer（None = 空壳状态）
+    /// 模型权重（None = 空壳状态）
     model: Option<GGUF_Model>,
+    /// tokenizer，独立加载（None = 未加载）
+    tokenizer: Option<shimmytok::Tokenizer>,
     /// 自增序列位置（forward offset=None 时自动 += seq_len）
     offset: usize,
     /// 采样随机数生成器状态 (xoshiro)
@@ -110,6 +112,7 @@ impl MlSession {
         Ok(Self {
             ctx: MlContext {
                 model: None,
+                tokenizer: None,
                 offset: 0,
                 rng_state: default_seed,
                 eos_token_id: 151645, // Qwen3 默认 EOS
@@ -118,8 +121,9 @@ impl MlSession {
         })
     }
 
-    /// 加载模型到当前 session。
+    /// 加载模型权重到当前 session。
     ///
+    /// 只加载权重，不加载 tokenizer。如需 tokenizer 请调用 `load_tokenizer()`。
     /// 若已有模型，先验证新模型路径有效再卸载旧模型，
     /// 避免因路径无效导致旧模型丢失。
     pub fn load_model(&mut self, path: &Path, start: usize, end: usize) -> Result<(), String> {
@@ -132,20 +136,37 @@ impl MlSession {
             GGUF_Unload_Model(old);
         }
 
-        self.ctx.eos_token_id = model.inference_config.eos_token;
         self.ctx.model = Some(model);
         self.ctx.offset = 0;
 
         Ok(())
     }
 
+    /// 仅加载 tokenizer，不加载模型权重。
+    ///
+    /// 从 GGUF/PGGUF 文件中提取 tokenizer 和 eos_token_id。
+    /// 适合只需要 encode/decode 能力的场景（如 Session）。
+    pub fn load_tokenizer(&mut self, path: &Path) -> Result<(), String> {
+        let tokenizer = shimmytok::Tokenizer::from_gguf_file(path)
+            .map_err(|e| format!("Failed to load tokenizer from {}: {}", path.display(), e))?;
+
+        // 同时从文件中解析 eos_token_id
+        let arch_info = super::gguf_model_manager::GGUF_Analyze(path)
+            .map_err(|e| format!("Failed to analyze model for eos token: {}", e))?;
+        self.ctx.eos_token_id = arch_info.eos_token_id;
+
+        self.ctx.tokenizer = Some(tokenizer);
+        Ok(())
+    }
+
     /// 卸载模型，回到空壳状态。
     ///
-    /// 不消耗 self，session 可重复 load_model。
+    /// 同时清除模型权重和 tokenizer。不消耗 self，session 可重复 load_model / load_tokenizer。
     pub fn unload(&mut self) {
         if let Some(model) = self.ctx.model.take() {
             GGUF_Unload_Model(model);
         }
+        self.ctx.tokenizer = None;
         self.ctx.offset = 0;
         self.ctx.eos_token_id = 151645;
     }
@@ -158,21 +179,28 @@ impl MlSession {
     // ─── 编解码 ────────────────────────────────────────────
 
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        let model = self
+        let tokenizer = self
             .ctx
-            .model
+            .tokenizer
             .as_ref()
-            .ok_or("encode: no model loaded. Call load_model() first.")?;
-        GGUF_Encode(model, text).map_err(|e| format!("Encode failed: {e}"))
+            .ok_or("encode: no tokenizer loaded. Call load_tokenizer() first.")?;
+        let format_prompt = format!("<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n");
+        tokenizer
+            .encode(&format_prompt, true)
+            .map_err(|e| format!("Encode failed: {e}"))
     }
 
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
-        let model = self
+        let tokenizer = self
             .ctx
-            .model
+            .tokenizer
             .as_ref()
-            .ok_or("decode: no model loaded. Call load_model() first.")?;
-        GGUF_Decode(model, &[token_id]).map_err(|e| format!("Decode failed: {e}"))
+            .ok_or("decode: no tokenizer loaded. Call load_tokenizer() first.")?;
+        let eos = self.ctx.eos_token_id;
+        let tokens: &[u32] = if token_id == eos { &[] } else { std::slice::from_ref(&token_id) };
+        tokenizer
+            .decode(tokens, true)
+            .map_err(|e| format!("Decode failed: {e}"))
     }
 
     // ─── 推理 ──────────────────────────────────────────────
@@ -324,6 +352,14 @@ impl mlua::UserData for MlSession {
             },
         );
 
+        methods.add_method_mut(
+            "load_tokenizer",
+            |_, sess, path: String| {
+                sess.load_tokenizer(std::path::Path::new(&path))
+                    .map_err(|e| mlua::Error::runtime(e))
+            },
+        );
+
         methods.add_method("has_model", |_, sess, (): ()| Ok(sess.has_model()));
 
         methods.add_method_mut("unload", |_, sess, (): ()| {
@@ -423,11 +459,19 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_without_model_errors() {
+    fn test_encode_without_tokenizer_errors() {
         let sess = MlSession::new("cpu").expect("create empty session");
         let result = sess.encode("hello");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("no model"));
+        assert!(result.unwrap_err().contains("no tokenizer"));
+    }
+
+    #[test]
+    fn test_decode_without_tokenizer_errors() {
+        let sess = MlSession::new("cpu").expect("create empty session");
+        let result = sess.decode(123);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no tokenizer"));
     }
 
     #[test]
