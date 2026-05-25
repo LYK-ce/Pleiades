@@ -120,36 +120,115 @@ impl Session {
                                 let text = String::from_utf8_lossy(chat_buf.As_Slice());
                                 tracing::info!("Session {} chat: {}", session_id, text);
 
-                                // encode → tensorize → send to ML
-                                match ml.encode(&text) {
-                                    Ok(token_ids) => {
-                                        match ml.tensorize(&token_ids) {
-                                            Ok(tensor) => {
-                                                match tensor_to_bytes(&tensor) {
-                                                    Ok(data) => {
-                                                        if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                                                            &mut ml_stream, 0, &data,
-                                                        ).await {
-                                                            tracing::warn!("Session {} send tensor error: {}", session_id, e);
-                                                            break;
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Session {} tensor_to_bytes error: {}", session_id, e);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Session {} tensorize error: {}", session_id, e);
-                                            }
-                                        }
-                                    }
+                                // ── encode → tensorize → prefill ──────
+                                let token_ids = match ml.encode(&text) {
+                                    Ok(ids) => ids,
                                     Err(e) => {
                                         event_bus.Publish(Bus_Event::Notify {
                                             level: NotifyLevel::Error,
                                             message: format!("Session {} encode failed: {}", session_id, e),
                                         });
+                                        continue;
                                     }
+                                };
+
+                                let tensor = match ml.tensorize(&token_ids) {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        tracing::warn!("Session {} tensorize error: {}", session_id, e);
+                                        continue;
+                                    }
+                                };
+
+                                let data = match tensor_to_bytes(&tensor) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!("Session {} tensor_to_bytes error: {}", session_id, e);
+                                        continue;
+                                    }
+                                };
+
+                                if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
+                                    &mut ml_stream, 0, &data,
+                                ).await {
+                                    tracing::warn!("Session {} send tensor error: {}", session_id, e);
+                                    break;
+                                }
+
+                                let mut offset = token_ids.len();
+                                let eos = ml.get_eos();
+
+                                // ── 自回归生成 loop ───────────────────
+                                for _ in 0..120 {
+                                    // recv logits from ML
+                                    match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
+                                        &mut ml_stream, &mut ml_buf,
+                                    ).await {
+                                        Ok(_offset) => {},
+                                        Err(e) => {
+                                            tracing::warn!("Session {} ML recv error in gen: {}", session_id, e);
+                                            break;
+                                        }
+                                    }
+
+                                    let logits = match bytes_to_tensor(ml_buf.As_Slice(), &candle_core::Device::Cpu) {
+                                        Ok(l) => l,
+                                        Err(e) => {
+                                            tracing::warn!("Session {} bytes_to_tensor error: {}", session_id, e);
+                                            break;
+                                        }
+                                    };
+
+                                    let token_id = match ml.sample(&logits, 0.8) {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            tracing::warn!("Session {} sample error: {}", session_id, e);
+                                            break;
+                                        }
+                                    };
+
+                                    // EOS → end generation
+                                    if token_id == eos {
+                                        break;
+                                    }
+
+                                    match ml.decode(token_id) {
+                                        Ok(text) => {
+                                            tracing::info!("Session {} output: {}", session_id, text);
+                                            event_bus.Publish(Bus_Event::Notify {
+                                                level: NotifyLevel::Info,
+                                                message: format!("Session {}: {}", session_id, text),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Session {} decode error: {}", session_id, e);
+                                        }
+                                    }
+
+                                    // send next single token
+                                    let next_t = match ml.tensorize(&[token_id]) {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            tracing::warn!("Session {} tensorize error: {}", session_id, e);
+                                            break;
+                                        }
+                                    };
+
+                                    let next_data = match tensor_to_bytes(&next_t) {
+                                        Ok(d) => d,
+                                        Err(e) => {
+                                            tracing::warn!("Session {} tensor_to_bytes error: {}", session_id, e);
+                                            break;
+                                        }
+                                    };
+
+                                    if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
+                                        &mut ml_stream, offset as u64, &next_data,
+                                    ).await {
+                                        tracing::warn!("Session {} send token error: {}", session_id, e);
+                                        break;
+                                    }
+                                    offset += 1;
                                 }
                             }
                             Err(e) => {
@@ -159,45 +238,12 @@ impl Session {
                         }
                     }
 
-                    // 收 logits 来自 ML Thread
+                    // 收 logits 来自 ML Thread（仅用于非自回归阶段，已废弃）
                     result = crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                         &mut ml_stream, &mut ml_buf,
                     ) => {
-                        match result {
-                            Ok(_offset) => {
-                                // deserialize → sample → decode
-                                match bytes_to_tensor(ml_buf.As_Slice(), &candle_core::Device::Cpu) {
-                                    Ok(logits) => {
-                                        match ml.sample(&logits, 0.8) {
-                                            Ok(token_id) => {
-                                                match ml.decode(token_id) {
-                                                    Ok(text) => {
-                                                        tracing::info!("Session {} output: {}", session_id, text);
-                                                        event_bus.Publish(Bus_Event::Notify {
-                                                            level: NotifyLevel::Info,
-                                                            message: format!("Session {}: {}", session_id, text),
-                                                        });
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Session {} decode error: {}", session_id, e);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Session {} sample error: {}", session_id, e);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Session {} bytes_to_tensor error: {}", session_id, e);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Session {} ML recv error: {}", session_id, e);
-                                break;
-                            }
-                        }
+                        // 自回归循环已在 chat 分支内完成，此分支仅防止 select! 预检 panic
+                        let _ = result;
                     }
                 }
             }
