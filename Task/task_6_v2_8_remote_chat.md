@@ -1,7 +1,8 @@
-# Task 6 v2.8: 远端 Chat — Session 流协议 + remote chat 命令
+# Task 6 v2.8: 远端 Chat — Session 流协议 + remote chat 命令 ✅
 
 > Presented by KeJi
 > Date: 2026-05-25
+> Updated: 2026-05-26 — yamux 缓冲修复
 
 ---
 
@@ -243,6 +244,14 @@ UserCommand::RemoteChat { peer_name, session_id } => {
 alice 侧无需任何新命令。当本地 `open_session_stream` 发出连接请求时，alice 的网络层通过 `incoming_session_streams` 接收，解析 handshake（session_id=1），构造 `SessionStreamArrived` 事件发给 Core。Core B3（阶段 3）自动分配 slot 建立 bridge。
 
 
+
+---
+
+## yamux 缓冲修复 (2026-05-26)
+
+最初 remote chat 采用单 task 串行（send prompt → recv tokens → send next...）。问题：recv 结束后回到 `prompt_rx.recv()` 等输入时，**没有人读 stream**，yamux 将 alice 发来的数据缓存在协议缓冲区。等用户输入新 prompt 触发 write 才 flush，导致 token 延迟显示和 Command Output 清空。
+
+修复：改为两 task 架构（`tokio_util::compat` + `tokio::io::split`），读 task 持续 `read_exact` 等待，yamux 数据即时递送。
 
 ---
 

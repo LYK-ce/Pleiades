@@ -31,7 +31,7 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 | v2.5 | 多轮对话: context_len + 增量 prefill + KV Cache 复用 + 4096 截断 | 8565f44 |
 | v2.6 | reply 流式输出: Stream token → Command Output 区 + Output 起止标记 | 97244f8 |
 | v2.7 | Slot 化: mpsc 通道对替代 local_tensor_stream (chat ↔ Session) | c768b07 |
-| v2.8 | 远端 Chat: Session 流协议 + remote chat + 空哨兵多轮 | 5914ac1..de9e247 |
+| v2.8 | 远端 Chat: Session 流协议 + remote chat + yamux 两 task 修复 | 5914ac1..c4a9172 |
 | v2.9 | Chat Template: messages数组 + think过滤 + KV Cache清理 + encode_messages | 7b669a3..4c6caf2 |
 
 ## 架构笔记（更新）
