@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::slot::{Slot, SlotState};
 use crate::event_bus::{Bus_Event, EventBus, NotifyLevel};
-use crate::ml_engine::context::MlSession;
+use crate::ml_engine::context::{MlSession, Message};
 use crate::ml_engine::lua_tensor::{bytes_to_tensor, tensor_to_bytes};
 use crate::storage::StorageCapability;
 use tokio::sync::mpsc;
@@ -122,8 +122,8 @@ impl Session {
             let mut slot_tokens: HashMap<usize, mpsc::UnboundedSender<String>> = HashMap::new();
             slot_tokens.insert(slot_id, token_tx);
 
-            // ── 4. select! loop ────────────────────────────
-            let mut context_len: usize = 0;
+            // ── 4. main loop ──────────────────────────────
+            let mut messages: Vec<Message> = Vec::new();
             let mut ml_buf =
                 crate::network::tensor_stream::protocol::Tensor_Buffer::New(16 * 1024 * 1024);
 
@@ -136,13 +136,14 @@ impl Session {
                     prompt_rx = new_rx;
                 }
 
-                // 收 prompt 来自当前 slot mpsc
+                // 收 prompt
                 match prompt_rx.recv().await {
                     Some(text) => {
                         tracing::info!("Session {} chat: {}", session_id, text);
+                        messages.push(Message { role: "user".into(), content: text });
 
-                        // ── encode → tensorize → prefill ──────
-                        let token_ids = match ml.encode(&text) {
+                        // ── encode 完整历史 → prefill offset=0 ──
+                        let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {
                                 event_bus.Publish(Bus_Event::Notify {
@@ -169,30 +170,20 @@ impl Session {
                             }
                         };
 
-                        // ── context 截断 (max 4096 tokens) ──────
-                        if context_len + token_ids.len() > 4096 {
-                            tracing::info!(
-                                "Session {} context overflow ({} → 4096+), resetting",
-                                session_id, context_len
-                            );
-                            context_len = 0;
-                        }
-
                         if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                            &mut ml_stream, context_len as u64, &data,
+                            &mut ml_stream, 0, &data,
                         ).await {
                             tracing::warn!("Session {} send tensor error: {}", session_id, e);
                             break;
                         }
-                        context_len += token_ids.len();
 
-                        let mut offset = context_len;
+                        let mut offset = token_ids.len();
                         let eos = ml.get_eos();
-                        tracing::info!("Session {} autoregression start: offset={}, EOS={}", session_id, offset, eos);
+                        tracing::info!("Session {} autoregression start: tokens={}, EOS={}", session_id, offset, eos);
 
                         // ── 自回归生成 loop ───────────────────
+                        let mut assistant_reply = String::new();
                         for _ in 0..300 {
-                            // recv logits from ML
                             match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                                 &mut ml_stream, &mut ml_buf,
                             ).await {
@@ -219,23 +210,22 @@ impl Session {
                                 }
                             };
 
-                            // EOS → end generation
                             if token_id == eos {
                                 tracing::info!("Session {} EOS (token_id={}) at offset {}", session_id, token_id, offset);
                                 break;
                             }
 
                             match ml.decode(token_id) {
-                                        Ok(text) => {
-                                            tracing::info!("Session {} output: {}", session_id, text);
-                                            let _ = slot_tokens[&slot_id].send(text);
-                                        }
+                                Ok(text) => {
+                                    tracing::info!("Session {} output: {}", session_id, text);
+                                    assistant_reply.push_str(&text);
+                                    let _ = slot_tokens[&slot_id].send(text);
+                                }
                                 Err(e) => {
                                     tracing::warn!("Session {} decode error: {}", session_id, e);
                                 }
                             }
 
-                            // send next single token
                             let next_t = match ml.tensorize(&[token_id]) {
                                 Ok(t) => t,
                                 Err(e) => {
@@ -260,8 +250,12 @@ impl Session {
                             }
                             offset += 1;
                         }
-                        context_len = offset;
-                        // 空哨兵: 本轮结束，通知 bridge 发送空帧给远端
+
+                        // 过滤 <think>...</think>，保留到 messages
+                        let cleaned = Self::strip_think(&assistant_reply);
+                        messages.push(Message { role: "assistant".into(), content: cleaned });
+
+                        // 空哨兵
                         let _ = slot_tokens[&slot_id].send("\0".into());
                     }
                     None => {
@@ -269,12 +263,29 @@ impl Session {
                         break;
                     }
                 }
-
-                // 同时收 ML recv（自回归完后的残留消息）
-                // ml_stream 的消息在自回归循环内已经被消费，
-                // 这里只用于 drain 残留
             }
         });
+    }
+
+    /// 去掉 assistant reply 中的 <think>...</think> 块
+    fn strip_think(reply: &str) -> String {
+        let think_start = "<think>";
+        let think_end = "</think>";
+        let mut result = String::new();
+        let mut remaining = reply;
+        while let Some(start) = remaining.find(think_start) {
+            result.push_str(&remaining[..start]);
+            let after_start = &remaining[start + think_start.len()..];
+            if let Some(end) = after_start.find(think_end) {
+                remaining = &after_start[end + think_end.len()..];
+            } else {
+                // 有 <think> 但没有 </think>，跳过整段
+                result.push_str(remaining);
+                return result;
+            }
+        }
+        result.push_str(remaining);
+        result
     }
 
     pub fn allocate(&mut self, token_tx: mpsc::UnboundedSender<String>) -> Option<usize> {

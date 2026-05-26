@@ -26,6 +26,16 @@ use super::gguf_model::{
 use super::lua_tensor::LuaTensor;
 
 // ============================================================
+// Message — 对话消息
+// ============================================================
+
+/// 对话消息
+pub struct Message {
+    pub role: String,   // "system", "user", "assistant"
+    pub content: String,
+}
+
+// ============================================================
 // MlSession — 对外句柄 (Lua userdata)
 // ============================================================
 
@@ -70,6 +80,8 @@ struct MlContext {
     rng_state: u64,
     /// EOS token ID
     eos_token_id: u32,
+    /// chat template，从 GGUF metadata 读取
+    chat_template: Option<String>,
     /// 运行设备
     device: Device,
 }
@@ -116,6 +128,7 @@ impl MlSession {
                 offset: 0,
                 rng_state: default_seed,
                 eos_token_id: 151645, // Qwen3 默认 EOS
+                chat_template: None,
                 device,
             },
         })
@@ -154,6 +167,7 @@ impl MlSession {
         let arch_info = super::gguf_model_manager::GGUF_Analyze(path)
             .map_err(|e| format!("Failed to analyze model for eos token: {}", e))?;
         self.ctx.eos_token_id = arch_info.eos_token_id;
+        self.ctx.chat_template = arch_info.chat_template.clone();
 
         self.ctx.tokenizer = Some(tokenizer);
         Ok(())
@@ -189,6 +203,80 @@ impl MlSession {
         tokenizer
             .encode_with_options(&format_prompt, &opts)
             .map_err(|e| format!("Encode failed: {e}"))
+    }
+
+    /// 使用 chat template 编码 messages 数组。
+    ///
+    /// 若有 chat_template → apply_template → tokenize。
+    /// 若无 → fallback 为当前硬编码 Qwen3 格式（仅支持最后一轮 user）。
+    pub fn encode_messages(&self, messages: &[Message]) -> Result<Vec<u32>, String> {
+        let tokenizer = self
+            .ctx
+            .tokenizer
+            .as_ref()
+            .ok_or("encode_messages: no tokenizer loaded.")?;
+
+        let prompt = self.apply_chat_template(messages);
+        let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
+        tokenizer
+            .encode_with_options(&prompt, &opts)
+            .map_err(|e| format!("Encode messages failed: {e}"))
+    }
+
+    /// 应用 chat template 到 messages 数组，返回格式化文本。
+    fn apply_chat_template(&self, messages: &[Message]) -> String {
+        if let Some(ref tmpl) = self.ctx.chat_template {
+            // 简单模板替换: 支持 Qwen3 格式的 Jinja 模板
+            // "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n"
+            Self::render_template(tmpl, messages)
+        } else {
+            // Fallback: 硬编码 Qwen3 格式
+            let mut result = String::new();
+            for msg in messages {
+                if msg.role == "system" {
+                    result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
+                } else if msg.role == "user" {
+                    result.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", msg.content));
+                } else if msg.role == "assistant" {
+                    result.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content));
+                }
+            }
+            // 最后一个 assistant 不带 <|im_end|>，模型来补
+            if result.ends_with("<|im_end|>\n") {
+                let trim_len = "<|im_end|>\n".len();
+                result.truncate(result.len() - trim_len);
+            }
+            result
+        }
+    }
+
+    /// 简易 Jinja 模板渲染 — 仅支持 messages loop + role/content 变量
+    fn render_template(tmpl: &str, messages: &[Message]) -> String {
+        // 提取 for 循环内的文本
+        let for_tag = "{% for message in messages %}";
+        let endfor_tag = "{% endfor %}";
+        let mut result = String::new();
+
+        if let Some(for_start) = tmpl.find(for_tag) {
+            // for 之前的内容
+            result.push_str(&tmpl[..for_start]);
+            let body_start = for_start + for_tag.len();
+            if let Some(body_end) = tmpl[body_start..].find(endfor_tag) {
+                let body = &tmpl[body_start..body_start + body_end];
+                let after = &tmpl[body_start + body_end + endfor_tag.len()..];
+                for msg in messages {
+                    let line = body
+                        .replace("{{ message.role }}", &msg.role)
+                        .replace("{{ message.content }}", &msg.content);
+                    result.push_str(&line);
+                }
+                result.push_str(after);
+            }
+        } else {
+            // 无模板语法，直接返回原文
+            result = tmpl.to_string();
+        }
+        result
     }
 
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
