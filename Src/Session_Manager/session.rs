@@ -228,16 +228,10 @@ impl Session {
                             match ml.decode(token_id) {
                                         Ok(text) => {
                                             tracing::info!("Session {} output: {}", session_id, text);
-                                            // 无效 token → 提前终止，避免污染 KV Cache
-                                            let bad = text.is_empty() || text.contains('�');
                                             let _ = slot_tokens[&slot_id].send(text);
-                                            if bad {
-                                                break;
-                                            }
                                         }
                                 Err(e) => {
                                     tracing::warn!("Session {} decode error: {}", session_id, e);
-                                    break;
                                 }
                             }
 
