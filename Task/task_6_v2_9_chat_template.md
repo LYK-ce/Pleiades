@@ -71,7 +71,7 @@
 | spawn() 中 `messages: Vec<Message>` 替代 `context_len` | `session.rs` |
 | 收到 prompt: `messages.push(Message::user(prompt))` | `session.rs` |
 | 推理前: `ml.encode_messages(&messages)` → prefill(offset=0) | `session.rs` |
-| 自回归: 累计 `assistant_reply: String` | `session.rs` |
+| 自回归: 累计 `assistant_reply: String`（offset 在轮内自回归中保留） | `session.rs` |
 | 过滤: 去掉 `<think>...</think>` 后 push 到 messages | `session.rs` |
 | prefill 改为 offset=0（因为每轮重新 tokenize 全部历史） | `session.rs` |
 
@@ -79,8 +79,8 @@
 
 | 步骤 | 文件 |
 |------|------|
-| 删除旧的 `context_len` 机制（KV Cache offset 跟踪） | `session.rs` |
-| 简化 spawn() 逻辑：去掉增量 prefill 相关代码 | `session.rs` |
+| 删除跨轮 `context_len`（每轮重新 tokenize，prefill offset=0） | `session.rs` |
+| 轮内自回归 `offset` 保留不变（prefill 后从全量 tokens 长度开始） | `session.rs` |
 | 旧的 `encode()` 方法保留或标记 deprecated | `context.rs` |
 
 ---
