@@ -18,7 +18,7 @@ function execute(params)
 
     -- 2. 加载模型权重
     caps.print("inference: 加载模型 " .. path .. " ...")
-    local sess = ml.new("cpu")
+    local sess = ml.new("cuda")
     sess:load_model(path, 0, 999999)
     handle:release()
 
@@ -31,7 +31,7 @@ function execute(params)
 
     -- 4. forward loop
     while true do
-        local tensor, offset = local_tensor.recv_tensor(stream, "cpu")
+        local tensor, offset = local_tensor.recv_tensor(stream, "cuda")
         local logits = sess:forward(tensor, offset)
         local_tensor.send_tensor(stream, logits, offset)
     end
