@@ -61,9 +61,3 @@
 - **风险**：remote chat 单 task 串行时，recv 结束回 prompt 等待期间无人读 libp2p stream，yamux 缓冲对端数据。等新 prompt 触发 write 才 flush，导致 token 延迟和 Command Output 清空。
 - **影响范围**：`branch_user.rs` remote chat handler 的 stream 读写架构
 - **当前状态**：已修复 — 改为两 task（`tokio_util::compat` + `tokio::io::split`），读 task 持续 read_exact 避免 yamux 缓冲
-
-### 8. 远端 ML Thread 未实现
-
-- **风险**：当前 ML Thread 必须和 Session 在同一进程内（通过 local_tensor_stream 连接）。无法将模型推理卸载到远端节点。
-- **影响范围**：inference.lua + Session.spawn() 的 ml_stream 连接方式
-- **方向**：ML Thread 支持网络接入（通过 /pleiades/tensor/1.0.0 或新协议），Session 通过网络接受 ML 连接
