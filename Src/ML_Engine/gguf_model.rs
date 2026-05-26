@@ -365,8 +365,9 @@ pub fn GGUF_Encode(model: &GGUF_Model, input: &str) -> Result<Vec<u32>> {
 
     let format_prompt = format!("<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n");
 
+    let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
     let token_ids = tokenizer
-        .encode(&format_prompt, true)
+        .encode_with_options(&format_prompt, &opts)
         .map_err(|e| anyhow::anyhow!("Tokenization error: {}", e))?;
 
     Ok(token_ids)

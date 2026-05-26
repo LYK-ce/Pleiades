@@ -185,8 +185,9 @@ impl MlSession {
             .as_ref()
             .ok_or("encode: no tokenizer loaded. Call load_tokenizer() first.")?;
         let format_prompt = format!("<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n");
+        let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
         tokenizer
-            .encode(&format_prompt, true)
+            .encode_with_options(&format_prompt, &opts)
             .map_err(|e| format!("Encode failed: {e}"))
     }
 
