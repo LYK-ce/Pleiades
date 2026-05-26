@@ -32,6 +32,7 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 | v2.6 | reply 流式输出: Stream token → Command Output 区 + Output 起止标记 | 97244f8 |
 | v2.7 | Slot 化: mpsc 通道对替代 local_tensor_stream (chat ↔ Session) | c768b07 |
 | v2.8 | 远端 Chat: Session 流协议 + remote chat + 空哨兵多轮 | 5914ac1..de9e247 |
+| v2.9 | Chat Template: messages数组 + think过滤 + KV Cache清理 + encode_messages | 7b669a3..4c6caf2 |
 
 ## 架构笔记（更新）
 
@@ -56,11 +57,15 @@ session create model.pgguf → chat 1 → session inference 1 model.pgguf
 - 多轮: 空帧哨兵 (len=0) 作轮次分隔 → bridge 转发 → 远端退出 recv loop 回到 prompt 等待
 - 死锁修复: Arc<Mutex<Stream>> → 单 task 串行读写
 - slot_notify: oneshot → mpsc unbounded (支持多 slot 动态注册)
+- messages 数组: 每轮 encode 完整历史 → prefill offset=0, ML Thread offset=0 时 reset KV Cache
+- strip_think: 去掉 assistant_reply 中的 <think>...</think> 块再存入 messages
+- chat_template: GGUF metadata 已读取但 fallback 硬编码 Qwen3 格式（Jinja 解析待后续）
 
 ## 已知问题
 
 - logits 传输: 每 token ~600KB，应 ML Thread 侧 sample → 只回传 token_id (4B)
 - 无 stop string 检测: temp=0 时 EOS OK，非 greedy 需兜底
+- KV Cache: 每轮全量 prefill 清空重建，未利用历史前缀复用（因 think 过滤后前缀可能变化）
 - slot 机制未启用: chat 一对一 session，多 slot 未挂接
 - 远端 ML Thread 未实现
 

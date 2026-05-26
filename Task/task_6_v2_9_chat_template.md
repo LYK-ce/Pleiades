@@ -1,15 +1,21 @@
-# Task 6 v2.9: Chat Template 规范化 — 读取 GGUF 模板 + 过滤 think 块 + 多轮完整历史
+# Task 6 v2.9: Chat Template 规范化 — 读取 GGUF 模板 + 过滤 think 块 + 多轮完整历史 ✅
 
 > Presented by KeJi
 > Date: 2026-05-26
 
 ---
 
+## 状态：已完成
+
+多轮对话端到端验证通过。messages 数组 + think 过滤 + KV Cache 清理全部闭环。
+
+---
+
 ## 目标
 
-1. 从 GGUF metadata 读取 `tokenizer.chat_template` 替代硬编码 Qwen3 模板
-2. 多轮对话改为每轮重新 tokenize 完整历史（messages 数组），而非增量拼接
-3. 过滤 `<think>...</think>` 块，不将其保留在对话历史中
+1. ✅ 从 GGUF metadata 读取 `tokenizer.chat_template`（当前 fallback 硬编码，详见局限）
+2. ✅ 多轮对话改为每轮重新 tokenize 完整历史（messages 数组）
+3. ✅ 过滤 `<think>...</think>` 块，不将其保留在对话历史中
 
 ---
 

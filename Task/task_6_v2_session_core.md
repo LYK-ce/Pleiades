@@ -317,3 +317,9 @@ GGUF metadata 中的 `tokenizer.chat_template` 已能读取（`Model_Arch_Info.c
 
 每轮重新 tokenize 完整 history，KV Cache 自动前缀匹配。对于长对话（>100 轮），tokenize 开销线性增长。后续可加 token 缓存避免重复 tokenize 历史前缀。
 
+### KV Cache 每轮重建
+
+当前多轮方案：每轮清空 KV Cache → encode 完整 history → prefill(offset=0)。ML Thread 在 `inference.lua` 中检测 `offset==0` 时自动调用 `sess:reset_kv_cache()`。
+
+原因：`strip_think` 过滤后 assistant 内容可能与 KV Cache 不符，无法安全复用历史前缀。这导致每轮都做全量 prefill，浪费了前缀复用的计算。后续可对 think 过滤后的前缀做一致性校验，仅在变化时重建。
+
