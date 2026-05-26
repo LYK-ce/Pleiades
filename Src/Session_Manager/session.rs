@@ -142,15 +142,7 @@ impl Session {
                         tracing::info!("Session {} chat: {}", session_id, text);
                         messages.push(Message { role: "user".into(), content: text });
 
-                        // ── encode 完整历史 → clear KV Cache → prefill offset=0 ──
-                        // 发送控制帧通知 ML Thread 清理 KV Cache (offset = u64::MAX - 1)
-                        let clear_offset: u64 = u64::MAX - 1;
-                        if let Err(e) = crate::orchestrator::local_tensor_stream::frames::local_send_frame(
-                            &mut ml_stream, clear_offset, &[],
-                        ).await {
-                            tracing::warn!("Session {} send clear-cache error: {}", session_id, e);
-                            break;
-                        }
+                        // ── encode 完整历史 → prefill offset=0 ──
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {
