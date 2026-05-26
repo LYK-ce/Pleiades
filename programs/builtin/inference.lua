@@ -32,7 +32,13 @@ function execute(params)
     -- 4. forward loop
     while true do
         local tensor, offset = local_tensor.recv_tensor(stream, "cuda")
+        -- offset = u64::MAX - 1: 清理 KV Cache 控制帧
+        if offset == 18446744073709551614 then
+            sess:reset_kv_cache()
+            goto continue
+        end
         local logits = sess:forward(tensor, offset)
         local_tensor.send_tensor(stream, logits, offset)
+        ::continue::
     end
 end

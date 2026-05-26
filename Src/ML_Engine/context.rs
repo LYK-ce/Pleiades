@@ -473,6 +473,14 @@ impl mlua::UserData for MlSession {
         });
 
         methods.add_method_mut(
+            "reset_kv_cache",
+            |_, sess, (): ()| {
+                sess.reset_kv_cache();
+                Ok(())
+            },
+        );
+
+        methods.add_method_mut(
             "forward",
             |_, sess, (tensor, offset): (mlua::AnyUserData, Option<usize>)| {
                 let t = tensor.borrow::<LuaTensor>().map_err(|e| {
