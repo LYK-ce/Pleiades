@@ -498,60 +498,48 @@ impl Core {
                         }
                     };
 
-                    // 3. 单 task 串行: prompt 广播 → stream write → stream read → EventBus
-                    // libp2p::Stream 不支持 tokio::io::split，读写串行避免锁竞争
-                    let mut stream = stream;
-                    let send_task = tokio::spawn(async move {
-                        tracing::info!("remote chat: send task started");
+                    // 3. 双 task: prompt 上行 / token 下行（仿照本地 chat）
+                    let (mut stream_read, mut stream_write) = {
+                        use tokio_util::compat::FuturesAsyncReadCompatExt;
+                        let compat = stream.compat();
+                        tokio::io::split(compat)
+                    };
+
+                    // prompt 上行: broadcast → stream write
+                    tokio::spawn(async move {
                         loop {
                             match prompt_rx.recv().await {
                                 Ok(prompt) => {
                                     tracing::info!("remote chat: sending prompt '{}'", prompt);
-                                    if write_session_frame(&mut stream, &prompt).await.is_err() {
-                                        tracing::warn!("remote chat: send error");
-                                        break;
-                                    }
-
-                                    // token 下行: read from stream → EventBus
-                                    event_bus.Publish(Bus_Event::Output {
-                                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
-                                    });
-                                    loop {
-                                        match read_session_frame(&mut stream).await {
-                                            Ok(token) => {
-                                                if token.is_empty() {
-                                                    // 空哨兵: 本轮结束
-                                                    break;
-                                                }
-                                                tracing::info!("remote chat: recv token '{}'", token);
-                                                event_bus.Publish(Bus_Event::Stream {
-                                                    payload: serde_json::json!({"type":"token","text":token}).to_string(),
-                                                });
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("remote chat: recv error: {}", e);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    event_bus.Publish(Bus_Event::Output {
-                                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
-                                    });
+                                    use tokio::io::AsyncWriteExt;
+                                    let payload = prompt.as_bytes();
+                                    if stream_write.write_all(&(payload.len() as u32).to_be_bytes()).await.is_err() { break; }
+                                    if stream_write.write_all(payload).await.is_err() { break; }
                                 }
-                                Err(broadcast::error::RecvError::Lagged(n)) => {
-                                    tracing::warn!("remote chat: lagged {}", n);
-                                }
-                                Err(broadcast::error::RecvError::Closed) => {
-                                    tracing::info!("remote chat: prompt channel closed");
-                                    break;
-                                }
+                                Err(_) => break,
                             }
                         }
-                        tracing::info!("remote chat: send task ended");
                     });
 
-                    // 主 task 等待 send_task 结束
-                    let _ = send_task.await;
+                    // token 下行: stream read → EventBus
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt;
+                        event_bus.Publish(Bus_Event::Output {
+                            payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                        });
+                        loop {
+                            let mut len_buf = [0u8; 4];
+                            if stream_read.read_exact(&mut len_buf).await.is_err() { break; }
+                            let len = u32::from_be_bytes(len_buf) as usize;
+                            let mut buf = vec![0u8; len];
+                            if stream_read.read_exact(&mut buf).await.is_err() { break; }
+                            let token = String::from_utf8_lossy(&buf).into_owned();
+                            if token.is_empty() { continue; }
+                            event_bus.Publish(Bus_Event::Stream {
+                                payload: serde_json::json!({"type":"token","text":token}).to_string(),
+                            });
+                        }
+                    });
                 });
             }
         }
