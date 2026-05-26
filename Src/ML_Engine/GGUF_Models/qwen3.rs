@@ -611,6 +611,12 @@ impl Model_Weights {
             span_output,
         }
     }
+
+    pub fn clear_kv_cache(&mut self) {
+        for layer in &mut self.layers {
+            layer.Clear_Kv_Cache();
+        }
+    }
 }
 
 // ============================================================

@@ -379,6 +379,13 @@ impl MlSession {
         self.ctx.offset
     }
 
+    /// 清除 KV Cache（每轮对话开始前调用）
+    pub fn reset_kv_cache(&mut self) {
+        if let Some(ref mut model) = self.ctx.model {
+            super::gguf_model::GGUF_Model_Clear_KV_Cache(model);
+        }
+    }
+
     // ─── 随机种子 ──────────────────────────────────────────
 
     /// 设置采样随机数生成器的种子。

@@ -343,6 +343,13 @@ pub fn GGUF_Model_Inference(
     Ok(result)
 }
 
+/// GGUF_Model_Clear_KV_Cache — 清除模型内部 KV Cache
+///
+/// 在每轮对话开始前调用，确保新旧对话的 KV Cache 不冲突。
+pub fn GGUF_Model_Clear_KV_Cache(model: &mut GGUF_Model) {
+    model.model.clear_kv_cache();
+}
+
 // ============================================================
 // Tokenizer 独立 API
 // ============================================================

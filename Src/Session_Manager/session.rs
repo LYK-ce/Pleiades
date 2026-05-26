@@ -142,7 +142,8 @@ impl Session {
                         tracing::info!("Session {} chat: {}", session_id, text);
                         messages.push(Message { role: "user".into(), content: text });
 
-                        // ── encode 完整历史 → prefill offset=0 ──
+                        // ── encode 完整历史 → clear KV Cache → prefill offset=0 ──
+                        ml.reset_kv_cache();
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {

@@ -75,7 +75,17 @@
 | 过滤: 去掉 `<think>...</think>` 后 push 到 messages | `session.rs` |
 | prefill 改为 offset=0（因为每轮重新 tokenize 全部历史） | `session.rs` |
 
-### 阶段 4: 清理
+### 阶段 4: 清理 KV Cache API
+
+| 步骤 | 文件 |
+|------|------|
+| `GGUF_Model` 加 `reset_kv_cache(&mut self)` 方法 | `gguf_model.rs` |
+| `MlSession` 加 `reset_kv_cache(&mut self)` 公开方法 | `context.rs` |
+| Lua 绑定加 `sess:reset_kv_cache()` 方法 | `context.rs` (UserData impl) |
+| Session.spawn() 中每轮 prefill 前调 `ml.reset_kv_cache()` | `session.rs` |
+| 同时可恢复 `encode_messages(完整历史)` + `prefill(offset=0)` | `session.rs` |
+
+### 阶段 5: 清理
 
 | 步骤 | 文件 |
 |------|------|
