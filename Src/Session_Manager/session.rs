@@ -188,6 +188,7 @@ impl Session {
 
                         let mut offset = context_len;
                         let eos = ml.get_eos();
+                        tracing::info!("Session {} autoregression start: offset={}, EOS={}", session_id, offset, eos);
 
                         // ── 自回归生成 loop ───────────────────
                         for _ in 0..300 {
@@ -220,6 +221,7 @@ impl Session {
 
                             // EOS → end generation
                             if token_id == eos {
+                                tracing::info!("Session {} EOS (token_id={}) at offset {}", session_id, token_id, offset);
                                 break;
                             }
 
