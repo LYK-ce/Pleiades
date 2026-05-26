@@ -26,6 +26,7 @@
 
 use futures::prelude::*;
 use std::io;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ===== 协议标识符 =====
 pub const SESSION_STREAM_PROTOCOL: &str = "/pleiades/session/1.0.0";
@@ -61,17 +62,8 @@ pub async fn Read_Session_Handshake(
 // ============================================================
 
 /// 写入 Session 数据帧: [4B BE u32 len][UTF-8 payload]
-pub async fn write_session_frame(
-    stream: &mut libp2p::Stream,
-    text: &str,
-) -> io::Result<()> {
+pub async fn write_session_frame<S: AsyncWriteExt + Unpin>(stream: &mut S, text: &str) -> io::Result<()> {
     let payload = text.as_bytes();
-    if payload.len() > MAX_FRAME_SIZE as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Session 帧过大: {} bytes (max {})", payload.len(), MAX_FRAME_SIZE),
-        ));
-    }
     stream.write_all(&(payload.len() as u32).to_be_bytes()).await?;
     stream.write_all(payload).await?;
     stream.flush().await?;
@@ -79,20 +71,10 @@ pub async fn write_session_frame(
 }
 
 /// 读取 Session 数据帧: [4B BE u32 len][UTF-8 payload]
-pub async fn read_session_frame(
-    stream: &mut libp2p::Stream,
-) -> io::Result<String> {
+pub async fn read_session_frame<S: AsyncReadExt + Unpin>(stream: &mut S) -> io::Result<String> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
-
-    if len > MAX_FRAME_SIZE as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Session 帧过大: {} bytes (max {})", len, MAX_FRAME_SIZE),
-        ));
-    }
-
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
 

@@ -53,7 +53,7 @@ impl Core {
                     });
                 });
             }
-            Network_Inbound_Event::SessionStreamArrived { peer, session_id, mut stream } => {
+            Network_Inbound_Event::SessionStreamArrived { peer, session_id, stream } => {
                 let session_mgr = self.session_mgr.clone();
                 let peer_str = peer.to_base58();
                 tracing::info!("收到入站 Session 流 from {}, session={}", peer_str, session_id);
@@ -74,9 +74,9 @@ impl Core {
                     let prompt_tx = handle.prompt_tx;
                     let mut token_rx = handle.token_rx;
 
-                    // 2. 双向 bridge: stream ↔ mpsc (串行，避免 Mutex 死锁)
-                    // 读 prompt → 处理 → token_rx.recv → 写 token → 循环
-                    let mut stream = stream;
+                    // 2. 双向 bridge: stream ↔ mpsc
+                    use tokio_util::compat::FuturesAsyncReadCompatExt;
+                    let mut stream = stream.compat();
                     let sid = session_id;
 
                     tokio::spawn(async move {

@@ -20,25 +20,29 @@ pub struct Session {
     pub model_id: String,
     pub max_slots: usize,
     pub slots: Vec<SlotState>,
-    pub eos_token_id: u32,
+    pub eos_token_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// slot_notify_tx: allocate_slot 时把 (slot_id, prompt_rx, token_tx) 发给 spawn task
     pub slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
-    /// slot_notify_rx: spawn task 接收新 slot
-    pub slot_notify_rx: std::cell::RefCell<Option<mpsc::UnboundedReceiver<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>>>,
 }
 
 impl Session {
-    pub fn new(session_id: u64, model_id: String, max_slots: usize, eos_token_id: u32) -> Self {
+    pub fn new(
+        session_id: u64,
+        model_id: String,
+        max_slots: usize,
+        eos_token_id: u32,
+        slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
+    ) -> Self {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU32;
         let slots = (0..max_slots).map(|_| SlotState::Vacant).collect();
-        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel();
         Session {
             session_id,
             model_id,
             max_slots,
             slots,
-            eos_token_id,
+            eos_token_id: Arc::new(AtomicU32::new(eos_token_id)),
             slot_notify_tx,
-            slot_notify_rx: std::cell::RefCell::new(Some(slot_notify_rx)),
         }
     }
 
@@ -49,6 +53,7 @@ impl Session {
     /// - ML 流收到 logits → sample → decode → slot.token_tx
     pub fn spawn(
         &self,
+        slot_notify_rx: mpsc::UnboundedReceiver<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
         stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
         event_bus: Arc<EventBus>,
         storage: Arc<dyn StorageCapability>,
@@ -56,8 +61,7 @@ impl Session {
         let session_id = self.session_id;
         let model_path = self.model_id.clone();
         let ml_stream_id = format!("ml-{}", session_id);
-        let slot_notify_rx = self.slot_notify_rx.borrow_mut().take()
-            .expect("spawn called without slot_notify_rx");
+        let eos = self.eos_token_id.clone();
 
         tokio::spawn(async move {
             // ── 1. 加载 tokenizer ──────────────────────────
@@ -91,6 +95,7 @@ impl Session {
                 return;
             }
             drop(_guard);
+            eos.store(ml.get_eos(), std::sync::atomic::Ordering::Relaxed);
             tracing::info!("Session {} tokenizer loaded from {}", session_id, model_path);
 
             // ── 2. 等 ML Thread 连接 ──────────────────────
@@ -346,9 +351,14 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
+    fn make_session(id: u64, model: &str, slots: usize) -> Session {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Session::new(id, model.into(), slots, 1, tx)
+    }
+
     #[test]
     fn test_session_new_all_vacant() {
-        let sess = Session::new(1, "qwen3".into(), 4, 1);
+        let sess = make_session(1, "qwen3", 4);
         assert_eq!(sess.session_id, 1);
         assert_eq!(sess.max_slots, 4);
         assert_eq!(sess.slots.len(), 4);
@@ -358,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_allocate_and_release() {
-        let mut sess = Session::new(2, "qwen3".into(), 4, 1);
+        let mut sess = make_session(2, "qwen3", 4);
         let (tx, _rx) = mpsc::unbounded_channel();
 
         let id = sess.allocate(tx).expect("should allocate");
@@ -373,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_allocate_exhausts_slots() {
-        let mut sess = Session::new(3, "qwen3".into(), 2, 1);
+        let mut sess = make_session(3, "qwen3", 2);
 
         let (tx1, _rx1) = mpsc::unbounded_channel();
         let (tx2, _rx2) = mpsc::unbounded_channel();
@@ -387,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_allocate_after_release() {
-        let mut sess = Session::new(4, "qwen3".into(), 2, 1);
+        let mut sess = make_session(4, "qwen3", 2);
 
         let (tx1, _rx1) = mpsc::unbounded_channel();
         let (tx2, _rx2) = mpsc::unbounded_channel();
@@ -403,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_slot_token_buf_operations() {
-        let mut sess = Session::new(5, "qwen3".into(), 2, 1);
+        let mut sess = make_session(5, "qwen3", 2);
         let (tx, _rx) = mpsc::unbounded_channel();
         sess.allocate(tx);
 
@@ -413,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_get_slot_out_of_bounds() {
-        let sess = Session::new(6, "qwen3".into(), 2, 1);
+        let sess = make_session(6, "qwen3", 2);
         assert!(sess.get_slot(5).is_none());
         let mut sess = sess;
         assert!(sess.get_slot_mut(5).is_none());

@@ -56,7 +56,37 @@
 - **影响范围**：Session.spawn() select! loop + slot_notify_rx
 - **当前状态**：只使用一个 slot，满足当前需求
 
-### 7. yamux 流缓冲
+### 8. 多 Slot prompt_rx 覆盖导致旧 slot 孤儿化
+
+- **风险**：`Session.spawn()` 动态 slot 注册时 `try_recv` 循环用新的 `prompt_rx` 覆盖旧的。先后分配多个 slot 时，只有最后分配的 slot 能收到 prompt，旧 slot 永久静默。消息 Vec 也被所有 slot 共享，若多 slot 同时活跃会导致对话上下文交叉污染。
+- **影响范围**：`Session.spawn()` select! loop (`session.rs:112-117`), `allocate_slot` → `slot_notify_tx`
+- **当前状态**：单 slot 使用，满足当前需求。推迟至 Continuous Batching 阶段统一解决。
+
+### 9. Session spawn task 退出无错误传播
+
+- **风险**：Session 的 spawn task 在 tokenizer 加载失败、ML 连接超时等情况下直接 return。SessionManager 的 HashMap 仍保留该条目，`list_sessions()` 返回正常，`allocate_slot` 返回 Ok 但 `slot_notify_tx.send()` 静默失败。外部无法感知 Session 已死。
+- **影响范围**：`Session::spawn()` + `SessionManager::create_session()`
+- **当前状态**：记录风险，推迟至 Continuous Batching 时一并重构 Session 生命周期管理。
+
+### 10. slot_tokens HashMap 内存泄漏
+
+- **风险**：Session.spawn() 内 `slot_tokens` HashMap 每次 allocate_slot 插入新条目，但 slot 关闭时永不删除，长期运行造成微小内存泄漏。`UnboundedSender` 虽轻量 (< 200B)，但频繁创建/关闭 slot 场景下累积。
+- **影响范围**：`session.rs:115 slot_tokens.insert()` — 无对应 remove
+- **当前状态**：记录风险，推迟至 Continuous Batching 时修复。
+
+### 12. messages 历史无限增长 OOM
+
+- **风险**：`Session.spawn()` 内 `messages: Vec<Message>` 每轮对话 push user + assistant，永远不截断。长对话（千轮级）会导致内存持续增长最终 OOM；且每轮 prefill 需 encode 完整历史，tokenize 开销线性增长。
+- **影响范围**：`session.rs:131` messages 累积 + `ml.encode_messages(&messages)` 每轮全量 tokenize
+- **当前状态**：推迟处理。当前单 slot 短对话场景不触发，后续与上下文窗口管理一并解决。
+
+### 13. MlSession.forward() 自动/显式 offset 语义冗余
+
+- **风险**：`forward(tensor, offset: Option<usize>)` 同时支持自动追踪（`offset=None` 时内部 `self.ctx.offset` 自增）和显式传参。当前 Session/ML Thread 全走显式，自动模式仅旧 `run.lua` 使用。若调用方漏传 offset，静默切到自动模式，拿到过期 offset 导致推理错乱。
+- **影响范围**：`MlSession::forward()` (`context.rs:274-291`)
+- **方向**：移除自动递增模式，`offset` 改为必传 `usize`
+
+### 11. yamux 流缓冲
 
 - **风险**：remote chat 单 task 串行时，recv 结束回 prompt 等待期间无人读 libp2p stream，yamux 缓冲对端数据。等新 prompt 触发 write 才 flush，导致 token 延迟和 Command Output 清空。
 - **影响范围**：`branch_user.rs` remote chat handler 的 stream 读写架构

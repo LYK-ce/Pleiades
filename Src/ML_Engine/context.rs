@@ -192,6 +192,8 @@ impl MlSession {
 
     // ─── 编解码 ────────────────────────────────────────────
 
+    /// 已废弃：使用 `encode_messages()` 替代。
+    #[deprecated(note = "use encode_messages() instead")]
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
         let tokenizer = self
             .ctx
@@ -227,9 +229,9 @@ impl MlSession {
     ///
     /// 当前使用硬编码 Qwen3 格式。GGUF 中的 tokenizer.chat_template 已读取但未使用，
     /// 因为需要完整 Jinja 引擎才能解析（see Task 6 v2 总文档 §局限）。
-    fn apply_chat_template(&self, _messages: &[Message]) -> String {
+    fn apply_chat_template(&self, messages: &[Message]) -> String {
         let mut result = String::new();
-        for msg in _messages {
+        for msg in messages {
             if msg.role == "system" {
                 result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
             } else if msg.role == "user" {

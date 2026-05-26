@@ -41,8 +41,9 @@ impl SessionManager {
         let session_id = self.counter;
         self.counter += 1;
 
-        let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1);
-        session.spawn(self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
+        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel();
+        let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1, slot_notify_tx);
+        session.spawn(slot_notify_rx, self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
         self.sessions.insert(session_id, session);
         session_id
     }
