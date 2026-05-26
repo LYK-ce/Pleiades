@@ -226,28 +226,27 @@ impl MlSession {
     /// 应用 chat template 到 messages 数组，返回格式化文本。
     fn apply_chat_template(&self, messages: &[Message]) -> String {
         if let Some(ref tmpl) = self.ctx.chat_template {
-            // 简单模板替换: 支持 Qwen3 格式的 Jinja 模板
-            // "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n"
-            Self::render_template(tmpl, messages)
-        } else {
-            // Fallback: 硬编码 Qwen3 格式
-            let mut result = String::new();
-            for msg in messages {
-                if msg.role == "system" {
-                    result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
-                } else if msg.role == "user" {
-                    result.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", msg.content));
-                } else if msg.role == "assistant" {
-                    result.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content));
-                }
+            let rendered = Self::render_template(tmpl, messages);
+            // 如果渲染结果仍含 Jinja 语法，说明模板太复杂，fallback
+            if rendered.contains("{{") || rendered.contains("{%") {
+                tracing::warn!("chat template too complex for simple renderer, using fallback");
+            } else {
+                return rendered;
             }
-            // 最后一个 assistant 不带 <|im_end|>，模型来补
-            if result.ends_with("<|im_end|>\n") {
-                let trim_len = "<|im_end|>\n".len();
-                result.truncate(result.len() - trim_len);
-            }
-            result
         }
+        // Fallback: 硬编码 Qwen3 格式
+        let mut result = String::new();
+        for msg in messages {
+            if msg.role == "system" {
+                result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
+            } else if msg.role == "user" {
+                result.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", msg.content));
+            } else if msg.role == "assistant" {
+                result.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content));
+            }
+        }
+        result.push_str("<|im_start|>assistant\n");
+        result
     }
 
     /// 简易 Jinja 模板渲染 — 仅支持 messages loop + role/content 变量
