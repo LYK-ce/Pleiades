@@ -298,3 +298,22 @@ pub struct SlotHandle {
 }
 ```
 
+
+---
+
+## 已知局限
+
+### Chat Template 硬编码
+
+GGUF metadata 中的 `tokenizer.chat_template` 已能读取（`Model_Arch_Info.chat_template`），但当前未使用。原因：
+
+- Qwen3 的模板使用 Jinja 复杂表达式（如 `{{'<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n'}}`），需要完整 Jinja 引擎
+- 当前使用硬编码 Qwen3 格式作为 fallback，覆盖 system/user/assistant 三种角色
+- `render_template()` 只处理了简单的 `{{ message.role }}` 变量替换，无法处理表达式和条件判断
+
+后续方向：引入 `minijinja` 或 `tera` 模板引擎，或解析 GGUF 模板中的特殊 token 映射表直接拼 token 序列。
+
+### encode_messages 性能
+
+每轮重新 tokenize 完整 history，KV Cache 自动前缀匹配。对于长对话（>100 轮），tokenize 开销线性增长。后续可加 token 缓存避免重复 tokenize 历史前缀。
+

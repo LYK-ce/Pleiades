@@ -224,19 +224,12 @@ impl MlSession {
     }
 
     /// 应用 chat template 到 messages 数组，返回格式化文本。
-    fn apply_chat_template(&self, messages: &[Message]) -> String {
-        if let Some(ref tmpl) = self.ctx.chat_template {
-            let rendered = Self::render_template(tmpl, messages);
-            // 如果渲染结果仍含 Jinja 语法，说明模板太复杂，fallback
-            if rendered.contains("{{") || rendered.contains("{%") {
-                tracing::warn!("chat template too complex for simple renderer, using fallback");
-            } else {
-                return rendered;
-            }
-        }
-        // Fallback: 硬编码 Qwen3 格式
+    ///
+    /// 当前使用硬编码 Qwen3 格式。GGUF 中的 tokenizer.chat_template 已读取但未使用，
+    /// 因为需要完整 Jinja 引擎才能解析（see Task 6 v2 总文档 §局限）。
+    fn apply_chat_template(&self, _messages: &[Message]) -> String {
         let mut result = String::new();
-        for msg in messages {
+        for msg in _messages {
             if msg.role == "system" {
                 result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
             } else if msg.role == "user" {
@@ -249,7 +242,7 @@ impl MlSession {
         result
     }
 
-    /// 简易 Jinja 模板渲染 — 仅支持 messages loop + role/content 变量
+    /// 简易 Jinja 模板渲染 — 保留作为后续扩展参考
     fn render_template(tmpl: &str, messages: &[Message]) -> String {
         // 提取 for 循环内的文本
         let for_tag = "{% for message in messages %}";
