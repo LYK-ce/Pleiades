@@ -86,6 +86,24 @@
 - **影响范围**：`MlSession::forward()` (`context.rs:274-291`)
 - **方向**：移除自动递增模式，`offset` 改为必传 `usize`
 
+### 14. 自回归 max_tokens 硬编码 300
+
+- **风险**：`Session.spawn()` 自回归循环 `for _ in 0..300`，超长输出静默截断无提示，无法配置。
+- **影响范围**：`session.rs:171` 生成上限
+- **当前状态**：暂时不处理。
+
+### 15. strip_think 未闭合标签泄露
+
+- **风险**：`strip_think()` 遇到未闭合 `<think>` 标签时，注释说"跳过整段"但实际把含标签的尾部全部保留，可能暴露给用户。
+- **影响范围**：`session.rs:232-237` strip_think 逻辑
+- **当前状态**：暂时不处理。
+
+### 16. Remote Chat bridge 退出无 Session 通知
+
+- **风险**：远端断开后 bridge break，Session 仍持有 `token_tx` sender 不知情，下次推理 send 静默失败。
+- **影响范围**：`branch_stream.rs:89-95` bridge 退出 + session.rs spawn task
+- **当前状态**：暂时不处理。
+
 ### 11. yamux 流缓冲
 
 - **风险**：remote chat 单 task 串行时，recv 结束回 prompt 等待期间无人读 libp2p stream，yamux 缓冲对端数据。等新 prompt 触发 write 才 flush，导致 token 延迟和 Command Output 清空。
