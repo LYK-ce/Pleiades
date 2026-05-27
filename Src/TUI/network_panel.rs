@@ -90,6 +90,17 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
                 ])));
             }
 
+            // session 子行
+            for s in &peer.sessions {
+                lines.push(ListItem::new(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("session {} ({}) [slots {}]", s.session_id, s.model_id, s.slots),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ])));
+            }
+
             lines
         })
         .collect();

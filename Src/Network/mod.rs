@@ -77,10 +77,12 @@ pub use session_stream::protocol::{
     write_session_frame, read_session_frame,
 };
 
-/// 构建本地节点信息 payload（"name|models_json"），用于 Info 协议交换
+/// 构建本地节点信息 payload（"name|models_json|sessions_json"），用于 Info 协议交换
 pub fn build_local_info_payload(local: &crate::peer_management::PeerInfo) -> String {
     let models_json = serde_json::to_string(&local.supported_models)
         .unwrap_or_else(|_| "[]".to_string());
-    format!("{}|{}", local.name, models_json)
+    let sessions_json = serde_json::to_string(&local.sessions)
+        .unwrap_or_else(|_| "[]".to_string());
+    format!("{}|{}|{}", local.name, models_json, sessions_json)
 }
 

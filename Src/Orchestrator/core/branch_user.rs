@@ -419,7 +419,39 @@ impl Core {
                                     total_slots: s.total_slots,
                                 }
                             }).collect();
-                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions).await;
+                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions.clone()).await;
+
+                        // 向所有已连接 peer 推送 Info
+                        if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
+                            let info = crate::network::build_local_info_payload(&local);
+                            for peer in &peers {
+                                if peer.peer_id != local.peer_id {
+                                    let _ = caps.network.send_data(
+                                        peer.peer_id,
+                                        crate::network::DataType::Info,
+                                        info.clone().into_bytes(),
+                                    ).await;
+                                }
+                            }
+                        }
+
+                        // 通知 TUI 刷新本地 session 列表
+                        let sessions_display: Vec<serde_json::Value> = sessions.iter().map(|s| {
+                            serde_json::json!({
+                                "session_id": s.session_id,
+                                "model_id": s.model_id,
+                                "occupied_slots": s.occupied_slots,
+                                "total_slots": s.total_slots,
+                            })
+                        }).collect();
+                        caps.event_bus.Publish(crate::event_bus::Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": local.peer_id.to_string(),
+                                "peer_name": local.name,
+                                "sessions": sessions_display,
+                            }).to_string(),
+                        });
                     }
 
                     caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {

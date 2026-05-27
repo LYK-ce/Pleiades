@@ -210,6 +210,8 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
             app.Update_Peer(peer_id.to_string(), peer_name.to_string(), true);
             let models = parse_models_json(v.get("models"));
             app.Update_Peer_Models(peer_id, models);
+            let sessions = parse_sessions_json(v.get("sessions"));
+            app.Update_Peer_Sessions(peer_id, sessions);
             if !peer_name.is_empty() {
                 app.Add_Log(format!("节点信息: {peer_name}"));
             }
@@ -1059,6 +1061,24 @@ fn parse_one_model(v: &serde_json::Value) -> Option<app::ModelDisplay> {
         .unwrap_or("?")
         .to_string();
     Some(app::ModelDisplay { file_name, layer_range })
+}
+
+/// 从 EventBus JSON 中解析 session 列表
+fn parse_sessions_json(sessions_val: Option<&serde_json::Value>) -> Vec<app::SessionDisplay> {
+    let Some(val) = sessions_val else { return Vec::new() };
+    let arr = match val {
+        serde_json::Value::Array(a) => a,
+        _ => return Vec::new(),
+    };
+    arr.iter().filter_map(|v| {
+        Some(app::SessionDisplay {
+            session_id: v.get("session_id")?.as_u64()?,
+            model_id: v.get("model_id")?.as_str()?.to_string(),
+            slots: format!("{}/{}",
+                v.get("occupied_slots")?.as_u64()?,
+                v.get("total_slots")?.as_u64()?),
+        })
+    }).collect()
 }
 
 /// 解析 peer 分配字符串，格式: `peer_id:start-end`

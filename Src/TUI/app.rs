@@ -127,6 +127,8 @@ pub struct Peer_Display {
     pub connected: bool,
     /// 持有的模型列表
     pub models: Vec<ModelDisplay>,
+    /// 活跃的 session 列表（仅本地节点有意义）
+    pub sessions: Vec<SessionDisplay>,
 }
 
 /// 模型显示信息
@@ -134,6 +136,14 @@ pub struct Peer_Display {
 pub struct ModelDisplay {
     pub file_name: String,
     pub layer_range: String,
+}
+
+/// Session 显示信息
+#[derive(Debug, Clone)]
+pub struct SessionDisplay {
+    pub session_id: u64,
+    pub model_id: String,
+    pub slots: String,  // "1/4"
 }
 
 // ============================================================
@@ -255,7 +265,7 @@ impl App {
                 peer.name = name;
             }
         } else {
-            self.peers.push(Peer_Display { name, peer_id, connected, models: Vec::new() });
+            self.peers.push(Peer_Display { name, peer_id, connected, models: Vec::new(), sessions: Vec::new() });
         }
     }
 
@@ -263,6 +273,13 @@ impl App {
     pub fn Update_Peer_Models(&mut self, peer_id: &str, models: Vec<ModelDisplay>) {
         if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
             peer.models = models;
+        }
+    }
+
+    /// 更新节点的 session 列表
+    pub fn Update_Peer_Sessions(&mut self, peer_id: &str, sessions: Vec<SessionDisplay>) {
+        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+            peer.sessions = sessions;
         }
     }
 
