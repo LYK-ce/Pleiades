@@ -55,7 +55,7 @@
 - `Src/TUI/app.rs` — `Peer_Display` 加 `name` 字段，`Update_Peer` 加 name 参数
 - `Src/TUI/mod.rs` — `handle_state` 解析 `peer_name`
 - `Src/TUI/network_panel.rs` — 渲染 name
-- `Src/Network/` (EventBus 发送端) — 事件 payload 加 `peer_name`
+- `Src/Network/swarm_events.rs` — `peer_connected` / `peer_discovered` 事件 payload 加 `peer_name`
 
 ### 2. Network 面板：显示每个 peer 持有的模型及层范围
 
@@ -63,8 +63,8 @@
 
 **方案**：
 - `Peer_Display` 新增 `models: Vec<ModelDisplay>` 字段，`ModelDisplay` 包含 `file_name` 和 `layer_range`
-- EventBus `peer_discovered` / `peer_connected` 事件 payload 增加模型列表 JSON
-- 节点更新 supported_models 时（flush 后），通过 EventBus 发送 `peer_models_updated` 事件
+- 网络层已有的 `DataType::Info` 同步机制（`"name|models_json"`）已能正确更新 PeerManager；**补全 EventBus 事件 payload**，在 `peer_connected` / `peer_discovered` 事件中带上 `models` JSON，TUI 解析后直接渲染
+- **flush 时主动推送**：flush 操作重新扫描磁盘文件后，本地 `supported_models` 可能变化，发 `peer_models_updated` 事件通知 TUI 刷新本地节点的模型列表
 - `network_panel.rs` 在每个 peer 下方缩进显示模型信息：
   ```
   ● alice-node    已连接
@@ -88,9 +88,17 @@
 **方案**：
 - `PeerInfo` 新增 `sessions: Vec<SessionSummary>` 字段（`#[serde(skip)]`，仅本地使用，不通过 DHT 同步）
 - `SessionSummary` 包含 `session_id`、`model_id`、`occupied_slots`、`total_slots`
-- `SessionManager::create_session()` / `destroy_session()` 通过 EventBus 发送 `session_created` / `session_destroyed` 事件
-- 事件监听方（Core 或 main.rs）调用 `peer_manager.update_local_sessions()` 更新
-- Network 面板（空间允许时）和 `dp` 命令展示 session 信息
+- **create_session / destroy_session 时发 EventBus**：`SessionManager` 在创建/销毁 session 后，通过 EventBus 发送 `session_created` / `session_destroyed` 事件，payload 包含 session 摘要信息
+- 事件监听方调用 `peer_manager.update_local_sessions()` 更新 `PeerInfo`
+- Network 面板（空间允许时）和 `dp` 命令展示本地 session 信息
+
+**事件发送时间点**：
+| 触发操作 | EventBus 事件 | 更新内容 |
+|---|---|---|
+| `flush` | `peer_models_updated` | 本地 supported_models |
+| `session create` | `session_created` | 本地 sessions |
+| `session destroy` | `session_destroyed` | 本地 sessions |
+| 对端 Info 到达 | `peer_connected` (补全) | 远端 name + models |
 
 **数据流**：
 ```
