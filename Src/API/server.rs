@@ -13,16 +13,30 @@ use super::routes::{self, ApiState};
 
 /// 启动一个绑定到指定 session 的 API HTTP server
 ///
-/// 端口自动分配（从 8080 起递增），返回实际绑定的端口号。
+/// 分配一个 slot 常驻不释放，端口自动分配，返回实际端口号。
 pub async fn spawn_api_server(
     session_mgr: Arc<Mutex<SessionManager>>,
     session_id: u64,
     model_id: String,
 ) -> Result<u16, String> {
+    // 分配 slot（常驻，由后台 handler task 持有）
+    let handle = {
+        let mut mgr = session_mgr
+            .lock()
+            .map_err(|e| format!("session_mgr lock: {}", e))?;
+        mgr.allocate_slot(session_id)
+            .map_err(|e| format!("allocate_slot: {} (session may not exist or slots exhausted)", e))?
+    };
+
+    let prompt_tx = handle.prompt_tx;
+    let token_rx = handle.token_rx;
+
+    // 启动后台 handler task，保持 slot 存活
+    let request_tx = routes::spawn_slot_handler(prompt_tx, token_rx, session_id);
+
     let state = ApiState {
-        session_mgr,
-        session_id,
         model_id,
+        request_tx,
     };
 
     let app = Router::new()
@@ -30,7 +44,6 @@ pub async fn spawn_api_server(
         .route("/v1/chat/completions", post(routes::chat_completions))
         .with_state(state);
 
-    // 端口自动分配（8080 起尝试）
     let port = find_available_port(8080)?;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
