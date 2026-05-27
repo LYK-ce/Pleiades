@@ -62,6 +62,8 @@ pub enum UserCommand {
     SessionInference { session_id: u64, model_path: String },
     /// 远端 Chat — 连接到指定节点的 Session
     RemoteChat { peer_name: String, session_id: u64 },
+    /// 启动 OpenAI 兼容 API Server，绑定到指定 Session
+    Api { session_id: u64 },
 }
 
 // ============================================================

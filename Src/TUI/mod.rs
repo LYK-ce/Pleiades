@@ -619,6 +619,32 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- api <session_id> ----
+
+    if trimmed.starts_with("api ") || trimmed.starts_with("API ") {
+        let sid_str = trimmed
+            .strip_prefix("api ")
+            .or_else(|| trimmed.strip_prefix("API "))
+            .unwrap_or("")
+            .trim();
+        let sid = sid_str.parse::<u64>();
+        match sid {
+            Ok(session_id) => {
+                app.command_output.output_text =
+                    format!("正在启动 API Server -> Session {}...", session_id);
+                let cmd = UserCommand::Api { session_id };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                }
+            }
+            Err(_) => {
+                app.command_output.output_text =
+                    format!("错误: '{}' 不是有效的 session_id\n用法: api <session_id>", sid_str);
+            }
+        }
+        return;
+    }
+
     // ---- session inference <session_id> <model_path> ----
 
     if trimmed.starts_with("session inference ") {

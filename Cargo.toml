@@ -50,6 +50,10 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 futures = "0.3"
 
+# HTTP API (OpenAI 兼容)
+axum = { version = "0.7", features = ["json", "macros"] }
+async-stream = "0.3"
+
 # 序列化 (网络协议)
 bincode = "1.3"
 

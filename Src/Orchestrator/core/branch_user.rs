@@ -39,6 +39,7 @@ fn cmd_output(text: impl Into<String>, completed: bool) -> String {
 // ============================================================
 
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("api <session_id>",       "启动 OpenAI 兼容 API Server"),
     ("run <model>",           "启动本地推理"),
     ("pipeline <model>",      "启动分布式流水线推理"),
     ("cancel <job_id>",       "取消指定作业"),
@@ -534,6 +535,47 @@ impl Core {
                             });
                         }
                     });
+                });
+            }
+            // ════════════════════════════════════════════════
+            // API Server (OpenAI 兼容)
+            // ════════════════════════════════════════════════
+            UserCommand::Api { session_id } => {
+                let session_mgr = self.session_mgr.clone();
+                let event_bus = self.capabilities.event_bus.clone();
+
+                let model_id = {
+                    let mgr = session_mgr.lock().unwrap();
+                    let sessions = mgr.list_sessions();
+                    sessions
+                        .iter()
+                        .find(|s| s.session_id == session_id)
+                        .map(|s| s.model_id.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+
+                tokio::spawn(async move {
+                    match crate::api::spawn_api_server(
+                        session_mgr,
+                        session_id,
+                        model_id.clone(),
+                    ).await {
+                        Ok(port) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!(
+                                    "API server started for session {} on http://127.0.0.1:{} (model: {})",
+                                    session_id, port, model_id
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("API server failed for session {}: {}", session_id, e),
+                            });
+                        }
+                    }
                 });
             }
         }
