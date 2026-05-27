@@ -109,3 +109,23 @@
 - **风险**：remote chat 单 task 串行时，recv 结束回 prompt 等待期间无人读 libp2p stream，yamux 缓冲对端数据。等新 prompt 触发 write 才 flush，导致 token 延迟和 Command Output 清空。
 - **影响范围**：`branch_user.rs` remote chat handler 的 stream 读写架构
 - **当前状态**：已修复 — 改为两 task（`tokio_util::compat` + `tokio::io::split`），读 task 持续 read_exact 避免 yamux 缓冲
+
+## API (Task 7)
+
+### 17. Chat Template 处理粗糙导致模型直接 EOS
+
+- **风险**：API 只提取请求中最后一条 `role: "user"` 的 content 作为提示词发送给 Session，system message 和多轮 assistant 历史全部丢弃。某些 chat template 严格的模型（如 Qwen3）收到裸文本（缺少 `<|im_start|>system` 等标记）会直接生成 EOS，客户端收到空响应。
+- **影响范围**：`Src/API/routes.rs` chat_completions handler → prompt 提取逻辑
+- **方向**：API 侧将完整 `messages[]` 数组传递给 Session，Session 端支持「替换」模式（替换而非追加消息历史），或 API 侧用 tokenizer 渲染 chat template 后发 raw prompt
+
+### 18. 有状态 Session 与无状态 API 的架构矛盾
+
+- **风险**：OpenAI API 是无状态的——客户端每次请求自带完整 `messages[]`，服务端不保存上下文。但当前 Session 设计是有状态的——内部维护 `Vec<Message>` 历史，每轮 prompt 追加。API 复用有状态 Session 会导致：(a) 不同 API 客户端请求混入同一对话历史，(b) 客户端自带的完整 messages 信息被截断，只取最后一条 user message。
+- **影响范围**：`Session.spawn()` 的消息管理 + `API` 的 slot 分配路径
+- **方向**：Session 支持「追加」和「替换」两种模式。chat/remote chat 用追加模式，API 用替换模式。或 API 每次请求独立创建临时推理上下文，不复用 Session
+
+### 19. API slot 独占导致单并发
+
+- **风险**：当前 API server 启动时分配一个 slot 常驻持有，后台 handler task 串行处理请求。同一 Session 的 API 只支持单并发——前一个请求推理期间（可能数秒到数十秒），后续请求排队等待。
+- **影响范围**：`Src/API/routes.rs` spawn_slot_handler → request_rx 串行 loop
+- **当前状态**：单用户场景暂时够用。需多并发时改为 slot pool 或每请求独立推理上下文
