@@ -48,6 +48,9 @@ pub mod tui;
 #[path = "VM/mod.rs"]
 pub mod vm;
 
+#[path = "API/mod.rs"]
+pub mod api;
+
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
@@ -88,7 +91,7 @@ pub use peer_management::{
 pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 
 // Session模块类型导出（原 LLM_IO，已升级为 SessionManager）
-pub use session::{Session_Capability, Session_Error, IoFrontend, IoHandle, SessionManager, SessionInfo};
+pub use session::{Session_Error, SessionManager, SessionInfo, SlotHandle};
 
 
 

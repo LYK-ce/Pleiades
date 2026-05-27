@@ -42,19 +42,22 @@ impl Network_Service {
                 );
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
-                // 向新节点发送本机信息（name + supported_models）
-                if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
-                    let models_json = serde_json::to_string(&local.supported_models)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    let payload = format!("{}|{}", local.name, models_json).into_bytes();
-                    let request = Network_Data { data_type: DataType::Info, payload };
-                    self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                }
+                // 向新节点发送本机信息（name + models + sessions）
+                let local_name =
+                    if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
+                        let payload = super::build_local_info_payload(&local).into_bytes();
+                        let request = Network_Data { data_type: DataType::Info, payload };
+                        self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                        local.name
+                    } else {
+                        String::new()
+                    };
 
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
                         "type": "peer_connected",
                         "peer_id": peer_id.to_string(),
+                        "peer_name": local_name,
                     }).to_string(),
                 });
             }
@@ -188,16 +191,53 @@ impl Network_Service {
                             }
                         }
                         DataType::Info => {
-                            // 解析对方信息: "name|models_json"
+                            // 解析对方信息: "name|models_json|sessions_json"
                             let payload_str = String::from_utf8_lossy(&request.payload);
-                            if let Some((name, models_json)) = payload_str.split_once('|') {
-                                if !name.is_empty() {
-                                    let _ = self.peer_handle.Update_Peer_Name(&peer, name).await;
-                                }
-                                if let Ok(models) = serde_json::from_str::<Vec<crate::peer_management::SupportedModel>>(models_json) {
-                                    let _ = self.peer_handle.Update_Supported_Models(&peer, models).await;
-                                }
+                            let parts: Vec<&str> = payload_str.splitn(3, '|').collect();
+                            let name = parts.first().copied().unwrap_or("");
+                            let models_json = parts.get(1).copied().unwrap_or("[]");
+                            let sessions_json = parts.get(2).copied().unwrap_or("[]");
+
+                            if !name.is_empty() {
+                                let _ = self.peer_handle.Update_Peer_Name(&peer, name).await;
                             }
+                            let models: Vec<crate::peer_management::SupportedModel> =
+                                serde_json::from_str(models_json).unwrap_or_default();
+                            if !models.is_empty() {
+                                let _ = self.peer_handle.Update_Supported_Models(&peer, models.clone()).await;
+                            }
+                            let sessions: Vec<crate::peer_management::SessionSummary> =
+                                serde_json::from_str(sessions_json).unwrap_or_default();
+                            if !sessions.is_empty() {
+                                let _ = self.peer_handle.Update_Local_Sessions(&peer, sessions.clone()).await;
+                            }
+
+                            // 通知 TUI
+                            let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                                serde_json::json!({
+                                    "file_name": m.file_name,
+                                    "layer_range": m.layer_range(),
+                                })
+                            }).collect();
+                            let sessions_display: Vec<serde_json::Value> = sessions.iter().map(|s| {
+                                serde_json::json!({
+                                    "session_id": s.session_id,
+                                    "model_id": s.model_id,
+                                    "occupied_slots": s.occupied_slots,
+                                    "total_slots": s.total_slots,
+                                })
+                            }).collect();
+                            self.event_bus.Publish(Bus_Event::State {
+                                payload: serde_json::json!({
+                                    "type": "peer_info_updated",
+                                    "peer_id": peer.to_string(),
+                                    "peer_name": name,
+                                    "is_local": false,
+                                    "models": models_display,
+                                    "sessions": sessions_display,
+                                }).to_string(),
+                            });
+
                             let response = Network_Data {
                                 data_type: DataType::Info,
                                 payload: b"OK".to_vec(),

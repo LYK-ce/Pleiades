@@ -42,9 +42,10 @@ impl LuaTensor {
     }
 }
 
-/// 将 Tensor 序列化为字节数组（含 shape header）。
+/// 将 Tensor 序列化为字节数组（含 shape header + dtype）。
 ///
-/// 格式: `[ndim: u64 LE][d0: u64 LE]...[dn: u64 LE][f32 LE raw data]`
+/// 格式: `[dtype: u8][ndim: u64 LE][d0: u64 LE]...[dn: u64 LE][raw data]`
+/// dtype: 0=F32, 1=U32
 pub fn tensor_to_bytes(t: &Tensor) -> Result<Vec<u8>, String> {
     let shape = t.dims().to_vec();
     if shape.is_empty() || shape.iter().any(|&d| d == 0) {
@@ -52,18 +53,36 @@ pub fn tensor_to_bytes(t: &Tensor) -> Result<Vec<u8>, String> {
     }
     let total: usize = shape.iter().product();
     let t_flat = t.reshape(&[total]).map_err(|e| format!("reshape: {e}"))?;
-    let flat: Vec<f32> = t_flat.to_vec1().map_err(|e| format!("to_vec1: {e}"))?;
 
-    let header_size = 8 + shape.len() * 8;
-    let mut buf = Vec::with_capacity(header_size + flat.len() * 4);
+    let dtype: u8 = match t.dtype() {
+        candle_core::DType::F32 => 0,
+        candle_core::DType::U32 => 1,
+        other => return Err(format!("tensor_to_bytes: unsupported dtype {:?}", other)),
+    };
+
+    let header_size = 1 + 8 + shape.len() * 8;
+    let mut buf = Vec::with_capacity(header_size + total * 4);
+    buf.push(dtype);
     buf.extend_from_slice(&(shape.len() as u64).to_le_bytes());
     for &d in &shape {
         buf.extend_from_slice(&(d as u64).to_le_bytes());
     }
-    // SAFETY: f32 array reinterpreted as [u8], well-aligned and properly sized
-    let f32_bytes =
-        unsafe { std::slice::from_raw_parts(flat.as_ptr() as *const u8, flat.len() * 4) };
-    buf.extend_from_slice(f32_bytes);
+
+    match dtype {
+        0 => {
+            let flat: Vec<f32> = t_flat.to_vec1().map_err(|e| format!("to_vec1: {e}"))?;
+            let f32_bytes =
+                unsafe { std::slice::from_raw_parts(flat.as_ptr() as *const u8, flat.len() * 4) };
+            buf.extend_from_slice(f32_bytes);
+        }
+        1 => {
+            let flat: Vec<u32> = t_flat.to_vec1().map_err(|e| format!("to_vec1: {e}"))?;
+            let u32_bytes =
+                unsafe { std::slice::from_raw_parts(flat.as_ptr() as *const u8, flat.len() * 4) };
+            buf.extend_from_slice(u32_bytes);
+        }
+        _ => unreachable!(),
+    }
     Ok(buf)
 }
 
@@ -71,34 +90,46 @@ pub fn tensor_to_bytes(t: &Tensor) -> Result<Vec<u8>, String> {
 ///
 /// 读取 `tensor_to_bytes` 的格式，在指定设备上重建 Tensor。
 pub fn bytes_to_tensor(data: &[u8], device: &Device) -> Result<Tensor, String> {
-    if data.len() < 8 {
+    if data.len() < 9 {
         return Err("bytes_to_tensor: data too short for header".into());
     }
-    let ndim = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-    let header_size = 8 + ndim * 8;
+    let dtype = data[0];
+    let ndim = u64::from_le_bytes(data[1..9].try_into().unwrap()) as usize;
+    let header_size = 9 + ndim * 8;
     if data.len() < header_size {
         return Err("bytes_to_tensor: data too short for dims".into());
     }
     let mut shape: Vec<usize> = Vec::with_capacity(ndim);
     for i in 0..ndim {
-        let start = 8 + i * 8;
+        let start = 9 + i * 8;
         let d = u64::from_le_bytes(data[start..start + 8].try_into().unwrap());
         shape.push(d as usize);
     }
-    let f32_data = &data[header_size..];
+    let raw_data = &data[header_size..];
     let elem_count: usize = shape.iter().product();
     let expected_bytes = elem_count * 4;
-    if f32_data.len() != expected_bytes {
+    if raw_data.len() != expected_bytes {
         return Err(format!(
             "bytes_to_tensor: data size mismatch: expected {expected_bytes}, got {}",
-            f32_data.len()
+            raw_data.len()
         ));
     }
-    // SAFETY: f32 byte slice aligned and properly sized
-    let f32_slice: &[f32] =
-        unsafe { std::slice::from_raw_parts(f32_data.as_ptr() as *const f32, elem_count) };
-    Tensor::from_vec(f32_slice.to_vec(), &shape[..], device)
-        .map_err(|e| format!("tensor from_vec: {e}"))
+
+    match dtype {
+        0 => {
+            let f32_slice: &[f32] =
+                unsafe { std::slice::from_raw_parts(raw_data.as_ptr() as *const f32, elem_count) };
+            Tensor::from_vec(f32_slice.to_vec(), &shape[..], device)
+                .map_err(|e| format!("tensor from_vec: {e}"))
+        }
+        1 => {
+            let u32_slice: &[u32] =
+                unsafe { std::slice::from_raw_parts(raw_data.as_ptr() as *const u32, elem_count) };
+            Tensor::from_vec(u32_slice.to_vec(), &shape[..], device)
+                .map_err(|e| format!("tensor from_vec: {e}"))
+        }
+        _ => Err(format!("bytes_to_tensor: unknown dtype {}", dtype)),
+    }
 }
 
 // ─── Device 解析 ──────────────────────────────────────────

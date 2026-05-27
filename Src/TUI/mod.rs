@@ -75,6 +75,7 @@ use crate::orchestrator::job::JobId;
 pub fn TUI_Loop(
     mut event_rx: broadcast::Receiver<Bus_Event>,
     user_cmd_tx: mpsc::Sender<UserCommand>,
+    prompt_tx: broadcast::Sender<String>,
 ) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
@@ -82,7 +83,7 @@ pub fn TUI_Loop(
     // 启用鼠标捕获（滚轮等事件）
     crossterm::execute!(std::io::stdout(), EnableMouseCapture).ok();
 
-    let mut app = App::New();
+    let mut app = App::New(prompt_tx);
     app.Add_Log("Pleiades TUI 已启动".to_string());
 
     // 2. 事件循环
@@ -193,23 +194,42 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
     match v["type"].as_str() {
         Some("peer_discovered") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), false);
-            app.Add_Log(format!("发现节点: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, false);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("发现节点: {label}"));
         }
         Some("peer_left") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             app.Remove_Peer(peer_id);
             app.Add_Log(format!("节点离开: {peer_id}"));
         }
+        Some("peer_info_updated") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            let is_local = v["is_local"].as_bool().unwrap_or(false);
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), is_local, true);
+            let models = parse_models_json(v.get("models"));
+            app.Update_Peer_Models(peer_id, models);
+            let sessions = parse_sessions_json(v.get("sessions"));
+            app.Update_Peer_Sessions(peer_id, sessions);
+            if !peer_name.is_empty() {
+                app.Add_Log(format!("节点信息: {peer_name}"));
+            }
+        }
         Some("peer_connected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), true);
-            app.Add_Log(format!("连接建立: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, true);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("连接建立: {label}"));
         }
         Some("peer_disconnected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), false);
-            app.Add_Log(format!("连接断开: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, false);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("连接断开: {label}"));
         }
         Some("job_created") => {
             let job_id = v["job_id"].as_u64().unwrap_or(0);
@@ -482,7 +502,7 @@ fn Handle_Prompt_Submit(app: &mut App) {
     if prompt.is_empty() {
         return;
     }
-    app.Add_Log("[提示] 无活跃推理会话，请先执行 run <model_path>".to_string());
+    let _ = app.prompt_tx.send(prompt);
 }
 
 // ============================================================
@@ -551,6 +571,128 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     // 每次新命令清空 Command 面板并重置滚动
     app.command_output = Command_Output::New();
     app.command_scroll = 0;
+
+    // ---- session create <model> ----
+
+    if trimmed.starts_with("session create ") {
+        let model = trimmed.strip_prefix("session create ").unwrap_or("").trim();
+        if model.is_empty() {
+            app.command_output.output_text =
+                "错误: 缺少 model 参数\n用法: session create <model_name>".to_string();
+        } else {
+            app.command_output.output_text = format!("正在创建 Session: {}...", model);
+            let cmd = UserCommand::Session { model_id: model.to_string() };
+            if user_cmd_tx.blocking_send(cmd).is_err() {
+                app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            }
+        }
+        return;
+    }
+
+    // ---- chat <session_id> ----
+
+    if trimmed.starts_with("chat ") {
+        let sid_str = trimmed.strip_prefix("chat ").unwrap_or("").trim();
+        let sid = sid_str.parse::<u64>();
+        match sid {
+            Ok(session_id) => {
+                app.command_output.output_text =
+                    format!("已连接到 Session {}，请切换到 Prompt 框输入", session_id);
+                let cmd = UserCommand::Chat { session_id };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                }
+            }
+            Err(_) => {
+                app.command_output.output_text =
+                    format!("错误: '{}' 不是有效的 session_id\n用法: chat <session_id>", sid_str);
+            }
+        }
+        return;
+    }
+
+    // ---- remote chat <peer_name> <session_id> ----
+
+    if trimmed.starts_with("remote chat ") {
+        let args = trimmed.strip_prefix("remote chat ").unwrap_or("");
+        let mut parts = args.split_whitespace();
+        let peer_name = parts.next();
+        let sid_str = parts.next();
+        match (peer_name, sid_str.and_then(|s| s.parse::<u64>().ok())) {
+            (Some(name), Some(session_id)) => {
+                app.command_output.output_text =
+                    format!("已连接到远端 {} Session {}", name, session_id);
+                let cmd = UserCommand::RemoteChat {
+                    peer_name: name.to_string(),
+                    session_id,
+                };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                }
+            }
+            _ => {
+                app.command_output.output_text =
+                    "用法: remote chat <peer_name> <session_id>".to_string();
+            }
+        }
+        return;
+    }
+
+    // ---- api <session_id> ----
+
+    if trimmed.starts_with("api ") || trimmed.starts_with("API ") {
+        let sid_str = trimmed
+            .strip_prefix("api ")
+            .or_else(|| trimmed.strip_prefix("API "))
+            .unwrap_or("")
+            .trim();
+        let sid = sid_str.parse::<u64>();
+        match sid {
+            Ok(session_id) => {
+                app.command_output.output_text =
+                    format!("正在启动 API Server -> Session {}...", session_id);
+                let cmd = UserCommand::Api { session_id };
+                if user_cmd_tx.blocking_send(cmd).is_err() {
+                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                }
+            }
+            Err(_) => {
+                app.command_output.output_text =
+                    format!("错误: '{}' 不是有效的 session_id\n用法: api <session_id>", sid_str);
+            }
+        }
+        return;
+    }
+
+    // ---- session inference <session_id> <model_path> ----
+
+    if trimmed.starts_with("session inference ") {
+        let rest = trimmed.strip_prefix("session inference ").unwrap_or("").trim();
+        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            app.command_output.output_text =
+                "错误: 参数不足\n用法: session inference <session_id> <model_path>".to_string();
+        } else {
+            match parts[0].parse::<u64>() {
+                Ok(session_id) => {
+                    app.command_output.output_text =
+                        format!("正在启动 ML Thread -> Session {} (模型: {})...", session_id, parts[1]);
+                    let cmd = UserCommand::SessionInference {
+                        session_id,
+                        model_path: parts[1].to_string(),
+                    };
+                    if user_cmd_tx.blocking_send(cmd).is_err() {
+                        app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                    }
+                }
+                Err(_) => {
+                    app.command_output.output_text =
+                        format!("错误: '{}' 不是有效的 session_id", parts[0]);
+                }
+            }
+        }
+        return;
+    }
 
     // ---- run <model_path> ----
 
@@ -897,6 +1039,49 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     app.command_output.completed = true;
 }
 
+/// 从 EventBus JSON 中解析模型列表
+fn parse_models_json(models_val: Option<&serde_json::Value>) -> Vec<app::ModelDisplay> {
+    let Some(val) = models_val else { return Vec::new() };
+    let arr = match val {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::String(s) => {
+            match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                Ok(a) => return a.iter().filter_map(|v| parse_one_model(v)).collect(),
+                Err(_) => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+    arr.iter().filter_map(|v| parse_one_model(v)).collect()
+}
+
+fn parse_one_model(v: &serde_json::Value) -> Option<app::ModelDisplay> {
+    let file_name = v.get("file_name")?.as_str()?.to_string();
+    let layer_range = v.get("layer_range")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    Some(app::ModelDisplay { file_name, layer_range })
+}
+
+/// 从 EventBus JSON 中解析 session 列表
+fn parse_sessions_json(sessions_val: Option<&serde_json::Value>) -> Vec<app::SessionDisplay> {
+    let Some(val) = sessions_val else { return Vec::new() };
+    let arr = match val {
+        serde_json::Value::Array(a) => a,
+        _ => return Vec::new(),
+    };
+    arr.iter().filter_map(|v| {
+        Some(app::SessionDisplay {
+            session_id: v.get("session_id")?.as_u64()?,
+            model_id: v.get("model_id")?.as_str()?.to_string(),
+            slots: format!("{}/{}",
+                v.get("occupied_slots")?.as_u64()?,
+                v.get("total_slots")?.as_u64()?),
+        })
+    }).collect()
+}
+
 /// 解析 peer 分配字符串，格式: `peer_id:start-end`
 ///
 /// 例: `12D3KooW...abc:0-15` → `("12D3KooW...abc", 0, 15)`
@@ -942,9 +1127,9 @@ fn Render(frame: &mut Frame, app: &mut App) {
 
     let rows = Layout::vertical(constraints).split(area);
 
-    // Row 0: Log (70%) + Network (30%)
+    // Row 0: Log (60%) + Network (40%)
     let top =
-        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).split(rows[0]);
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[0]);
 
     // 记录面板区域，供鼠标滚轮事件命中检测
     app.log_area = top[0];
@@ -973,7 +1158,6 @@ fn Render(frame: &mut Frame, app: &mut App) {
 /// - 无活跃 session：灰色 + "无活跃会话" 提示
 fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.focus == InputFocus::Prompt;
-    let has_session = app.Has_Active_Session();
 
     let border_color = if is_focused {
         Color::Cyan
@@ -985,40 +1169,28 @@ fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
-    if has_session {
-        let input_text = Line::from(vec![
-            Span::styled(
-                "Prompt> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                app.prompt_buffer.as_str(),
-                Style::default().fg(Color::White),
-            ),
-        ]);
-        let paragraph = Paragraph::new(input_text).block(block);
-        frame.render_widget(paragraph, area);
+    let input_text = Line::from(vec![
+        Span::styled(
+            "Prompt> ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.prompt_buffer.as_str(),
+            Style::default().fg(Color::White),
+        ),
+    ]);
+    let paragraph = Paragraph::new(input_text).block(block);
+    frame.render_widget(paragraph, area);
 
-        // 设置光标位置（仅当 Prompt 获得焦点时）
-        if is_focused {
-            let cursor_x = area.x + 1 + "Prompt> ".len() as u16 + app.prompt_cursor as u16;
-            let cursor_y = area.y + 1;
-            if cursor_x < area.x + area.width - 1 {
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
+    // 设置光标位置（仅当 Prompt 获得焦点时）
+    if is_focused {
+        let cursor_x = area.x + 1 + "Prompt> ".len() as u16 + app.prompt_cursor as u16;
+        let cursor_y = area.y + 1;
+        if cursor_x < area.x + area.width - 1 {
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
-    } else {
-        let hint_text = Line::from(vec![
-            Span::styled("Prompt> ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "无活跃会话 (先执行 run <model>)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        let paragraph = Paragraph::new(hint_text).block(block);
-        frame.render_widget(paragraph, area);
     }
 }
 

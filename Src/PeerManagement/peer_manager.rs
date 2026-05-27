@@ -124,16 +124,27 @@ use tokio::sync::RwLock;
          }
      }
 
-     /// 更新节点持有的模型列表
-     pub async fn update_supported_models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> bool {
-         let mut peers = self.peers.write().await;
-         if let Some(peer_info) = peers.get_mut(peer_id) {
-             peer_info.update_supported_models(models);
-             true
-         } else {
-             false
-         }
-     }
+    /// 更新节点持有的模型列表
+    pub async fn update_supported_models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> bool {
+        let mut peers = self.peers.write().await;
+        if let Some(peer_info) = peers.get_mut(peer_id) {
+            peer_info.update_supported_models(models);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 更新本地节点的 sessions 列表
+    pub async fn update_local_sessions(&self, local_peer_id: &PeerId, sessions: Vec<crate::peer_management::SessionSummary>) -> bool {
+        let mut peers = self.peers.write().await;
+        if let Some(peer_info) = peers.get_mut(local_peer_id) {
+            peer_info.sessions = sessions;
+            true
+        } else {
+            false
+        }
+    }
 
      /// 获取节点数量
      pub async fn count(&self) -> usize {

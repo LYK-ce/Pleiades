@@ -196,7 +196,8 @@ pub fn register_storage_caps(
 /// - `sess:get_eos()` → u32
 /// - `sess:get_offset()` → usize
 /// - `sess:tensorize(token_ids)` → {dim0, dim1, ...}
-/// - `sess:load_model(path, start, end)` → ()
+/// - `sess:load_model(path, start, end)` → ()  — 只加载权重
+/// - `sess:load_tokenizer(path)` → ()            — 只加载 tokenizer
 /// - `sess:unload()` → ()
 pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     let ml = lua.create_table()?;

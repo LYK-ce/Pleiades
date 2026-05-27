@@ -181,10 +181,12 @@ pub fn GGUF_Load_Model(
         .map_err(|e| anyhow::anyhow!("Failed to build RotaryEmbedding: {}", e))?,
     );
 
-    // 5. 如果 start==0，表示包含输入层，加载 embedding 和 tokenizer；否则为 None
+    // 5. 如果 start==0，表示包含输入层，加载 embedding；否则为 None
+    //    注意：tokenizer 不再在此处加载，请使用 MlSession::load_tokenizer() 或
+    //    shimmytok::Tokenizer::from_gguf_file() 独立加载。
     let has_input_head = start == 0;
 
-    let (embed_tokens, tokenizer): (Option<candle_nn::Embedding>, Option<shimmytok::Tokenizer>) =
+    let embed_tokens: Option<candle_nn::Embedding> =
         if has_input_head {
             // 通过 GGUF_Load_Layer 加载第 0 层（embedding）
             let mut lw = GGUF_Load_Layer(&content, &mut file, 0, device)?;
@@ -196,28 +198,12 @@ pub fn GGUF_Load_Model(
                 .dequantize(device)
                 .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {}", e))?;
 
-            // 尝试加载 tokenizer（如原 GGUF 文件包含，则加载；split 文件通常不含 tokenizer）
-            let tok = match shimmytok::Tokenizer::from_gguf_file(model_path) {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load tokenizer from {}: {}. Model will have no tokenizer.",
-                        model_path.display(),
-                        e
-                    );
-                    None
-                }
-            };
-
-            (
-                Some(candle_nn::Embedding::new(
-                    embed_tensor,
-                    arch_info.embedding_length,
-                )),
-                tok,
-            )
+            Some(candle_nn::Embedding::new(
+                embed_tensor,
+                arch_info.embedding_length,
+            ))
         } else {
-            (None, None)
+            None
         };
 
     // 6. 根据 start 和 end，调用 GGUF_Load_Layer 逐层加载 transformer block 层
@@ -303,7 +289,7 @@ pub fn GGUF_Load_Model(
 
     Ok(GGUF_Model {
         model,
-        tokenizer,
+        tokenizer: None,  // tokenizer 不再由 GGUF_Load_Model 加载，请使用 MlSession::load_tokenizer()
         inference_config,
         arch_info,
         model_path: model_path.to_path_buf(),
@@ -357,6 +343,13 @@ pub fn GGUF_Model_Inference(
     Ok(result)
 }
 
+/// GGUF_Model_Clear_KV_Cache — 清除模型内部 KV Cache
+///
+/// 在每轮对话开始前调用，确保新旧对话的 KV Cache 不冲突。
+pub fn GGUF_Model_Clear_KV_Cache(model: &mut GGUF_Model) {
+    model.model.clear_kv_cache();
+}
+
 // ============================================================
 // Tokenizer 独立 API
 // ============================================================
@@ -379,8 +372,9 @@ pub fn GGUF_Encode(model: &GGUF_Model, input: &str) -> Result<Vec<u32>> {
 
     let format_prompt = format!("<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n");
 
+    let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
     let token_ids = tokenizer
-        .encode(&format_prompt, true)
+        .encode_with_options(&format_prompt, &opts)
         .map_err(|e| anyhow::anyhow!("Tokenization error: {}", e))?;
 
     Ok(token_ids)

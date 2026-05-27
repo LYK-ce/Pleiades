@@ -23,7 +23,7 @@
  use libp2p::PeerId;
 
  // 导出 peer_info 模块中的公共类型
- pub use peer_info::{PeerInfo, PeerProfile, SupportedModel};
+ pub use peer_info::{PeerInfo, PeerProfile, SessionSummary, SupportedModel};
  // 导出 peer_manager 模块中的公共类型
  pub use peer_manager::PeerManager;
  // 导出 peer_handle 模块中的公共类型

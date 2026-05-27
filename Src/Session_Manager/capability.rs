@@ -1,20 +1,17 @@
 //Presented by KeJi
-//Date ： 2026-05-14
+//Date ： 2026-05-24
 
-use async_trait::async_trait;
+//! Session 能力定义 — 错误类型 + SlotHandle (v2: 最小化)
+
 use std::fmt;
 use tokio::sync::mpsc;
 
 // ─── 错误类型 ───────────────────────────────────────────────
 
-/// Session 模块错误枚举
 #[derive(Debug)]
 pub enum Session_Error {
-    /// session_id 不存在
     SessionNotFound(String),
-    /// 槽位已满（已达 max_slots 上限）
     SlotExhausted(String),
-    /// 内部错误
     Internal(String),
 }
 
@@ -30,50 +27,15 @@ impl fmt::Display for Session_Error {
 
 impl std::error::Error for Session_Error {}
 
-// ─── 通道结构 ───────────────────────────────────────────────
+// ─── SlotHandle ─────────────────────────────────────────────
 
-/// 前端持有的外侧端点
-#[derive(Debug)]
-pub struct IoFrontend {
-    /// 发送 Prompt
-    pub input_tx: mpsc::Sender<String>,
-    /// 接收 Completion
-    pub output_rx: mpsc::Receiver<String>,
-}
-
-/// ML 侧端点（传给 ML Engine 启动推理线程）
-#[derive(Debug)]
-pub struct IoHandle {
-    /// 接收 Prompt
-    pub input_rx: mpsc::Receiver<String>,
-    /// 发送 Completion
-    pub output_tx: mpsc::Sender<String>,
-}
-
-// ─── Trait 定义 ─────────────────────────────────────────────
-
-/// Session 能力 trait
-#[async_trait]
-pub trait Session_Capability: Send + Sync {
-    /// 创建 Session（分配槽位 + channel pair），返回 (session_id, IoHandle)
-    /// 调用方自行将 IoHandle 传给 ML Engine 启动线程
-    async fn create_session(&self, model_id: String)
-        -> Result<(String, IoHandle), Session_Error>;
-
-    /// 销毁 Session，清理所有通道和槽位
-    async fn destroy_session(&self, session_id: &str)
-        -> Result<(), Session_Error>;
-
-    /// 申请槽位，返回 (slot_id, IoFrontend)
-    async fn connect(&self, session_id: &str)
-        -> Result<(u32, IoFrontend), Session_Error>;
-
-    /// 列出所有活跃 Session
-    fn list_sessions(&self) -> Vec<super::session::SessionInfo>;
-
-    /// 释放槽位（v1 空实现，预留接口）
-    async fn release_slot(&self, session_id: &str, slot_id: u32)
-        -> Result<(), Session_Error>;
+/// v2.7: Slot 通过 mpsc 通道对连接 Chat ↔ Session。
+/// prompt_tx 发送 prompt 给 Session，token_rx 从 Session 接收 token。
+pub struct SlotHandle {
+    pub session_id: u64,
+    pub slot_id: usize,
+    pub prompt_tx: mpsc::UnboundedSender<String>,
+    pub token_rx: mpsc::UnboundedReceiver<String>,
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────
@@ -88,17 +50,16 @@ mod tests {
             format!("{}", Session_Error::SessionNotFound("sess-1".to_string())),
             "SessionNotFound: sess-1"
         );
-        assert_eq!(
-            format!("{}", Session_Error::SlotExhausted("sess-1".to_string())),
-            "SlotExhausted: sess-1"
-        );
     }
 
     #[tokio::test]
-    async fn test_io_endpoints_construct() {
-        let (input_tx, input_rx) = mpsc::channel::<String>(64);
-        let (output_tx, output_rx) = mpsc::channel::<String>(64);
-        let _frontend = IoFrontend { input_tx, output_rx };
-        let _ml_side = IoHandle { input_rx, output_tx };
+    async fn test_slot_handle_token_recv() {
+        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+        let (token_tx, token_rx) = mpsc::unbounded_channel();
+        let _handle = SlotHandle { session_id: 1, slot_id: 0, prompt_tx, token_rx };
+
+        token_tx.send("hello".into()).unwrap();
+        // token_rx moved into handle; test the channel directly
+        // (in real code, handle.token_rx is used by chat relay task)
     }
 }

@@ -13,7 +13,9 @@ use crate::vm::capability_binding::{
     register_storage_caps, register_ml_caps,
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
+use crate::network::{write_session_frame, read_session_frame};
 use std::path::Path;
+use tokio::sync::broadcast;
 
 // ============================================================
 // 本地 HelpEntry（已从 EventBus 中解耦）
@@ -37,6 +39,7 @@ fn cmd_output(text: impl Into<String>, completed: bool) -> String {
 // ============================================================
 
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("api <session_id>",       "启动 OpenAI 兼容 API Server"),
     ("run <model>",           "启动本地推理"),
     ("pipeline <model>",      "启动分布式流水线推理"),
     ("cancel <job_id>",       "取消指定作业"),
@@ -280,6 +283,8 @@ impl Core {
                                     let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models).await;
                                 }
                             }
+                            // 广播本地节点信息（Info → peers + EventBus → TUI）
+                            crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
                             format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
                         }
                         Err(e) => format!("flush 失败: {}", e),
@@ -364,6 +369,233 @@ impl Core {
 
                 self.capabilities.event_bus.Publish(Bus_Event::Output {
                     payload: serde_json::json!({"type":"help","text":text}).to_string(),
+                });
+            }
+            // ════════════════════════════════════════════════
+            // Session / Chat (v2)
+            // ════════════════════════════════════════════════
+            UserCommand::Session { model_id } => {
+                let session_mgr = self.session_mgr.clone();
+                let caps = self.capabilities.clone();
+                tokio::spawn(async move {
+                    let id = session_mgr.lock().unwrap().create_session(&model_id);
+
+                    // 更新 PeerManager 本地 sessions
+                    if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
+                        let sessions: Vec<crate::peer_management::SessionSummary> =
+                            session_mgr.lock().unwrap().list_sessions().iter().map(|s| {
+                                crate::peer_management::SessionSummary {
+                                    session_id: s.session_id,
+                                    model_id: s.model_id.clone(),
+                                    occupied_slots: s.occupied_slots,
+                                    total_slots: s.total_slots,
+                                }
+                            }).collect();
+                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions).await;
+                    }
+
+                    // 广播本地节点信息（Info → peers + EventBus → TUI）
+                    crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
+
+                    caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+                        level: crate::event_bus::NotifyLevel::Info,
+                        message: format!("Session {} created (model: {})", id, model_id),
+                    });
+                });
+            }
+            UserCommand::SessionInference { session_id, model_path } => {
+                let Some(entry) = self.program_registry.get("inference").cloned() else {
+                    tracing::error!("SessionInference: builtin 'inference' script not found");
+                    self.capabilities.event_bus.Publish(Bus_Event::Notify {
+                        level: NotifyLevel::Error,
+                        message: "ML Thread: builtin inference.lua 未找到".to_string(),
+                    });
+                    return;
+                };
+                let mut params = std::collections::HashMap::new();
+                params.insert("session_id".into(), session_id.to_string());
+                params.insert("model_path".into(), model_path);
+                spawn_lua_script(
+                    entry.path,
+                    params,
+                    self.capabilities.clone(),
+                    format!("inference session {}", session_id),
+                );
+            }
+            UserCommand::Chat { session_id } => {
+                let session_mgr = self.session_mgr.clone();
+                let event_bus = self.capabilities.event_bus.clone();
+                let mut prompt_rx = self.prompt_tx.subscribe();
+
+                // allocate slot → 拿到 mpsc 通道对
+                let handle = {
+                    let mut mgr = session_mgr.lock().unwrap();
+                    match mgr.allocate_slot(session_id) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("chat: 分配 slot 失败: {}", e),
+                            });
+                            return;
+                        }
+                    }
+                };
+
+                let prompt_tx = handle.prompt_tx;
+                let mut token_rx = handle.token_rx;
+
+                // prompt 转发 task: broadcast → slot.prompt_tx
+                let prompt_tx_clone = prompt_tx.clone();
+                tokio::spawn(async move {
+                    loop {
+                        match prompt_rx.recv().await {
+                            Ok(prompt) => {
+                                tracing::info!("chat: sending to Session {}: {}", session_id, prompt);
+                                if prompt_tx_clone.send(prompt).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!("chat: lagged {} messages", n);
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                tracing::info!("chat: prompt channel closed, exiting");
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                // token 接收 task: slot.token_rx → EventBus::Stream
+                tokio::spawn(async move {
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                    });
+                    while let Some(token) = token_rx.recv().await {
+                        if token == "\0" { continue; }  // skip sentinel
+                        event_bus.Publish(Bus_Event::Stream {
+                            payload: serde_json::json!({"type":"token","text":token}).to_string(),
+                        });
+                    }
+                    event_bus.Publish(Bus_Event::Output {
+                        payload: serde_json::json!({"type":"cmd_result","text":"","completed":true}).to_string(),
+                    });
+                });
+            }
+            // ════════════════════════════════════════════════
+            // Remote Chat（远端 Session 连接）
+            // ════════════════════════════════════════════════
+            UserCommand::RemoteChat { peer_name, session_id } => {
+                let caps = self.capabilities.clone();
+                let event_bus = caps.event_bus.clone();
+                let mut prompt_rx = self.prompt_tx.subscribe();
+
+                tokio::spawn(async move {
+                    // 1. 解析 peer name → PeerId
+                    let peer_id = match caps.peer_manager.Get_Peer_By_Name(&peer_name).await {
+                        Ok(info) => info.peer_id,
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("remote chat: 找不到节点 '{}': {}", peer_name, e),
+                            });
+                            return;
+                        }
+                    };
+
+                    // 2. 打开 Session stream (含 handshake)
+                    let stream = match caps.network.open_session_stream(&peer_id, session_id).await {
+                        Ok(s) => {
+                            tracing::info!("remote chat: connected to {} session {}", peer_name, session_id);
+                            s
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("remote chat: 连接失败: {}", e),
+                            });
+                            return;
+                        }
+                    };
+
+                    // 3. 双 task: prompt 上行 / token 下行（仿照本地 chat）
+                    let (mut stream_read, mut stream_write) = {
+                        use tokio_util::compat::FuturesAsyncReadCompatExt;
+                        let compat = stream.compat();
+                        tokio::io::split(compat)
+                    };
+
+                    // prompt 上行: broadcast → stream write
+                    tokio::spawn(async move {
+                        loop {
+                            match prompt_rx.recv().await {
+                                Ok(prompt) => {
+                                    tracing::info!("remote chat: sending prompt '{}'", prompt);
+                                    if write_session_frame(&mut stream_write, &prompt).await.is_err() { break; }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+
+                    // token 下行: stream read → EventBus
+                    tokio::spawn(async move {
+                        event_bus.Publish(Bus_Event::Output {
+                            payload: serde_json::json!({"type":"cmd_result","text":"","completed":false}).to_string(),
+                        });
+                        loop {
+                            let token = match read_session_frame(&mut stream_read).await {
+                                Ok(t) => t,
+                                Err(_) => break,
+                            };
+                            if token.is_empty() { continue; }
+                            event_bus.Publish(Bus_Event::Stream {
+                                payload: serde_json::json!({"type":"token","text":token}).to_string(),
+                            });
+                        }
+                    });
+                });
+            }
+            // ════════════════════════════════════════════════
+            // API Server (OpenAI 兼容)
+            // ════════════════════════════════════════════════
+            UserCommand::Api { session_id } => {
+                let session_mgr = self.session_mgr.clone();
+                let event_bus = self.capabilities.event_bus.clone();
+
+                let model_id = {
+                    let mgr = session_mgr.lock().unwrap();
+                    let sessions = mgr.list_sessions();
+                    sessions
+                        .iter()
+                        .find(|s| s.session_id == session_id)
+                        .map(|s| s.model_id.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+
+                tokio::spawn(async move {
+                    match crate::api::spawn_api_server(
+                        session_mgr,
+                        session_id,
+                        model_id.clone(),
+                    ).await {
+                        Ok(port) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!(
+                                    "API server started for session {} on http://127.0.0.1:{} (model: {})",
+                                    session_id, port, model_id
+                                ),
+                            });
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("API server failed for session {}: {}", session_id, e),
+                            });
+                        }
+                    }
                 });
             }
         }

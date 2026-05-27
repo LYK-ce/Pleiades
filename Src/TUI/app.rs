@@ -11,6 +11,7 @@
 
 use crate::orchestrator::job::JobId;
 use ratatui::layout::Rect;
+use tokio::sync::broadcast;
 
 // ============================================================
 // 视图模式
@@ -118,10 +119,33 @@ pub enum InputFocus {
 /// 网络节点显示信息
 #[derive(Debug, Clone)]
 pub struct Peer_Display {
+    /// 节点名称（优先显示，空则回退 peer_id）
+    pub name: String,
     /// 节点 ID（截断显示）
     pub peer_id: String,
-    /// 连接状态
+    /// 是否为本地节点
+    pub is_local: bool,
+    /// 连接状态（本地节点始终 true）
     pub connected: bool,
+    /// 持有的模型列表
+    pub models: Vec<ModelDisplay>,
+    /// 活跃的 session 列表（仅本地节点有意义）
+    pub sessions: Vec<SessionDisplay>,
+}
+
+/// 模型显示信息
+#[derive(Debug, Clone)]
+pub struct ModelDisplay {
+    pub file_name: String,
+    pub layer_range: String,
+}
+
+/// Session 显示信息
+#[derive(Debug, Clone)]
+pub struct SessionDisplay {
+    pub session_id: u64,
+    pub model_id: String,
+    pub slots: String,  // "1/4"
 }
 
 // ============================================================
@@ -192,11 +216,15 @@ pub struct App {
     pub log_area: Rect,
     /// Command 面板区域
     pub command_area: Rect,
+
+    // ===== Prompt 通道 =====
+    /// Prompt 输入广播通道（TUI 初始化时创建，chat task 订阅）
+    pub prompt_tx: broadcast::Sender<String>,
 }
 
 impl App {
     /// 创建新的 App 实例
-    pub fn New() -> Self {
+    pub fn New(prompt_tx: broadcast::Sender<String>) -> Self {
         Self {
             view_mode: View_Mode::Idle,
             device: "cpu".to_string(),
@@ -210,6 +238,7 @@ impl App {
             cursor_position: 0,
             prompt_buffer: String::new(),
             prompt_cursor: 0,
+            prompt_tx,
             focus: InputFocus::Command,
             active_job_id: None,
             should_quit: false,
@@ -230,12 +259,38 @@ impl App {
         }
     }
 
-    /// 添加或更新节点
-    pub fn Update_Peer(&mut self, peer_id: String, connected: bool) {
-        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+    /// 添加或更新节点（本地节点始终排在第一位）
+    pub fn Update_Peer(&mut self, peer_id: String, name: String, is_local: bool, connected: bool) {
+        if let Some(pos) = self.peers.iter().position(|p| p.peer_id == peer_id) {
+            let peer = &mut self.peers[pos];
             peer.connected = connected;
+            if !name.is_empty() {
+                peer.name = name;
+            }
+            peer.is_local = is_local;
+            // 本地节点移到最前
+            if is_local && pos != 0 {
+                let peer = self.peers.remove(pos);
+                self.peers.insert(0, peer);
+            }
+        } else if is_local {
+            self.peers.insert(0, Peer_Display { name, peer_id, is_local, connected, models: Vec::new(), sessions: Vec::new() });
         } else {
-            self.peers.push(Peer_Display { peer_id, connected });
+            self.peers.push(Peer_Display { name, peer_id, is_local, connected, models: Vec::new(), sessions: Vec::new() });
+        }
+    }
+
+    /// 更新节点的模型列表
+    pub fn Update_Peer_Models(&mut self, peer_id: &str, models: Vec<ModelDisplay>) {
+        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+            peer.models = models;
+        }
+    }
+
+    /// 更新节点的 session 列表
+    pub fn Update_Peer_Sessions(&mut self, peer_id: &str, sessions: Vec<SessionDisplay>) {
+        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+            peer.sessions = sessions;
         }
     }
 

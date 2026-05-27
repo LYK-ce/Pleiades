@@ -268,6 +268,17 @@ pub trait Network_Capability: Send + Sync {
     ) -> Result<libp2p::Stream, Network_Error>;
 
     // ========================================
+    // Session 流
+    // ========================================
+
+    /// 打开 Session 流连接到远端 Session
+    ///
+    /// 写入 handshake (session_id) 供对端路由到正确的 Session。
+    async fn open_session_stream(
+        &self, peer: &PeerId, session_id: u64,
+    ) -> Result<libp2p::Stream, Network_Error>;
+
+    // ========================================
     // DHT（委托 NodeHandle）
     // ========================================
 
@@ -323,27 +334,15 @@ pub trait Network_Capability: Send + Sync {
 /// - 连接建立/断开 → peer_handle.Upsert_Peer / Remove_Peer
 ///
 /// ## 复杂事件（转发给 Orchestrator）
-/// - 入站文件流 → `FileStreamArrived`
-/// - 入站张量流 → `TensorStreamArrived`
+    /// - 入站文件流 → `FileStreamArrived`
 pub enum Network_Inbound_Event {
-    /// 入站文件流（远端节点主动发送文件）
-    ///
-    /// Orchestrator 收到后 compile 接收作业 → spawn Job，
-    /// 将 stream 存入 SlotFile 供 Executor 使用。
     FileStreamArrived {
-        /// 发送方节点 ID
         peer: PeerId,
-        /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
         stream: libp2p::Stream,
     },
-    /// 入站张量流（远端节点建立 pipeline 连接）
-    ///
-    /// Orchestrator 收到后保存入站 tensor stream，
-    /// 供后续 Job 构建 `Tensor_IO_Handle` 使用。
-    TensorStreamArrived {
-        /// 发送方节点 ID
+    SessionStreamArrived {
         peer: PeerId,
-        /// 入站的 raw libp2p::Stream（所有权移交给 Orchestrator）
+        session_id: u64,
         stream: libp2p::Stream,
     },
 }
@@ -368,8 +367,10 @@ pub struct Network_Service_Capability {
     tensor_stream_control: stream::Control,
     /// 带宽测试流直接 open（不经过 Network_Service 事件循环）
     bandwidth_stream_control: stream::Control,
+    /// Session 流直接 open（不经过 Network_Service 事件循环）
+    session_stream_control: stream::Control,
     /// 张量流 rendezvous 匹配（与 Network_Service Event Loop 共享）
-    tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
+    pub tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
     /// 事件总线（文件传输进度上报等）
     event_bus: Arc<EventBus>,
 }
@@ -389,6 +390,7 @@ impl Network_Service_Capability {
         file_stream_control: stream::Control,
         tensor_stream_control: stream::Control,
         bandwidth_stream_control: stream::Control,
+        session_stream_control: stream::Control,
         tensor_rendezvous: std::sync::Arc<super::tensor_stream::rendezvous::RendezvousMap>,
         event_bus: Arc<EventBus>,
     ) -> Self {
@@ -397,6 +399,7 @@ impl Network_Service_Capability {
             file_stream_control,
             tensor_stream_control,
             bandwidth_stream_control,
+            session_stream_control,
             tensor_rendezvous,
             event_bus,
         }
@@ -538,6 +541,21 @@ impl Network_Capability for Network_Service_Capability {
         }
     }
 
+    async fn open_session_stream(
+        &self, peer: &PeerId, session_id: u64,
+    ) -> Result<libp2p::Stream, Network_Error> {
+        let mut stream = self
+            .session_stream_control
+            .clone()
+            .open_stream(*peer, StreamProtocol::new(super::session_stream::protocol::SESSION_STREAM_PROTOCOL))
+            .await
+            .map_err(|e| Network_Error::StreamOpenFailed(format!("session stream: {}", e)))?;
+        super::session_stream::protocol::Write_Session_Handshake(&mut stream, session_id)
+            .await
+            .map_err(|e| Network_Error::StreamOpenFailed(format!("session handshake: {}", e)))?;
+        Ok(stream)
+    }
+
     // ========================================
     // DHT（委托 NodeHandle）
     // ========================================
@@ -629,7 +647,7 @@ mod tests {
         fn _match_event(event: Network_Inbound_Event) {
             match event {
                 Network_Inbound_Event::FileStreamArrived { peer: _, stream: _ } => {}
-                Network_Inbound_Event::TensorStreamArrived { peer: _, stream: _ } => {}
+                Network_Inbound_Event::SessionStreamArrived { peer: _, session_id: _, stream: _ } => {}
             }
         }
     }

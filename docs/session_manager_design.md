@@ -1,5 +1,12 @@
 # SessionManager 设计文档
 
+> ⚠️ **此文档为早期设计提案（2026-05-14），实际实现已有重大变更。**  
+> 当前架构请参见 `Architecture/Pleiades_Architecture.md` §3.6 Orchestrator 和 `Task/task_6_v2_session_core.md`。
+>
+> 主要差异：SessionManager 不是 trait（改为纯数据结构 Arc<Mutex<>>）；Slot 不走 IoHandle 而是 mpsc 通道对；Chat 连接通过 allocate_slot 建立；远端 Chat 通过 Session 流协议接入。
+
+---
+
 Presented by KeJi
 Date ： 2026-05-14
 

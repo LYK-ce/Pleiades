@@ -1,137 +1,124 @@
 //Presented by KeJi
-//Date ： 2026-05-14
+//Date ： 2026-05-24
+
+//! SessionManager — 会话管理器 (v2: 纯数据结构，无 loop)
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 
-use super::capability::{IoFrontend, IoHandle, Session_Capability, Session_Error};
-use super::session::{Session, SessionInfo};
-use super::slot::SlotState;
-use crate::orchestrator::job::JobId;
+use super::capability::{Session_Error, SlotHandle};
+use super::session::Session;
+use crate::storage::StorageCapability;
 
-// ─── 常量 ───────────────────────────────────────────────────
-
-const CHANNEL_BUFFER_SIZE: usize = 64;
-
-// ─── SessionManager ─────────────────────────────────────────
-
-/// Session 管理器，负责会话生命周期、槽位分配和 IO 通道管理。
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: HashMap<u64, Session>,
+    pub stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
+    pub event_bus: Arc<crate::event_bus::EventBus>,
+    storage: Arc<dyn StorageCapability>,
     max_slots: usize,
+    counter: u64,
 }
 
 impl SessionManager {
-    pub fn new(max_slots: usize) -> Self {
-        SessionManager {
-            sessions: Mutex::new(HashMap::new()),
+    pub fn new(
+        max_slots: usize,
+        stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
+        event_bus: Arc<crate::event_bus::EventBus>,
+        storage: Arc<dyn StorageCapability>,
+    ) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(SessionManager {
+            sessions: HashMap::new(),
+            stream_hub,
+            event_bus,
+            storage,
             max_slots,
-        }
+            counter: 1,
+        }))
     }
 
-    /// 按 JobId 获取推理会话的前端端点（stub，待实现）
-    pub async fn Take_Frontend(&self, job_id: JobId) -> Result<IoFrontend, Session_Error> {
-        let _ = job_id;
-        Err(Session_Error::Internal("Take_Frontend not yet implemented".into()))
-    }
-}
+    pub fn create_session(&mut self, model_id: &str) -> u64 {
+        let session_id = self.counter;
+        self.counter += 1;
 
-#[async_trait::async_trait]
-impl Session_Capability for SessionManager {
-    async fn create_session(
-        &self,
-        model_id: String,
-    ) -> Result<(String, IoHandle), Session_Error> {
-        let session_id = generate_session_id();
+        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel();
+        let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1, slot_notify_tx);
+        session.spawn(slot_notify_rx, self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
+        self.sessions.insert(session_id, session);
 
-        let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-        let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
+        self.publish_session_event("session_created", Some(session_id), Some(model_id));
 
-        let io_handle = IoHandle { input_rx, output_tx };
-        // 对端存入 Session，不再 drop
-        let session = Session::new(
-            session_id.clone(),
-            model_id,
-            self.max_slots,
-            input_tx,
-            output_rx,
-        );
-
-        let mut sessions = self.sessions.lock().await;
-        sessions.insert(session_id.clone(), session);
-
-        Ok((session_id, io_handle))
+        session_id
     }
 
-    async fn destroy_session(&self, session_id: &str) -> Result<(), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        sessions.remove(session_id);
+    pub fn destroy_session(&mut self, session_id: u64) -> Result<(), Session_Error> {
+        self.sessions.remove(&session_id);
+        self.publish_session_event("session_destroyed", Some(session_id), None);
         Ok(())
     }
 
-    async fn connect(&self, session_id: &str) -> Result<(u32, IoFrontend), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.get_mut(session_id).ok_or_else(|| {
-            Session_Error::SessionNotFound(session_id.to_string())
-        })?;
+    fn publish_session_event(&self, event_type: &str, session_id: Option<u64>, model_id: Option<&str>) {
+        let sessions_json: Vec<serde_json::Value> = self.sessions
+            .values()
+            .map(|s| serde_json::json!({
+                "session_id": s.session_id,
+                "model_id": s.model_id,
+                "occupied_slots": s.occupied_count(),
+                "total_slots": s.max_slots,
+            }))
+            .collect();
 
-        if session.slot_counter as usize >= session.max_slots {
-            return Err(Session_Error::SlotExhausted(session_id.to_string()));
-        }
-
-        let slot_id = session.slot_counter;
-        session.slots[slot_id as usize].state = SlotState::Occupied {
-            owner: format!("frontend-{}", slot_id),
-        };
-        session.slot_counter += 1;
-
-        let (input_tx, input_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-        let (output_tx, output_rx) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
-
-        // 对端存入 Session，不再 drop
-        session.frontend_pairs.push((input_rx, output_tx));
-
-        Ok((slot_id, IoFrontend { input_tx, output_rx }))
+        self.event_bus.Publish(crate::event_bus::Bus_Event::State {
+            payload: serde_json::json!({
+                "type": event_type,
+                "session_id": session_id,
+                "model_id": model_id,
+                "sessions": sessions_json,
+            }).to_string(),
+        });
     }
 
-    fn list_sessions(&self) -> Vec<SessionInfo> {
-        if let Ok(sessions) = self.sessions.try_lock() {
-            sessions.values().map(|s| SessionInfo {
-                session_id: s.session_id.clone(),
+    pub fn list_sessions(&self) -> Vec<super::session::SessionInfo> {
+        self.sessions
+            .values()
+            .map(|s| super::session::SessionInfo {
+                session_id: s.session_id,
                 model_id: s.model_id.clone(),
                 total_slots: s.max_slots,
                 occupied_slots: s.occupied_count(),
-            }).collect()
-        } else {
-            Vec::new()
-        }
+            })
+            .collect()
     }
 
-    async fn release_slot(&self, session_id: &str, slot_id: u32) -> Result<(), Session_Error> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions.get_mut(session_id).ok_or_else(|| {
-            Session_Error::SessionNotFound(session_id.to_string())
-        })?;
+    pub fn allocate_slot(&mut self, session_id: u64) -> Result<SlotHandle, Session_Error> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| Session_Error::SessionNotFound(session_id.to_string()))?;
 
-        if (slot_id as usize) >= session.slots.len() {
-            return Err(Session_Error::Internal(format!(
-                "slot_id {} out of range (max {})",
-                slot_id,
-                session.slots.len()
-            )));
-        }
+        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
 
-        session.slots[slot_id as usize].state = SlotState::Vacant;
-        Ok(())
+        let slot_id = session
+            .allocate(token_tx.clone())
+            .ok_or_else(|| Session_Error::SlotExhausted(session_id.to_string()))?;
+
+        // 通知 spawn task：新 slot 已分配
+        let _ = session.slot_notify_tx.send((slot_id, prompt_rx, token_tx));
+
+        Ok(SlotHandle {
+            session_id,
+            slot_id,
+            prompt_tx,
+            token_rx,
+        })
     }
-}
 
-fn generate_session_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("sess-{}", id)
+    pub fn close_slot(&mut self, session_id: u64, slot_id: usize) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.release(slot_id);
+        }
+    }
 }
 
 // ─── 内联测试 ───────────────────────────────────────────────
@@ -140,69 +127,81 @@ fn generate_session_id() -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_create_session() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        assert!(session_id.starts_with("sess-"));
+    fn make_mgr() -> Arc<Mutex<SessionManager>> {
+        use crate::storage::StorageCapability;
+        use crate::storage::StorageError;
+        use crate::storage::FileEntry;
+        use crate::storage::ChecksumAlgorithm;
+        use crate::storage::ReadGuard;
+        use crate::storage::WriteGuard;
+        use async_trait::async_trait;
+
+        struct StubStorage;
+        #[async_trait]
+        impl StorageCapability for StubStorage {
+            async fn acquire_read(&self, _file_id: &str) -> Result<(std::path::PathBuf, ReadGuard), StorageError> {
+                unimplemented!("stub")
+            }
+            async fn acquire_write(&self, _file_id: &str) -> Result<(std::path::PathBuf, WriteGuard), StorageError> {
+                unimplemented!("stub")
+            }
+            async fn remove(&self, _file_id: &str) -> Result<(), StorageError> { unimplemented!("stub") }
+            async fn exists(&self, _file_id: &str) -> Result<bool, StorageError> { unimplemented!("stub") }
+            async fn list(&self) -> Result<Vec<FileEntry>, StorageError> { Ok(vec![]) }
+            async fn checksum(&self, _file_id: &str, _algo: Option<ChecksumAlgorithm>) -> Result<String, StorageError> { unimplemented!("stub") }
+            async fn flush(&self) -> Result<(usize, usize), StorageError> { Ok((0, 0)) }
+        }
+
+        SessionManager::new(
+            4,
+            Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
+            Arc::new(crate::event_bus::EventBus::New(16)),
+            Arc::new(StubStorage),
+        )
     }
 
     #[tokio::test]
-    async fn test_list_sessions_empty() {
-        let mgr = SessionManager::new(4);
-        assert!(mgr.list_sessions().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_list_sessions_after_create() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let infos = mgr.list_sessions();
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].session_id, session_id);
-        assert_eq!(infos[0].total_slots, 4);
-        assert_eq!(infos[0].occupied_slots, 0);
-    }
-
-    #[tokio::test]
-    async fn test_connect_allocates_slot() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let (slot_id, _frontend) = mgr.connect(&session_id).await.unwrap();
-        assert_eq!(slot_id, 0);
-        assert_eq!(mgr.list_sessions()[0].occupied_slots, 1);
-    }
-
-    #[tokio::test]
-    async fn test_connect_slot_exhausted() {
-        let mgr = SessionManager::new(2);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        mgr.connect(&session_id).await.unwrap();
-        mgr.connect(&session_id).await.unwrap();
-        let result = mgr.connect(&session_id).await;
-        assert!(matches!(result, Err(Session_Error::SlotExhausted(_))));
-    }
-
-    #[tokio::test]
-    async fn test_connect_session_not_found() {
-        let mgr = SessionManager::new(4);
-        assert!(matches!(mgr.connect("no-such").await, Err(Session_Error::SessionNotFound(_))));
+    async fn test_create_and_list_sessions() {
+        let mgr = make_mgr();
+        let id = mgr.lock().unwrap().create_session("qwen3");
+        assert!(id > 0);
+        assert_eq!(mgr.lock().unwrap().list_sessions().len(), 1);
     }
 
     #[tokio::test]
     async fn test_destroy_session() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        mgr.destroy_session(&session_id).await.unwrap();
-        assert!(mgr.list_sessions().is_empty());
+        let mgr = make_mgr();
+        let id = mgr.lock().unwrap().create_session("qwen3");
+        mgr.lock().unwrap().destroy_session(id).unwrap();
+        assert!(mgr.lock().unwrap().list_sessions().is_empty());
     }
 
     #[tokio::test]
-    async fn test_release_slot() {
-        let mgr = SessionManager::new(4);
-        let (session_id, _io) = mgr.create_session("qwen3".to_string()).await.unwrap();
-        let (slot_id, _frontend) = mgr.connect(&session_id).await.unwrap();
-        mgr.release_slot(&session_id, slot_id).await.unwrap();
-        assert_eq!(mgr.list_sessions()[0].occupied_slots, 0);
+    async fn test_open_slot_exhausted() {
+        let mgr = make_mgr();
+        let sess_id = mgr.lock().unwrap().create_session("qwen3");
+
+        let mut lock = mgr.lock().unwrap();
+        assert!(lock.allocate_slot(sess_id).is_ok());
+        assert!(lock.allocate_slot(sess_id).is_ok());
+        assert!(lock.allocate_slot(sess_id).is_ok());
+        assert!(lock.allocate_slot(sess_id).is_ok());
+        assert!(matches!(lock.allocate_slot(sess_id), Err(Session_Error::SlotExhausted(_))));
+    }
+
+    #[tokio::test]
+    async fn test_close_slot_and_reallocate() {
+        let mgr = make_mgr();
+        let sess_id = mgr.lock().unwrap().create_session("qwen3");
+
+        {
+            let mut lock = mgr.lock().unwrap();
+            lock.allocate_slot(sess_id).unwrap();
+            assert_eq!(lock.list_sessions()[0].occupied_slots, 1);
+            lock.close_slot(sess_id, 0);
+            assert_eq!(lock.list_sessions()[0].occupied_slots, 0);
+        }
+
+        assert!(mgr.lock().unwrap().allocate_slot(sess_id).is_ok());
     }
 }

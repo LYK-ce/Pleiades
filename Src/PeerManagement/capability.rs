@@ -11,7 +11,7 @@
 
  use async_trait::async_trait;
  use libp2p::PeerId;
- use super::peer_info::{PeerInfo, PeerProfile, SupportedModel};
+ use super::peer_info::{PeerInfo, PeerProfile, SessionSummary, SupportedModel};
 
  /// 节点管理错误
  #[derive(Debug, thiserror::Error)]
@@ -71,8 +71,11 @@ pub trait Peer_Management_Capability: Send + Sync {
      /// 更新节点性能画像，字段为 None 时跳过
      async fn Update_Profile(&self, peer_id: &PeerId, profile: PeerProfile) -> Result<(), Peer_Management_Error>;
 
-     /// 更新节点持有的模型列表
-     async fn Update_Supported_Models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> Result<(), Peer_Management_Error>;
+    /// 更新节点持有的模型列表
+    async fn Update_Supported_Models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> Result<(), Peer_Management_Error>;
+
+    /// 更新本地节点的 sessions 列表
+    async fn Update_Local_Sessions(&self, local_peer_id: &PeerId, sessions: Vec<SessionSummary>) -> Result<(), Peer_Management_Error>;
 
     /// 清理超时节点，返回清理数量
     async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error>;

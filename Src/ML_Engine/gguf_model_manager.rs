@@ -39,6 +39,8 @@ pub struct Model_Arch_Info {
     pub vocab_size: usize,
     /// EOS token ID，从 GGUF metadata 的 tokenizer.ggml.eos_token_id 读取
     pub eos_token_id: u32,
+    /// chat template，从 GGUF metadata 的 tokenizer.chat_template 读取
+    pub chat_template: Option<String>,
     pub layers: Vec<Layer_Info>,
     pub non_layer_tensors: Vec<Tensor_Detail>,
     pub metadata_raw: HashMap<String, String>,
@@ -242,6 +244,9 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         .map(|v| v as u32)
         .unwrap_or(0);
 
+    // 读取 chat template
+    let chat_template = Get_Metadata_String(&content.metadata, "tokenizer.chat_template");
+
     // 4. 将 tensor 按层分组
     //    GGUF tensor 命名约定: blk.{layer_idx}.{component}.weight
     let mut layer_tensors_map: HashMap<usize, Vec<Tensor_Detail>> = HashMap::new();
@@ -319,6 +324,7 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         rope_freq_base,
         vocab_size,
         eos_token_id,
+        chat_template: chat_template.clone(),
         layers,
         non_layer_tensors,
         metadata_raw,
@@ -410,6 +416,8 @@ pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_A
         .map(|v| v as u32)
         .unwrap_or(0);
 
+    let chat_template = Get_Metadata_String(&content.metadata, "tokenizer.chat_template");
+
     let mut layer_tensors_map: HashMap<usize, Vec<Tensor_Detail>> = HashMap::new();
     let mut non_layer_tensors: Vec<Tensor_Detail> = Vec::new();
 
@@ -477,6 +485,7 @@ pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_A
         rope_freq_base,
         vocab_size,
         eos_token_id,
+        chat_template: chat_template.clone(),
         layers,
         non_layer_tensors,
         metadata_raw,
