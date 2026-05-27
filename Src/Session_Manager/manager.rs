@@ -45,12 +45,37 @@ impl SessionManager {
         let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1, slot_notify_tx);
         session.spawn(slot_notify_rx, self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
         self.sessions.insert(session_id, session);
+
+        self.publish_session_event("session_created", Some(session_id), Some(model_id));
+
         session_id
     }
 
     pub fn destroy_session(&mut self, session_id: u64) -> Result<(), Session_Error> {
         self.sessions.remove(&session_id);
+        self.publish_session_event("session_destroyed", Some(session_id), None);
         Ok(())
+    }
+
+    fn publish_session_event(&self, event_type: &str, session_id: Option<u64>, model_id: Option<&str>) {
+        let sessions_json: Vec<serde_json::Value> = self.sessions
+            .values()
+            .map(|s| serde_json::json!({
+                "session_id": s.session_id,
+                "model_id": s.model_id,
+                "occupied_slots": s.occupied_count(),
+                "total_slots": s.max_slots,
+            }))
+            .collect();
+
+        self.event_bus.Publish(crate::event_bus::Bus_Event::State {
+            payload: serde_json::json!({
+                "type": event_type,
+                "session_id": session_id,
+                "model_id": model_id,
+                "sessions": sessions_json,
+            }).to_string(),
+        });
     }
 
     pub fn list_sessions(&self) -> Vec<super::session::SessionInfo> {

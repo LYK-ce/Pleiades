@@ -52,29 +52,45 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app
         .peers
         .iter()
-        .map(|peer| {
+        .flat_map(|peer| {
+            let mut lines: Vec<ListItem> = Vec::new();
+
             let (icon, color) = if peer.connected {
                 ("●", Color::Green)
             } else {
                 ("○", Color::Red)
             };
 
-            // 截断 PeerId 显示（取前 8 位 + 后 4 位）
-            let display_id = Truncate_Peer_Id(&peer.peer_id);
+            let display_name = if peer.name.is_empty() {
+                Truncate_Peer_Id(&peer.peer_id)
+            } else {
+                peer.name.clone()
+            };
             let status = if peer.connected {
                 "已连接"
             } else {
                 "已断开"
             };
 
-            let line = Line::from(vec![
+            lines.push(ListItem::new(Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                Span::styled(display_id, Style::default().fg(Color::White)),
+                Span::styled(display_name, Style::default().fg(Color::White)),
                 Span::raw(" "),
                 Span::styled(status, Style::default().fg(color)),
-            ]);
+            ])));
 
-            ListItem::new(line)
+            // 模型子行
+            for m in &peer.models {
+                lines.push(ListItem::new(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        format!("{} [{}]", m.file_name, m.layer_range),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])));
+            }
+
+            lines
         })
         .collect();
 

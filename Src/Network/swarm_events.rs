@@ -43,18 +43,23 @@ impl Network_Service {
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
                 // 向新节点发送本机信息（name + supported_models）
-                if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
-                    let models_json = serde_json::to_string(&local.supported_models)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    let payload = format!("{}|{}", local.name, models_json).into_bytes();
-                    let request = Network_Data { data_type: DataType::Info, payload };
-                    self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                }
+                let (local_name, models_json) =
+                    if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
+                        let models = serde_json::to_string(&local.supported_models)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let payload = format!("{}|{}", local.name, models).into_bytes();
+                        let request = Network_Data { data_type: DataType::Info, payload };
+                        self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                        (local.name, models)
+                    } else {
+                        (String::new(), "[]".to_string())
+                    };
 
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
                         "type": "peer_connected",
                         "peer_id": peer_id.to_string(),
+                        "peer_name": local_name,
                     }).to_string(),
                 });
             }
@@ -194,9 +199,26 @@ impl Network_Service {
                                 if !name.is_empty() {
                                     let _ = self.peer_handle.Update_Peer_Name(&peer, name).await;
                                 }
-                                if let Ok(models) = serde_json::from_str::<Vec<crate::peer_management::SupportedModel>>(models_json) {
-                                    let _ = self.peer_handle.Update_Supported_Models(&peer, models).await;
+                                let models: Vec<crate::peer_management::SupportedModel> =
+                                    serde_json::from_str(models_json).unwrap_or_default();
+                                if !models.is_empty() {
+                                    let _ = self.peer_handle.Update_Supported_Models(&peer, models.clone()).await;
                                 }
+                                // 通知 TUI 更新该节点的 name/models
+                                let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                                    serde_json::json!({
+                                        "file_name": m.file_name,
+                                        "layer_range": m.layer_range(),
+                                    })
+                                }).collect();
+                                self.event_bus.Publish(Bus_Event::State {
+                                    payload: serde_json::json!({
+                                        "type": "peer_info_updated",
+                                        "peer_id": peer.to_string(),
+                                        "peer_name": name,
+                                        "models": models_display,
+                                    }).to_string(),
+                                });
                             }
                             let response = Network_Data {
                                 data_type: DataType::Info,

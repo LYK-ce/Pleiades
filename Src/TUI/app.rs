@@ -119,10 +119,21 @@ pub enum InputFocus {
 /// 网络节点显示信息
 #[derive(Debug, Clone)]
 pub struct Peer_Display {
+    /// 节点名称（优先显示，空则回退 peer_id）
+    pub name: String,
     /// 节点 ID（截断显示）
     pub peer_id: String,
     /// 连接状态
     pub connected: bool,
+    /// 持有的模型列表
+    pub models: Vec<ModelDisplay>,
+}
+
+/// 模型显示信息
+#[derive(Debug, Clone)]
+pub struct ModelDisplay {
+    pub file_name: String,
+    pub layer_range: String,
 }
 
 // ============================================================
@@ -237,11 +248,21 @@ impl App {
     }
 
     /// 添加或更新节点
-    pub fn Update_Peer(&mut self, peer_id: String, connected: bool) {
+    pub fn Update_Peer(&mut self, peer_id: String, name: String, connected: bool) {
         if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
             peer.connected = connected;
+            if !name.is_empty() {
+                peer.name = name;
+            }
         } else {
-            self.peers.push(Peer_Display { peer_id, connected });
+            self.peers.push(Peer_Display { name, peer_id, connected, models: Vec::new() });
+        }
+    }
+
+    /// 更新节点的模型列表
+    pub fn Update_Peer_Models(&mut self, peer_id: &str, models: Vec<ModelDisplay>) {
+        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+            peer.models = models;
         }
     }
 

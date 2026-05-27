@@ -194,23 +194,39 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
     match v["type"].as_str() {
         Some("peer_discovered") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), false);
-            app.Add_Log(format!("发现节点: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("发现节点: {label}"));
         }
         Some("peer_left") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             app.Remove_Peer(peer_id);
             app.Add_Log(format!("节点离开: {peer_id}"));
         }
+        Some("peer_info_updated") => {
+            let peer_id = v["peer_id"].as_str().unwrap_or("?");
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), true);
+            let models = parse_models_json(v.get("models"));
+            app.Update_Peer_Models(peer_id, models);
+            if !peer_name.is_empty() {
+                app.Add_Log(format!("节点信息: {peer_name}"));
+            }
+        }
         Some("peer_connected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), true);
-            app.Add_Log(format!("连接建立: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), true);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("连接建立: {label}"));
         }
         Some("peer_disconnected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
-            app.Update_Peer(peer_id.to_string(), false);
-            app.Add_Log(format!("连接断开: {peer_id}"));
+            let peer_name = v["peer_name"].as_str().unwrap_or("");
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false);
+            let label = if peer_name.is_empty() { peer_id } else { peer_name };
+            app.Add_Log(format!("连接断开: {label}"));
         }
         Some("job_created") => {
             let job_id = v["job_id"].as_u64().unwrap_or(0);
@@ -1020,6 +1036,31 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
     app.command_output.completed = true;
 }
 
+/// 从 EventBus JSON 中解析模型列表
+fn parse_models_json(models_val: Option<&serde_json::Value>) -> Vec<app::ModelDisplay> {
+    let Some(val) = models_val else { return Vec::new() };
+    let arr = match val {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::String(s) => {
+            match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+                Ok(a) => return a.iter().filter_map(|v| parse_one_model(v)).collect(),
+                Err(_) => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+    arr.iter().filter_map(|v| parse_one_model(v)).collect()
+}
+
+fn parse_one_model(v: &serde_json::Value) -> Option<app::ModelDisplay> {
+    let file_name = v.get("file_name")?.as_str()?.to_string();
+    let layer_range = v.get("layer_range")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    Some(app::ModelDisplay { file_name, layer_range })
+}
+
 /// 解析 peer 分配字符串，格式: `peer_id:start-end`
 ///
 /// 例: `12D3KooW...abc:0-15` → `("12D3KooW...abc", 0, 15)`
@@ -1065,9 +1106,9 @@ fn Render(frame: &mut Frame, app: &mut App) {
 
     let rows = Layout::vertical(constraints).split(area);
 
-    // Row 0: Log (70%) + Network (30%)
+    // Row 0: Log (60%) + Network (40%)
     let top =
-        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).split(rows[0]);
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[0]);
 
     // 记录面板区域，供鼠标滚轮事件命中检测
     app.log_area = top[0];

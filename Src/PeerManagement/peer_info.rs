@@ -160,6 +160,15 @@ impl Default for PeerProfile {
     }
 }
 
+/// 推理会话摘要（用于 PeerInfo，`#[serde(skip)]` 仅本地使用）
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionSummary {
+    pub session_id: u64,
+    pub model_id: String,
+    pub occupied_slots: usize,
+    pub total_slots: usize,
+}
+
 /// 节点详细信息
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerInfo {
@@ -179,6 +188,8 @@ pub struct PeerInfo {
     pub profile: PeerProfile,
     /// 持有的模型列表
     pub supported_models: Vec<SupportedModel>,
+    /// 本节点的活跃会话（仅 local=true 有意义）
+    pub sessions: Vec<SessionSummary>,
 }
 
 impl PeerInfo {
@@ -194,6 +205,7 @@ impl PeerInfo {
             last_active: now,
             profile: PeerProfile::default(),
             supported_models: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
@@ -209,6 +221,7 @@ impl PeerInfo {
             last_active: now,
             profile: PeerProfile::default(),
             supported_models: Vec::new(),
+            sessions: Vec::new(),
         }
     }
 
