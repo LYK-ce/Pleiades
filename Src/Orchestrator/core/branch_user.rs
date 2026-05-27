@@ -421,16 +421,19 @@ impl Core {
                             }).collect();
                         let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions.clone()).await;
 
-                        // 向所有已连接 peer 推送 Info
-                        if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
-                            let info = crate::network::build_local_info_payload(&local);
-                            for peer in &peers {
-                                if peer.peer_id != local.peer_id {
-                                    let _ = caps.network.send_data(
-                                        peer.peer_id,
-                                        crate::network::DataType::Info,
-                                        info.clone().into_bytes(),
-                                    ).await;
+                        // 重新获取 local（sessions 已更新）
+                        if let Ok(local_updated) = caps.peer_manager.Get_Local_Peer().await {
+                            // 向所有已连接 peer 推送 Info
+                            if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
+                                let info = crate::network::build_local_info_payload(&local_updated);
+                                for peer in &peers {
+                                    if peer.peer_id != local_updated.peer_id {
+                                        let _ = caps.network.send_data(
+                                            peer.peer_id,
+                                            crate::network::DataType::Info,
+                                            info.clone().into_bytes(),
+                                        ).await;
+                                    }
                                 }
                             }
                         }
