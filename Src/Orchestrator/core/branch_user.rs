@@ -374,10 +374,25 @@ impl Core {
             // ════════════════════════════════════════════════
             UserCommand::Session { model_id } => {
                 let session_mgr = self.session_mgr.clone();
-                let event_bus = self.capabilities.event_bus.clone();
+                let caps = self.capabilities.clone();
                 tokio::spawn(async move {
                     let id = session_mgr.lock().unwrap().create_session(&model_id);
-                    event_bus.Publish(crate::event_bus::Bus_Event::Notify {
+
+                    // 直接更新 PeerManager 本地 sessions
+                    if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
+                        let sessions: Vec<crate::peer_management::SessionSummary> =
+                            session_mgr.lock().unwrap().list_sessions().iter().map(|s| {
+                                crate::peer_management::SessionSummary {
+                                    session_id: s.session_id,
+                                    model_id: s.model_id.clone(),
+                                    occupied_slots: s.occupied_slots,
+                                    total_slots: s.total_slots,
+                                }
+                            }).collect();
+                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions).await;
+                    }
+
+                    caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
                         level: crate::event_bus::NotifyLevel::Info,
                         message: format!("Session {} created (model: {})", id, model_id),
                     });

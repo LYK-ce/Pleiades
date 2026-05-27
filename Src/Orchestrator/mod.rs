@@ -112,6 +112,9 @@ pub(crate) mod test_utils {
         async fn Update_Supported_Models(&self, peer_id: &libp2p::PeerId, models: Vec<crate::peer_management::SupportedModel>) -> Result<(), Peer_Management_Error> {
             if self.inner.update_supported_models(peer_id, models).await { Ok(()) } else { Err(Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
         }
+        async fn Update_Local_Sessions(&self, local_peer_id: &libp2p::PeerId, sessions: Vec<crate::peer_management::SessionSummary>) -> Result<(), Peer_Management_Error> {
+            if self.inner.update_local_sessions(local_peer_id, sessions).await { Ok(()) } else { Err(Peer_Management_Error::PeerNotFound(local_peer_id.to_string())) }
+        }
         async fn Cleanup_Timeout_Peers(&self, timeout_secs: u64) -> Result<usize, Peer_Management_Error> { Ok(self.inner.cleanup_timeout_peers(timeout_secs).await) }
         async fn Clear(&self) -> Result<(), Peer_Management_Error> { self.inner.clear().await; Ok(()) }
     }

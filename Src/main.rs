@@ -209,53 +209,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ══════════════════════════════════════════════════════
-    // Phase 5.6: Session 事件监听 — 更新 PeerManager
-    // ══════════════════════════════════════════════════════
-    {
-        let peer_manager = peer_manager_arc.clone();
-        let mut session_event_rx = event_bus.Subscribe();
-        tokio::spawn(async move {
-            loop {
-                match session_event_rx.recv().await {
-                    Ok(pleiades::event_bus::Bus_Event::State { payload }) => {
-                        let v: serde_json::Value = match serde_json::from_str(&payload) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        match v["type"].as_str() {
-                            Some("session_created") | Some("session_destroyed") => {
-                                if let (Some(sessions_val), Some(local)) = (
-                                    v.get("sessions"),
-                                    peer_manager.get_local_peer().await,
-                                ) {
-                                    let sessions: Vec<pleiades::peer_management::SessionSummary> =
-                                        sessions_val.as_array()
-                                            .map(|arr| arr.iter().filter_map(|s| {
-                                                Some(pleiades::peer_management::SessionSummary {
-                                                    session_id: s.get("session_id")?.as_u64()?,
-                                                    model_id: s.get("model_id")?.as_str()?.to_string(),
-                                                    occupied_slots: s.get("occupied_slots")?.as_u64()? as usize,
-                                                    total_slots: s.get("total_slots")?.as_u64()? as usize,
-                                                })
-                                            }).collect())
-                                            .unwrap_or_default();
-                                    let _ = peer_manager.update_local_sessions(&local.peer_id, sessions).await;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("session event listener lagged {} messages", n);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Ok(_) => {} // Notify/Stream/Output 等不处理
-                }
-            }
-        });
-    }
-
-    // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时
     // ══════════════════════════════════════════════════════
 
