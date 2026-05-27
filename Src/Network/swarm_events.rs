@@ -42,17 +42,15 @@ impl Network_Service {
                 );
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
-                // 向新节点发送本机信息（name + supported_models）
-                let (local_name, models_json) =
+                // 向新节点发送本机信息（name + models + sessions）
+                let local_name =
                     if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
-                        let models = serde_json::to_string(&local.supported_models)
-                            .unwrap_or_else(|_| "[]".to_string());
-                        let payload = format!("{}|{}", local.name, models).into_bytes();
+                        let payload = super::build_local_info_payload(&local).into_bytes();
                         let request = Network_Data { data_type: DataType::Info, payload };
                         self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                        (local.name, models)
+                        local.name
                     } else {
-                        (String::new(), "[]".to_string())
+                        String::new()
                     };
 
                 self.event_bus.Publish(Bus_Event::State {

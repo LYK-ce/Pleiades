@@ -280,39 +280,11 @@ impl Core {
                                     })
                                     .collect();
                                 if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
-                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models.clone()).await;
-
-                                    // 向所有已连接 peer 推送 Info
-                                    if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
-                                        let info = crate::network::build_local_info_payload(&local);
-                                        for peer in &peers {
-                                            if peer.peer_id != local.peer_id {
-                                                let _ = caps.network.send_data(
-                                                    peer.peer_id,
-                                                    crate::network::DataType::Info,
-                                                    info.clone().into_bytes(),
-                                                ).await;
-                                            }
-                                        }
-                                    }
-
-                                    // 通知 TUI 刷新本地模型列表
-                                    let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
-                                        serde_json::json!({
-                                            "file_name": m.file_name,
-                                            "layer_range": m.layer_range(),
-                                        })
-                                    }).collect();
-                                    caps.event_bus.Publish(Bus_Event::State {
-                                        payload: serde_json::json!({
-                                            "type": "peer_info_updated",
-                                            "peer_id": local.peer_id.to_string(),
-                                            "peer_name": local.name,
-                                            "models": models_display,
-                                        }).to_string(),
-                                    });
+                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models).await;
                                 }
                             }
+                            // 广播本地节点信息（Info → peers + EventBus → TUI）
+                            crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
                             format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
                         }
                         Err(e) => format!("flush 失败: {}", e),
@@ -408,7 +380,7 @@ impl Core {
                 tokio::spawn(async move {
                     let id = session_mgr.lock().unwrap().create_session(&model_id);
 
-                    // 直接更新 PeerManager 本地 sessions
+                    // 更新 PeerManager 本地 sessions
                     if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
                         let sessions: Vec<crate::peer_management::SessionSummary> =
                             session_mgr.lock().unwrap().list_sessions().iter().map(|s| {
@@ -419,43 +391,11 @@ impl Core {
                                     total_slots: s.total_slots,
                                 }
                             }).collect();
-                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions.clone()).await;
-
-                        // 重新获取 local（sessions 已更新）
-                        if let Ok(local_updated) = caps.peer_manager.Get_Local_Peer().await {
-                            // 向所有已连接 peer 推送 Info
-                            if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
-                                let info = crate::network::build_local_info_payload(&local_updated);
-                                for peer in &peers {
-                                    if peer.peer_id != local_updated.peer_id {
-                                        let _ = caps.network.send_data(
-                                            peer.peer_id,
-                                            crate::network::DataType::Info,
-                                            info.clone().into_bytes(),
-                                        ).await;
-                                    }
-                                }
-                            }
-                        }
-
-                        // 通知 TUI 刷新本地 session 列表
-                        let sessions_display: Vec<serde_json::Value> = sessions.iter().map(|s| {
-                            serde_json::json!({
-                                "session_id": s.session_id,
-                                "model_id": s.model_id,
-                                "occupied_slots": s.occupied_slots,
-                                "total_slots": s.total_slots,
-                            })
-                        }).collect();
-                        caps.event_bus.Publish(crate::event_bus::Bus_Event::State {
-                            payload: serde_json::json!({
-                                "type": "peer_info_updated",
-                                "peer_id": local.peer_id.to_string(),
-                                "peer_name": local.name,
-                                "sessions": sessions_display,
-                            }).to_string(),
-                        });
+                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions).await;
                     }
+
+                    // 广播本地节点信息（Info → peers + EventBus → TUI）
+                    crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
 
                     caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
                         level: crate::event_bus::NotifyLevel::Info,
