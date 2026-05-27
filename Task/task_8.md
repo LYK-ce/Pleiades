@@ -119,10 +119,28 @@ SessionManager → EventBus → PeerManager.update_local_sessions() → PeerInfo
 ## 实施计划
 
 0. 从当前分支 `reforge` 创建新分支 `task8_advance`，所有改动在此分支上进行 ✅
-1. Network 面板：peer_id → peer_name
-2. Network 面板：显示 peer 持有的模型及层范围
-3. Session 信息纳入 PeerInfo
-4. Network 面板宽度调整：30% → 40%（Log 对应变为 60%）
+1. Network 面板：peer_id → peer_name ✅
+2. Network 面板：显示 peer 持有的模型及层范围 ✅
+3. Session 信息纳入 PeerInfo + Info 推送 ✅
+4. Network 面板宽度 30% → 40% ✅
+5. Info payload 扩展为 name|models|sessions，分场景处理 ✅
+6. flush 后发 Info + peer_info_updated ✅
+7. 启动时发 peer_info_updated 显示本地节点 ✅
+
+## 改动文件 (10 files)
+
+| 文件 | 改动 |
+|---|---|
+| `Src/TUI/app.rs` | `Peer_Display` 加 name/models/sessions；`ModelDisplay`/`SessionDisplay` 类型 |
+| `Src/TUI/mod.rs` | `handle_state` 解析各类事件；`parse_models_json`/`parse_sessions_json`；布局 60/40 |
+| `Src/TUI/network_panel.rs` | name 优先；flat_map 灰色模型行 + 黄色 session 行 |
+| `Src/Network/swarm_events.rs` | peer_connected 带 peer_name；Info 入站 splitn(3) 解析 models+sessions |
+| `Src/Network/mod.rs` | `build_local_info_payload` → 三段格式 |
+| `Src/PeerManagement/peer_info.rs` | `SessionSummary` 类型；`PeerInfo.sessions` 字段 |
+| `Src/PeerManagement/` (capability/manager/handle/mod) | trait + 实现 `Update_Local_Sessions` |
+| `Src/Session_Manager/manager.rs` | `publish_session_event` 带完整 sessions 列表 |
+| `Src/Orchestrator/core/branch_user.rs` | Session handler: 更新 PeerManager + 发 Info + peer_info_updated；flush: 发 Info |
+| `Src/main.rs` | Phase 5.5 发 peer_info_updated 让 TUI 显示本地节点 |
 
 ---
 
