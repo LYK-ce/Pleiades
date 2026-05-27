@@ -81,6 +81,29 @@
 - `Src/Network/` (EventBus 发送端) — 事件 payload 加模型列表；新增 `peer_models_updated` 事件
 - `Src/main.rs` — Phase 5.5 flush 后发 `peer_models_updated` 事件
 
+### 3. Session 信息纳入 PeerInfo
+
+**问题**：创建 Session 后，session 信息只在 SessionManager 内部，PeerManager 的本地节点信息中不包含 session 列表。其他节点无法通过 DHT / dp 命令获知本节点有哪些活跃会话。
+
+**方案**：
+- `PeerInfo` 新增 `sessions: Vec<SessionSummary>` 字段（`#[serde(skip)]`，仅本地使用，不通过 DHT 同步）
+- `SessionSummary` 包含 `session_id`、`model_id`、`occupied_slots`、`total_slots`
+- `SessionManager::create_session()` / `destroy_session()` 通过 EventBus 发送 `session_created` / `session_destroyed` 事件
+- 事件监听方（Core 或 main.rs）调用 `peer_manager.update_local_sessions()` 更新
+- Network 面板（空间允许时）和 `dp` 命令展示 session 信息
+
+**数据流**：
+```
+SessionManager → EventBus → PeerManager.update_local_sessions() → PeerInfo.sessions → TUI
+```
+
+**影响文件**：
+- `Src/PeerManagement/peer_info.rs` — `PeerInfo` 加 `sessions` + `SessionSummary` 类型
+- `Src/PeerManagement/manager.rs` — 加 `update_local_sessions()` 方法
+- `Src/Session_Manager/manager.rs` — `create_session` / `destroy_session` 发 EventBus
+- `Src/main.rs` 或 `Core` — 监听 session 事件 → 更新 PeerManager
+- `Src/TUI/network_panel.rs` — 渲染 session 信息（可选，视面板空间）
+
 ---
 
 ## 实施计划
@@ -88,7 +111,7 @@
 0. 从当前分支 `reforge` 创建新分支 `task8_advance`，所有改动在此分支上进行 ✅
 1. Network 面板：peer_id → peer_name
 2. Network 面板：显示 peer 持有的模型及层范围
-3. <!-- TODO -->
+3. Session 信息纳入 PeerInfo
 
 ---
 
