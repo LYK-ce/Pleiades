@@ -126,6 +126,9 @@ SessionManager → EventBus → PeerManager.update_local_sessions() → PeerInfo
 5. Info payload 扩展为 name|models|sessions，分场景处理 ✅
 6. flush 后发 Info + peer_info_updated ✅
 7. 启动时发 peer_info_updated 显示本地节点 ✅
+8. 区分本地/远程节点（🏠 本机 / ● 已连接 / ○ 已断开）✅
+9. 提取 broadcast_local_info() 消除 Session/Flush handler 重复逻辑 ✅
+10. ConnectionEstablished Info payload 改用三段格式 ✅
 
 ## 改动文件 (10 files)
 

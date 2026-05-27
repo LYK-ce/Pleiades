@@ -276,3 +276,15 @@ slots: format!("{}/{}",
 - Session handler: 从 ~50 行 → `broadcast_local_info(...)` 一行调用
 - Flush handler: 从 ~40 行 → `broadcast_local_info(...)` 一行调用
 - **顺手修复**: Flush handler 原来用 `Update_Supported_Models` 前的旧 `local` 构造 payload（stale data），新函数内部重新 `Get_Local_Peer` 获取最新数据
+
+- [x] 额外: 区分本地/远程节点
+  - Peer_Display.is_local, Update_Peer 加 is_local 参数
+  - EventBus peer_info_updated payload 加 is_local 标记
+  - 本地节点: 🏠 本机 (Cyan)，始终排第一位
+  - 远程节点: ● 已连接 / ○ 已断开
+  - Update_Peer: 本地节点始终 insert(0) / 已有节点移到 pos 0
+
+## 完成
+
+> 2026-05-27 end
+> commits: 539f911 (base) → f76c105 (B1+R3 fix) → 5525fb5 (is_local)
