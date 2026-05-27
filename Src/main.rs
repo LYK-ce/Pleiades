@@ -187,6 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let storage = capabilities.storage.clone();
         let peer_manager = peer_manager_arc.clone();
+        let event_bus_5_5 = event_bus.clone();
         tokio::spawn(async move {
             if let Ok((added, _removed)) = storage.flush().await {
                 info!("启动后台 flush 完成: 新增 {} 个文件", added);
@@ -199,9 +200,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layer_bitmap: e.layer_bitmap?,
                         })
                     }).collect();
-                    let peers = peer_manager.get_local_peer().await;
-                    if let Some(local) = peers {
-                        peer_manager.update_supported_models(&local.peer_id, models).await;
+                    if let Some(local) = peer_manager.get_local_peer().await {
+                        peer_manager.update_supported_models(&local.peer_id, models.clone()).await;
+                        // 通知 TUI 显示本地节点
+                        let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                            serde_json::json!({"file_name": m.file_name, "layer_range": m.layer_range()})
+                        }).collect();
+                        event_bus_5_5.Publish(pleiades::event_bus::Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": local.peer_id.to_string(),
+                                "peer_name": local.name,
+                                "models": models_display,
+                                "sessions": serde_json::json!([]),
+                            }).to_string(),
+                        });
                     }
                 }
             }
