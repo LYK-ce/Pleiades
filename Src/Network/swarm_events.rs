@@ -232,6 +232,7 @@ impl Network_Service {
                                     "type": "peer_info_updated",
                                     "peer_id": peer.to_string(),
                                     "peer_name": name,
+                                    "is_local": false,
                                     "models": models_display,
                                     "sessions": sessions_display,
                                 }).to_string(),

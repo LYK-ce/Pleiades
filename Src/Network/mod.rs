@@ -151,6 +151,7 @@ pub async fn broadcast_local_info(
             "type": "peer_info_updated",
             "peer_id": local.peer_id.to_string(),
             "peer_name": local.name,
+            "is_local": true,
             "models": models_display,
             "sessions": sessions_display,
         })

@@ -211,6 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "type": "peer_info_updated",
                                 "peer_id": local.peer_id.to_string(),
                                 "peer_name": local.name,
+                                "is_local": true,
                                 "models": models_display,
                                 "sessions": serde_json::json!([]),
                             }).to_string(),

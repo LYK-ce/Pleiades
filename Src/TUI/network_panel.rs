@@ -55,7 +55,9 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
         .flat_map(|peer| {
             let mut lines: Vec<ListItem> = Vec::new();
 
-            let (icon, color) = if peer.connected {
+            let (icon, color) = if peer.is_local {
+                ("🏠", Color::Cyan)
+            } else if peer.connected {
                 ("●", Color::Green)
             } else {
                 ("○", Color::Red)
@@ -66,7 +68,9 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 peer.name.clone()
             };
-            let status = if peer.connected {
+            let status = if peer.is_local {
+                "本机"
+            } else if peer.connected {
                 "已连接"
             } else {
                 "已断开"

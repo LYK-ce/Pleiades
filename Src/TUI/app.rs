@@ -123,7 +123,9 @@ pub struct Peer_Display {
     pub name: String,
     /// 节点 ID（截断显示）
     pub peer_id: String,
-    /// 连接状态
+    /// 是否为本地节点
+    pub is_local: bool,
+    /// 连接状态（本地节点始终 true）
     pub connected: bool,
     /// 持有的模型列表
     pub models: Vec<ModelDisplay>,
@@ -257,15 +259,24 @@ impl App {
         }
     }
 
-    /// 添加或更新节点
-    pub fn Update_Peer(&mut self, peer_id: String, name: String, connected: bool) {
-        if let Some(peer) = self.peers.iter_mut().find(|p| p.peer_id == peer_id) {
+    /// 添加或更新节点（本地节点始终排在第一位）
+    pub fn Update_Peer(&mut self, peer_id: String, name: String, is_local: bool, connected: bool) {
+        if let Some(pos) = self.peers.iter().position(|p| p.peer_id == peer_id) {
+            let peer = &mut self.peers[pos];
             peer.connected = connected;
             if !name.is_empty() {
                 peer.name = name;
             }
+            peer.is_local = is_local;
+            // 本地节点移到最前
+            if is_local && pos != 0 {
+                let peer = self.peers.remove(pos);
+                self.peers.insert(0, peer);
+            }
+        } else if is_local {
+            self.peers.insert(0, Peer_Display { name, peer_id, is_local, connected, models: Vec::new(), sessions: Vec::new() });
         } else {
-            self.peers.push(Peer_Display { name, peer_id, connected, models: Vec::new(), sessions: Vec::new() });
+            self.peers.push(Peer_Display { name, peer_id, is_local, connected, models: Vec::new(), sessions: Vec::new() });
         }
     }
 

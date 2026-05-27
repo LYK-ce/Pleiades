@@ -195,7 +195,7 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
         Some("peer_discovered") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             let peer_name = v["peer_name"].as_str().unwrap_or("");
-            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false);
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, false);
             let label = if peer_name.is_empty() { peer_id } else { peer_name };
             app.Add_Log(format!("发现节点: {label}"));
         }
@@ -207,7 +207,8 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
         Some("peer_info_updated") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             let peer_name = v["peer_name"].as_str().unwrap_or("");
-            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), true);
+            let is_local = v["is_local"].as_bool().unwrap_or(false);
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), is_local, true);
             let models = parse_models_json(v.get("models"));
             app.Update_Peer_Models(peer_id, models);
             let sessions = parse_sessions_json(v.get("sessions"));
@@ -219,14 +220,14 @@ fn handle_state(app: &mut App, v: &serde_json::Value) {
         Some("peer_connected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             let peer_name = v["peer_name"].as_str().unwrap_or("");
-            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), true);
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, true);
             let label = if peer_name.is_empty() { peer_id } else { peer_name };
             app.Add_Log(format!("连接建立: {label}"));
         }
         Some("peer_disconnected") => {
             let peer_id = v["peer_id"].as_str().unwrap_or("?");
             let peer_name = v["peer_name"].as_str().unwrap_or("");
-            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false);
+            app.Update_Peer(peer_id.to_string(), peer_name.to_string(), false, false);
             let label = if peer_name.is_empty() { peer_id } else { peer_name };
             app.Add_Log(format!("连接断开: {label}"));
         }
