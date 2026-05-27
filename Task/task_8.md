@@ -93,16 +93,18 @@
 - Network 面板（空间允许时）和 `dp` 命令展示本地 session 信息
 
 **事件发送时间点**：
-| 触发操作 | EventBus 事件 | 更新内容 |
+| 触发操作 | EventBus 事件 | 网络推送 |
 |---|---|---|
-| `flush` | `peer_models_updated` | 本地 supported_models |
-| `session create` | `session_created` | 本地 sessions |
-| `session destroy` | `session_destroyed` | 本地 sessions |
-| 对端 Info 到达 | `peer_connected` (补全) | 远端 name + models |
+| `flush` | `peer_models_updated` | 向所有已连接节点重发 `DataType::Info` |
+| `session create` | `session_created` | 向所有已连接节点重发 `DataType::Info` |
+| `session destroy` | `session_destroyed` | 向所有已连接节点重发 `DataType::Info` |
+| 对端 Info 到达 | `peer_connected` (补全) | —（被动接收） |
 
 **数据流**：
 ```
 SessionManager → EventBus → PeerManager.update_local_sessions() → PeerInfo.sessions → TUI
+                  │
+                  └→ Network: 向所有 peer 重发 DataType::Info（name + models + sessions）
 ```
 
 **影响文件**：
