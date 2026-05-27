@@ -280,7 +280,37 @@ impl Core {
                                     })
                                     .collect();
                                 if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
-                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models).await;
+                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models.clone()).await;
+
+                                    // 向所有已连接 peer 推送 Info
+                                    if let Ok(peers) = caps.peer_manager.Get_All_Peers().await {
+                                        let info = crate::network::build_local_info_payload(&local);
+                                        for peer in &peers {
+                                            if peer.peer_id != local.peer_id {
+                                                let _ = caps.network.send_data(
+                                                    peer.peer_id,
+                                                    crate::network::DataType::Info,
+                                                    info.clone().into_bytes(),
+                                                ).await;
+                                            }
+                                        }
+                                    }
+
+                                    // 通知 TUI 刷新本地模型列表
+                                    let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                                        serde_json::json!({
+                                            "file_name": m.file_name,
+                                            "layer_range": m.layer_range(),
+                                        })
+                                    }).collect();
+                                    caps.event_bus.Publish(Bus_Event::State {
+                                        payload: serde_json::json!({
+                                            "type": "peer_info_updated",
+                                            "peer_id": local.peer_id.to_string(),
+                                            "peer_name": local.name,
+                                            "models": models_display,
+                                        }).to_string(),
+                                    });
                                 }
                             }
                             format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
