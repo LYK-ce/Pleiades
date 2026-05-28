@@ -329,15 +329,6 @@ impl MlSession {
         // 将 Python 风格的方法调用改写为 minijinja 过滤器语法
         // 参考: Crane (https://github.com/lucasjinreal/Crane)
         let tmpl_str = Self::rewrite_python_str_methods(tmpl_str);
-        // DEBUG: 打印改写后的模板（第 30-40 行）
-        {
-            let lines: Vec<&str> = tmpl_str.lines().collect();
-            let start = 30usize.saturating_sub(1);
-            let end = (lines.len()).min(45);
-            for (i, line) in lines.iter().enumerate().skip(start).take(end - start) {
-                tracing::info!("TMPL[{:>3}]: {}", i + 1, line);
-            }
-        }
 
         let mut env = minijinja::Environment::new();
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);

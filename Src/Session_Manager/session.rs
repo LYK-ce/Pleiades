@@ -148,33 +148,6 @@ impl Session {
                         let max_tokens = req.max_tokens;
                         tracing::info!("Session {} request: {} messages, max_tokens={}", session_id, messages.len(), max_tokens);
 
-                        // DEBUG: 打印前端传入的原始 messages
-                        {
-                            let debug_lines: Vec<String> = messages.iter().map(|m| {
-                                format!("  [{}] {}", m.role, m.content)
-                            }).collect();
-                            let debug_msg = format!(
-                                "Session {} DEBUG input messages:\n{}",
-                                session_id,
-                                debug_lines.join("\n")
-                            );
-                            tracing::info!("{}", debug_msg);
-                            event_bus.Publish(Bus_Event::Notify {
-                                level: NotifyLevel::Info,
-                                message: debug_msg,
-                            });
-                        }
-
-                        // DEBUG: 打印渲染后的 chat template
-                        {
-                            let rendered = ml.apply_chat_template(&messages);
-                            tracing::info!("Session {} DEBUG rendered template:\n{}", session_id, rendered);
-                            event_bus.Publish(Bus_Event::Notify {
-                                level: NotifyLevel::Info,
-                                message: format!("Session {} DEBUG rendered template:\n{}", session_id, rendered),
-                            });
-                        }
-
                         // ── encode 客户端传入的完整 messages ──
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
@@ -215,7 +188,6 @@ impl Session {
                         tracing::info!("Session {} autoregression start: tokens={}, EOS={}", session_id, offset, eos);
 
                         // ── 自回归生成 loop ───────────────────
-                        let mut assistant_reply = String::new();
                         let gen_limit = max_tokens.min(2048) as usize;
                         for _ in 0..gen_limit {
                             match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
@@ -251,8 +223,6 @@ impl Session {
 
                             match ml.decode(token_id) {
                                 Ok(text) => {
-                                    tracing::info!("Session {} output: {}", session_id, text);
-                                    assistant_reply.push_str(&text);
                                     let _ = slot_tokens[&slot_id].send(text);
                                 }
                                 Err(e) => {
@@ -295,27 +265,6 @@ impl Session {
                 }
             }
         });
-    }
-
-    /// 去掉 assistant reply 中的 <think>...</think> 块
-    fn strip_think(reply: &str) -> String {
-        let think_start = "<think>";
-        let think_end = "</think>";
-        let mut result = String::new();
-        let mut remaining = reply;
-        while let Some(start) = remaining.find(think_start) {
-            result.push_str(&remaining[..start]);
-            let after_start = &remaining[start + think_start.len()..];
-            if let Some(end) = after_start.find(think_end) {
-                remaining = &after_start[end + think_end.len()..];
-            } else {
-                // 有 <think> 但没有 </think>，跳过整段
-                result.push_str(remaining);
-                return result;
-            }
-        }
-        result.push_str(remaining);
-        result
     }
 
     pub fn allocate(&mut self, token_tx: mpsc::UnboundedSender<String>) -> Option<usize> {
