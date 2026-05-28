@@ -275,12 +275,12 @@ impl MlSession {
                     // 检查后面是否有 [0] 或 [-1]
                     let rest = &template[split_args_end..];
                     if rest.starts_with("[0]") {
-                        out.push_str(" | split");
+                        out.push_str(" | split(");
                         out.push_str(&template[after_dot_split..split_args_end]);
                         out.push_str(" | first");
                         i = split_args_end + 3; // skip [0]
                     } else if rest.starts_with("[-1]") {
-                        out.push_str(" | split");
+                        out.push_str(" | split(");
                         out.push_str(&template[after_dot_split..split_args_end]);
                         out.push_str(" | last");
                         i = split_args_end + 4; // skip [-1]
