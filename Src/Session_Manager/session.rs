@@ -158,6 +158,7 @@ impl Session {
                                 session_id,
                                 debug_lines.join("\n")
                             );
+                            tracing::info!("{}", debug_msg);
                             event_bus.Publish(Bus_Event::Notify {
                                 level: NotifyLevel::Info,
                                 message: debug_msg,
@@ -167,6 +168,7 @@ impl Session {
                         // DEBUG: 打印渲染后的 chat template
                         {
                             let rendered = ml.apply_chat_template(&messages);
+                            tracing::info!("Session {} DEBUG rendered template:\n{}", session_id, rendered);
                             event_bus.Publish(Bus_Event::Notify {
                                 level: NotifyLevel::Info,
                                 message: format!("Session {} DEBUG rendered template:\n{}", session_id, rendered),
