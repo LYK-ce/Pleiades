@@ -81,6 +81,7 @@ toml_edit = "0.22"
 shimmytok = "0.7"
 # Jinja2 模板引擎 (GGUF chat_template 渲染)
 minijinja = "2"
+minijinja-contrib = "2"
 # P2P网络流
 libp2p-stream = "0.4.0-alpha"
 

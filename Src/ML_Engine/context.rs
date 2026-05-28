@@ -342,6 +342,9 @@ impl MlSession {
         let mut env = minijinja::Environment::new();
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
 
+        // Python 兼容内置函数（tojson, namespace, is string 等）
+        minijinja_contrib::add_to_environment(&mut env);
+
         // 注册 Python 兼容的字符串过滤器
         env.add_filter("startswith", |s: &str, prefix: &str| -> bool { s.starts_with(prefix) });
         env.add_filter("endswith", |s: &str, suffix: &str| -> bool { s.ends_with(suffix) });
