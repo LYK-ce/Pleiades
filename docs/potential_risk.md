@@ -40,9 +40,8 @@
 
 ### 4. chat template 硬编码
 
-- **风险**：当前硬编码 Qwen3 对话格式（`<|im_start|>user\n...`），换模型（Llama/Mistral）时模板不匹配，导致输出异常。GGUF metadata 已有 `tokenizer.chat_template` 但需 Jinja 引擎解析。
-- **影响范围**：`MlSession::apply_chat_template()`
-- **方向**：引入 `minijinja`/`tera` 或直接映射特殊 token ID
+- **风险**：~~当前硬编码 Qwen3 对话格式~~ ✅ **已修复 (Task 9)**。引入 `minijinja` + `minijinja-contrib` 渲染 GGUF metadata 中的 `chat_template`，支持 Qwen3、Llama、Mistral 等多模型格式。Python 风格方法调用 (`split`/`startswith` 等) 通过 `rewrite_python_str_methods()` 改写为 minijinja 过滤器语法。
+- **影响范围**：已消除
 
 ### 5. encode_messages 长对话性能
 
@@ -76,9 +75,8 @@
 
 ### 12. messages 历史无限增长 OOM
 
-- **风险**：`Session.spawn()` 内 `messages: Vec<Message>` 每轮对话 push user + assistant，永远不截断。长对话（千轮级）会导致内存持续增长最终 OOM；且每轮 prefill 需 encode 完整历史，tokenize 开销线性增长。
-- **影响范围**：`session.rs:131` messages 累积 + `ml.encode_messages(&messages)` 每轮全量 tokenize
-- **当前状态**：推迟处理。当前单 slot 短对话场景不触发，后续与上下文窗口管理一并解决。
+- **风险**：~~`Session.spawn()` 内 `messages: Vec<Message>` 每轮对话累积~~ ✅ **已修复 (Task 9)**。Session 无状态化——对话历史完全由前端管理，Session 不再自管 `Vec<Message>`。每次请求通过 `SessionRequest` 透传完整 `messages[]`。
+- **影响范围**：已消除
 
 ### 13. MlSession.forward() 自动/显式 offset 语义冗余
 
@@ -88,15 +86,19 @@
 
 ### 14. 自回归 max_tokens 硬编码 300
 
-- **风险**：`Session.spawn()` 自回归循环 `for _ in 0..300`，超长输出静默截断无提示，无法配置。
-- **影响范围**：`session.rs:171` 生成上限
-- **当前状态**：暂时不处理。
+- **风险**：~~`Session.spawn()` 自回归循环 `for _ in 0..300`，超长输出静默截断~~ ✅ **已修复 (Task 9)**。`max_tokens` 通过 `SessionRequest.max_tokens` 由前端（API/CLI）传入，Session 使用 `gen_limit = max_tokens.min(2048) as usize`。
+- **影响范围**：已消除
+
+### 14b. max_tokens 硬上限 2048
+
+- **风险**：`Session.spawn()` 自回归循环 `gen_limit = max_tokens.min(2048)` 硬上限 2048。前端传入 `max_tokens > 2048` 时静默截断，用户无法生成超长回复。
+- **影响范围**：`session.rs` 生成 loop
+- **当前状态**：记录风险。短回复场景不触发；若需更长输出，改为可配置或取消防护上限。
 
 ### 15. strip_think 未闭合标签泄露
 
-- **风险**：`strip_think()` 遇到未闭合 `<think>` 标签时，注释说"跳过整段"但实际把含标签的尾部全部保留，可能暴露给用户。
-- **影响范围**：`session.rs:232-237` strip_think 逻辑
-- **当前状态**：暂时不处理。
+- **风险**：~~`strip_think()` 遇到未闭合 `<think>` 标签时泄露尾部内容~~ ✅ **已消除 (Task 9 Code Review)**。`strip_think()` 函数已删除——Task 9 无状态化后不再需要此过滤逻辑。
+- **影响范围**：已消除
 
 ### 16. Remote Chat bridge 退出无 Session 通知
 
