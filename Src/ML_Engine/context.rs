@@ -340,7 +340,7 @@ impl MlSession {
         }
 
         let mut env = minijinja::Environment::new();
-        env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
 
         // Python 兼容内置函数（tojson, namespace, is string 等）
         minijinja_contrib::add_to_environment(&mut env);
