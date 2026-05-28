@@ -149,6 +149,13 @@ impl Session {
                         tracing::info!("Session {} request: {} messages, max_tokens={}", session_id, messages.len(), max_tokens);
 
                         // ── encode 客户端传入的完整 messages ──
+                        tracing::info!("Session {} incoming messages:\n{}",
+                            session_id,
+                            messages.iter().map(|m| format!("  [{}] {}", m.role, m.content)).collect::<Vec<_>>().join("\n"));
+                        {
+                            let rendered = ml.apply_chat_template(&messages);
+                            tracing::info!("Session {} rendered template:\n{}", session_id, rendered);
+                        }
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {
