@@ -242,19 +242,130 @@ impl MlSession {
         Self::fallback_qwen3_template(messages)
     }
 
+    /// 将 Python 风格的字符串方法调用改写为 minijinja 过滤器语法。
+    /// 参考: Crane (https://github.com/lucasjinreal/Crane)
+    fn rewrite_python_str_methods(template: &str) -> String {
+        let template = Self::rewrite_split_index(template);
+        const METHODS: &[&str] = &["startswith", "endswith", "split", "lstrip", "rstrip", "strip"];
+        let mut out = template.to_string();
+        for method in METHODS {
+            let pat = format!(".{}(", method);
+            let repl = format!(" | {}(", method);
+            out = out.replace(&pat, &repl);
+        }
+        out
+    }
+
+    /// 将 .split(X)[0] → | split(X) | first, .split(X)[-1] → | split(X) | last
+    fn rewrite_split_index(template: &str) -> String {
+        let mut out = String::with_capacity(template.len());
+        let bytes = template.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            // 查找 .split(
+            let suffix = b".split(";
+            if let Some(pos) = bytes[i..].windows(suffix.len()).position(|w| w == suffix) {
+                let abs = i + pos;
+                out.push_str(&template[i..abs]);
+                // 找到匹配的 )
+                let after_dot_split = abs + suffix.len();
+                if let Some(end) = Self::find_matching_paren(&template[after_dot_split..]) {
+                    let split_args_end = after_dot_split + end + 1; // past the )
+                    // 检查后面是否有 [0] 或 [-1]
+                    let rest = &template[split_args_end..];
+                    if rest.starts_with("[0]") {
+                        out.push_str(" | split");
+                        out.push_str(&template[after_dot_split..split_args_end]);
+                        out.push_str(" | first");
+                        i = split_args_end + 3; // skip [0]
+                    } else if rest.starts_with("[-1]") {
+                        out.push_str(" | split");
+                        out.push_str(&template[after_dot_split..split_args_end]);
+                        out.push_str(" | last");
+                        i = split_args_end + 4; // skip [-1]
+                    } else {
+                        // 不处理的索引，原样保留
+                        out.push_str(&template[abs..split_args_end]);
+                        out.push_str(&rest[..rest.chars().next().map_or(0, |c| c.len_utf8())]);
+                        i = split_args_end + rest.chars().next().map_or(0, |c| c.len_utf8());
+                    }
+                } else {
+                    out.push_str(&template[abs..]);
+                    i = len;
+                }
+            } else {
+                out.push_str(&template[i..]);
+                break;
+            }
+        }
+        out
+    }
+
+    /// 找到匹配的 ) 位置（处理嵌套括号和引号）
+    fn find_matching_paren(s: &str) -> Option<usize> {
+        let mut depth = 1usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        for (i, c) in s.char_indices() {
+            match c {
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                '(' if !in_single && !in_double => depth += 1,
+                ')' if !in_single && !in_double => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// minijinja 渲染 chat_template
     fn render_with_minijinja(tmpl_str: &str, messages: &[Message]) -> Result<String, String> {
+        // 将 Python 风格的方法调用改写为 minijinja 过滤器语法
+        // 参考: Crane (https://github.com/lucasjinreal/Crane)
+        let tmpl_str = Self::rewrite_python_str_methods(tmpl_str);
+
         let mut env = minijinja::Environment::new();
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
 
-        // Qwen3 模板使用 .split() 方法调用语法，minijinja 不支持
-        // 转换为过滤器语法: value.split(delim) → value|split(delim)
-        let tmpl_str = tmpl_str.replace(".split(", "|split(");
-
-        // 注册 split 过滤器: "a,b,c"|split(",") → ["a","b","c"]
-        fn split_filter(value: &str, delimiter: &str) -> Vec<String> {
-            value.split(delimiter).map(|s| s.to_string()).collect()
-        }
-        env.add_filter("split", split_filter);
+        // 注册 Python 兼容的字符串过滤器
+        env.add_filter("startswith", |s: &str, prefix: &str| -> bool { s.starts_with(prefix) });
+        env.add_filter("endswith", |s: &str, suffix: &str| -> bool { s.ends_with(suffix) });
+        env.add_filter("split", |s: String, sep: String| -> Vec<String> {
+            s.split(&sep).map(|p| p.to_string()).collect()
+        });
+        env.add_filter("lstrip", |s: String, chars: Option<String>| -> String {
+            match chars {
+                None => s.trim_start().to_string(),
+                Some(c) => {
+                    let ch: Vec<char> = c.chars().collect();
+                    s.trim_start_matches(ch.as_slice()).to_string()
+                }
+            }
+        });
+        env.add_filter("rstrip", |s: String, chars: Option<String>| -> String {
+            match chars {
+                None => s.trim_end().to_string(),
+                Some(c) => {
+                    let ch: Vec<char> = c.chars().collect();
+                    s.trim_end_matches(ch.as_slice()).to_string()
+                }
+            }
+        });
+        env.add_filter("strip", |s: String, chars: Option<String>| -> String {
+            match chars {
+                None => s.trim().to_string(),
+                Some(c) => {
+                    let ch: Vec<char> = c.chars().collect();
+                    s.trim_matches(ch.as_slice()).to_string()
+                }
+            }
+        });
 
         env.add_template("chat", &tmpl_str)
             .map_err(|e| format!("parse template: {}", e))?;
@@ -269,7 +380,7 @@ impl MlSession {
             minijinja::value::Value::from(map)
         }).collect();
 
-        tmpl.render(minijinja::context! { messages => msgs })
+        tmpl.render(minijinja::context! { messages => msgs, add_generation_prompt => true })
             .map_err(|e| format!("render: {}", e))
     }
 
