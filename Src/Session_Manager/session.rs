@@ -148,6 +148,31 @@ impl Session {
                         let max_tokens = req.max_tokens;
                         tracing::info!("Session {} request: {} messages, max_tokens={}", session_id, messages.len(), max_tokens);
 
+                        // DEBUG: 打印前端传入的原始 messages
+                        {
+                            let debug_lines: Vec<String> = messages.iter().map(|m| {
+                                format!("  [{}] {}", m.role, m.content)
+                            }).collect();
+                            let debug_msg = format!(
+                                "Session {} DEBUG input messages:\n{}",
+                                session_id,
+                                debug_lines.join("\n")
+                            );
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: debug_msg,
+                            });
+                        }
+
+                        // DEBUG: 打印渲染后的 chat template
+                        {
+                            let rendered = ml.apply_chat_template(&messages);
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!("Session {} DEBUG rendered template:\n{}", session_id, rendered),
+                            });
+                        }
+
                         // ── encode 客户端传入的完整 messages ──
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,

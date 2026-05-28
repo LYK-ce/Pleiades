@@ -230,7 +230,7 @@ impl MlSession {
     ///
     /// 优先使用 GGUF metadata 中的 chat_template（由 load_tokenizer 注入），
     /// 通过 minijinja 渲染。若无模板则 fallback 为硬编码 Qwen3 格式。
-    fn apply_chat_template(&self, messages: &[Message]) -> String {
+    pub fn apply_chat_template(&self, messages: &[Message]) -> String {
         // 1. 优先使用 GGUF metadata 中的 chat_template
         if let Some(ref tmpl_str) = self.ctx.chat_template {
             match Self::render_with_minijinja(tmpl_str, messages) {
