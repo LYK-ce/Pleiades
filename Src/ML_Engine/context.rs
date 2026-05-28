@@ -245,7 +245,18 @@ impl MlSession {
     /// minijinja 渲染 chat_template
     fn render_with_minijinja(tmpl_str: &str, messages: &[Message]) -> Result<String, String> {
         let mut env = minijinja::Environment::new();
-        env.add_template("chat", tmpl_str)
+
+        // Qwen3 模板使用 .split() 方法调用语法，minijinja 不支持
+        // 转换为过滤器语法: value.split(delim) → value|split(delim)
+        let tmpl_str = tmpl_str.replace(".split(", "|split(");
+
+        // 注册 split 过滤器: "a,b,c"|split(",") → ["a","b","c"]
+        fn split_filter(value: &str, delimiter: &str) -> Vec<String> {
+            value.split(delimiter).map(|s| s.to_string()).collect()
+        }
+        env.add_filter("split", split_filter);
+
+        env.add_template("chat", &tmpl_str)
             .map_err(|e| format!("parse template: {}", e))?;
         let tmpl = env.get_template("chat")
             .map_err(|e| format!("get template: {}", e))?;
