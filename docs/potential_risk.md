@@ -130,15 +130,19 @@
 
 ### 20. CUDA OOM — 长 prompt 预填充显存压力 (Task 9 期间发现)
 
-- **风险**：OpenCode 等前端会注入超长 system prompt（实测 3488 tokens），在 f32 精度下：
-  - Prefill 的 Attention 矩阵 `[1, heads, 3488, 3488] × f32` ≈ 780 MB
+- **风险**：OpenCode 等前端会注入超长 system prompt（实测 3488 tokens）。`nvidia-smi` 观测峰值 ~5000 MB，模型在 f32 精度下：
   - 模型权重 (0.6B f32) ≈ 2.4 GB
-  - 中间激活值 ≈ 500 MB
-  - 总计 ≈ 4-5 GB。在 8GB 显卡上多次请求后 KV cache 增长 + CUDA 碎片化导致 OOM
-- **影响范围**：`inference.lua` forward loop + CUDA DriverError `out of memory`
+  - KV Cache (28 层 × 2 × 4 kv_heads × 128 dim × 3488 tokens × f32) ≈ 400 MB
+  - Attention 矩阵 (prefill 时 `[1, 16 heads, 3488, 3488] × f32`) ≈ 780 MB
+  - FFN 中间激活 (SwiGLU, gate+up `[1, 3488, 4864]` × 2 × f32) ≈ 136 MB/层
+  - CUDA context / cublas workspace / gemm 缓冲区 ≈ 300-500 MB
+  - **总量约 4.5-5 GB**，接近 8GB 显卡的碎片化阈值
+- **OOM 可能原因**：CUDA 内存碎片化——多次 tensor allocate/free 后，即使总空闲内存够，找不到足够大的连续块分配给 attention 矩阵或 FFN 中间 tensor
+- **影响范围**：`inference.lua` forward loop + CUDA DriverError `out of memory`；短 prompt 正常，长 prompt (>2000 tokens) 高概率触发
 - **缓解方向**：
-  - 使用 GGUF 量化模型（Q4/Q5）而非 f32
+  - 使用 GGUF 量化模型（Q4_K_M 等）而非 f32 精度的 PGGUF
+  - 接入 Flash Attention 消除完整 attention 矩阵（~780 MB → ~几 MB）
   - 限制 max_tokens（当前已 clamp 到 2048）
-  - 接入 Flash Attention 减少 attention 矩阵内存
-  - 优化 prompt 截断（前端控制 system prompt 长度）
+  - 前端控制 system prompt 长度
+  - 设置 `CUDA_LAUNCH_BLOCKING=1` + `cuda-memcheck` 精确定位分配失败点
 - **当前状态**：记录为已知风险。短 prompt（几十 token）正常，长 prompt 在 f32 精度 8GB 显存下有 OOM 风险。
