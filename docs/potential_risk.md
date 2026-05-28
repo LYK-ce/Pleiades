@@ -114,18 +114,31 @@
 
 ### 17. Chat Template 处理粗糙导致模型直接 EOS
 
-- **风险**：API 只提取请求中最后一条 `role: "user"` 的 content 作为提示词发送给 Session，system message 和多轮 assistant 历史全部丢弃。某些 chat template 严格的模型（如 Qwen3）收到裸文本（缺少 `<|im_start|>system` 等标记）会直接生成 EOS，客户端收到空响应。
-- **影响范围**：`Src/API/routes.rs` chat_completions handler → prompt 提取逻辑
-- **方向**：API 侧将完整 `messages[]` 数组传递给 Session，Session 端支持「替换」模式（替换而非追加消息历史），或 API 侧用 tokenizer 渲染 chat template 后发 raw prompt
+- **风险**：~~API 只提取最后一条 user 消息~~ ✅ **已修复 (Task 9)**。API 完整透传 `messages[]` 数组给 Session，system message 和多轮历史均被保留。
+- **影响范围**：已消除
 
 ### 18. 有状态 Session 与无状态 API 的架构矛盾
 
-- **风险**：OpenAI API 是无状态的——客户端每次请求自带完整 `messages[]`，服务端不保存上下文。但当前 Session 设计是有状态的——内部维护 `Vec<Message>` 历史，每轮 prompt 追加。API 复用有状态 Session 会导致：(a) 不同 API 客户端请求混入同一对话历史，(b) 客户端自带的完整 messages 信息被截断，只取最后一条 user message。
-- **影响范围**：`Session.spawn()` 的消息管理 + `API` 的 slot 分配路径
-- **方向**：Session 支持「追加」和「替换」两种模式。chat/remote chat 用追加模式，API 用替换模式。或 API 每次请求独立创建临时推理上下文，不复用 Session
+- **风险**：~~API 复用有状态 Session 导致上下文混乱~~ ✅ **已修复 (Task 9)**。Session 变为无状态——对话历史完全由前端管理，每次请求透传完整 `messages[]`。`SessionRequest` 替代裸 String prompt。
+- **影响范围**：已消除
 
 ### 19. API slot 独占导致单并发
 
 - **风险**：当前 API server 启动时分配一个 slot 常驻持有，后台 handler task 串行处理请求。同一 Session 的 API 只支持单并发——前一个请求推理期间（可能数秒到数十秒），后续请求排队等待。
 - **影响范围**：`Src/API/routes.rs` spawn_slot_handler → request_rx 串行 loop
 - **当前状态**：单用户场景暂时够用。需多并发时改为 slot pool 或每请求独立推理上下文
+
+### 20. CUDA OOM — 长 prompt 预填充显存压力 (Task 9 期间发现)
+
+- **风险**：OpenCode 等前端会注入超长 system prompt（实测 3488 tokens），在 f32 精度下：
+  - Prefill 的 Attention 矩阵 `[1, heads, 3488, 3488] × f32` ≈ 780 MB
+  - 模型权重 (0.6B f32) ≈ 2.4 GB
+  - 中间激活值 ≈ 500 MB
+  - 总计 ≈ 4-5 GB。在 8GB 显卡上多次请求后 KV cache 增长 + CUDA 碎片化导致 OOM
+- **影响范围**：`inference.lua` forward loop + CUDA DriverError `out of memory`
+- **缓解方向**：
+  - 使用 GGUF 量化模型（Q4/Q5）而非 f32
+  - 限制 max_tokens（当前已 clamp 到 2048）
+  - 接入 Flash Attention 减少 attention 矩阵内存
+  - 优化 prompt 截断（前端控制 system prompt 长度）
+- **当前状态**：记录为已知风险。短 prompt（几十 token）正常，长 prompt 在 f32 精度 8GB 显存下有 OOM 风险。
