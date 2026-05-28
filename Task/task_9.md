@@ -295,3 +295,8 @@ Client → API{messages[]} → 完整透传 → Session{无状态} → ML{chat_t
 - 基分支: `reforge`
 - 工作分支: `task9_api` ✅ 已创建
 - 对话模板方案: `minijinja` crate (crates.io)
+- **参考实现**: [Crane](https://github.com/lucasjinreal/Crane) — `rewrite_python_str_methods()` 函数
+  - 将 GGUF chat_template 中的 Python 风格方法调用（`.split()`, `.startswith()`, `.rstrip()` 等）改写为 minijinja 过滤器语法
+  - 处理 `.split(X)[0]` → `| split(X) | first` 和 `.split(X)[-1]` → `| split(X) | last`
+  - 注册 `startswith`/`endswith`/`split`/`lstrip`/`rstrip`/`strip` 过滤器
+  - 源文件: `crane-core/src/autotokenizer.rs`

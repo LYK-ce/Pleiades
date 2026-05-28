@@ -25,3 +25,12 @@
 - 对话历史完全由前端管理，Session 变为无状态
 - minijinja 渲染 GGUF chat_template，fallback Qwen3 硬编码
 - TUI 双输入框简化为单输入框，删除 chat/remote chat 命令
+
+## References
+
+- [Crane](https://github.com/lucasjinreal/Crane) — `crane-core/src/autotokenizer.rs`
+  - `rewrite_python_str_methods()`: 将 Python 风格 `.split()`/`.startswith()` 等改写为 minijinja 过滤器语法
+  - `rewrite_split_index()`: `.split(X)[0]` → `| first`, `.split(X)[-1]` → `| last`
+  - `find_matching_paren()`: 处理嵌套括号和引号匹配
+  - 注册字符串过滤器: `startswith`, `endswith`, `split`, `lstrip`, `rstrip`, `strip`
+  - 使用 `minijinja_contrib::add_to_environment()` 添加 Python 兼容内置函数
