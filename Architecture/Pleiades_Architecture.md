@@ -154,6 +154,13 @@ pub struct FileEntry {
 
 **位置**: `Src/ML_Engine/`
 
+**外部依赖**:
+- `minijinja` + `minijinja-contrib` — Jinja2 模板引擎，用于渲染 GGUF chat_template
+- 参考: [Crane](https://github.com/lucasjinreal/Crane) (`crane-core/src/autotokenizer.rs`)
+  - `rewrite_python_str_methods()`: 将 Python 风格的 `.split()`/`.startswith()` 等方法调用改写为 minijinja 过滤器语法
+  - `rewrite_split_index()`: `.split(X)[0]` → `| first`, `.split(X)[-1]` → `| last`
+  - 注册字符串过滤器: `startswith`, `endswith`, `split`, `lstrip`, `rstrip`, `strip`
+
 #### 3.4.1 GGUF → PGGUF 转换 ⚠️
 
 **PGGUF 不是 split model 的产物！** PGGUF = 原始 GGUF + `pleiades.model_id` + `pleiades.layer_bitmap` 元数据。**完整保留了所有模型权重、tokenizer、架构信息。**
@@ -222,14 +229,21 @@ impl MlSession {
     pub fn Load_Model(&mut self, path: &Path, start: usize, end: usize) -> Result<()>;
     pub fn Unload(&mut self);
     pub fn Has_Model(&self) -> bool;
-    pub fn Encode(&self, text: &str) -> Result<Vec<u32>>;          // Tokenizer
+    pub fn Encode(&self, text: &str) -> Result<Vec<u32>>;          // Tokenizer (deprecated)
     pub fn Decode(&self, token_id: u32) -> Result<String>;
     pub fn Tensorize(&self, token_ids: &[u32]) -> Result<Tensor>;  // 无需模型已加载
     pub fn Forward(&self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor>;
     pub fn Sample(&self, logits: &Tensor, temperature: f64) -> Result<u32>;
     pub fn Get_Eos(&self) -> u32;
+    pub fn Encode_Messages(&self, messages: &[Message]) -> Result<Vec<u32>>;  // 对话消息编码
+    pub fn Apply_Chat_Template(&self, messages: &[Message]) -> String;  // 渲染 chat_template
 }
 ```
+
+**chat_template 渲染流程**:
+1. `load_tokenizer()` → 从 GGUF metadata 读取 `tokenizer.chat_template` (Jinja2 格式)
+2. `apply_chat_template()` → `rewrite_python_str_methods()` 改写模板 → minijinja 渲染
+3. 渲染失败 → fallback 硬编码 Qwen3 格式
 
 ---
 
@@ -306,11 +320,17 @@ pub enum Network_Inbound_Event {
 **Session/Slot 机制**:
 
 ```rust
+// 推理请求结构体
+pub struct SessionRequest {
+    pub messages: Vec<Message>,  // 完整对话历史（前端管理）
+    pub max_tokens: u32,
+}
+
 // SessionManager::allocate_slot → mpsc 通道对
 pub struct SlotHandle {
     pub session_id: u64,
     pub slot_id: usize,
-    pub prompt_tx: mpsc::UnboundedSender<String>,
+    pub prompt_tx: mpsc::UnboundedSender<SessionRequest>,
     pub token_rx: mpsc::UnboundedReceiver<String>,
 }
 
@@ -319,13 +339,8 @@ pub struct SlotHandle {
 // 空哨兵 "\0" 标记一轮结束
 ```
 
-**本地 Chat vs 远端 Chat**:
-
-```
-本地: Chat → allocate_slot → prompt_tx/token_rx mpsc → Session.spawn()
-远端: remote chat <peer> <id> → open_session_stream → prompt 上行/token 下行串行
-      对端收到 SessionStreamArrived → Core B3 → allocate_slot → bridge (stream↔mpsc)
-```
+**对话历史管理**: 前端（API 客户端）负责管理完整 messages 数组，每次请求透传。
+Session 不再自管 `Vec<Message>`，只做无状态推理。
 
 **Capabilities 容器**:
 ```rust
@@ -430,7 +445,7 @@ local_tensor.send_eof(stream)
 
 **位置**: `Src/TUI/`
 
-ratatui + crossterm。双输入框布局：
+ratatui + crossterm。单输入框布局：
 
 ```
 ┌──────────────────────┬──────────────┐
@@ -440,15 +455,13 @@ ratatui + crossterm。双输入框布局：
 ├─────────────────────────────────────┤
 │ Command Output (8 行)               │
 ├─────────────────────────────────────┤
-│ Prompt> (3 行)                      │
-├─────────────────────────────────────┤
 │ pleiades> (3 行, 命令输入)          │
 └─────────────────────────────────────┘
 ```
 
-**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`
+**内置命令**: `run`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `help`
 
-**Session 命令**: `session create <model>`, `session inference <id> <model>`, `chat <id>`, `remote chat <peer> <id>`
+**Session 命令**: `session <model_id>`, `session inference <id> <model>`, `api <id>`
 
 ---
 
@@ -548,7 +561,8 @@ Session.spawn()                       ML Thread (Lua)
   ← recv_frame(logits)                  send_tensor(logits)
 ```
 
-**多轮对话**: Session 维护 `context_len`，每轮 prefill offset = context_len，KV Cache 增量复用。超过 4096 tokens 时 reset。
+**多轮对话**: 每一轮 offset=0（每次 prefill 前 ML Thread 清空 KV Cache）。
+对话历史由前端管理，服务端无状态。
 
 ---
 
