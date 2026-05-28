@@ -30,6 +30,7 @@ use super::lua_tensor::LuaTensor;
 // ============================================================
 
 /// 对话消息
+#[derive(Debug, Clone)]
 pub struct Message {
     pub role: String,   // "system", "user", "assistant"
     pub content: String,
@@ -227,49 +228,47 @@ impl MlSession {
 
     /// 应用 chat template 到 messages 数组，返回格式化文本。
     ///
-    /// 当前使用硬编码 Qwen3 格式。GGUF 中的 tokenizer.chat_template 已读取但未使用，
-    /// 因为需要完整 Jinja 引擎才能解析（see Task 6 v2 总文档 §局限）。
+    /// 优先使用 GGUF metadata 中的 chat_template（由 load_tokenizer 注入），
+    /// 通过 minijinja 渲染。若无模板则 fallback 为硬编码 Qwen3 格式。
     fn apply_chat_template(&self, messages: &[Message]) -> String {
-        let mut result = String::new();
-        for msg in messages {
-            if msg.role == "system" {
-                result.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
-            } else if msg.role == "user" {
-                result.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", msg.content));
-            } else if msg.role == "assistant" {
-                result.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content));
+        // 1. 优先使用 GGUF metadata 中的 chat_template
+        if let Some(ref tmpl_str) = self.ctx.chat_template {
+            match Self::render_with_minijinja(tmpl_str, messages) {
+                Ok(result) => return result,
+                Err(e) => tracing::warn!("chat_template render failed, fallback to qwen3: {}", e),
             }
         }
-        result.push_str("<|im_start|>assistant\n");
-        result
+        // 2. fallback: 硬编码 Qwen3（兼容无 chat_template 的旧模型或 split PGGUF）
+        Self::fallback_qwen3_template(messages)
     }
 
-    /// 简易 Jinja 模板渲染 — 保留作为后续扩展参考
-    fn render_template(tmpl: &str, messages: &[Message]) -> String {
-        // 提取 for 循环内的文本
-        let for_tag = "{% for message in messages %}";
-        let endfor_tag = "{% endfor %}";
-        let mut result = String::new();
+    /// minijinja 渲染 chat_template
+    fn render_with_minijinja(tmpl_str: &str, messages: &[Message]) -> Result<String, String> {
+        let mut env = minijinja::Environment::new();
+        env.add_template("chat", tmpl_str)
+            .map_err(|e| format!("parse template: {}", e))?;
+        let tmpl = env.get_template("chat")
+            .map_err(|e| format!("get template: {}", e))?;
 
-        if let Some(for_start) = tmpl.find(for_tag) {
-            // for 之前的内容
-            result.push_str(&tmpl[..for_start]);
-            let body_start = for_start + for_tag.len();
-            if let Some(body_end) = tmpl[body_start..].find(endfor_tag) {
-                let body = &tmpl[body_start..body_start + body_end];
-                let after = &tmpl[body_start + body_end + endfor_tag.len()..];
-                for msg in messages {
-                    let line = body
-                        .replace("{{ message.role }}", &msg.role)
-                        .replace("{{ message.content }}", &msg.content);
-                    result.push_str(&line);
-                }
-                result.push_str(after);
-            }
-        } else {
-            // 无模板语法，直接返回原文
-            result = tmpl.to_string();
+        let msgs: Vec<minijinja::value::Value> = messages.iter().map(|m| {
+            let mut map: std::collections::BTreeMap<String, minijinja::Value> =
+                std::collections::BTreeMap::new();
+            map.insert("role".into(), m.role.clone().into());
+            map.insert("content".into(), m.content.clone().into());
+            minijinja::value::Value::from(map)
+        }).collect();
+
+        tmpl.render(minijinja::context! { messages => msgs })
+            .map_err(|e| format!("render: {}", e))
+    }
+
+    /// fallback Qwen3 格式（无 chat_template 时使用）
+    fn fallback_qwen3_template(messages: &[Message]) -> String {
+        let mut result = String::new();
+        for msg in messages {
+            result.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
         }
+        result.push_str("<|im_start|>assistant\n");
         result
     }
 

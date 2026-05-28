@@ -11,7 +11,6 @@
 
 use crate::orchestrator::job::JobId;
 use ratatui::layout::Rect;
-use tokio::sync::broadcast;
 
 // ============================================================
 // 视图模式
@@ -103,13 +102,11 @@ impl Command_Output {
 
 /// 输入焦点枚举
 ///
-/// 双输入框设计，Tab 键在两者间切换。
+/// 命令输入框。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFocus {
     /// 系统命令输入框（最底部）
     Command,
-    /// Prompt 输入框（Command Output 下方）
-    Prompt,
 }
 
 // ============================================================
@@ -189,12 +186,6 @@ pub struct App {
     /// 命令光标位置
     pub cursor_position: usize,
 
-    // ===== Prompt 输入栏数据 =====
-    /// Prompt 输入缓冲区
-    pub prompt_buffer: String,
-    /// Prompt 光标位置
-    pub prompt_cursor: usize,
-
     // ===== 焦点管理 =====
     /// 当前输入焦点
     pub focus: InputFocus,
@@ -216,15 +207,11 @@ pub struct App {
     pub log_area: Rect,
     /// Command 面板区域
     pub command_area: Rect,
-
-    // ===== Prompt 通道 =====
-    /// Prompt 输入广播通道（TUI 初始化时创建，chat task 订阅）
-    pub prompt_tx: broadcast::Sender<String>,
 }
 
 impl App {
     /// 创建新的 App 实例
-    pub fn New(prompt_tx: broadcast::Sender<String>) -> Self {
+    pub fn New() -> Self {
         Self {
             view_mode: View_Mode::Idle,
             device: "cpu".to_string(),
@@ -236,9 +223,6 @@ impl App {
             command_scroll: 0,
             input_buffer: String::new(),
             cursor_position: 0,
-            prompt_buffer: String::new(),
-            prompt_cursor: 0,
-            prompt_tx,
             focus: InputFocus::Command,
             active_job_id: None,
             should_quit: false,
@@ -358,48 +342,6 @@ impl App {
         let input = self.input_buffer.clone();
         self.Clear_Input();
         input
-    }
-
-    // ===== Prompt 输入栏方法 =====
-
-    /// Prompt 输入字符
-    pub fn Prompt_Input_Char(&mut self, c: char) {
-        self.prompt_buffer.insert(self.prompt_cursor, c);
-        self.prompt_cursor += c.len_utf8();
-    }
-
-    /// Prompt 删除字符（Backspace）
-    pub fn Prompt_Delete_Char(&mut self) {
-        if self.prompt_cursor > 0 {
-            let prev = self.prompt_buffer[..self.prompt_cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.prompt_buffer.remove(prev);
-            self.prompt_cursor = prev;
-        }
-    }
-
-    /// Prompt 清空输入
-    pub fn Prompt_Clear(&mut self) {
-        self.prompt_buffer.clear();
-        self.prompt_cursor = 0;
-    }
-
-    /// Prompt 提取输入内容并清空
-    pub fn Take_Prompt(&mut self) -> String {
-        let input = self.prompt_buffer.clone();
-        self.Prompt_Clear();
-        input
-    }
-
-    /// 切换输入焦点
-    pub fn Toggle_Focus(&mut self) {
-        self.focus = match self.focus {
-            InputFocus::Command => InputFocus::Prompt,
-            InputFocus::Prompt => InputFocus::Command,
-        };
     }
 
     /// 检查是否有活跃推理会话

@@ -14,7 +14,7 @@
 //! - job_panel: Job 显示区
 //! - command_panel: Command 显示区
 //!
-//! ## 布局（双输入框）
+//! ## 布局（单输入框）
 //! ```text
 //! ┌─────────────────────────┬────────────────┐
 //! │ Log (70%)               │ Network (30%)  │
@@ -22,8 +22,6 @@
 //! │ Job (始终显示, 3行)                       │
 //! ├──────────────────────────────────────────┤
 //! │ Command Output (始终显示, 8行)            │
-//! ├──────────────────────────────────────────┤
-//! │ Prompt> (3行)                            │
 //! ├──────────────────────────────────────────┤
 //! │ pleiades> (3行, 命令输入)                 │
 //! └──────────────────────────────────────────┘
@@ -38,7 +36,6 @@ pub mod job_panel;
 pub mod log_panel;
 pub mod network_panel;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -75,7 +72,6 @@ use crate::orchestrator::job::JobId;
 pub fn TUI_Loop(
     mut event_rx: broadcast::Receiver<Bus_Event>,
     user_cmd_tx: mpsc::Sender<UserCommand>,
-    prompt_tx: broadcast::Sender<String>,
 ) {
     // 1. 初始化终端
     let mut terminal = ratatui::init();
@@ -83,7 +79,7 @@ pub fn TUI_Loop(
     // 启用鼠标捕获（滚轮等事件）
     crossterm::execute!(std::io::stdout(), EnableMouseCapture).ok();
 
-    let mut app = App::New(prompt_tx);
+    let mut app = App::New();
     app.Add_Log("Pleiades TUI 已启动".to_string());
 
     // 2. 事件循环
@@ -430,32 +426,17 @@ fn Handle_Key_Event(
     }
 
     match key_code {
-        // Tab: 切换输入焦点
-        KeyCode::Tab => {
-            app.Toggle_Focus();
+        // 回车: 提交命令
+        KeyCode::Enter => {
+            let input = app.Take_Input();
+            if !input.is_empty() {
+                Handle_Command_Input(app, &input, user_cmd_tx);
+            }
         }
-        // 回车: 根据焦点分发
-        KeyCode::Enter => match app.focus {
-            InputFocus::Command => {
-                let input = app.Take_Input();
-                if !input.is_empty() {
-                    Handle_Command_Input(app, &input, user_cmd_tx);
-                }
-            }
-            InputFocus::Prompt => {
-                Handle_Prompt_Submit(app);
-            }
-        },
-        // Esc: 清空当前焦点输入
-        KeyCode::Esc => match app.focus {
-            InputFocus::Command => app.Clear_Input(),
-            InputFocus::Prompt => app.Prompt_Clear(),
-        },
-        // Backspace: 删除当前焦点字符
-        KeyCode::Backspace => match app.focus {
-            InputFocus::Command => app.Delete_Char(),
-            InputFocus::Prompt => app.Prompt_Delete_Char(),
-        },
+        // Esc: 清空输入
+        KeyCode::Esc => app.Clear_Input(),
+        // Backspace: 删除字符
+        KeyCode::Backspace => app.Delete_Char(),
         // ↑: 根据修饰键决定滚动目标
         KeyCode::Up => {
             if modifiers.contains(KeyModifiers::CONTROL) {
@@ -484,25 +465,10 @@ fn Handle_Key_Event(
                 app.Scroll_Command_Down();
             }
         }
-        // 普通字符输入: 路由到当前焦点
-        KeyCode::Char(c) => match app.focus {
-            InputFocus::Command => app.Input_Char(c),
-            InputFocus::Prompt => app.Prompt_Input_Char(c),
-        },
+        // 普通字符输入
+        KeyCode::Char(c) => app.Input_Char(c),
         _ => {}
     }
-}
-
-/// 处理 Prompt 提交
-///
-/// 将 prompt_buffer 的内容通过 IoFrontend.input_tx 发送给 ML Session。
-/// 仅在有活跃 session 且未在生成中时有效。
-fn Handle_Prompt_Submit(app: &mut App) {
-    let prompt = app.Take_Prompt();
-    if prompt.is_empty() {
-        return;
-    }
-    let _ = app.prompt_tx.send(prompt);
 }
 
 // ============================================================
@@ -584,55 +550,6 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             let cmd = UserCommand::Session { model_id: model.to_string() };
             if user_cmd_tx.blocking_send(cmd).is_err() {
                 app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            }
-        }
-        return;
-    }
-
-    // ---- chat <session_id> ----
-
-    if trimmed.starts_with("chat ") {
-        let sid_str = trimmed.strip_prefix("chat ").unwrap_or("").trim();
-        let sid = sid_str.parse::<u64>();
-        match sid {
-            Ok(session_id) => {
-                app.command_output.output_text =
-                    format!("已连接到 Session {}，请切换到 Prompt 框输入", session_id);
-                let cmd = UserCommand::Chat { session_id };
-                if user_cmd_tx.blocking_send(cmd).is_err() {
-                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-                }
-            }
-            Err(_) => {
-                app.command_output.output_text =
-                    format!("错误: '{}' 不是有效的 session_id\n用法: chat <session_id>", sid_str);
-            }
-        }
-        return;
-    }
-
-    // ---- remote chat <peer_name> <session_id> ----
-
-    if trimmed.starts_with("remote chat ") {
-        let args = trimmed.strip_prefix("remote chat ").unwrap_or("");
-        let mut parts = args.split_whitespace();
-        let peer_name = parts.next();
-        let sid_str = parts.next();
-        match (peer_name, sid_str.and_then(|s| s.parse::<u64>().ok())) {
-            (Some(name), Some(session_id)) => {
-                app.command_output.output_text =
-                    format!("已连接到远端 {} Session {}", name, session_id);
-                let cmd = UserCommand::RemoteChat {
-                    peer_name: name.to_string(),
-                    session_id,
-                };
-                if user_cmd_tx.blocking_send(cmd).is_err() {
-                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-                }
-            }
-            _ => {
-                app.command_output.output_text =
-                    "用法: remote chat <peer_name> <session_id>".to_string();
             }
         }
         return;
@@ -1112,16 +1029,15 @@ fn Parse_Peer_Assignment(arg: &str) -> Result<(String, usize, usize), String> {
 // 总渲染函数
 // ============================================================
 
-/// 总渲染函数 — 计算布局并分发给各 panel 渲染（双输入框布局）
+/// 总渲染函数 — 计算布局并分发给各 panel 渲染（单输入框布局）
 fn Render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // 5 行布局：Log+Network | Job | Command Output | Prompt 输入 | 命令输入
+    // 4 行布局：Log+Network | Job | Command Output | 命令输入
     let constraints = vec![
         Constraint::Min(6),    // Log + Network（自适应填满）
         Constraint::Length(3), // Job（固定 3 行）
         Constraint::Length(8), // Command Output（固定 8 行，推理输出）
-        Constraint::Length(3), // Prompt 输入栏（固定 3 行）
         Constraint::Length(3), // 命令输入栏（固定 3 行，最底部）
     ];
 
@@ -1144,54 +1060,8 @@ fn Render(frame: &mut Frame, app: &mut App) {
     // Row 2: Command Output（始终显示）
     command_panel::Render(frame, rows[2], app);
 
-    // Row 3: Prompt 输入栏
-    Render_Prompt(frame, rows[3], app);
-
-    // Row 4: 命令输入栏（最底部）
-    Render_Input(frame, rows[4], app);
-}
-
-/// 渲染 Prompt 输入栏
-///
-/// 根据是否有活跃 session 显示不同状态：
-/// - 有活跃 session：正常边框 + "Prompt>" 前缀
-/// - 无活跃 session：灰色 + "无活跃会话" 提示
-fn Render_Prompt(frame: &mut Frame, area: Rect, app: &App) {
-    let is_focused = app.focus == InputFocus::Prompt;
-
-    let border_color = if is_focused {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-
-    let input_text = Line::from(vec![
-        Span::styled(
-            "Prompt> ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            app.prompt_buffer.as_str(),
-            Style::default().fg(Color::White),
-        ),
-    ]);
-    let paragraph = Paragraph::new(input_text).block(block);
-    frame.render_widget(paragraph, area);
-
-    // 设置光标位置（仅当 Prompt 获得焦点时）
-    if is_focused {
-        let cursor_x = area.x + 1 + "Prompt> ".len() as u16 + app.prompt_cursor as u16;
-        let cursor_y = area.y + 1;
-        if cursor_x < area.x + area.width - 1 {
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
-    }
+    // Row 3: 命令输入栏（最底部）
+    Render_Input(frame, rows[3], app);
 }
 
 /// 渲染命令输入栏（最底部）

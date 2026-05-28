@@ -8,6 +8,13 @@ use tokio::sync::mpsc;
 
 // ─── 错误类型 ───────────────────────────────────────────────
 
+/// Session 推理请求（由 API/前端传入）
+#[derive(Debug, Clone)]
+pub struct SessionRequest {
+    pub messages: Vec<crate::ml_engine::context::Message>,
+    pub max_tokens: u32,
+}
+
 #[derive(Debug)]
 pub enum Session_Error {
     SessionNotFound(String),
@@ -30,11 +37,11 @@ impl std::error::Error for Session_Error {}
 // ─── SlotHandle ─────────────────────────────────────────────
 
 /// v2.7: Slot 通过 mpsc 通道对连接 Chat ↔ Session。
-/// prompt_tx 发送 prompt 给 Session，token_rx 从 Session 接收 token。
+/// prompt_tx 发送 SessionRequest 给 Session，token_rx 从 Session 接收 token。
 pub struct SlotHandle {
     pub session_id: u64,
     pub slot_id: usize,
-    pub prompt_tx: mpsc::UnboundedSender<String>,
+    pub prompt_tx: mpsc::UnboundedSender<SessionRequest>,
     pub token_rx: mpsc::UnboundedReceiver<String>,
 }
 
@@ -54,12 +61,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_slot_handle_token_recv() {
-        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+        use crate::ml_engine::context::Message;
+        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel::<SessionRequest>();
         let (token_tx, token_rx) = mpsc::unbounded_channel();
         let _handle = SlotHandle { session_id: 1, slot_id: 0, prompt_tx, token_rx };
 
         token_tx.send("hello".into()).unwrap();
-        // token_rx moved into handle; test the channel directly
-        // (in real code, handle.token_rx is used by chat relay task)
     }
 }

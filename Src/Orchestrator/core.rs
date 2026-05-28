@@ -10,7 +10,7 @@ mod job_executor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use super::job::{JobId, JobKind, LifecycleEvent};
 use super::command::UserCommand;
@@ -83,8 +83,6 @@ pub struct Core {
     // --- Session Manager ---
     pub(crate) session_mgr: std::sync::Arc<std::sync::Mutex<crate::session::SessionManager>>,
 
-    // --- Prompt 通道 ---
-    prompt_tx: broadcast::Sender<String>,
 
     // --- 偏好设置 ---
     device_preference: String,
@@ -97,7 +95,6 @@ impl Core {
         user_cmd_rx: mpsc::Receiver<UserCommand>,
         inbound_rx: mpsc::Receiver<InboundRequest>,
         network_inbound_rx: mpsc::Receiver<Network_Inbound_Event>,
-        prompt_tx: broadcast::Sender<String>,
     ) -> Self {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_BUFFER);
         let program_registry = ProgramRegistry::new()
@@ -120,7 +117,6 @@ impl Core {
             lifecycle_rx,
             program_registry,
             session_mgr,
-            prompt_tx,
             device_preference: String::new(),
         }
     }

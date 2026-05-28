@@ -25,7 +25,8 @@ use super::types::*;
 
 /// HTTP handler → 后台 handler task 的请求
 pub(crate) struct ApiRequest {
-    pub prompt: String,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: u32,
     pub stream: bool,
     pub reply_tx: oneshot::Sender<ApiResponse>,
 }
@@ -51,7 +52,7 @@ pub(crate) struct ApiState {
 // ─── 后台 handler task：持有 slot，串行处理请求 ─────────────
 
 pub(crate) fn spawn_slot_handler(
-    prompt_tx: mpsc::UnboundedSender<String>,
+    prompt_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionRequest>,
     mut token_rx: mpsc::UnboundedReceiver<String>,
     session_id: u64,
 ) -> mpsc::UnboundedSender<ApiRequest> {
@@ -60,7 +61,17 @@ pub(crate) fn spawn_slot_handler(
     tokio::spawn(async move {
         tracing::info!("API slot handler started for session {}", session_id);
         while let Some(req) = request_rx.recv().await {
-            if prompt_tx.send(req.prompt).is_err() {
+            let session_req = crate::session::SessionRequest {
+                messages: req.messages.into_iter().map(|m| {
+                    crate::ml_engine::context::Message {
+                        role: m.role,
+                        content: m.content,
+                    }
+                }).collect(),
+                max_tokens: req.max_tokens,
+            };
+
+            if prompt_tx.send(session_req).is_err() {
                 let _ = req.reply_tx.send(ApiResponse::Error("session closed".into()));
                 break;
             }
@@ -109,13 +120,10 @@ pub(crate) async fn chat_completions(
     State(state): State<ApiState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let prompt = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+     // 验证至少有一条消息
+    if req.messages.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let completion_id = format!("chatcmpl-{}", rand_id());
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -123,7 +131,8 @@ pub(crate) async fn chat_completions(
     state
         .request_tx
         .send(ApiRequest {
-            prompt,
+            messages: req.messages,
+            max_tokens: req.max_tokens,
             stream: req.stream,
             reply_tx,
         })

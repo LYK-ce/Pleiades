@@ -85,7 +85,14 @@ impl Core {
                             match read_session_frame(&mut stream).await {
                                 Ok(prompt) => {
                                     tracing::info!("Session {} bridge: recv prompt '{}'", sid, prompt);
-                                    if prompt_tx.send(prompt).is_err() {
+                                    let req = crate::session::SessionRequest {
+                                        messages: vec![crate::ml_engine::context::Message {
+                                            role: "user".into(),
+                                            content: prompt,
+                                        }],
+                                        max_tokens: 256,
+                                    };
+                                    if prompt_tx.send(req).is_err() {
                                         tracing::warn!("Session {} bridge: prompt_tx closed", sid);
                                         break;
                                     }

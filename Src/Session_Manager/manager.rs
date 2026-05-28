@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-use super::capability::{Session_Error, SlotHandle};
+use super::capability::{SessionRequest, Session_Error, SlotHandle};
 use super::session::Session;
 use crate::storage::StorageCapability;
 
@@ -41,7 +41,7 @@ impl SessionManager {
         let session_id = self.counter;
         self.counter += 1;
 
-        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel();
+        let (slot_notify_tx, slot_notify_rx) = mpsc::unbounded_channel::<(usize, mpsc::UnboundedReceiver<SessionRequest>, mpsc::UnboundedSender<String>)>();
         let session = Session::new(session_id, model_id.to_string(), self.max_slots, 1, slot_notify_tx);
         session.spawn(slot_notify_rx, self.stream_hub.clone(), self.event_bus.clone(), self.storage.clone());
         self.sessions.insert(session_id, session);
@@ -96,7 +96,7 @@ impl SessionManager {
             .get_mut(&session_id)
             .ok_or_else(|| Session_Error::SessionNotFound(session_id.to_string()))?;
 
-        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
+        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<SessionRequest>();
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
 
         let slot_id = session

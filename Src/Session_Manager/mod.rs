@@ -16,7 +16,7 @@ pub mod slot;
 
 // ─── 聚合导出 ───────────────────────────────────────────────
 
-pub use capability::{Session_Error, SlotHandle};
+pub use capability::{Session_Error, SessionRequest, SlotHandle};
 pub use manager::SessionManager;
 pub use session::SessionInfo;
 pub use slot::Slot;

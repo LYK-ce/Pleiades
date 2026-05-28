@@ -7,9 +7,10 @@
 
 use std::sync::Arc;
 
+use super::capability::SessionRequest;
 use super::slot::{Slot, SlotState};
 use crate::event_bus::{Bus_Event, EventBus, NotifyLevel};
-use crate::ml_engine::context::{MlSession, Message};
+use crate::ml_engine::context::MlSession;
 use crate::ml_engine::lua_tensor::{bytes_to_tensor, tensor_to_bytes};
 use crate::storage::StorageCapability;
 use tokio::sync::mpsc;
@@ -22,7 +23,7 @@ pub struct Session {
     pub slots: Vec<SlotState>,
     pub eos_token_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// slot_notify_tx: allocate_slot 时把 (slot_id, prompt_rx, token_tx) 发给 spawn task
-    pub slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
+    pub slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<SessionRequest>, mpsc::UnboundedSender<String>)>,
 }
 
 impl Session {
@@ -31,7 +32,7 @@ impl Session {
         model_id: String,
         max_slots: usize,
         eos_token_id: u32,
-        slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
+        slot_notify_tx: mpsc::UnboundedSender<(usize, mpsc::UnboundedReceiver<SessionRequest>, mpsc::UnboundedSender<String>)>,
     ) -> Self {
         use std::sync::Arc;
         use std::sync::atomic::AtomicU32;
@@ -53,7 +54,7 @@ impl Session {
     /// - ML 流收到 logits → sample → decode → slot.token_tx
     pub fn spawn(
         &self,
-        slot_notify_rx: mpsc::UnboundedReceiver<(usize, mpsc::UnboundedReceiver<String>, mpsc::UnboundedSender<String>)>,
+        slot_notify_rx: mpsc::UnboundedReceiver<(usize, mpsc::UnboundedReceiver<SessionRequest>, mpsc::UnboundedSender<String>)>,
         stream_hub: Arc<crate::orchestrator::local_tensor_stream::LocalStreamHub>,
         event_bus: Arc<EventBus>,
         storage: Arc<dyn StorageCapability>,
@@ -128,7 +129,6 @@ impl Session {
             slot_tokens.insert(slot_id, token_tx);
 
             // ── 4. main loop ──────────────────────────────
-            let mut messages: Vec<Message> = Vec::new();
             let mut ml_buf =
                 crate::network::tensor_stream::protocol::Tensor_Buffer::New(16 * 1024 * 1024);
 
@@ -141,13 +141,14 @@ impl Session {
                     prompt_rx = new_rx;
                 }
 
-                // 收 prompt
+                // 收 SessionRequest（包含完整 messages + max_tokens）
                 match prompt_rx.recv().await {
-                    Some(text) => {
-                        tracing::info!("Session {} chat: {}", session_id, text);
-                        messages.push(Message { role: "user".into(), content: text });
+                    Some(req) => {
+                        let messages = req.messages;
+                        let max_tokens = req.max_tokens;
+                        tracing::info!("Session {} request: {} messages, max_tokens={}", session_id, messages.len(), max_tokens);
 
-                        // ── encode 完整历史 → prefill offset=0 ──
+                        // ── encode 客户端传入的完整 messages ──
                         let token_ids = match ml.encode_messages(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {
@@ -188,7 +189,8 @@ impl Session {
 
                         // ── 自回归生成 loop ───────────────────
                         let mut assistant_reply = String::new();
-                        for _ in 0..300 {
+                        let gen_limit = max_tokens.min(2048) as usize;
+                        for _ in 0..gen_limit {
                             match crate::orchestrator::local_tensor_stream::frames::local_recv_frame(
                                 &mut ml_stream, &mut ml_buf,
                             ).await {
@@ -255,10 +257,6 @@ impl Session {
                             }
                             offset += 1;
                         }
-
-                        // 过滤 <think>...</think>，保留到 messages
-                        let cleaned = Self::strip_think(&assistant_reply);
-                        messages.push(Message { role: "assistant".into(), content: cleaned });
 
                         // 空哨兵
                         let _ = slot_tokens[&slot_id].send("\0".into());
