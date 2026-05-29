@@ -302,27 +302,27 @@ rexec <peer> <command> [key=value ...]
 
 当前 `session inference <sid> <model_path>` 固定使用 `programs/builtin/inference.lua`。需要：
 
-1. 将 `inference.lua` 移到 `programs/user/`，使其成为可修改的用户脚本
+1. 将 `inference.lua` 移动到 `programs/user/` 并重命名为 `single_inf.lua`
 2. 改为 `session inference <command> <sid> <model_path>`，`command` 对应 `programs/user/` 下的 Lua 脚本
 
 `ProgramRegistry` 的查找逻辑自动支持：`get_user("inference")` 返回 user 下的脚本，`get("inference")` 返回 user 优先→builtin 回退。
 
 #### 改动
 
-##### 3a. 移动脚本
+##### 3a. 移动并重命名脚本
 
 ```
-programs/builtin/inference.lua → programs/user/inference.lua
+programs/builtin/inference.lua → programs/user/single_inf.lua
 ```
 
-无代码改动，仅文件移动。`ProgramRegistry::reload_user()` 会自动扫描新位置。
+无代码改动，仅文件移动+重命名。`ProgramRegistry::reload_user()` 会自动扫描新位置，COMMAND 从脚本内容读取。
 
 ##### 3b. `Src/Orchestrator/command.rs` — `UserCommand::SessionInference` 扩展
 
 ```rust
 SessionInference {
     /// 用户 Lua 脚本 COMMAND 名（对应 programs/user/{command}.lua）
-    /// 默认 "inference" (programs/user/inference.lua)
+    /// 默认 "single_inf" (programs/user/single_inf.lua)
     command: String,
     session_id: u64,
     model_path: String,
@@ -353,7 +353,7 @@ UserCommand::SessionInference { command, session_id, model_path } => {
 
 ```
 session inference <command> <session_id> <model_path>   // 3 参数
-session inference <session_id> <model_path>              // 2 参数（command="inference"）
+session inference <session_id> <model_path>              // 2 参数（command="single_inf"）
 ```
 
 解析逻辑：
@@ -361,7 +361,7 @@ session inference <session_id> <model_path>              // 2 参数（command="
 if args.len() == 3 {
     command = args[0], session_id = args[1], model_path = args[2]
 } else if args.len() == 2 {
-    command = "inference", session_id = args[0], model_path = args[1]
+    command = "single_inf", session_id = args[0], model_path = args[1]
 }
 ```
 
@@ -369,17 +369,18 @@ if args.len() == 3 {
 
 | 文件 | 改动点 |
 |------|--------|
-| `programs/builtin/inference.lua` | 移动到 `programs/user/inference.lua` |
+| `programs/builtin/inference.lua` | 移动+重命名为 `programs/user/single_inf.lua` |
 | `Src/Orchestrator/command.rs` | `SessionInference` 加 `command` 字段 |
 | `Src/Orchestrator/core/branch_user.rs` | `get("inference")` → `get(&command)` |
 | `Src/TUI/mod.rs` | 3 参数新格式 + 2 参数兼容 |
 
 #### 验证方式
 
-1. 移动文件后 `reload`
-2. `session create test` → `session inference 1 test.pgguf`（2 参数，默认 "inference"）正常工作
-3. 复制 `user/inference.lua` → `user/my_ml.lua`，修改如 `caps.print("custom ML thread")`
-4. `session inference my_ml 1 test.pgguf` → 日志输出 `custom ML thread`
+1. 移动+重命名文件后 `reload`
+2. `session create test` → `session inference 1 test.pgguf`（2 参数，默认 "single_inf"）正常工作
+3. `session inference single_inf 1 test.pgguf`（3 参数，显式指定）正常工作
+4. 复制 `user/single_inf.lua` → `user/my_ml.lua`，修改如 `caps.print("custom ML thread")`
+5. `session inference my_ml 1 test.pgguf` → 日志输出 `custom ML thread`
 
 ---
 
