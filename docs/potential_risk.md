@@ -155,3 +155,19 @@
 - **影响范围**：Core 主循环 B1/B3 分支中 `session_mgr.lock().unwrap()` 调用
 - **当前状态**：锁持有时间极短（HashMap 插入/删除），当前无并发争用。改为 `tokio::sync::Mutex`（`lock().await`）属防御性规范修复，暂不处理。
 
+## ML Engine
+
+### 22. 多 GPU 卡不支持
+
+- **风险**：`MlSession::new("cuda")` 硬编码 `Device::new_cuda(0)`，始终走卡 0。`cuda:1`、`cuda:2` 直接报错（未知设备）。多卡服务器上 pipe_3/pipe_4 的 CPU/GPU 混合策略只能利用一张卡，其余卡空闲。
+- **影响范围**：`Src/ML_Engine/context.rs:108` — `MlSession::new()` device 解析
+- **方向**：支持 `cuda:N` 格式，解析索引号 `N`，调用 `Device::new_cuda(N)`
+- **当前状态**：记录为已知风险。单卡场景不受影响。
+
+### 23. Qwen3 Dense 架构不支持 MoE 模型
+
+- **风险**：`qwen3.rs` 只实现了标准 Dense Transformer（每层 1 个 FFN），不支持 MoE 架构（多层 expert FFN + 稀疏路由）。Qwen3-30B-A3B 等 MoE 模型无法加载。
+- **影响范围**：`Src/ML_Engine/GGUF_Models/qwen3.rs` — `Mlp_Weights`、`Layer_Weights`
+- **方向**：新增 `qwen3_moe.rs` 或扩展现有实现，支持多 expert 权重和稀疏激活
+- **当前状态**：记录为已知风险。仅影响 MoE 架构模型，Dense 模型不受影响。
+

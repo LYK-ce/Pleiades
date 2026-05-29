@@ -842,3 +842,5 @@ gpu_sess:load_model(full_path, mid + 1, info.split_end)
 - 工作分支: 直接在 `reforge` 上完成
 - 后续子任务: 待定
 - 额外修复: TUI Network 面板 peer 名称显示为 `name#XXXX` 完整格式 (原只显示裸 name)
+- 已知风险: `ml.new("cuda")` 硬编码卡0，多卡需支持 `cuda:N` 格式 (见 `potential_risk.md #22`)
+- 已知风险: Qwen3 Dense 不支持 MoE 模型 (见 `potential_risk.md #23`)
