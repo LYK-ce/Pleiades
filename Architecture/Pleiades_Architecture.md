@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-05-25
+> **最后更新**: 2026-05-28
 
 ---
 
@@ -36,10 +36,6 @@
 │   ├── EventBus/               ← 广播事件总线
 │   ├── ML_Engine/              ← ML 推理引擎 (GGUF/PGGUF)
 │   ├── Network/                ← P2P 网络 (libp2p)
-│   ├── Session_Stream/     ← Session 流协议 (远端 Chat)
-│   ├── Tensor_Stream/      ← 张量流协议
-│   ├── File_Stream/        ← 文件流协议
-│   └── ...
 │   ├── Orchestrator/           ← 任务编排核心
 │   ├── PeerManagement/         ← 节点发现与管理
 │   ├── Session_Manager/        ← 推理会话槽位
@@ -48,6 +44,7 @@
 │   └── VM/                     ← Lua 脚本引擎 + 所有绑定
 ├── programs/                   ← Lua 脚本
 │   ├── builtin/                ← 内置 (优先级低于 user)
+│   │   └── legacy/             ← 过期脚本 (API 不兼容)
 │   └── user/                   ← 用户脚本
 └── tests/                      ← 集成测试
 ```
@@ -88,6 +85,8 @@ pub fn Ensure_Identity(dir: &Path) -> Keypair;           // Ed25519 密钥
 [Storage]   workspace_dir = "Pleiades_Workspace"
 [Session]   max_slots = 4
 [Identity]  peer_name = "new_peer"
+
+> ⚠️ `config.toml` 中存在 `[Scheduler]` 段（strategy = "uniform"），但 `Pleiades_Config` 中尚未实现对应的 `Scheduler_Config` 结构体，该段在反序列化时被静默忽略。
 ```
 
 ---
@@ -153,13 +152,6 @@ pub struct FileEntry {
 ### 3.4 ML_Engine
 
 **位置**: `Src/ML_Engine/`
-
-**外部依赖**:
-- `minijinja` + `minijinja-contrib` — Jinja2 模板引擎，用于渲染 GGUF chat_template
-- 参考: [Crane](https://github.com/lucasjinreal/Crane) (`crane-core/src/autotokenizer.rs`)
-  - `rewrite_python_str_methods()`: 将 Python 风格的 `.split()`/`.startswith()` 等方法调用改写为 minijinja 过滤器语法
-  - `rewrite_split_index()`: `.split(X)[0]` → `| first`, `.split(X)[-1]` → `| last`
-  - 注册字符串过滤器: `startswith`, `endswith`, `split`, `lstrip`, `rstrip`, `strip`
 
 #### 3.4.1 GGUF → PGGUF 转换 ⚠️
 
@@ -229,21 +221,14 @@ impl MlSession {
     pub fn Load_Model(&mut self, path: &Path, start: usize, end: usize) -> Result<()>;
     pub fn Unload(&mut self);
     pub fn Has_Model(&self) -> bool;
-    pub fn Encode(&self, text: &str) -> Result<Vec<u32>>;          // Tokenizer (deprecated)
+    pub fn Encode(&self, text: &str) -> Result<Vec<u32>>;          // Tokenizer
     pub fn Decode(&self, token_id: u32) -> Result<String>;
     pub fn Tensorize(&self, token_ids: &[u32]) -> Result<Tensor>;  // 无需模型已加载
     pub fn Forward(&self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor>;
     pub fn Sample(&self, logits: &Tensor, temperature: f64) -> Result<u32>;
     pub fn Get_Eos(&self) -> u32;
-    pub fn Encode_Messages(&self, messages: &[Message]) -> Result<Vec<u32>>;  // 对话消息编码
-    pub fn Apply_Chat_Template(&self, messages: &[Message]) -> String;  // 渲染 chat_template
 }
 ```
-
-**chat_template 渲染流程**:
-1. `load_tokenizer()` → 从 GGUF metadata 读取 `tokenizer.chat_template` (Jinja2 格式)
-2. `apply_chat_template()` → `rewrite_python_str_methods()` 改写模板 → minijinja 渲染
-3. 渲染失败 → fallback 硬编码 Qwen3 格式
 
 ---
 
@@ -253,53 +238,29 @@ impl MlSession {
 
 libp2p 协议栈：TCP + Noise 加密 + Yamux 多路复用 + mDNS 发现 + Kademlia DHT + Request-Response + Stream + Ping。
 
-**流协议一览**:
-
-| 协议 | 用途 | 入站路由 |
-|------|------|---------|
-| `/pleiades/tensor/1.0.0` | Pipeline 张量传输 | RendezvousMap（直接匹配，不经过 Core） |
-| `/pleiades/file-stream/1.0.0` | 文件传输 | `Network_Inbound_Event::FileStreamArrived` → Core B3 |
-| `/pleiades/session/1.0.0` | 远端 Chat ↔ Session | `Network_Inbound_Event::SessionStreamArrived` → Core B3 |
-| `/pleiades/bandwidth/1.0.0` | 带宽测试 | 网络层内部处理 |
-
-**Session 流协议**:
-```
-Handshake: [8B BE u64 session_id]
-数据帧:    [4B BE u32 len][UTF-8 payload]
-空帧哨兵:  [4B len=0] — 标记一轮推理结束
-```
-
 ```rust
 #[async_trait]
 pub trait Network_Capability {
-    // 请求-响应
     async fn Send_Data(&self, peer: PeerId, data_type: &str, payload: &[u8]) -> Result<Vec<u8>>;
-    // 连接管理
     async fn Dial(&self, addr: &str) -> Result<()>;
     async fn Disconnect(&self, peer: &PeerId) -> Result<()>;
-    // 文件流
+    async fn Test_Bandwidth(&self, peer: &PeerId) -> Result<()>;
     async fn Send_File(&self, peer: &PeerId, path: &Path) -> Result<()>;
-    // 张量流
-    async fn Open_Tensor_Stream(&self, peer: &PeerId, inference_id: u64) -> Result<Stream>;
-    async fn Accept_Tensor_Stream(&self, inference_id: u64, timeout_secs: u64) -> Result<Stream>;
-    // Session 流（远端 Chat）
-    async fn open_session_stream(&self, peer: &PeerId, session_id: u64) -> Result<Stream>;
-    // DHT
-    async fn put_record(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
-    async fn get_record(&self, key: Vec<u8>) -> Result<()>;
-    // 工具
-    fn get_local_peer_id(&self) -> PeerId;
-    async fn test_bandwidth(&self, peer: &PeerId) -> Result<u64>;
+    async fn Open_Tensor_Stream(&self, peer: &PeerId, inference_id: u64) -> Result<NetworkStream>;
+    async fn Accept_Tensor_Stream(&self, inference_id: u64, timeout: u64) -> Result<NetworkStream>;
+    async fn Send_Response(&self, request_id: u64, data_type: &str, payload: &[u8]) -> Result<()>;
+    async fn Put_Record(&self, key: &str, value: &[u8]) -> Result<()>;
+    async fn Get_Record(&self, key: &str) -> Result<Vec<u8>>;
+    async fn Open_File_Stream(&self, peer: &PeerId, file_id: &str) -> Result<FileStream>;
+    async fn Send_File_Data(&self, stream: &mut FileStream, data: &[u8]) -> Result<()>;
+    async fn Receive_File_Data(&self, stream: &mut FileStream, path: &Path, size: u64) -> Result<()>;
+    async fn Send_Tensor(&self, stream: &mut NetworkStream, tensor: &Tensor, offset: u64) -> Result<()>;
+    async fn Recv_Tensor(&self, stream: &mut NetworkStream, device: &Device) -> Result<(Tensor, u64)>;
+    async fn Send_Eof(&self, stream: &mut NetworkStream) -> Result<()>;
 }
 ```
 
-**入站事件**: `Network_Inbound_Event` 枚举通过 mpsc 通道发送给 Core：
-```rust
-pub enum Network_Inbound_Event {
-    FileStreamArrived { peer: PeerId, stream: Stream },
-    SessionStreamArrived { peer: PeerId, session_id: u64, stream: Stream },
-}
-```
+**Tensor 流协议**: `[offset: u64][len: u64][data: bytes]...`，EOF = `[u64::MAX][0]`
 
 ---
 
@@ -311,36 +272,11 @@ pub enum Network_Inbound_Event {
 
 | 分支 | 功能 |
 |------|------|
-| B1 | `route_user()` — 用户命令路由 (含 `session create/chat/inference`, `remote chat`) |
-| B2 | `route_inbound()` — 解析 NetworkProtocol |
-| B3 | `route_stream()` — FileStreamArrived, SessionStreamArrived → 分配 slot + bridge |
+| B1 | `route_user()` — 用户命令 → 查找/执行 Lua 脚本 |
+| B2 | `route_inbound()` — 解析 NetworkProtocol (ESTABLISH_TENSOR_STREAM, JOIN_PIPELINE 等) |
+| B3 | `route_stream()` — FileStreamArrived, TensorStreamArrived |
 | B4 | `route_lifecycle()` — JobExecutor 完成回调 |
-| B5 | `route_eventbus()` — EventBus 事件 → TUI 更新 |
-
-**Session/Slot 机制**:
-
-```rust
-// 推理请求结构体
-pub struct SessionRequest {
-    pub messages: Vec<Message>,  // 完整对话历史（前端管理）
-    pub max_tokens: u32,
-}
-
-// SessionManager::allocate_slot → mpsc 通道对
-pub struct SlotHandle {
-    pub session_id: u64,
-    pub slot_id: usize,
-    pub prompt_tx: mpsc::UnboundedSender<SessionRequest>,
-    pub token_rx: mpsc::UnboundedReceiver<String>,
-}
-
-// Session.spawn() 内 select! 监听 slot prompt_rx
-// 推理结果通过 slot.token_tx 返回
-// 空哨兵 "\0" 标记一轮结束
-```
-
-**对话历史管理**: 前端（API 客户端）负责管理完整 messages 数组，每次请求透传。
-Session 不再自管 `Vec<Message>`，只做无状态推理。
+| B5 | `route_eventbus()` — ⚠️ 未实现，EventBus 由 TUI 直接消费（见 3.8 节） |
 
 **Capabilities 容器**:
 ```rust
@@ -362,6 +298,8 @@ pub struct Capabilities {
 #### 3.7.1 沙箱环境
 
 只加载 `string`, `table`, `math`。**禁用** `os`, `io`, `require`, `dofile`, `loadfile`。
+
+**脚本发现**: `ProgramRegistry` 在启动时扫描 `programs/builtin/` 和 `programs/user/`，user 目录优先级高于 builtin。每个脚本按 `COMMAND` 全局变量注册命令名，通过 TUI `exec <command>` 调用。
 
 #### 3.7.2 Lua 脚本规范
 
@@ -403,6 +341,15 @@ sess:tensorize(token_ids) → LuaTensor
 sess:forward(tensor, offset?) → LuaTensor
 sess:sample(logits, temperature) → u32
 sess:get_eos() → u32
+sess:get_offset() → usize        -- 当前 forward offset
+sess:set_seed(seed)              -- 设置随机种子
+```
+
+**LuaTensor 方法** (UserData):
+```lua
+tensor:dims() → table<usize>      -- 维度信息
+tensor:to_bytes() → String       -- 序列化为字节
+tensor:to_device(device) → LuaTensor  -- 迁移到指定设备 ("cpu"|"cuda")
 ```
 
 **`caps.storage_*` 表 (Storage)**:
@@ -428,6 +375,15 @@ caps.network.accept_tensor_stream(inference_id, timeout) → NetworkStream
 caps.network.send_tensor(stream, tensor, offset)
 caps.network.recv_tensor(stream, device) → (LuaTensor, offset)
 caps.network.send_eof(stream)
+caps.network.send_response(request_id, data_type, payload)  -- 响应请求
+caps.network.put_record(key, value)                          -- DHT 存储
+caps.network.get_record(key) → Value                         -- DHT 查询
+caps.network.open_file_stream(peer, file_id) → FileStream    -- 文件流
+```
+
+**`caps.storage_*` 补充方法**:
+```lua
+handle:release()                 -- 手动释放锁（否则 drop 时自动释放）
 ```
 
 **`local_tensor.*` 表 (本地流)**:
@@ -445,7 +401,7 @@ local_tensor.send_eof(stream)
 
 **位置**: `Src/TUI/`
 
-ratatui + crossterm。单输入框布局：
+ratatui + crossterm。双输入框布局：
 
 ```
 ┌──────────────────────┬──────────────┐
@@ -455,17 +411,40 @@ ratatui + crossterm。单输入框布局：
 ├─────────────────────────────────────┤
 │ Command Output (8 行)               │
 ├─────────────────────────────────────┤
+│ Prompt> (3 行)                      │
+├─────────────────────────────────────┤
 │ pleiades> (3 行, 命令输入)          │
 └─────────────────────────────────────┘
 ```
 
-**内置命令**: `run`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `help`
-
-**Session 命令**: `session <model_id>`, `session inference <id> <model>`, `api <id>`
+**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`
 
 ---
 
-## 4. 关键工作流
+### 3.9 Session_Manager
+
+**位置**: `Src/Session_Manager/`
+
+管理推理会话的生命周期和槽位分配。每个会话绑定到一个推理模型和推理设备。
+
+```rust
+#[async_trait]
+pub trait Session_Capability {
+    async fn Create_Session(&self, model_id: u32, device: &str, start: usize, end: usize) -> Result<(SessionId, IoFrontend)>;
+    async fn Destroy_Session(&self, id: SessionId) -> Result<()>;
+    async fn Get_Session(&self, id: SessionId) -> Result<SessionInfo>;
+    async fn List_Sessions(&self) -> Result<Vec<SessionInfo>>;
+    async fn Has_Capacity(&self) -> Result<bool>;
+}
+```
+
+**核心结构**:
+- `SessionManager` — 全局管理器，通过 `max_slots` 限制并发会话数
+- `Session` — 内部结构，持有 MlSession + 设备信息 + 模型引用
+- `Slot` / `SlotState` — 槽位状态机 (Idle / Occupied / Loading)
+- `SessionInfo` — 对外暴露的只读会话信息
+
+> ⚠️ 当前 `SessionManager` 已实现但尚未集成到 Core 主循环中。
 
 ### 4.1 模型加载与分析
 
@@ -527,42 +506,6 @@ Thread A: exec local_coord         Thread B: exec local_work
   → network.receive_file_data(stream, dest_path, file_size)
   → guard drop → 自动注册到 Storage 索引
 ```
-
-### 4.5 Session 推理 + 远端 Chat
-
-**单机**:
-```
-pleiades> session create model.pgguf      → Session.spawn() 启动
-pleiades> session inference 1 model.pgguf → Lua ML Thread 加载模型
-pleiades> chat 1                          → allocate_slot → mpsc 通道对
-[Prompt>] 你好                            → encode → prefill → 自回归 → token 流式输出
-```
-
-**远端**:
-```
-alice (Session 宿主机)                          bob (远端)
-─────────────────                              ────────
-session create + inference
-                                                remote chat alice 1
-                                                  → open_session_stream
-  ← SessionStreamArrived → allocate_slot → bridge
-  ═══ stream read ── prompt ──────────────────────
-  → Session 推理
-  ═══ stream write ── token ──► EventBus::Stream
-  ═══ stream write ── 空帧 ──► (本轮结束)
-                                                → 回到 Prompt 等待下一轮
-```
-
-**Session ↔ ML Thread**（始终走 local_tensor_stream）:
-```
-Session.spawn()                       ML Thread (Lua)
-  accept_async("ml-{id}")  ◄──配对──  open_stream("ml-{id}")
-  local_send_frame(tensor, offset) →  recv_tensor → forward
-  ← recv_frame(logits)                  send_tensor(logits)
-```
-
-**多轮对话**: 每一轮 offset=0（每次 prefill 前 ML Thread 清空 KV Cache）。
-对话历史由前端管理，服务端无状态。
 
 ---
 
