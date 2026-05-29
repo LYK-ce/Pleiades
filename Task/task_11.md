@@ -11,8 +11,8 @@
 
 | # | 任务 | 涉及文件数 | 状态 |
 |---|------|-----------|------|
-| 11.1 | Split Model 适配 PGGUF 格式 | 1 | ⬜ |
-| 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ⬜ |
+| 11.1 | Split Model 适配 PGGUF 格式 | 1 | ✅ |
+| 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
 
 ---
 
@@ -298,5 +298,6 @@ rexec <peer> <command> [key=value ...]
 ## 备注
 
 - 基分支: `reforge`
-- 工作分支: `task11_branch_ml_refine`
+- 工作分支: 直接在 `reforge` 上完成
 - 后续子任务: 待定
+- 额外修复: TUI Network 面板 peer 名称显示为 `name#XXXX` 完整格式 (原只显示裸 name)
