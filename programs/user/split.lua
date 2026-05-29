@@ -28,6 +28,9 @@ function execute(params)
     local handle = caps.storage_acquire_read(path)
     local full_path = handle:path()
 
+    -- 提取模型所在目录（split 产物输出到同一目录）
+    local dir = string.match(full_path, "^(.*)/") or "."
+
     -- 2. 读取模型架构信息
     caps.print("split: 分析模型 " .. full_path .. " ...")
     local info = ml.analyze_model(full_path)
@@ -58,7 +61,7 @@ function execute(params)
         caps.print(string.format("split: part %d/%d  layers %d-%d  (tokenizer=%s)",
             i + 1, num, start, end_idx, tostring(keep_tok)))
 
-        ml.split_model(full_path, start, end_idx, ".", keep_tok)
+        ml.split_model(full_path, start, end_idx, dir, keep_tok)
 
         start = end_idx + 1
     end
