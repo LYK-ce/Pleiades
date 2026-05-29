@@ -29,7 +29,7 @@ function execute(params)
     local full_path = read_handle:path()
 
     -- 提取文件名 stem（如 Qwen14B）
-    local stem = string.match(full_path, "([^/]+)%.[^.]+$")
+    local stem = string.match(full_path, "([^/\\]+)%.[^.]+$")
     if not stem then
         caps.print("split: 错误 — 无法解析文件名: " .. full_path)
         read_handle:release()
