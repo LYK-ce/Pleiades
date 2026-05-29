@@ -80,3 +80,4 @@ Test_Environment_3/
 # ZGent 运行时文件
 .zgent/
 uploads/
+Tool/__pycache__/
