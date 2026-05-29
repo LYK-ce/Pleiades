@@ -13,6 +13,7 @@
 |---|------|-----------|------|
 | 11.1 | Split Model 适配 PGGUF 格式 | 1 | ✅ |
 | 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
+| 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ⬜ |
 
 ---
 
@@ -292,6 +293,164 @@ rexec <peer> <command> [key=value ...]
 3. A 的 TUI 中执行 `rexec B hello name=KeJi`
 4. 确认 B 的日志显示收到并执行了脚本
 5. 确认 A 的 TUI 显示 `[B] 远程执行完成: OK|Hello, KeJi!`
+
+---
+
+### 11.3 Session Inference 支持用户自定义 ML Thread 脚本
+
+#### 背景
+
+当前 `session inference <sid> <model_path>` 固定查找 builtin `"inference"` 脚本（`programs/builtin/inference.lua`），用户无法替换 ML Thread 的推理逻辑。
+
+需要改为 `session inference <command> <sid> <model_path>`，其中 `command` 对应用户放在 `programs/user/` 下的 Lua 脚本，优先使用用户脚本，回退 builtin。
+
+#### 现有流程
+
+```
+session inference 1 test.pgguf
+  → TUI 解析: SessionInference { session_id: 1, model_path: "test.pgguf" }
+  → B1: program_registry.get("inference")  ← 固定查 "inference"
+  → spawn_lua_script("programs/builtin/inference.lua", ...)
+```
+
+#### 目标流程
+
+```
+session inference my_ml 1 test.pgguf
+  → TUI 解析: SessionInference { command: "my_ml", session_id: 1, model_path: "test.pgguf" }
+  → B1: program_registry.get_user("my_ml")  ← 优先用户脚本
+    → 有 → spawn_lua_script("programs/user/my_ml.lua", ...)
+    → 无 → fallback: program_registry.get("inference") → builtin
+```
+
+#### 待修改内容
+
+##### 3a. `Src/Orchestrator/command.rs` — `UserCommand::SessionInference` 扩展
+
+新增 `command` 字段：
+
+```rust
+SessionInference {
+    /// 用户 Lua 脚本 COMMAND 名（对应 programs/user/{command}.lua）
+    command: String,
+    session_id: u64,
+    model_path: String,
+},
+```
+
+> 向后兼容：旧格式 `session inference <sid> <model>` 默认 `command = "inference"`。
+
+##### 3b. `Src/Orchestrator/core/branch_user.rs` — B1 调度逻辑
+
+当前（约 line 571）：
+```rust
+UserCommand::SessionInference { session_id, model_path } => {
+    let Some(entry) = self.program_registry.get("inference").cloned() else { ... };
+    ...
+}
+```
+
+改为：
+```rust
+UserCommand::SessionInference { command, session_id, model_path } => {
+    // 优先查用户脚本，未找到则回退 builtin
+    let entry = self.program_registry
+        .get_user(&command)
+        .or_else(|| self.program_registry.get("inference"))
+        .cloned();
+    let Some(entry) = entry else {
+        // 连 builtin inference 都找不到 → 报错
+        ...
+    };
+    spawn_lua_script(entry.path, params, self.capabilities.clone(), ...);
+}
+```
+
+##### 3c. `Src/TUI/mod.rs` — 命令解析
+
+当前（约 line 949）：
+```
+session inference <session_id> <model_path>    // 2 个参数
+```
+
+改为（同时兼容旧格式）：
+```
+session inference <command> <session_id> <model_path>   // 3 参数（新）
+session inference <session_id> <model_path>              // 2 参数（旧，command="inference"）
+```
+
+解析逻辑：
+```rust
+if trimmed.starts_with("session inference ") {
+    let args: Vec<&str> = ...;
+    if args.len() == 3 {
+        // 新格式: command sid model
+        let command = args[0].to_string();
+        let session_id = args[1].parse::<u64>()?;
+        let model_path = args[2].to_string();
+    } else if args.len() == 2 {
+        // 旧格式: sid model，默认 command="inference"
+        let command = "inference".to_string();
+        let session_id = args[0].parse::<u64>()?;
+        let model_path = args[1].to_string();
+    } else { error }
+    UserCommand::SessionInference { command, session_id, model_path }
+}
+```
+
+#### 用户 Lua 脚本接口
+
+用户脚本需遵循与 `builtin/inference.lua` 相同的接口契约：
+
+```lua
+-- programs/user/my_ml.lua
+-- COMMAND: my_ml
+-- DESCRIPTION: 自定义 ML Thread — 带温度的采样版本
+
+function execute(params)
+    local session_id = params.session_id     -- "1"
+    local model_path = params.model_path     -- "test.pgguf"
+
+    -- 1. 获取模型文件路径
+    local handle = caps.storage_acquire_read(model_path)
+    local path = handle:path()
+
+    -- 2. 加载模型权重到 GPU
+    local sess = ml.new("cuda")
+    sess:load_model(path, 0, 999999)
+    handle:release()
+
+    -- 3. 连接 Session
+    local stream_id = "ml-" .. session_id
+    local stream = local_tensor.open_stream(stream_id)
+
+    -- 4. 自定义推理循环（例：带温度采样）
+    while true do
+        local tensor, offset = local_tensor.recv_tensor(stream, "cuda")
+        if offset == 0 then sess:reset_kv_cache() end
+        local logits = sess:forward(tensor, offset)
+        local_tensor.send_tensor(stream, logits, offset)
+    end
+end
+```
+
+> **关键约定**：脚本必须通过 `local_tensor.open_stream("ml-{session_id}")` 连接 Session，并在循环中 `recv_tensor → forward → send_tensor`。
+
+#### 涉及文件
+
+| 文件 | 改动点 |
+|------|--------|
+| `Src/Orchestrator/command.rs` | `UserCommand::SessionInference` 加 `command` 字段 |
+| `Src/Orchestrator/core/branch_user.rs` | B1 调度：`get_user(command)` → fallback `get("inference")` |
+| `Src/TUI/mod.rs` | 解析：3 参数新格式 + 2 参数旧格式兼容 |
+
+#### 验证方式
+
+1. 创建 `programs/user/my_ml.lua`（拷贝 inference.lua 并加一行 `caps.print("hello")`）
+2. `session create test`
+3. `session inference my_ml 1 test.pgguf`
+4. 确认日志输出 `hello`（说明使用了用户脚本而非 builtin）
+5. `session inference 1 test.pgguf`（2 参数旧格式）仍然正常工作
 
 ---
 
