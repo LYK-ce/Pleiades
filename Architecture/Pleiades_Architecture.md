@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-05-29
+> **最后更新**: 2026-05-29 (Storage 使用模式, GGUFSplitModel keep_tokenizer, split 工作流, rexec/session inference 命令更新)
 
 ---
 
@@ -136,6 +136,11 @@ pub trait StorageCapability {
 2. 用返回的 `PathBuf` 读取文件
 3. Drop `ReadGuard` / `WriteGuard` → **自动释放锁**
 
+**关键场景**:
+- **读取模型**: `storage_acquire_read` → `handle:path()` → 使用路径 → `handle:release()`
+- **接收文件** (Network): `storage_acquire_write(file_name)` → 用 path 写入 → guard drop 自动注册
+- **生成新文件**: `storage_acquire_write(file_name)` → 获取写入路径 → 外部写入 → `handle:release()` → `storage_flush()` 扫描注册
+
 **安全约束**:
 - `file_id` 不能为空、不能含 `/`、`\`、`..`，不能以 `.` 开头
 - `ReadGuard` 共享读锁（多并发）；`WriteGuard` 排他写锁
@@ -188,7 +193,8 @@ pub fn GGUF_Analyze(path: &Path) -> Result<Model_Arch_Info>;
 pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Info, PathBuf)>;
 
 // 模型切分 (输出 {stem}_split_{start}_{end}.pgguf)
-pub fn GGUF_Split_Model(gguf_file_path: &Path, split_start: usize, split_end: usize, output_gguf_file_path: &Path) -> Result<()>;
+// keep_tokenizer=true 时保留第一份的 tokenizer/chat_template 元数据
+pub fn GGUF_Split_Model(gguf_file_path: &Path, split_start: usize, split_end: usize, output_gguf_file_path: &Path, keep_tokenizer: bool) -> Result<()>;
 
 // 按层加载权重
 pub fn GGUF_Load_Layer(content: &gguf_file::Content, file: &mut File, layer_index: usize, device: &Device) -> Result<GGUF_Layer_Weights>;
@@ -355,7 +361,7 @@ caps.table_sum(table) → f64   -- 表求和
 ml.new(device) → MlSession                           -- 创建推理会话 ("cpu"|"cuda")
 ml.tensor_from_bytes(bytes, device) → LuaTensor       -- 字节反序列化
 ml.analyze_model(path) → Table                        -- 异步，返回 15 个字段
-ml.split_model(path, start, end, output_dir) → ()     -- 异步切分
+ml.split_model(path, start, end, output_dir, keep_tokenizer) → ()     -- 异步切分，keep_tokenizer: 第一份保留 tokenizer
 ```
 
 **MlSession 方法** (UserData):
@@ -439,7 +445,7 @@ ratatui + crossterm。双输入框布局：
 └─────────────────────────────────────┘
 ```
 
-**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`, `session <model_id>`, `session inference <id> <path>`, `api <session_id>`
+**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `rexec`, `clear`, `quit`, `help`, `session <model_id>`, `session inference [cmd] <id> <path>`, `api <session_id>`
 
 ---
 
@@ -516,7 +522,23 @@ Thread A: exec local_coord         Thread B: exec local_work
   │ recv logits → sample → decode    │
 ```
 
-### 4.4 文件传输
+### 4.4 模型切分 (`exec split`)
+
+```
+1. storage_acquire_read("model.pgguf") → handle:path()  → 获取源文件路径
+2. ml.analyze_model(full_path)          → 读取架构信息 (num_layers)
+3. handle:release()                     → 释放读锁
+4. 计算均分范围 (total = num_layers + 2)
+5. 对每份:
+   a. storage_acquire_write("{stem}_split_{S}_{E}.pgguf") → 获取写入路径
+   b. ml.split_model(full_path, S, E, write_dir, keep_tok)  → 切分写入
+   c. write_handle:release()                               → 释放写锁
+6. storage_flush()                       → 扫描注册新文件
+```
+
+> **key**: 第 1 份 `keep_tokenizer=true` 保留 tokenizer/chat_template，其余 `false`。
+
+### 4.5 文件传输
 
 ```
 发送端:
