@@ -246,12 +246,14 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
 
     ml.set(
         "split_model",
-        lua.create_async_function(move |_, (path, start, end, output_dir): (String, usize, usize, String)| async move {
+        lua.create_async_function(move |_, (path, start, end, output_dir, keep_tokenizer):
+            (String, usize, usize, String, bool)| async move {
             capability::split_model(
                 std::path::Path::new(&path),
                 start,
                 end,
                 std::path::Path::new(&output_dir),
+                keep_tokenizer,
             ).await.map_err(|e| mlua::Error::runtime(e))
         })?,
     )?;

@@ -47,10 +47,13 @@ pub async fn split_model(
     split_start: usize,
     split_end: usize,
     output_dir: &Path,
+    keep_tokenizer: bool,
 ) -> Result<(), String> {
     let src = gguf_file_path.to_path_buf();
     let out = output_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || GGUF_Split_Model(&src, split_start, split_end, &out))
+    tokio::task::spawn_blocking(move || {
+        GGUF_Split_Model(&src, split_start, split_end, &out, keep_tokenizer)
+    })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?
         .map_err(|e| format!("GGUF_Split_Model failed: {e}"))
@@ -78,6 +81,7 @@ mod tests {
             10,
             5, // start > end
             tmp.path(),
+            false,
         )
         .await;
         assert!(result.is_err());

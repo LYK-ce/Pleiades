@@ -814,6 +814,7 @@ pub fn GGUF_Split_Model(
     split_start: usize,
     split_end: usize,
     output_gguf_file_path: &Path,
+    keep_tokenizer: bool,
 ) -> Result<()> {
     // 1. 打开 gguf 文件，读取文件头信息，确认文件格式正确
     let mut src_file = std::fs::File::open(gguf_file_path)?;
@@ -919,8 +920,12 @@ pub fn GGUF_Split_Model(
     //   - 追加 pleiades.split.start 和 pleiades.split.end 字段
     let mut metadata_pairs: Vec<(String, gguf_file::Value)> = Vec::new();
 
-    // 需要跳过的 metadata key（tokenizer/chat 数据 + 旧的 layer_bitmap，后续重新计算）
-    let skip_keys: &[&str] = &["tokenizer.", "chat_template", "pleiades.layer_bitmap"];
+    // 需要跳过的 metadata key（旧的 layer_bitmap 必须跳过以重新计算）
+    let mut skip_keys: Vec<&str> = vec!["pleiades.layer_bitmap"];
+    if !keep_tokenizer {
+        skip_keys.push("tokenizer.");
+        skip_keys.push("chat_template");
+    }
 
     for (key, value) in &content.metadata {
         let should_skip = skip_keys
