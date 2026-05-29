@@ -68,7 +68,7 @@ function execute(params)
         local part_name = stem .. "_split_" .. start .. "_" .. end_idx .. ".pgguf"
         local write_handle = caps.storage_acquire_write(part_name)
         local write_path = write_handle:path()
-        local write_dir = string.match(write_path, "^(.*)/")
+        local write_dir = string.match(write_path, "^(.*)[/\\]")
 
         caps.print(string.format("split: part %d/%d  layers %d-%d → %s  (tokenizer=%s)",
             i + 1, num, start, end_idx, part_name, tostring(keep_tok)))
