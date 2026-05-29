@@ -329,6 +329,24 @@ pub fn register_network_caps(
         Ok::<_, mlua::Error>(caps_net.network.get_local_peer_id().to_base58())
     })?)?;
 
+    // ─── get_all_peers ──────────────────────────────────
+    let caps_all = capabilities.clone();
+    network.set("get_all_peers", lua.create_async_function(move |lua, (): ()| {
+        let caps_all = caps_all.clone();
+        async move {
+            let peers = caps_all.peer_manager.Get_All_Peers().await
+                .map_err(|e| mlua::Error::runtime(format!("get_all_peers: {}", e)))?;
+            let result = lua.create_table()?;
+            for (i, p) in peers.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("name", p.name.clone())?;
+                entry.set("peer_id", p.peer_id.to_base58())?;
+                result.set(i + 1, entry)?;
+            }
+            Ok(result)
+        }
+    })?)?;
+
     // ─── dial ──────────────────────────────────────────
     let caps_net = capabilities.clone();
     network.set("dial", lua.create_async_function(move |_, addr: String| {
