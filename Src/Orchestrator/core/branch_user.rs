@@ -481,6 +481,11 @@ impl Core {
                     params_json,
                 };
                 let payload = Serialize_Network_Command(&proto);
+                let payload_str = String::from_utf8_lossy(&payload);
+                tracing::info!(
+                    "[B1] rexec → peer={} ({}) payload={}",
+                    peer, info.peer_id, payload_str
+                );
                 // 4. 发送到远程节点
                 match self.capabilities.network.send_data(
                     info.peer_id.clone(),

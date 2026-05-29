@@ -15,6 +15,11 @@ impl Core {
     pub async fn route_inbound(&mut self, req: InboundRequest) {
         match req.data_type {
             DataType::Command => {
+                let payload_str = String::from_utf8_lossy(&req.payload);
+                tracing::info!(
+                    "[B2] Command from {} ({} bytes): {}",
+                    req.peer, req.payload.len(), payload_str
+                );
                 match Parse_Network_Command(&req.payload) {
                     Ok(NetworkProtocol::ExecRemote { command, params_json }) => {
                         // 反序列化参数
