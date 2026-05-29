@@ -24,26 +24,17 @@ impl Core {
                         // 查找脚本
                         match self.program_registry.get_user(&command) {
                             Some(entry) => {
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                super::branch_user::spawn_lua_script_with_reply(
+                                // fire-and-forget: 启动后立即响应，结果通过 EventBus 输出
+                                super::branch_user::spawn_lua_script(
                                     entry.path.clone(),
                                     params,
                                     self.capabilities.clone(),
-                                    command.clone(),
-                                    tx,
+                                    format!("rexec:{}:{}", req.peer, command),
                                 );
-                                // 等待脚本执行完成（60s 超时）
-                                let result = tokio::time::timeout(
-                                    std::time::Duration::from_secs(60),
-                                    rx,
-                                )
-                                .await
-                                .unwrap_or(Ok("TIMEOUT".to_string()))
-                                .unwrap_or_else(|_| "ERR".to_string());
                                 let _ = self.capabilities.network.send_response(
                                     req.request_id,
                                     DataType::Command,
-                                    result.into_bytes(),
+                                    b"OK".to_vec(),
                                 )
                                 .await;
                             }
