@@ -148,3 +148,10 @@
   - 前端控制 system prompt 长度
   - 设置 `CUDA_LAUNCH_BLOCKING=1` + `cuda-memcheck` 精确定位分配失败点
 - **当前状态**：记录为已知风险。短 prompt（几十 token）正常，长 prompt 在 f32 精度 8GB 显存下有 OOM 风险。
+
+### 21. std::sync::Mutex 阻塞 tokio worker 线程
+
+- **风险**：`SessionManager::new()` 返回 `Arc<std::sync::Mutex<SessionManager>>`，所有调用方（`branch_user.rs:379/384/431`, `branch_stream.rs:64`）在 tokio async 上下文中调用 `.lock().unwrap()`。若锁竞争发生，`std::sync::Mutex` 会**阻塞整个 tokio worker 线程**而非仅挂起当前 future，可能导致 runtime 停滞。
+- **影响范围**：Core 主循环 B1/B3 分支中 `session_mgr.lock().unwrap()` 调用
+- **当前状态**：锁持有时间极短（HashMap 插入/删除），当前无并发争用。改为 `tokio::sync::Mutex`（`lock().await`）属防御性规范修复，暂不处理。
+

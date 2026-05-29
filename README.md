@@ -79,6 +79,7 @@ pleiades/
 │   ├── Session_Manager/    ← 推理会话槽位
 │   ├── Storage/            ← 统一存储管理
 │   ├── TUI/                ← 终端 UI (ratatui)
+│   ├── API/                ← OpenAI 兼容 HTTP API
 │   └── VM/                 ← Lua 脚本引擎 + 绑定
 ├── programs/               ← Lua 脚本
 │   ├── builtin/            ← 内置脚本

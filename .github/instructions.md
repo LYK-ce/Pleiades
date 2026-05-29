@@ -138,4 +138,13 @@ Agent 在首次启动时必须执行以下初始化步骤：
    git remote set-url origin git@github.com:<user>/<repo>.git
    ```
 
+5. **确保本地分支与远程同步** ⚠️ — 容器镜像可能包含过时的本地分支，必须强制同步到远程最新状态：
+   ```
+   git fetch origin <branch>:refs/remotes/origin/<branch>
+   git checkout -B <branch> origin/<branch>
+   ```
+   - `-B` 参数会覆盖已存在的本地同名分支，确保与远程完全一致。
+   - 如果当前工作区有未提交的修改，先执行 `git stash` 暂存。
+   - **禁止**直接 `git checkout <branch>` 而不先 fetch 远程引用，这会使用本地过时版本。
+
 > **注意**：`.ssh` 目录应当以 **rw** 模式挂载。只读挂载会导致无法修正私钥权限和无法写入 `known_hosts`，从而阻碍 SSH 正常工作。

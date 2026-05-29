@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-05-28
+> **最后更新**: 2026-05-29
 
 ---
 
@@ -37,10 +37,12 @@
 │   ├── ML_Engine/              ← ML 推理引擎 (GGUF/PGGUF)
 │   ├── Network/                ← P2P 网络 (libp2p)
 │   ├── Orchestrator/           ← 任务编排核心
+│   │   └── local_tensor_stream/ ← 本地张量流通道
 │   ├── PeerManagement/         ← 节点发现与管理
 │   ├── Session_Manager/        ← 推理会话槽位
 │   ├── Storage/                ← 统一存储管理
 │   ├── TUI/                    ← 终端 UI (ratatui)
+│   ├── API/                    ← OpenAI 兼容 HTTP API
 │   └── VM/                     ← Lua 脚本引擎 + 所有绑定
 ├── programs/                   ← Lua 脚本
 │   ├── builtin/                ← 内置 (优先级低于 user)
@@ -73,16 +75,20 @@
 
 ```rust
 pub fn Ensure_Config() -> (Pleiades_Config, PathBuf);   // 自动创建默认配置
-pub fn Read_Config(path: &Path) -> Pleiades_Config;      // 解析 TOML
+pub fn Read_Config(path: &Path) -> Result<Pleiades_Config, Box<dyn Error>>;  // 解析 TOML
 pub fn Ensure_Identity(dir: &Path) -> Keypair;           // Ed25519 密钥
 ```
 
 配置文件 `.config/config.toml` 结构：
 ```toml
-[Log]       level = "info"
-[Network]   LAN = true, WAN = false
-[Runtime]   device = "cpu", model_path = "", max_token = 128, temperature = 0.8
-[Storage]   workspace_dir = "Pleiades_Workspace"
+[Log]       level = "info", log_file_path = "Log/"
+[Network]   LAN = true, WAN = false, transport_protocol = "tcp",
+            cleanup_interval = 300, timeout_interval = 30,
+            heartbeat_interval = 30, heartbeat_timeout = 60,
+            request_response_timeout = 30
+[Runtime]   device = "cpu", model_path = "", max_token = 128,
+            temperature = 0.8, seed = 299792458
+[Storage]   workspace_dir = "Pleiades_Workspace", quota_gb = 0
 [Session]   max_slots = 4
 [Identity]  peer_name = "new_peer"
 
@@ -179,31 +185,33 @@ pub struct FileEntry {
 // 模型分析 (GGUF/PGGUF 通用)
 pub fn GGUF_Analyze(path: &Path) -> Result<Model_Arch_Info>;
 // 分析 + 自动转换 GGUF→PGGUF
-pub fn GGUF_Analyze_And_Convert(path: &Path, workspace: &Path) -> Result<PathBuf>;
+pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Info, PathBuf)>;
 
 // 模型切分 (输出 {stem}_split_{start}_{end}.pgguf)
-pub fn GGUF_Split_Model(path: &Path, start: usize, end: usize, workspace: &Path) -> Result<PathBuf>;
+pub fn GGUF_Split_Model(gguf_file_path: &Path, split_start: usize, split_end: usize, output_gguf_file_path: &Path) -> Result<()>;
 
 // 按层加载权重
-pub fn GGUF_Load_Layer(path: &Path, layer_idx: usize, device: &Device) -> Result<HashMap<String, QTensor>>;
+pub fn GGUF_Load_Layer(content: &gguf_file::Content, file: &mut File, layer_index: usize, device: &Device) -> Result<GGUF_Layer_Weights>;
 
 // 完整加载组装模型
-pub fn GGUF_Load_Model(path: &Path, start: usize, end: usize, device: &Device) -> Result<GGUF_Model>;
+pub fn GGUF_Load_Model(start: usize, end: usize, model_path: &Path, device: &Device) -> Result<GGUF_Model>;
 ```
 
 #### 3.4.4 Model_Arch_Info
 
 ```rust
 pub struct Model_Arch_Info {
-    pub architecture: String,       // "qwen3"
-    pub num_layers: usize,          // transformer block 数
-    pub embedding_length: usize,
-    pub head_count, head_count_kv, head_dim: usize,
+    pub architecture: String,
+    pub num_layers: usize,
+    pub embedding_length, head_count, head_count_kv, head_dim: usize,
     pub feed_forward_length, context_length: usize,
     pub rms_norm_eps, rope_freq_base: f64,
     pub vocab_size: usize,
     pub eos_token_id: u32,
     pub layers: Vec<Layer_Info>,
+    pub chat_template: Option<String>,
+    pub non_layer_tensors: Vec<Tensor_Detail>,
+    pub metadata_raw: HashMap<String, String>,
 
     // 仅 PGGUF 有
     pub model_id: Option<u32>,
@@ -217,15 +225,18 @@ pub struct Model_Arch_Info {
 
 ```rust
 impl MlSession {
-    pub fn New(device: Device) -> MlSession;
+    pub fn New(device: &str) -> Result<MlSession>;
     pub fn Load_Model(&mut self, path: &Path, start: usize, end: usize) -> Result<()>;
+    pub fn Load_Tokenizer(&mut self, path: &Path) -> Result<()>;
     pub fn Unload(&mut self);
     pub fn Has_Model(&self) -> bool;
-    pub fn Encode(&self, text: &str) -> Result<Vec<u32>>;          // Tokenizer
+    pub fn Encode_Messages(&self, messages: &[Message]) -> Result<Vec<u32>>;
+    pub fn Apply_Chat_Template(&self, messages: &[Message]) -> String;
     pub fn Decode(&self, token_id: u32) -> Result<String>;
-    pub fn Tensorize(&self, token_ids: &[u32]) -> Result<Tensor>;  // 无需模型已加载
-    pub fn Forward(&self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor>;
-    pub fn Sample(&self, logits: &Tensor, temperature: f64) -> Result<u32>;
+    pub fn Tensorize(&self, token_ids: &[u32]) -> Result<Tensor>;
+    pub fn Forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor>;
+    pub fn Sample(&mut self, logits: &Tensor, temperature: f64) -> Result<u32>;
+    pub fn Reset_KV_Cache(&mut self);
     pub fn Get_Eos(&self) -> u32;
 }
 ```
@@ -241,26 +252,42 @@ libp2p 协议栈：TCP + Noise 加密 + Yamux 多路复用 + mDNS 发现 + Kadem
 ```rust
 #[async_trait]
 pub trait Network_Capability {
-    async fn Send_Data(&self, peer: PeerId, data_type: &str, payload: &[u8]) -> Result<Vec<u8>>;
-    async fn Dial(&self, addr: &str) -> Result<()>;
-    async fn Disconnect(&self, peer: &PeerId) -> Result<()>;
-    async fn Test_Bandwidth(&self, peer: &PeerId) -> Result<()>;
-    async fn Send_File(&self, peer: &PeerId, path: &Path) -> Result<()>;
-    async fn Open_Tensor_Stream(&self, peer: &PeerId, inference_id: u64) -> Result<NetworkStream>;
-    async fn Accept_Tensor_Stream(&self, inference_id: u64, timeout: u64) -> Result<NetworkStream>;
-    async fn Send_Response(&self, request_id: u64, data_type: &str, payload: &[u8]) -> Result<()>;
-    async fn Put_Record(&self, key: &str, value: &[u8]) -> Result<()>;
-    async fn Get_Record(&self, key: &str) -> Result<Vec<u8>>;
-    async fn Open_File_Stream(&self, peer: &PeerId, file_id: &str) -> Result<FileStream>;
-    async fn Send_File_Data(&self, stream: &mut FileStream, data: &[u8]) -> Result<()>;
-    async fn Receive_File_Data(&self, stream: &mut FileStream, path: &Path, size: u64) -> Result<()>;
-    async fn Send_Tensor(&self, stream: &mut NetworkStream, tensor: &Tensor, offset: u64) -> Result<()>;
-    async fn Recv_Tensor(&self, stream: &mut NetworkStream, device: &Device) -> Result<(Tensor, u64)>;
-    async fn Send_Eof(&self, stream: &mut NetworkStream) -> Result<()>;
+    // 请求-响应
+    async fn send_data(&self, peer: PeerId, data_type: DataType, payload: Vec<u8>)
+        -> Result<Network_Data, Network_Error>;
+    async fn send_response(&self, request_id: u64, data_type: DataType, payload: Vec<u8>)
+        -> Result<(), Network_Error>;
+
+    // 连接管理
+    async fn dial(&self, addr: Multiaddr) -> Result<(), Network_Error>;
+    async fn disconnect(&self, peer: PeerId) -> Result<(), Network_Error>;
+
+    // 文件流
+    async fn open_file_stream(&self, peer: PeerId) -> Result<libp2p::Stream, Network_Error>;
+    async fn send_file_data(&self, stream: &mut libp2p::Stream, file_path: &Path) -> Result<(), Network_Error>;
+    async fn receive_file_data(&self, stream: &mut libp2p::Stream, dest_path: &Path, file_size: u64) -> Result<(), Network_Error>;
+    async fn send_file(&self, peer: PeerId, file_path: &Path) -> Result<(), Network_Error>;
+
+    // 张量流
+    async fn open_tensor_stream(&self, peer: PeerId, inference_id: u64) -> Result<libp2p::Stream, Network_Error>;
+    async fn accept_tensor_stream(&self, inference_id: u64, timeout_secs: u64) -> Result<libp2p::Stream, Network_Error>;
+
+    // Session 流
+    async fn open_session_stream(&self, peer: &PeerId, session_id: u64) -> Result<libp2p::Stream, Network_Error>;
+
+    // DHT
+    async fn put_record(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Network_Error>;
+    async fn get_record(&self, key: Vec<u8>) -> Result<(), Network_Error>;
+
+    // 工具
+    fn get_local_peer_id(&self) -> PeerId;
+    async fn test_bandwidth(&self, peer: &PeerId) -> Result<u64, Network_Error>;
 }
 ```
 
 **Tensor 流协议**: `[offset: u64][len: u64][data: bytes]...`，EOF = `[u64::MAX][0]`
+
+张量流的帧读写（`Send_Tensor_Frame`, `Receive_Tensor_Frame`, `Send_EOF`）在 `Tensor_Stream/protocol.rs` 中作为独立函数实现，不在 trait 上。文件流的帧读写同理（`File_Stream/protocol.rs`）。
 
 ---
 
@@ -274,16 +301,16 @@ pub trait Network_Capability {
 |------|------|
 | B1 | `route_user()` — 用户命令 → 查找/执行 Lua 脚本 |
 | B2 | `route_inbound()` — 解析 NetworkProtocol (ESTABLISH_TENSOR_STREAM, JOIN_PIPELINE 等) |
-| B3 | `route_stream()` — FileStreamArrived, TensorStreamArrived |
+| B3 | `route_stream()` — FileStreamArrived, SessionStreamArrived |
 | B4 | `route_lifecycle()` — JobExecutor 完成回调 |
-| B5 | `route_eventbus()` — ⚠️ 未实现，EventBus 由 TUI 直接消费（见 3.8 节） |
+| B5 | **shutdown 超时兜底** (30s grace，收到 SIGTERM 后退出) |
 
 **Capabilities 容器**:
 ```rust
 pub struct Capabilities {
-    pub network: Arc<dyn Network_Capability>,
+    pub network: Box<dyn Network_Capability>,
     pub storage: Arc<dyn StorageCapability>,
-    pub peer_manager: Arc<PeerManager>,
+    pub peer_manager: Box<dyn Peer_Management_Capability>,
     pub event_bus: Arc<EventBus>,
     pub local_stream_hub: Arc<LocalStreamHub>,
 }
@@ -320,6 +347,7 @@ caps.print(msg)              -- 写入日志 + TUI
 caps.echo(msg) → String       -- 测试回显
 caps.add(a, b) → f64          -- 测试加法
 caps.ping() → String          -- 异步 pong
+caps.table_sum(table) → f64   -- 表求和
 ```
 
 **`ml` 表 (ML Engine)**:
@@ -343,6 +371,8 @@ sess:sample(logits, temperature) → u32
 sess:get_eos() → u32
 sess:get_offset() → usize        -- 当前 forward offset
 sess:set_seed(seed)              -- 设置随机种子
+sess:load_tokenizer(path)        -- 独立加载 tokenizer
+sess:reset_kv_cache()            -- 清空 KV Cache
 ```
 
 **LuaTensor 方法** (UserData):
@@ -375,16 +405,10 @@ caps.network.accept_tensor_stream(inference_id, timeout) → NetworkStream
 caps.network.send_tensor(stream, tensor, offset)
 caps.network.recv_tensor(stream, device) → (LuaTensor, offset)
 caps.network.send_eof(stream)
-caps.network.send_response(request_id, data_type, payload)  -- 响应请求
-caps.network.put_record(key, value)                          -- DHT 存储
-caps.network.get_record(key) → Value                         -- DHT 查询
-caps.network.open_file_stream(peer, file_id) → FileStream    -- 文件流
+caps.network.test_bandwidth(peer) → Mbps  -- 带宽测试
 ```
 
-**`caps.storage_*` 补充方法**:
-```lua
-handle:release()                 -- 手动释放锁（否则 drop 时自动释放）
-```
+> ⚠️ `send_response`, `put_record`, `get_record`, `open_file_stream` 在 Rust trait 上存在但**未注册 Lua 绑定**。
 
 **`local_tensor.*` 表 (本地流)**:
 ```lua
@@ -405,19 +429,17 @@ ratatui + crossterm。双输入框布局：
 
 ```
 ┌──────────────────────┬──────────────┐
-│ Log (70%)            │ Network (30%)│
+│ Log (60%)            │ Network (40%)│
 ├──────────────────────┴──────────────┤
 │ Job (3 行)                          │
 ├─────────────────────────────────────┤
 │ Command Output (8 行)               │
 ├─────────────────────────────────────┤
-│ Prompt> (3 行)                      │
-├─────────────────────────────────────┤
 │ pleiades> (3 行, 命令输入)          │
 └─────────────────────────────────────┘
 ```
 
-**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`
+**内置命令**: `run`, `pipeline`, `cancel`, `dp`, `set-device`, `ls`, `flush`, `reload`, `set-name`, `distribute`, `send`, `profile`, `exec`, `clear`, `quit`, `help`, `session <model_id>`, `session inference <id> <path>`, `api <session_id>`
 
 ---
 
@@ -425,26 +447,26 @@ ratatui + crossterm。双输入框布局：
 
 **位置**: `Src/Session_Manager/`
 
-管理推理会话的生命周期和槽位分配。每个会话绑定到一个推理模型和推理设备。
+管理推理会话的生命周期和槽位分配。无 trait，`SessionManager` 为具体类型，包裹在 `Arc<Mutex<SessionManager>>` 中供 Core 使用。
 
 ```rust
-#[async_trait]
-pub trait Session_Capability {
-    async fn Create_Session(&self, model_id: u32, device: &str, start: usize, end: usize) -> Result<(SessionId, IoFrontend)>;
-    async fn Destroy_Session(&self, id: SessionId) -> Result<()>;
-    async fn Get_Session(&self, id: SessionId) -> Result<SessionInfo>;
-    async fn List_Sessions(&self) -> Result<Vec<SessionInfo>>;
-    async fn Has_Capacity(&self) -> Result<bool>;
+pub struct SessionManager { max_slots: usize, sessions: Vec<Session>, ... }
+
+impl SessionManager {
+    pub fn new(max_slots: usize) -> Arc<Mutex<SessionManager>>;
+    pub fn create_session(&mut self, model_id: &str) -> u64;
+    pub fn destroy_session(&mut self, session_id: u64) -> Result<(), Session_Error>;
+    pub fn list_sessions(&self) -> Vec<SessionInfo>;
+    pub fn allocate_slot(&mut self, session_id: u64) -> Result<SlotHandle, Session_Error>;
+    pub fn close_slot(&mut self, session_id: u64, slot_id: usize) -> Result<(), Session_Error>;
 }
 ```
 
-**核心结构**:
-- `SessionManager` — 全局管理器，通过 `max_slots` 限制并发会话数
-- `Session` — 内部结构，持有 MlSession + 设备信息 + 模型引用
-- `Slot` / `SlotState` — 槽位状态机 (Idle / Occupied / Loading)
-- `SessionInfo` — 对外暴露的只读会话信息
-
-> ⚠️ 当前 `SessionManager` 已实现但尚未集成到 Core 主循环中。
+**核心概念**:
+- **Slot-based 设计**: 每个推理请求通过 `allocate_slot` 获取 `SlotHandle`（含 `prompt_tx`/`token_rx` mpsc 通道对），推理结果通过通道异步返回
+- `Session` 内部通过 `spawn()` 启动 select! 循环监听 slot 的 `prompt_rx`
+- `SlotHandle` Drop 时自动释放槽位
+- 已集成到 Core，支持 `session <model_id>`, `session inference`, `api` 等 TUI 命令
 
 ### 4.1 模型加载与分析
 

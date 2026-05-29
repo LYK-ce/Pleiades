@@ -1,51 +1,67 @@
-# wb_10_summary — 2026-05-28
+# wb_10_summary — 2026-05-29 (基于最新代码重新审查)
 
-## 事务 1: Architecture 文档更新
-- 完成: 2026-05-28
-- 更新内容: 日期; B5 标注未实现; inference_id/u64; Network 新增 API (send_response, put_record, get_record, open_file_stream, send_file_data, receive_file_data); MlSession 新增 get_offset/set_seed; LuaTensor 方法 (dims/to_bytes/to_device); storage handle:release(); network.send_response/put_record/get_record/open_file_stream; Session_Manager 3.9 节; Scheduler config 备注; ProgramRegistry 脚本发现; legacy 目录
+## 事务 1: Architecture 文档更新 (重做)
+- 完成: 2026-05-29
+- 差异: 11🔴 + 17🟡 + 3🟢
+- 主要修复: Network trait 完全重写、ML_Engine 4函数签名、Session_Manager trait→具体类型、TUI布局+Prompt行删除、VM Lua API修正、Config补全、B5语义修正、Capabilities类型
 
-## 事务 2: README 更新
-- 完成: 2026-05-28
-- 内容: 项目介绍、核心特性、快速开始(构建/运行)、项目结构、架构概览图
+## 事务 2: README
+- 前置操作已创建，本次检查确认项目结构包含新模块(API/)
 
 ## 事务 3: 清理
-- 完成: 2026-05-28
-- 删除: /workspace/Src/__pycache__/
-- 移动至 legacy: programs/builtin/{run,pipeline,list}.lua (引用不存在的 API: caps.create_session, caps.allocate_io, caps.get_available_peers, caps.plan_weighted/uniform, caps.split_model/wrong-table, caps.send_file/wrong-table, caps.establish_streams, caps.send_tensor/wrong-sig, caps.receive_tensor/wrong-sig, sess:get_output_tensor)
+- __pycache__ 已在之前清理
+- builtin legacy 脚本已归档
 
-## 事务 4: Code Review 结果
+## 事务 4: Code Review (基于最新代码 e66e4a3)
 
-### 严重问题
-|#|等级|问题|位置|
-|-|-|-|-|
-|1|🔴中|algo.unwrap() panic风险 |capability_binding.rs:160|
-|2|🔴中|B2 入站路由全TODO |branch_command.rs|
-|3|🟡低|B3 TensorStreamArrived TODO |branch_stream.rs:61|
-|4|🟡低|B5 EventBus路由缺失 |Core主循环|
-|5|🟡低|analyze_model闭包违反Lua绑定规范(15行table构造) |capability_binding.rs:220-237|
-|6|🟡低|Scheduler_Config缺失 |config.rs|
-|7|🟡低|Has_Active_Session()始终false |app.rs:354|
-|8|🟡低|SessionManager::Take_Frontend未实现 |manager.rs:31|
-|9|🟢低|PeerId::random() TODO |network_service.rs:312|
+> ✅ **已排除的误报**:
+> - ~~ML_Engine 绕过 Storage~~ → Storage 返回 PathBuf，下游用 std::fs 读写是正确用法
+> - ~~Lua 闭包违反绑定规范~~ → 闭包只做 Rust→Lua 类型转换，真正的业务逻辑在独立 fn 中
 
-### 代码质量
-- ✅ 模块化trait pattern贯穿 (Network/Storage/Peer/Session)
-- ✅ 并发安全: RwLock+oneshot+RendezvousMap
-- ✅ 路径安全检查 (file_id防目录遍历)
-- ✅ MlSession Lua绑定完全符合规范 (薄胶水模式)
-- ✅ 测试覆盖: Storage 30+, VM 15+, EventBus 4
-- ⚠️ try_into().unwrap() 5处 (gguf_tensor.rs) — 应expect
-- ⚠️ Mutex poison .unwrap_or_else(|e|e.into_inner()) 多处 — 统一处理
-- ⚠️ spawn_lua_script用std::thread而非tokio::task — 资源效率
-- ⚠️ Box<dyn Error> 丢失类型信息
+### 🟡 中等问题
+
+|#|问题|位置|
+|-|-|-|
+|1|SessionManager::new()返回Arc<Mutex<>>藕合并发策略 | manager.rs:27-37 |
+|2|LocalStreamHub.accept()使用thread::sleep忙等待 | local_tensor_stream/mod.rs:59-75 |
+|3|SupportedModel构造逻辑重复(3处) | main.rs:163-199, branch_user.rs:306-316 |
+|4|unsafe缺少SAFETY注释(4处) | lua_tensor.rs:75/81/121/127 |
+|5|JobExecutor是空壳stub(run()立即返回Success) | job_executor.rs:49-54 |
+|6|broadcast_local_info忽略所有错误 | Network/mod.rs:134-141 |
+|7|Has_Active_Session()硬编码false | app.rs:351-353 |
+|8|Mutex::lock().unwrap() poison panic风险 | branch_user.rs:379/384/431, branch_stream.rs:64 |
+
+### 🟢 轻微问题
+
+|#|问题|
+|-|-|
+|9|归属注释格式不一致(空格/全角半角冒号)|
+|10|#![allow(non_snake_case)]/#![allow(dead_code)]范围过大(lib.rs crate级别)|
+|11|StorageManager::New不填充模型元信息(等到flush)|
+|12|PeerId::random()作为bootstrap(Kademlia路由问题)|
+|13|slot_tokens[&slot_id]潜在panic(应用.get())|
+
+### 已记入 potential_risk.md
+
+|#|风险|位置|
+|-|-|-|
+|PR-21|std::sync::Mutex 阻塞 tokio worker 线程 | branch_user.rs:379-431, branch_stream.rs:64 |
 
 ### 规范符合度
-- 归属注释: ✅ 全部有 Present by KeJi + Date
-- Pascal_Snake_Case函数: ✅
-- #![allow(non_snake_case)]: ⚠️ 几乎所有文件，暗示命名未充分规范化
-- Lua绑定规范: ⚠️ 1处违反 (analyze_model)
 
-### 模块耦合度
-- 低耦合: trait object依赖倒置
-- Session_Manager: 几乎未被Core使用
-- EventBus: 仅TUI消费，Core不订阅
+|规范|符合度|备注|
+|-|-|-|
+|归属注释|🟡90%|格式不一致|
+|命名规范|✅95%|allow(non_snake_case)遮蔽|
+|Lua绑定(薄胶水)|✅|类型转换在闭包内，业务逻辑在独立fn|
+|Storage API使用|✅|PathBuf返下游，std::fs是唯一读写方式|
+|Core只做路由|✅100%|select!5分支严格遵守|
+
+### 代码优点
+1. Core主循环严格遵守"路由+spawn"原则
+2. Storage锁系统设计完善(RAII+惰性发现+路径防护)
+3. EventBus 4类型开闭原则
+4. MlSession空壳支持load/unload/reload循环
+5. GGUF→PGGUF自动转换+weight tying处理
+6. Network层分层清晰(NodeHandle+stream::Control+RendezvousMap)
+7. 测试覆盖全面(Storage 30+)
