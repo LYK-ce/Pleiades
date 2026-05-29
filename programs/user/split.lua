@@ -23,9 +23,15 @@ function execute(params)
         return
     end
 
-    -- 1. 读取模型架构信息
-    caps.print("split: 分析模型 " .. path .. " ...")
-    local info = ml.analyze_model(path)
+    -- 1. 通过 Storage 获取模型文件路径
+    caps.print("split: 读取模型 " .. path .. " ...")
+    local handle = caps.storage_acquire_read(path)
+    local full_path = handle:path()
+
+    -- 2. 读取模型架构信息
+    caps.print("split: 分析模型 " .. full_path .. " ...")
+    local info = ml.analyze_model(full_path)
+    handle:release()
     local total_layers = info.num_layers + 2   -- N blocks + embedding + LM head
 
     caps.print(string.format("split: %s, %d blocks → %d total layers, 分成 %d 份",
@@ -36,7 +42,7 @@ function execute(params)
         return
     end
 
-    -- 2. 计算均分范围（余数分配给前几份，每份多1层）
+    -- 3. 计算均分范围（余数分配给前几份，每份多1层）
     local base = math.floor(total_layers / num)
     local remainder = total_layers % num
 
@@ -52,7 +58,7 @@ function execute(params)
         caps.print(string.format("split: part %d/%d  layers %d-%d  (tokenizer=%s)",
             i + 1, num, start, end_idx, tostring(keep_tok)))
 
-        ml.split_model(path, start, end_idx, ".", keep_tok)
+        ml.split_model(full_path, start, end_idx, ".", keep_tok)
 
         start = end_idx + 1
     end
