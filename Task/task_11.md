@@ -15,7 +15,8 @@
 | 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
 | 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ✅ |
 | 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ✅ |
-| 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 3 | ⬜ |
+| 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 3 | ✅ |
+| 11.6 | CPU/GPU 混合流水线 pipe_3/pipe_4 — 单个分片内 CPU+GPU 分层加载 | 2 | ⬜ |
 
 ---
 
@@ -732,6 +733,106 @@ caps.network.get_peers() → { {name, peer_id}, ... }
 3. 节点 A: `session create Qwen14B_split_0_20` → `session inference pipe_1 1 Qwen14B_split_0_20.pgguf`
 4. 确认 pipe_2 在 B 上自动启动（日志可见）
 5. 通过 API 发 chat 请求 → 确认完整推理链路正常工作
+
+---
+
+### 11.6 CPU/GPU 混合流水线 pipe_3/pipe_4
+
+#### 背景
+
+pipe_1/pipe_2 将每个分片模型全部放在 GPU 上。当 GPU 显存不足以容纳整个分片时，需要将分片内部再拆分为 CPU + GPU 两部分混合加载。
+
+参考 `programs/user/cpu_gpu_run.lua` 的模式：单个模型创建两个 `MlSession`（CPU + GPU），CPU 算前半 → `tensor:to_device("cuda")` 传输 → GPU 算后半。
+
+#### 与 pipe_1/pipe_2 的关系
+
+```
+pipe_1/pipe_2:              pipe_3/pipe_4:
+
+节点A: 分片全在GPU           节点A: 分片 split → CPU一半 + GPU一半
+节点B: 分片全在GPU           节点B: 分片 split → CPU一半 + GPU一半
+```
+
+每个节点内部使用 `tensor:to_device()` 在 CPU↔GPU 之间搬运 tensor，两节点之间仍通过网络 tensor stream 通信。
+
+#### 分片内均分
+
+pipe_3 加载 `Qwen14B_split_0_20.pgguf`（layers 0-20，共 21 层）：
+- CPU: `split_start .. mid` = 0..10（11 层）
+- GPU: `mid+1 .. split_end` = 11..20（10 层）
+
+pipe_4 加载 `Qwen14B_split_21_41.pgguf`（layers 21-41，共 21 层）：
+- CPU: `split_start .. mid` = 21..31（11 层）
+- GPU: `mid+1 .. split_end` = 32..41（10 层）
+
+其中 `mid = split_start + floor((split_end - split_start) / 2)`。
+
+#### 数据流
+
+```
+Session
+  ↕ local_tensor "ml-{sid}"
+pipe_3 (节点A)
+  cpu_sess:forward(0..10, hidden) → hidden_cpu
+  hidden_cpu:to_device("cuda") → hidden_gpu
+  gpu_sess:forward(11..20, hidden_gpu) → hidden_out
+  caps.network.send_tensor(fwd, hidden_out)   → 发往 pipe_4
+  caps.network.recv_tensor(bwd) → logits      ← 接收 logits
+  local_tensor.send_tensor(session_stream, logits)
+─────────────────────────────────────────────────────
+pipe_4 (节点B)
+  caps.network.recv_tensor(fwd) → hidden
+  cpu_sess:forward(21..31, hidden) → hidden_cpu
+  hidden_cpu:to_device("cuda") → hidden_gpu
+  gpu_sess:forward(32..41, hidden_gpu) → logits
+  caps.network.send_tensor(bwd, logits)
+```
+
+#### 待修改内容
+
+##### 6a. `programs/user/pipe_3.lua` — 新建
+
+与 pipe_1 相同的前半段逻辑，区别：
+- 创建两个 MlSession：`cpu_sess` + `gpu_sess`
+- 按 `mid` 拆分当前分片的层范围
+- 每轮：CPU forward → `to_device("cuda")` → GPU forward → 网络发送
+
+```lua
+-- 1. 加载模型 → info.split_start / info.split_end
+-- 2. 计算 mid
+local mid = info.split_start + math.floor((info.split_end - info.split_start) / 2)
+-- 3. 创建 CPU + GPU session
+cpu_sess:load_model(full_path, info.split_start, mid)
+gpu_sess:load_model(full_path, mid + 1, info.split_end)
+-- 4. 桥接循环:
+--    recv → cpu_sess:forward → to_device("cuda") → gpu_sess:forward → send
+--    recv ← ... ← bwd ← send
+```
+
+##### 6b. `programs/user/pipe_4.lua` — 新建
+
+与 pipe_2 相同的后半段逻辑，区别：
+- 同样创建 `cpu_sess` + `gpu_sess`，按 mid 拆分
+- 每轮：网络接收 → CPU forward → `to_device("cuda")` → GPU forward → 网络发回
+
+#### 远程模型名推导
+
+复用 pipe_1 的 stem 提取逻辑（pipe_3 和 pipe_1 用同一组 split 产物，推导方式不变）。
+
+#### 涉及文件
+
+| 文件 | 改动点 |
+|------|--------|
+| `programs/user/pipe_3.lua` | **新建** — CPU/GPU 混合前半段 |
+| `programs/user/pipe_4.lua` | **新建** — CPU/GPU 混合后半段 |
+
+#### 验证方式
+
+1. 节点 A、B 各放半边模型
+2. `session inference pipe_3 1 Qwen14B_split_0_20.pgguf`
+3. 确认 pipe_4 在 B 上自动启动
+4. 确认两个节点各自创建了 CPU + GPU 两个 MlSession
+5. API 请求 → 推理结果正确
 
 ---
 
