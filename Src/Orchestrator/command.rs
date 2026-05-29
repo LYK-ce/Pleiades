@@ -60,6 +60,16 @@ pub enum UserCommand {
     SessionInference { session_id: u64, model_path: String },
     /// 启动 OpenAI 兼容 API Server，绑定到指定 Session
     Api { session_id: u64 },
+    /// 在远程节点执行 Lua 脚本
+    ///
+    /// `peer` 为目标节点名称（通过 PeerManager 解析为 PeerId），
+    /// `command` 为 Lua 脚本的 COMMAND 名，
+    /// `params` 为参数键值对（JSON 序列化后通过网络传输）。
+    ExecRemote {
+        peer: String,
+        command: String,
+        params: std::collections::HashMap<String, String>,
+    },
 }
 
 // ============================================================
@@ -116,6 +126,19 @@ pub enum NetworkProtocol {
         model_id: String,
         layer_count: u32,
         device: String,
+    },
+
+    /// 请求远程节点执行指定 Lua 脚本
+    ///
+    /// 格式: `EXEC|{command}|{params_json}`
+    ///   - command: 脚本 COMMAND 名（对应 programs/user/{command}.lua）
+    ///   - params_json: JSON 格式的参数字典
+    ///
+    /// 回复: `OK|{result}` 或 `FAIL|{reason}`
+    ExecRemote {
+        command: String,
+        /// JSON string of HashMap<String, String>
+        params_json: String,
     },
 }
 
@@ -193,6 +216,20 @@ pub fn Parse_Network_Command(payload: &[u8]) -> Result<NetworkProtocol, String> 
                 device,
             })
         }
+        "EXEC" => {
+            if parts.len() != 3 {
+                return Err(format!(
+                    "EXEC 格式错误: 需要 3 个字段, 实际 {}. 格式: EXEC|command|params_json",
+                    parts.len()
+                ));
+            }
+            let command = parts[1].to_string();
+            let params_json = parts[2].to_string();
+            Ok(NetworkProtocol::ExecRemote {
+                command,
+                params_json,
+            })
+        }
         unknown => Err(format!("未知命令前缀: '{}'", unknown)),
     }
 }
@@ -224,6 +261,10 @@ pub fn Serialize_Network_Command(cmd: &NetworkProtocol) -> Vec<u8> {
             layer_count,
             device,
         } => format!("PROFILE|{}|{}|{}", model_id, layer_count, device),
+        NetworkProtocol::ExecRemote {
+            command,
+            params_json,
+        } => format!("EXEC|{}|{}", command, params_json),
     };
     text.into_bytes()
 }
@@ -344,6 +385,44 @@ mod command_tests {
                 assert_eq!(layer_end, 29);
             }
             _ => panic!("expected Join_Pipeline"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exec_remote_ok() {
+        let payload = b"EXEC|hello|{\"name\":\"KeJi\"}";
+        let result = Parse_Network_Command(payload).unwrap();
+        match result {
+            NetworkProtocol::ExecRemote { command, params_json } => {
+                assert_eq!(command, "hello");
+                assert_eq!(params_json, "{\"name\":\"KeJi\"}");
+            }
+            _ => panic!("expected ExecRemote"),
+        }
+    }
+
+    #[test]
+    fn test_parse_exec_remote_wrong_field_count() {
+        let payload = b"EXEC|hello";
+        let result = Parse_Network_Command(payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("需要 3 个字段"));
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_exec_remote() {
+        let cmd = NetworkProtocol::ExecRemote {
+            command: "my_script".to_string(),
+            params_json: "{\"k1\":\"v1\",\"k2\":\"v2\"}".to_string(),
+        };
+        let bytes = Serialize_Network_Command(&cmd);
+        let parsed = Parse_Network_Command(&bytes).unwrap();
+        match parsed {
+            NetworkProtocol::ExecRemote { command, params_json } => {
+                assert_eq!(command, "my_script");
+                assert_eq!(params_json, "{\"k1\":\"v1\",\"k2\":\"v2\"}");
+            }
+            _ => panic!("expected ExecRemote"),
         }
     }
 }

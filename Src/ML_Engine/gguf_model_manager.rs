@@ -919,11 +919,11 @@ pub fn GGUF_Split_Model(
     //   - 追加 pleiades.split.start 和 pleiades.split.end 字段
     let mut metadata_pairs: Vec<(String, gguf_file::Value)> = Vec::new();
 
-    // 需要跳过的 metadata key 前缀（tokenizer 数据和 chat template，清空以节省空间）
-    let skip_prefixes = ["tokenizer.", "chat_template"];
+    // 需要跳过的 metadata key（tokenizer/chat 数据 + 旧的 layer_bitmap，后续重新计算）
+    let skip_keys: &[&str] = &["tokenizer.", "chat_template", "pleiades.layer_bitmap"];
 
     for (key, value) in &content.metadata {
-        let should_skip = skip_prefixes
+        let should_skip = skip_keys
             .iter()
             .any(|prefix| key.starts_with(prefix));
         if should_skip {
@@ -932,6 +932,26 @@ pub fn GGUF_Split_Model(
         // 保留所有其他 metadata（包括 block_count）原样复制
         metadata_pairs.push((key.clone(), value.clone()));
     }
+
+    // 5.5 根据已筛选的 tensor 名称重新构建 layer_bitmap（仅标记 split 范围内实际存在的层）
+    let mut new_bitmap = [0u8; 32];
+    for tensor_name in &selected_tensor_names {
+        if tensor_name.starts_with("blk.") {
+            // tensor 名称格式: blk.{idx}.{rest}
+            let parts: Vec<&str> = tensor_name.splitn(3, '.').collect();
+            if parts.len() >= 2 {
+                if let Ok(blk_idx) = parts[1].parse::<usize>() {
+                    if blk_idx < 256 {
+                        new_bitmap[blk_idx / 8] |= 1 << (blk_idx % 8);
+                    }
+                }
+            }
+        }
+    }
+    metadata_pairs.push((
+        "pleiades.layer_bitmap".to_string(),
+        gguf_file::Value::String(Bitmap_To_Hex(&new_bitmap)),
+    ));
 
     // 6. 追加切分范围标记
     metadata_pairs.push((

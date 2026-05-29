@@ -6,7 +6,8 @@
 //! 所有业务逻辑用 todo!() 占位，仅验证 Capability 调用通路。
 
 use super::Core;
-use crate::orchestrator::command::UserCommand;
+use crate::orchestrator::command::{UserCommand, NetworkProtocol, Serialize_Network_Command};
+use crate::network::DataType;
 use crate::vm::engine::LuaContext;
 use crate::vm::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
@@ -461,6 +462,50 @@ impl Core {
                     }
                 });
             }
+            // ════════════════════════════════════════════════
+            // 远程 Lua 脚本执行 (请求-响应)
+            // ════════════════════════════════════════════════
+            UserCommand::ExecRemote { peer, command, params } => {
+                // 1. 解析 peer 名称 → peer_id
+                let Ok(info) = self.capabilities.peer_manager.Get_Peer_By_Name(&peer).await else {
+                    self.capabilities.event_bus.Publish(Bus_Event::Output {
+                        payload: cmd_output(format!("未知节点: {}", peer), true),
+                    });
+                    return;
+                };
+                // 2. JSON 序列化参数
+                let params_json = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
+                // 3. 构造协议消息
+                let proto = NetworkProtocol::ExecRemote {
+                    command: command.clone(),
+                    params_json,
+                };
+                let payload = Serialize_Network_Command(&proto);
+                // 4. 发送到远程节点
+                match self.capabilities.network.send_data(
+                    info.peer_id.clone(),
+                    DataType::Command,
+                    payload,
+                ).await {
+                    Ok(response) => {
+                        let text = String::from_utf8_lossy(&response.payload);
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(
+                                format!("[{}] 远程执行完成: {}", peer, text),
+                                true,
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        self.capabilities.event_bus.Publish(Bus_Event::Output {
+                            payload: cmd_output(
+                                format!("[{}] 远程执行失败: {}", peer, e),
+                                true,
+                            ),
+                        });
+                    }
+                }
+            }
         }
     }
 }
@@ -650,5 +695,106 @@ fn spawn_lua_script(
                 }
             }
         });
+    });
+}
+
+/// Fire-and-reply: 在独立线程中加载并执行 Lua 脚本，通过 oneshot 通道返回结果。
+///
+/// 与 `spawn_lua_script` 逻辑相同，区别在于执行结果通过 `reply` oneshot 发送
+/// 而非 EventBus 推送（供 B2 入站请求使用，结果需回传给远程发起方）。
+///
+/// 返回格式: `"OK|..."` 或 `"FAIL|..."`。
+pub(super) fn spawn_lua_script_with_reply(
+    path: std::path::PathBuf,
+    params: std::collections::HashMap<String, String>,
+    caps: std::sync::Arc<crate::orchestrator::Capabilities>,
+    label: String,  // reserved for future EventBus logging
+    reply: tokio::sync::oneshot::Sender<String>,
+) {
+    let _ = &label; // used in EventBus path of spawn_lua_script, reserved here
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = reply.send(format!("FAIL|创建 runtime 失败: {}", e));
+                return;
+            }
+        };
+
+        let result = rt.block_on(async {
+            // 1. 读取脚本
+            let script = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => return format!("FAIL|读取脚本失败: {}", e),
+            };
+
+            // 2. 创建沙箱 Lua 实例
+            let lua = match LuaContext::new() {
+                Ok(l) => l,
+                Err(e) => return format!("FAIL|创建 Lua 实例失败: {}", e),
+            };
+
+            // 3. 注册能力函数
+            if let Err(e) = register_caps(&lua) {
+                return format!("FAIL|注册基础能力: {}", e);
+            }
+            if let Err(e) = register_logging_caps(&lua, caps.event_bus.clone()) {
+                return format!("FAIL|注册日志能力: {}", e);
+            }
+            if let Err(e) = register_network_caps(&lua, caps.clone()) {
+                return format!("FAIL|注册 Network 能力: {}", e);
+            }
+            if let Err(e) = register_storage_caps(&lua, caps.storage.clone()) {
+                return format!("FAIL|注册 Storage 能力: {}", e);
+            }
+            if let Err(e) = register_ml_caps(&lua) {
+                return format!("FAIL|注册 ML 能力: {}", e);
+            }
+            if let Err(e) = crate::vm::local_stream::register_local_stream_caps(
+                &lua,
+                caps.local_stream_hub.clone(),
+            ) {
+                return format!("FAIL|注册 LocalStream: {}", e);
+            }
+
+            // 4. 编译脚本
+            if let Err(e) = lua.load(&script).eval::<()>() {
+                return format!("FAIL|脚本语法错误: {}", e);
+            }
+
+            // 5. 构造参数 table
+            let params_table = match lua.create_table() {
+                Ok(t) => t,
+                Err(e) => return format!("FAIL|创建参数表: {}", e),
+            };
+            for (k, v) in &params {
+                if let Err(e) = params_table.set(k.as_str(), v.as_str()) {
+                    return format!("FAIL|设置参数 {}: {}", k, e);
+                }
+            }
+
+            // 6. 调用 execute 函数
+            let execute: mlua::Function = match lua.globals().get("execute") {
+                Ok(f) => f,
+                Err(_) => return "FAIL|脚本缺少 execute 函数".to_string(),
+            };
+
+            match execute.call_async::<mlua::Value>(params_table).await {
+                Ok(val) => {
+                    let result_text = match val {
+                        mlua::Value::String(s) => s.to_string_lossy(),
+                        mlua::Value::Nil => "nil".to_string(),
+                        other => format!("{:?}", other),
+                    };
+                    format!("OK|{}", result_text)
+                }
+                Err(e) => format!("FAIL|执行失败: {}", e),
+            }
+        });
+
+        let _ = reply.send(result);
     });
 }

@@ -950,6 +950,54 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
+    // ---- rexec <peer> <command> [key=value ...] ----
+
+    if trimmed.starts_with("rexec ") {
+        let args: Vec<&str> = trimmed
+            .strip_prefix("rexec ")
+            .unwrap_or("")
+            .trim()
+            .split_whitespace()
+            .collect();
+        if args.len() < 2 {
+            app.command_output.output_text =
+                "错误: 缺少参数\n用法: rexec <peer> <command> [key=value ...]".to_string();
+            app.command_output.completed = true;
+            return;
+        }
+
+        let peer = args[0].to_string();
+        let command = args[1].to_string();
+
+        let mut params = std::collections::HashMap::new();
+        for arg in &args[2..] {
+            if let Some((k, v)) = arg.split_once('=') {
+                params.insert(k.to_string(), v.to_string());
+            } else {
+                app.command_output.output_text = format!(
+                    "错误: 参数格式无效 '{}'\n用法: rexec <peer> <command> [key=value ...]",
+                    arg
+                );
+                app.command_output.completed = true;
+                return;
+            }
+        }
+
+        let cmd = UserCommand::ExecRemote {
+            peer,
+            command,
+            params,
+        };
+
+        app.Add_Log(format!("远程执行: rexec {} {}", args[0], args[1]));
+
+        if user_cmd_tx.blocking_send(cmd).is_err() {
+            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+            app.should_quit = true;
+        }
+        return;
+    }
+
     // ---- 未识别的命令 ----
 
     app.command_output.output_text = format!("未知命令: '{}'\n输入 help 查看可用命令", trimmed);
