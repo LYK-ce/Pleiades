@@ -66,7 +66,12 @@ pub fn Render(frame: &mut Frame, area: Rect, app: &App) {
             let display_name = if peer.name.is_empty() {
                 Truncate_Peer_Id(&peer.peer_id)
             } else {
-                peer.name.clone()
+                let suffix = if peer.peer_id.len() >= 4 {
+                    &peer.peer_id[peer.peer_id.len() - 4..]
+                } else {
+                    &peer.peer_id
+                };
+                format!("{}#{}", peer.name, suffix)
             };
             let status = if peer.is_local {
                 "本机"
