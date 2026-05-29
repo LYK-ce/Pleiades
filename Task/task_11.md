@@ -13,7 +13,8 @@
 |---|------|-----------|------|
 | 11.1 | Split Model 适配 PGGUF 格式 | 1 | ✅ |
 | 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
-| 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ⬜ |
+| 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ✅ |
+| 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ⬜ |
 
 ---
 
@@ -381,6 +382,155 @@ if args.len() == 3 {
 3. `session inference single_inf 1 test.pgguf`（3 参数，显式指定）正常工作
 4. 复制 `user/single_inf.lua` → `user/my_ml.lua`，修改如 `caps.print("custom ML thread")`
 5. `session inference my_ml 1 test.pgguf` → 日志输出 `custom ML thread`
+
+---
+
+### 11.4 用户 split.lua 脚本 — PGGUF 均分切分
+
+#### 背景
+
+`ml.split_model` 已暴露给 Lua，但缺少一个用户友好的脚本来自动计算均分切分范围。需要创建 `programs/user/split.lua`，用法：
+
+```
+exec split xxx.pgguf num
+```
+
+将 `xxx.pgguf` 按层均分为 `num` 份，第一份保留 tokenizer 数据（供 encode/decode 节点使用）。
+
+#### 层编号约定
+
+```
+Layer 0             = Embedding (token_embd.weight)
+Layer 1 .. N        = Transformer blocks (blk.0.* .. blk.(N-1).*)
+Layer N+1           = LM Head (output_norm.weight + output.weight)
+```
+
+总层数 = N + 2，其中 N = `block_count`（GGUF metadata 中的 `{arch}.block_count`）。
+
+#### 均分算法
+
+```
+total_layers = N + 2
+base = total_layers / num       // 每份基础层数
+remainder = total_layers % num  // 前 remainder 份各多 1 层
+
+for i in 0..num:
+    start = sum of previous group sizes
+    end = start + base + (if i < remainder { 1 } else { 0 }) - 1
+    ml.split_model(path, start, end, dir, keep_tokenizer=(i==0))
+```
+
+例：`N=28` → `total=30`，`num=3`：
+- Part 0: layers 0–9 (embedding + blk.0–7 + 1 extra)  ← tokenizer
+- Part 1: layers 10–19 (blk.8–17)
+- Part 2: layers 20–29 (blk.18–27 + LM head)
+
+#### Rust 层改动：`keep_tokenizer` 参数
+
+当前 `GGUF_Split_Model` 无条件跳过 `tokenizer.*` 和 `chat_template`。需要增加 `keep_tokenizer: bool` 参数：
+
+##### 4a. `Src/ML_Engine/gguf_model_manager.rs` — `GGUF_Split_Model`
+
+签名改为：
+```rust
+pub fn GGUF_Split_Model(
+    gguf_file_path: &Path,
+    split_start: usize,
+    split_end: usize,
+    output_gguf_file_path: &Path,
+    keep_tokenizer: bool,
+) -> Result<()> {
+```
+
+metadata 复制逻辑：
+```rust
+let mut skip_keys: Vec<&str> = vec!["pleiades.layer_bitmap"];
+if !keep_tokenizer {
+    skip_keys.push("tokenizer.");
+    skip_keys.push("chat_template");
+}
+```
+
+##### 4b. `Src/ML_Engine/capability.rs` — `split_model`
+
+新增参数透传：
+```rust
+pub async fn split_model(
+    gguf_file_path: &Path,
+    split_start: usize,
+    split_end: usize,
+    output_dir: &Path,
+    keep_tokenizer: bool,
+) -> Result<(), String> {
+```
+
+##### 4c. `Src/VM/capability_binding.rs` — Lua 绑定
+
+```rust
+ml.set(
+    "split_model",
+    lua.create_async_function(move |_, (path, start, end, output_dir, keep_tokenizer):
+        (String, usize, usize, String, bool)| async move {
+        capability::split_model(
+            std::path::Path::new(&path), start, end,
+            std::path::Path::new(&output_dir), keep_tokenizer,
+        ).await.map_err(|e| mlua::Error::runtime(e))
+    })?,
+)?;
+```
+
+##### 4d. `programs/user/split.lua` — 新建脚本
+
+```lua
+-- COMMAND: split
+-- DESCRIPTION: 将 PGGUF 文件按层均分为 num 份
+
+function execute(params)
+    local path = params.path
+    local num = tonumber(params.num)
+
+    -- 1. 读取模型架构信息
+    local info = ml.analyze_model(path)
+    local total_layers = info.num_layers + 2  -- N + embedding + LM head
+
+    -- 2. 计算均分范围
+    local base = math.floor(total_layers / num)
+    local remainder = total_layers % num
+
+    local start = 0
+    for i = 0, num - 1 do
+        local group_size = base
+        if i < remainder then group_size = group_size + 1 end
+        local end_idx = start + group_size - 1
+
+        local keep_tok = (i == 0)
+        caps.print(string.format("split: part %d/%d layers %d-%d (tokenizer=%s)",
+            i + 1, num, start, end_idx, tostring(keep_tok)))
+
+        ml.split_model(path, start, end_idx, ".", keep_tok)
+
+        start = end_idx + 1
+    end
+
+    caps.print("split: 完成")
+end
+```
+
+#### 涉及文件
+
+| 文件 | 改动点 |
+|------|--------|
+| `Src/ML_Engine/gguf_model_manager.rs` | `GGUF_Split_Model` 加 `keep_tokenizer: bool` 参数 |
+| `Src/ML_Engine/capability.rs` | `split_model` 透传 `keep_tokenizer` |
+| `Src/VM/capability_binding.rs` | Lua `ml.split_model` 加第5参数 |
+| `programs/user/split.lua` | **新建** — 均分逻辑脚本 |
+
+#### 验证方式
+
+1. `exec split test.pgguf 3`
+2. 确认输出 3 个文件：`test_split_0_9.pgguf`、`test_split_10_19.pgguf`、`test_split_20_29.pgguf`
+3. 对 Part 0 执行 `ml.analyze_model` → 确认 tokenizer 信息存在
+4. 对 Part 1/2 执行 `ml.analyze_model` → 确认无 tokenizer、`layer_bitmap` 正确
 
 ---
 
