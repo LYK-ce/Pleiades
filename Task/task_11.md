@@ -15,7 +15,7 @@
 | 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
 | 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ✅ |
 | 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ✅ |
-| 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 4 | ⬜ |
+| 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 3 | ⬜ |
 
 ---
 
@@ -573,27 +573,39 @@ Session ←─local_tensor─→ pipe_1 ←─network tensor stream─→ pipe_2
 
 节点 A:
   1. session create Qwen14B_split_0_20
-  2. session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=节点B名称
+  2. session inference pipe_1 1 Qwen14B_split_0_20.pgguf
      → pipe_1 加载前半模型
-     → 通过 peer_manager 查找节点 B 的 peer_id
-     → rexec 远程执行 "exec pipe_2 model=Qwen14B_split_21_41.pgguf"
+     → 通过 caps.network.get_remote_peer() 发现节点 B
+     → rexec 远程执行 "EXEC|pipe_2|{"model":"Qwen14B_split_21_41.pgguf"}"
      → 建立双向 tensor stream
      → 连接 Session (local_tensor)
      → 桥接循环开始
 ```
 
+> **约定**: 网络中只有两个节点，pipe_1 取本地 peer_id 之外的第一个就是远程节点。
+
 #### 待修改内容
 
-##### 5a. `Src/Orchestrator/core/branch_user.rs` — session inference 支持额外参数
+##### 5a. `Src/VM/capability_binding.rs` — 暴露 get_remote_peer 给 Lua
 
-当前只传 `session_id` + `model_path`。需要支持 `key=value` 额外参数：
+新增 `caps.network.get_remote_peer()`，返回网络中第一个非本地节点：
 
 ```rust
-// TUI 解析: session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=alice
-// → params: { session_id: "1", model_path: "Qwen14B_split_0_20.pgguf", peer: "alice" }
+network.set("get_remote_peer", lua.create_async_function(move |_, (): ()| {
+    let caps = capabilities.clone();
+    async move {
+        let local = caps.network.get_local_peer_id();
+        let peers = caps.peer_manager.Get_All_Peers().await
+            .map_err(|e| mlua::Error::runtime(format!("get_peers: {}", e)))?;
+        for p in &peers {
+            if p.peer_id != local {
+                return Ok(p.peer_id.to_base58());
+            }
+        }
+        Err(mlua::Error::runtime("没有找到远程节点"))
+    }
+})?)?;
 ```
-
-> 复用 `exec` 的参数解析逻辑，在 `session inference` 的 `model_path` 之后接受 `key=value`。
 
 ##### 5b. `programs/user/pipe_1.lua` — 新建
 
@@ -604,32 +616,44 @@ Session ←─local_tensor─→ pipe_1 ←─network tensor stream─→ pipe_2
 function execute(params)
     local session_id = params.session_id
     local model_path = params.model_path
-    local peer_name = params.peer  -- 远程节点名称
 
     -- 1. 加载前半模型
     local handle = caps.storage_acquire_read(model_path)
     local full_path = handle:path()
     local info = ml.analyze_model(full_path)
-    local total = info.num_layers + 2
 
     local sess = ml.new("cuda")
-    sess:load_model(full_path, 0, total - 1)  -- 此分片的所有层
+    sess:load_model(full_path, 0, info.num_layers + 1)  -- embedding + blocks
     handle:release()
 
-    -- 2. 连接 Session
-    local session_stream = local_tensor.open_stream("ml-" .. session_id)
+    -- 2. 发现远程节点（网络中只有两个节点）
+    local peer_id = caps.network.get_remote_peer()
+    caps.print("pipe_1: 远程节点 " .. peer_id)
 
     -- 3. 通过 rexec 启动远端 pipe_2
-    caps.network.send_data(peer_id, "Command", "EXEC|pipe_2|...")
-    
-    -- 4. 建立双向 tensor stream
-    local fwd_stream = caps.network.open_tensor_stream(peer_id, inference_id)
-    local bwd_stream = caps.network.accept_tensor_stream(inference_id, timeout)
+    local params_json = '{"model":"Qwen14B_split_21_41.pgguf"}'
+    caps.network.send_data(peer_id, "Command", "EXEC|pipe_2|" .. params_json)
 
-    -- 5. 桥接循环
+    -- 4. 连接 Session
+    local session_stream = local_tensor.open_stream("ml-" .. session_id)
+
+    -- 5. 建立双向 tensor stream (inference_id = session_id)
+    local fwd = caps.network.open_tensor_stream(peer_id, tonumber(session_id))
+    local bwd = caps.network.accept_tensor_stream(tonumber(session_id), 120)
+
+    -- 6. 桥接循环
     while true do
-        -- 从 Session 收 tensor → forward → 发 hidden 到 pipe_2
-        -- 从 pipe_2 收 logits → 发回 Session
+        -- 从 Session 收 tensor（prefill 或单 token）→ forward 前半
+        local tensor, offset = local_tensor.recv_tensor(session_stream, "cuda")
+        if offset == 0 then sess:reset_kv_cache() end
+        local hidden = sess:forward(tensor, offset)
+
+        -- 发送 hidden 到 pipe_2
+        caps.network.send_tensor(fwd, hidden, offset)
+
+        -- 接收 logits 回传 Session
+        local logits, _ = caps.network.recv_tensor(bwd, "cuda")
+        local_tensor.send_tensor(session_stream, logits, offset)
     end
 end
 ```
@@ -649,18 +673,22 @@ function execute(params)
     local info = ml.analyze_model(full_path)
 
     local sess = ml.new("cuda")
-    sess:load_model(full_path, 0, info.num_layers + 1)  -- 此分片所有层
+    sess:load_model(full_path, 0, info.num_layers + 1)  -- blocks + LM head
     handle:release()
 
-    -- 2. 接受 pipe_1 的 tensor stream
-    local fwd_stream = caps.network.accept_tensor_stream(inference_id, timeout)
-    local bwd_stream = caps.network.open_tensor_stream(peer_id, inference_id)
+    -- 2. 发现 pipe_1 节点
+    local peer_id = caps.network.get_remote_peer()
+    caps.print("pipe_2: 连接 pipe_1 (" .. peer_id .. ")")
 
-    -- 3. 循环
+    -- 3. 建立双向 tensor stream
+    local fwd = caps.network.accept_tensor_stream(tonumber(params.inference_id), 120)
+    local bwd = caps.network.open_tensor_stream(peer_id, tonumber(params.inference_id))
+
+    -- 4. 循环: 收 hidden → forward → 发 logits
     while true do
-        local hidden, offset = caps.network.recv_tensor(fwd_stream, "cuda")
+        local hidden, offset = caps.network.recv_tensor(fwd, "cuda")
         local logits = sess:forward(hidden, offset)
-        caps.network.send_tensor(bwd_stream, logits, sess:get_offset())
+        caps.network.send_tensor(bwd, logits, sess:get_offset())
     end
 end
 ```
@@ -680,8 +708,7 @@ caps.network.get_peers() → { {name, peer_id}, ... }
 
 | 文件 | 改动点 |
 |------|--------|
-| `Src/Orchestrator/core/branch_user.rs` | SessionInference 额外参数传递 + peer 名解析 |
-| `Src/TUI/mod.rs` | session inference 命令支持 `key=value` 尾随参数 |
+| `Src/VM/capability_binding.rs` | 新增 `caps.network.get_remote_peer()` Lua 绑定 |
 | `programs/user/pipe_1.lua` | **新建** — 前半段桥接脚本 |
 | `programs/user/pipe_2.lua` | **新建** — 后半段 forward 脚本 |
 
@@ -689,8 +716,8 @@ caps.network.get_peers() → { {name, peer_id}, ... }
 
 1. 节点 A、B 分别 `flush` 确认各自拥有半边模型
 2. 节点 B 处于空闲状态（等待 rexec 指令）
-3. 节点 A: `session create Qwen14B_split_0_20` → `session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=节点B`
-4. 确认 pipe_2 在 B 上自动启动
+3. 节点 A: `session create Qwen14B_split_0_20` → `session inference pipe_1 1 Qwen14B_split_0_20.pgguf`
+4. 确认 pipe_2 在 B 上自动启动（日志可见）
 5. 通过 API 发 chat 请求 → 确认完整推理链路正常工作
 
 ---
