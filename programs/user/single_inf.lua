@@ -1,11 +1,11 @@
 -- Presented by KeJi
 -- Date ： 2026-05-25
 
-COMMAND = "inference"
-DESCRIPTION = "启动 ML Thread，连接到指定 Session 并执行 forward"
+COMMAND = "single_inf"
+DESCRIPTION = "单机 ML Thread — 加载完整模型并执行 forward"
 
--- 内置命令: session inference <session_id> <model_path>
--- 由 Core 直接查找并调用，用户不可直接 exec
+-- 用户命令: session inference [single_inf] <session_id> <model_path>
+-- 通过 session inference 命令调用，也可用 exec single_inf 直接执行
 
 function execute(params)
     local session_id = params.session_id

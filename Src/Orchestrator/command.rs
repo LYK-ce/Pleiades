@@ -57,7 +57,13 @@ pub enum UserCommand {
     /// 创建推理 Session
     Session { model_id: String },
     /// 启动 ML Thread，连接到指定 Session
-    SessionInference { session_id: u64, model_path: String },
+    ///
+    /// `command` 为 Lua 脚本 COMMAND 名（默认 "single_inf"，对应 programs/user/single_inf.lua）
+    SessionInference {
+        command: String,
+        session_id: u64,
+        model_path: String,
+    },
     /// 启动 OpenAI 兼容 API Server，绑定到指定 Session
     Api { session_id: u64 },
     /// 在远程节点执行 Lua 脚本

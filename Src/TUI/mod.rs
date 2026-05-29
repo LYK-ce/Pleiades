@@ -581,22 +581,31 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
-    // ---- session inference <session_id> <model_path> ----
+    // ---- session inference [command] <session_id> <model_path> ----
 
     if trimmed.starts_with("session inference ") {
         let rest = trimmed.strip_prefix("session inference ").unwrap_or("").trim();
-        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-        if parts.len() < 2 {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        if args.len() < 2 {
             app.command_output.output_text =
-                "错误: 参数不足\n用法: session inference <session_id> <model_path>".to_string();
+                "错误: 参数不足\n用法: session inference [command] <session_id> <model_path>".to_string();
         } else {
-            match parts[0].parse::<u64>() {
+            // 2 参数: <sid> <model> → command="single_inf"
+            // 3 参数: <command> <sid> <model>
+            let (command, sid_str, model_path) = if args.len() >= 3 {
+                (args[0].to_string(), args[1], args[2])
+            } else {
+                ("single_inf".to_string(), args[0], args[1])
+            };
+            match sid_str.parse::<u64>() {
                 Ok(session_id) => {
                     app.command_output.output_text =
-                        format!("正在启动 ML Thread -> Session {} (模型: {})...", session_id, parts[1]);
+                        format!("正在启动 ML Thread ({}）-> Session {} (模型: {})...",
+                            command, session_id, model_path);
                     let cmd = UserCommand::SessionInference {
+                        command,
                         session_id,
-                        model_path: parts[1].to_string(),
+                        model_path: model_path.to_string(),
                     };
                     if user_cmd_tx.blocking_send(cmd).is_err() {
                         app.Add_Log("[错误] Orchestrator 已关闭".to_string());
@@ -604,7 +613,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
                 }
                 Err(_) => {
                     app.command_output.output_text =
-                        format!("错误: '{}' 不是有效的 session_id", parts[0]);
+                        format!("错误: '{}' 不是有效的 session_id", sid_str);
                 }
             }
         }

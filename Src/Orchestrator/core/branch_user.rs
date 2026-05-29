@@ -402,12 +402,12 @@ impl Core {
                     });
                 });
             }
-            UserCommand::SessionInference { session_id, model_path } => {
-                let Some(entry) = self.program_registry.get("inference").cloned() else {
-                    tracing::error!("SessionInference: builtin 'inference' script not found");
+            UserCommand::SessionInference { command, session_id, model_path } => {
+                let Some(entry) = self.program_registry.get(&command).cloned() else {
+                    tracing::error!("SessionInference: script '{}' not found", command);
                     self.capabilities.event_bus.Publish(Bus_Event::Notify {
                         level: NotifyLevel::Error,
-                        message: "ML Thread: builtin inference.lua 未找到".to_string(),
+                        message: format!("ML Thread: 脚本 '{}' 未找到", command),
                     });
                     return;
                 };
@@ -418,7 +418,7 @@ impl Core {
                     entry.path,
                     params,
                     self.capabilities.clone(),
-                    format!("inference session {}", session_id),
+                    format!("inference:{} session {}", command, session_id),
                 );
             }
             // ════════════════════════════════════════════════
