@@ -14,7 +14,8 @@
 | 11.1 | Split Model 适配 PGGUF 格式 | 1 | ✅ |
 | 11.2 | 恢复 Network Command Branch — 支持远程 exec Lua 脚本 | 4 | ✅ |
 | 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ✅ |
-| 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ⬜ |
+| 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ✅ |
+| 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 4 | ⬜ |
 
 ---
 
@@ -531,6 +532,166 @@ end
 2. 确认输出 3 个文件：`test_split_0_9.pgguf`、`test_split_10_19.pgguf`、`test_split_20_29.pgguf`
 3. 对 Part 0 执行 `ml.analyze_model` → 确认 tokenizer 信息存在
 4. 对 Part 1/2 执行 `ml.analyze_model` → 确认无 tokenizer、`layer_bitmap` 正确
+
+---
+
+### 11.5 分布式流水线推理 pipe_1/pipe_2
+
+#### 背景
+
+通过 11.4 的 split 将模型均分为两半后，分别放在两个节点上：
+- 节点 A: `Qwen14B_split_0_20.pgguf` (embedding + blk.0–19)
+- 节点 B: `Qwen14B_split_21_41.pgguf` (blk.20–39 + LM head)
+
+需实现 pipe_1/pipe_2 两个 Lua 脚本，自动编排为完整的 session 推理流水线。
+
+#### 参考实现
+
+`programs/user/pipeline1.lua` / `pipeline2.lua` — 基于 `caps.network` 的 `open_tensor_stream`/`accept_tensor_stream` 实现的双向张量流。
+
+#### 数据流设计
+
+```
+节点 A (pipe_1)                                 节点 B (pipe_2)
+                                                              
+Session ←─local_tensor─→ pipe_1 ←─network tensor stream─→ pipe_2
+ (encode/decode/sample)   (layers 0-20)                    (layers 21-41)
+                                                              
+1. Session encode → send tensor to pipe_1
+2. pipe_1: forward(0..20, hidden) → send hidden to pipe_2
+3. pipe_2: forward(21..41, hidden) → send logits to pipe_1
+4. pipe_1: relay logits to Session
+5. Session: sample → decode → output token
+6. Session: tensorize token → send to pipe_1 → GOTO 2
+```
+
+#### 启动流程
+
+```
+节点 B:
+  (pipe_2 由 pipe_1 通过 rexec 自动启动，无需手动操作)
+
+节点 A:
+  1. session create Qwen14B_split_0_20
+  2. session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=节点B名称
+     → pipe_1 加载前半模型
+     → 通过 peer_manager 查找节点 B 的 peer_id
+     → rexec 远程执行 "exec pipe_2 model=Qwen14B_split_21_41.pgguf"
+     → 建立双向 tensor stream
+     → 连接 Session (local_tensor)
+     → 桥接循环开始
+```
+
+#### 待修改内容
+
+##### 5a. `Src/Orchestrator/core/branch_user.rs` — session inference 支持额外参数
+
+当前只传 `session_id` + `model_path`。需要支持 `key=value` 额外参数：
+
+```rust
+// TUI 解析: session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=alice
+// → params: { session_id: "1", model_path: "Qwen14B_split_0_20.pgguf", peer: "alice" }
+```
+
+> 复用 `exec` 的参数解析逻辑，在 `session inference` 的 `model_path` 之后接受 `key=value`。
+
+##### 5b. `programs/user/pipe_1.lua` — 新建
+
+```lua
+-- COMMAND: pipe_1
+-- DESCRIPTION: 分布式流水线前半段，桥接 Session ↔ pipe_2
+
+function execute(params)
+    local session_id = params.session_id
+    local model_path = params.model_path
+    local peer_name = params.peer  -- 远程节点名称
+
+    -- 1. 加载前半模型
+    local handle = caps.storage_acquire_read(model_path)
+    local full_path = handle:path()
+    local info = ml.analyze_model(full_path)
+    local total = info.num_layers + 2
+
+    local sess = ml.new("cuda")
+    sess:load_model(full_path, 0, total - 1)  -- 此分片的所有层
+    handle:release()
+
+    -- 2. 连接 Session
+    local session_stream = local_tensor.open_stream("ml-" .. session_id)
+
+    -- 3. 通过 rexec 启动远端 pipe_2
+    caps.network.send_data(peer_id, "Command", "EXEC|pipe_2|...")
+    
+    -- 4. 建立双向 tensor stream
+    local fwd_stream = caps.network.open_tensor_stream(peer_id, inference_id)
+    local bwd_stream = caps.network.accept_tensor_stream(inference_id, timeout)
+
+    -- 5. 桥接循环
+    while true do
+        -- 从 Session 收 tensor → forward → 发 hidden 到 pipe_2
+        -- 从 pipe_2 收 logits → 发回 Session
+    end
+end
+```
+
+##### 5c. `programs/user/pipe_2.lua` — 新建
+
+```lua
+-- COMMAND: pipe_2
+-- DESCRIPTION: 分布式流水线后半段，接收 hidden 返回 logits
+
+function execute(params)
+    local model_path = params.model
+
+    -- 1. 加载后半模型
+    local handle = caps.storage_acquire_read(model_path)
+    local full_path = handle:path()
+    local info = ml.analyze_model(full_path)
+
+    local sess = ml.new("cuda")
+    sess:load_model(full_path, 0, info.num_layers + 1)  -- 此分片所有层
+    handle:release()
+
+    -- 2. 接受 pipe_1 的 tensor stream
+    local fwd_stream = caps.network.accept_tensor_stream(inference_id, timeout)
+    local bwd_stream = caps.network.open_tensor_stream(peer_id, inference_id)
+
+    -- 3. 循环
+    while true do
+        local hidden, offset = caps.network.recv_tensor(fwd_stream, "cuda")
+        local logits = sess:forward(hidden, offset)
+        caps.network.send_tensor(bwd_stream, logits, sess:get_offset())
+    end
+end
+```
+
+##### 5d. `Src/VM/capability_binding.rs` — 暴露 get_peers 给 Lua（可选）
+
+当前 Lua 无法获取节点列表。需要新增：
+```lua
+caps.network.get_peers() → { {name, peer_id}, ... }
+```
+
+或简化：pipe_1 通过 `exec` 参数传入 `peer`，在 B1 的 `SessionInference` 分支中解析 peer_name → peer_id（复用 `Execute` 分支的解析逻辑），然后 `spawn_lua_script` 时传入 `peer`=peer_id。
+
+> **推荐**：在 `branch_user.rs` 的 `SessionInference` 分支中，额外参数中的 `peer=` 自动解析为 peer_id，传入 Lua params。
+
+#### 涉及文件
+
+| 文件 | 改动点 |
+|------|--------|
+| `Src/Orchestrator/core/branch_user.rs` | SessionInference 额外参数传递 + peer 名解析 |
+| `Src/TUI/mod.rs` | session inference 命令支持 `key=value` 尾随参数 |
+| `programs/user/pipe_1.lua` | **新建** — 前半段桥接脚本 |
+| `programs/user/pipe_2.lua` | **新建** — 后半段 forward 脚本 |
+
+#### 验证方式
+
+1. 节点 A、B 分别 `flush` 确认各自拥有半边模型
+2. 节点 B 处于空闲状态（等待 rexec 指令）
+3. 节点 A: `session create Qwen14B_split_0_20` → `session inference pipe_1 1 Qwen14B_split_0_20.pgguf peer=节点B`
+4. 确认 pipe_2 在 B 上自动启动
+5. 通过 API 发 chat 请求 → 确认完整推理链路正常工作
 
 ---
 
