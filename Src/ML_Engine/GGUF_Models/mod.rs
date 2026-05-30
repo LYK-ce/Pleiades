@@ -8,6 +8,7 @@
 //! - DeepSeek V3.2: DeepSeek V3.2 系列模型 (MLA + MoE)
 
 pub mod qwen3;
+pub mod qwen3_moe;
 pub mod deepseek_v3;
 
 // 重新导出 Qwen3 相关类型，便于外部使用

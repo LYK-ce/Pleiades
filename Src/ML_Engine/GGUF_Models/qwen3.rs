@@ -112,7 +112,7 @@ pub struct Mlp_Weights {
     pub up_proj: QMatMul,
     pub down_proj: QMatMul,
     pub act_fn: Activation,
-    span: tracing::Span,
+    pub(crate) span: tracing::Span,
 }
 
 impl Mlp_Weights {
@@ -160,8 +160,8 @@ pub struct Attention_Weights {
     pub num_kv_groups: usize,
     pub head_dim: usize,
     pub rotary_emb: Arc<Rotary_Embedding>,
-    kv_cache: ConcatKvCache,
-    span_attn: tracing::Span,
+    pub(crate) kv_cache: ConcatKvCache,
+    pub(crate) span_attn: tracing::Span,
 }
 
 impl Attention_Weights {

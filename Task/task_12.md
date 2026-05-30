@@ -16,7 +16,8 @@
 | 12.2 | 新建 `deepseek_v3.rs` — 模型权重结构体 | 1 | ✅ |
 | 12.3 | 集成到 `GGUF_Load_Model` + `MlSession` | 3 | ✅ |
 | 12.5 | 支持 `cuda:0` / `cuda:1` 等多 GPU 设备选择 | 7 | ✅ |
-| 12.6 | `pipe_5`/`pipe_6` — 2节点 × 2 GPU 流水线并行脚本 | 2 | ⬜ |
+| 12.6 | `pipe_5`/`pipe_6` — 2节点 × 2 GPU 流水线并行脚本 | 2 | ✅ |
+| 12.7 | 集成 Qwen MoE 支持（基于 candle `quantized_qwen3_moe.rs`） | TBD | ⬜ |
 
 ---
 
@@ -369,6 +370,86 @@ Node 1 (pipe_5)                              Node 2 (pipe_6)
 |---|------|------|
 | 1 | `programs/user/pipe_5.lua` | Node 1 脚本，2 GPU 前半段 |
 | 2 | `programs/user/pipe_6.lua` | Node 2 脚本，2 GPU 后半段 |
+
+---
+
+### 12.7 集成 Qwen MoE 支持
+
+#### 背景
+
+candle-transformers 0.10.2 已内置 Qwen MoE 的三个参考实现：
+
+| 文件 | 路径 | 适用场景 |
+|------|------|---------|
+| `qwen2_moe.rs` | `candle-transformers/src/models/` | Qwen2 MoE，shared expert + sparse experts |
+| `qwen3_moe.rs` | `candle-transformers/src/models/` | Qwen3 MoE，CUDA 时自动走 `FusedMoe` kernel |
+| **`quantized_qwen3_moe.rs`** | `candle-transformers/src/models/` | Qwen3 MoE **GGUF 量化**，直接对接 GGUF 权重 |
+
+本项目 `Cargo.toml` 已启用 `default = ["cuda"]`，`FusedMoe` CUDA kernel 直接可用。
+
+#### 架构分析
+
+`quantized_qwen3_moe.rs` 的核心设计：
+
+```rust
+// MoE 层与 Dense 层混合 — 每 N 层出现一个 MoE
+enum MoeOrMlp {
+    FusedMoe(FusedMoeGGUF),  // MoE: gate_inp + shared_expert + experts
+    Mlp(Mlp),                // Dense: gate/up/down SwiGLU
+}
+
+// FusedMoeGGUF 从 GGUF 加载的权重
+struct FusedMoeGGUF {
+    gate_inp: QMatMul,              // Router: [hidden → num_experts]
+    shared_expert_gate: QMatMul,    // shared expert gate
+    shared_expert_up: QMatMul,      // shared expert up
+    shared_expert_down: QMatMul,    // shared expert down
+    experts_gate: Vec<QMatMul>,     // [n_experts]
+    experts_up: Vec<QMatMul>,
+    experts_down: Vec<QMatMul>,
+    num_experts_per_tok: usize,     // 每 token 激活 expert 数
+    norm_topk_prob: bool,           // 是否归一化 top-k
+}
+```
+
+**与我们现有实现的对比：**
+
+| | 我们 (qwen3 Dense) | candle Qwen3 MoE |
+|---|---|---|
+| Attention | ✅ `Attention_Weights` | ✅ 复用同一个 `Attention_Weights` |
+| FFN | `Mlp_Weights` (gate/up/down) | `MoeOrMlp` (dense 或 MoE) |
+| MoE Router | — | `gate_inp` (router) |
+| Shared Expert | — | `shared_expert` (始终激活) |
+| Sparse Experts | — | `Vec<QMatMul>` × 3 (gate/up/down) |
+| CUDA 加速 | — | `FusedMoe` kernel (已启用) |
+| GGUF 加载 | 按 `blk.N.ffn_*` 前缀 | 按 `blk.N.ffn_gate_inp` + `blk.N.ffn_gate_exps` 等 |
+
+#### 实施策略
+
+**方案：在 `GGUF_Models/` 下新建 `qwen3_moe.rs`，参照 `quantized_qwen3_moe.rs` 的模式。**
+
+- **Attention 不动** — 直接服用现有的 `Attention_Weights`（Qwen3 MoE 的 attention 和 Dense 完全相同）
+- **FFN 改为枚举** — `MoeOrMlp { Mlp(Mlp_Weights), MoE(New_MoE_Weights) }`
+- **GGUF tensor 命名** — 专家权重命名格式：
+  ```
+  blk.N.ffn_gate_inp.weight         ← Router
+  blk.N.ffn_gate.weight             ← shared expert gate
+  blk.N.ffn_up.weight               ← shared expert up
+  blk.N.ffn_down.weight             ← shared expert down
+  blk.N.ffn_gate_exps.weight        ← 所有专家 gate (合并)
+  blk.N.ffn_up_exps.weight          ← 所有专家 up
+  blk.N.ffn_down_exps.weight        ← 所有专家 down
+  ```
+- **架构分发** — `GGUF_Load_Model` 中新增 `"qwen3_moe"` 分支，metadata key 前缀使用 `qwen3` (Qwen3 MoE 和 Dense 共享同一套架构参数)
+
+#### 涉及文件（预估）
+
+| # | 文件 | 操作 |
+|---|------|------|
+| 1 | `Src/ML_Engine/GGUF_Models/qwen3_moe.rs` | **新建** — Qwen MoE 权重 + Forward |
+| 2 | `Src/ML_Engine/GGUF_Models/mod.rs` | 添加 `pub mod qwen3_moe` |
+| 3 | `Src/ML_Engine/gguf_model.rs` | `AnyModel` 新增 `Qwen3Moe` 变体 |
+| 4 | `Src/ML_Engine/mod.rs` | re-export |
 
 ---
 

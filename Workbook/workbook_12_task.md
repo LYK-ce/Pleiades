@@ -28,7 +28,20 @@
 | 12.2 | 新建 deepseek_v3.rs | ✅ |
 | 12.3 | 集成到 GGUF_Load_Model + MlSession | ✅ |
 | 12.5 | 支持 cuda:0/cuda:1 多GPU | ✅ |
-| 12.6 | pipe_5/pipe_6 2节点×2GPU 脚本 | ⬜ |
+| 12.6 | pipe_5/pipe_6 2节点×2GPU 脚本 | ✅ |
+| 12.7 | 集成 Qwen MoE 支持 | ⬜ |
+
+## 12.7 调研 (2026-05-30)
+
+### 发现
+candle-transformers 0.10.2 已有完整的 Qwen MoE 实现：
+- qwen2_moe.rs / qwen3_moe.rs / quantized_qwen3_moe.rs
+- FusedMoe CUDA kernel 直接可用 (default=["cuda"])
+
+### 方案
+Attention 不变（复用现有 Attention_Weights），FFN 改为 MoeOrMlp 枚举。
+新增 qwen3_moe.rs，参照 quantized_qwen3_moe.rs 的 GGUF 加载模式。
+AnyModel 新增 Qwen3Moe 变体。
 
 ## 12.6 调研 (2026-05-30)
 
