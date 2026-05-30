@@ -559,6 +559,15 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
 
     // 4. 原始 GGUF → 计算 model_id + layer_bitmap
     //    读全量字节计算 xxhash32
+    let file_size = file.metadata()
+        .map(|m| m.len())
+        .unwrap_or(0);
+    tracing::info!(
+        "GGUF → PGGUF 转换开始: {} ({:.1} GB)",
+        gguf_file_path.display(),
+        file_size as f64 / 1e9
+    );
+
     let mut raw_bytes = Vec::new();
     file.seek(SeekFrom::Start(0))
         .map_err(|e| anyhow::anyhow!("Failed to seek to start: {}", e))?;
@@ -613,6 +622,15 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
         loaded_tensors.push((tensor_name.clone(), qtensor));
     }
 
+    let total_loaded: usize = loaded_tensors.iter()
+        .map(|(_, t)| t.storage_size_in_bytes())
+        .sum();
+    tracing::info!(
+        "GGUF → PGGUF: 加载 {} 个 tensor, 总大小 {:.1} GB",
+        loaded_tensors.len(),
+        total_loaded as f64 / 1e9
+    );
+
     let metadata_refs: Vec<(&str, &gguf_file::Value)> = metadata_pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v))
@@ -625,6 +643,16 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
     gguf_file::write(&mut writer, &metadata_refs, &tensor_refs)
         .map_err(|e| anyhow::anyhow!("Failed to write PGGUF file: {}", e))?;
     drop(writer);
+
+    // 验证输出文件大小
+    let output_size = std::fs::metadata(&pgguf_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    tracing::info!(
+        "GGUF → PGGUF 转换完成: {} ({:.1} GB)",
+        pgguf_path.display(),
+        output_size as f64 / 1e9
+    );
 
     // 7. 删除原始 .gguf，保留 .pgguf
     std::fs::remove_file(gguf_file_path)
