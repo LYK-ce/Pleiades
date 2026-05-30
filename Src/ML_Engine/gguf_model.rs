@@ -243,7 +243,7 @@ pub fn GGUF_Load_Model(
             arch_info.architecture
         ),
     };
-    let is_qwen3_moe = architecture.as_str() == "qwen3_moe";
+    let is_qwen3_moe = architecture.as_str() == "qwen3_moe" || architecture.as_str() == "qwen3moe";
 
     // 3. 范围校验
     let max_layer_index = arch_info.num_layers + 1; // N+1 = output 层
