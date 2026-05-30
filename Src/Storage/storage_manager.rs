@@ -407,13 +407,22 @@ impl StorageCapability for StorageManager {
                     // 对模型文件刷新元信息（已转换 PGGUF 走快速路径，零 I/O）
                     if Self::Is_Model_File(&file_name_str) {
                         let full_path = self.Full_Path(&file_name_str);
-                        if let Ok(arch_info) = analyze_model(&full_path).await {
-                            let mut files = self.files.write().await;
-                            if let Some(state) = files.get_mut(&file_name_str) {
-                                state.model_id = arch_info.model_id;
-                                state.num_layers = Some(arch_info.num_layers as u32);
-                                state.layer_bitmap = arch_info.layer_bitmap;
-                                state.architecture = Some(arch_info.architecture);
+                        match analyze_model(&full_path).await {
+                            Ok(arch_info) => {
+                                let mut files = self.files.write().await;
+                                if let Some(state) = files.get_mut(&file_name_str) {
+                                    state.model_id = arch_info.model_id;
+                                    state.num_layers = Some(arch_info.num_layers as u32);
+                                    state.layer_bitmap = arch_info.layer_bitmap;
+                                    state.architecture = Some(arch_info.architecture);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    "analyze_model failed for {}: {}",
+                                    file_name_str,
+                                    e
+                                );
                             }
                         }
                     }
