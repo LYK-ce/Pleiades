@@ -235,11 +235,10 @@ pub fn GGUF_Load_Model(
     // 2. 根据模型架构信息，匹配对应的模型架构
     let architecture = arch_info.architecture.to_lowercase();
     let is_deepseek = match architecture.as_str() {
-        "qwen3" => false,
-        "qwen3_moe" => false,
+        "qwen3" | "qwen3moe" => false,
         "deepseek_v3" | "deepseek2" => true,
         _ => anyhow::bail!(
-            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3_moe', and 'deepseek_v3' are supported.",
+            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3moe', and 'deepseek_v3' are supported.",
             arch_info.architecture
         ),
     };
