@@ -165,6 +165,19 @@ fn Mlp_From_Tensors(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> any
     })
 }
 
+/// 从 metadata 中读取模型 dtype
+fn Read_Model_Dtype(metadata: &std::collections::HashMap<String, gguf_file::Value>) -> DType {
+    match metadata.get("general.dtype") {
+        Some(v) => match v.to_u32() {
+            Ok(0) => DType::F32,
+            Ok(1) => DType::F16,
+            Ok(30) => DType::BF16,
+            _ => DType::F16,
+        },
+        None => DType::F16,
+    }
+}
+
 // ============================================================
 // 核心公开函数
 // ============================================================
@@ -231,6 +244,9 @@ pub fn GGUF_Load_Model(
 
     // 从已加载的 Content 提取架构信息（零 I/O）
     let arch_info = GGUF_Analyze_From_Content(&content)?;
+
+    // 读取模型 dtype
+    let model_dtype = Read_Model_Dtype(&content.metadata);
 
     // 2. 根据模型架构信息，匹配对应的模型架构
     let architecture = arch_info.architecture.to_lowercase();
@@ -367,7 +383,7 @@ pub fn GGUF_Load_Model(
                     act: candle_nn::Activation::Silu,
                     norm_topk_prob: moe_cfg.norm_topk_prob,
                     num_experts_per_tok: moe_cfg.num_experts_per_tok,
-                    dtype: DType::F32,
+                    dtype: model_dtype,
                 };
                 MoeOrMlp::MoE(Arc::new(fused_moe))
             } else {
@@ -440,7 +456,7 @@ pub fn GGUF_Load_Model(
 
         let model = AnyModel::Qwen3Moe(Qwen3MoE_Model::From_Dynamic(
             embed_tokens, layers, norm, lm_head,
-            device.clone(), DType::F32,
+            device.clone(), model_dtype,
         ));
 
         let mut inference_config = Inference_Config::default();
@@ -511,7 +527,7 @@ pub fn GGUF_Load_Model(
 
         let model = AnyModel::DeepSeek(DeepSeek_Model::From_Dynamic(
             embed_tokens, layers, norm, lm_head,
-            device.clone(), DType::F32,
+            device.clone(), model_dtype,
         ));
 
         let mut inference_config = Inference_Config::default();
@@ -595,7 +611,7 @@ pub fn GGUF_Load_Model(
         norm,
         lm_head,
         device.clone(),
-        DType::F32,
+        model_dtype,
     ));
 
     // 9. 返回组装好的模型，eos_token 从模型 metadata 中自动获取
