@@ -56,6 +56,10 @@ function execute(params)
             break
         end
 
+        if offset == 0 then
+            sess:reset_kv_cache()
+        end
+
         local logits = sess:forward(hidden, offset)
         caps.network.send_tensor(bwd, logits, sess:get_offset())
     end

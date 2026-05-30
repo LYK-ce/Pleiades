@@ -74,6 +74,11 @@ function execute(params)
             break
         end
 
+        if offset == 0 then
+            gpu0_sess:reset_kv_cache()
+            gpu1_sess:reset_kv_cache()
+        end
+
         -- GPU:0 前向
         local hidden0 = gpu0_sess:forward(hidden, offset)
 

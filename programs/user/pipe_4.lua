@@ -70,6 +70,11 @@ function execute(params)
             break
         end
 
+        if offset == 0 then
+            cpu_sess:reset_kv_cache()
+            gpu_sess:reset_kv_cache()
+        end
+
         -- CPU 前向 → 转 GPU → GPU 前向
         local hidden_cpu = cpu_sess:forward(hidden, offset)
         local hidden_gpu = hidden_cpu:to_device("cuda")
