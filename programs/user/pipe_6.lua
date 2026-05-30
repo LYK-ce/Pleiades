@@ -82,8 +82,9 @@ function execute(params)
         -- GPU:0 前向
         local hidden0 = gpu0_sess:forward(hidden, offset)
 
-        -- 跨 GPU 搬运: GPU:0 → GPU:1
-        local hidden1 = hidden0:to_device("cuda:1")
+        -- 跨 GPU 搬运: GPU:0 → CPU → GPU:1
+        local hidden_cpu = hidden0:to_device("cpu")
+        local hidden1 = hidden_cpu:to_device("cuda:1")
 
         -- GPU:1 前向
         local logits = gpu1_sess:forward(hidden1, offset)
