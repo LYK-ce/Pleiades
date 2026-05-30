@@ -5,8 +5,10 @@
 //!
 //! 当前支持的模型:
 //! - Qwen3: 通义千问3系列量化模型
+//! - DeepSeek V3.2: DeepSeek V3.2 系列模型 (MLA + MoE)
 
 pub mod qwen3;
+pub mod deepseek_v3;
 
 // 重新导出 Qwen3 相关类型，便于外部使用
 pub use qwen3::{

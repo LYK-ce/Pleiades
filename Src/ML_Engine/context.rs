@@ -20,6 +20,7 @@ use std::path::Path;
 
 use candle_core::{Device, Tensor};
 
+use super::device::parse_device_str;
 use super::gguf_model::{
     GGUF_Load_Model, GGUF_Model, GGUF_Model_Inference, GGUF_Unload_Model,
 };
@@ -103,18 +104,7 @@ impl MlSession {
     /// - `set_seed()` — 设置采样随机种子
     /// - `load_model()` — 加载模型填充空壳
     pub fn new(device: &str) -> Result<Self, String> {
-        let device = match device.to_lowercase().as_str() {
-            "cpu" => Device::Cpu,
-            "cuda" => match Device::new_cuda(0) {
-                Ok(d) => d,
-                Err(e) => return Err(format!("CUDA device init failed: {e}")),
-            },
-            other => {
-                return Err(format!(
-                    "Unsupported device: '{other}'. Use 'cpu' or 'cuda'."
-                ))
-            }
-        };
+        let device = parse_device_str(device)?;
 
         // 默认种子基于系统时间，避免所有 session 使用相同随机序列
         let default_seed = std::time::SystemTime::now()

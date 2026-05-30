@@ -686,7 +686,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
         return;
     }
 
-    // ---- set-device <cpu/cuda> ----
+    // ---- set-device <cpu|cuda|cuda:N> ----
 
     if trimmed.starts_with("set-device ") {
         let device_str = trimmed
@@ -694,9 +694,13 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        if device_str != "cpu" && device_str != "cuda" {
+        // 验证：cpu、cuda、cuda:N 均为合法设备
+        let is_valid = device_str == "cpu"
+            || device_str == "cuda"
+            || device_str.starts_with("cuda:");
+        if !is_valid {
             app.command_output.output_text =
-                format!("不支持的设备: '{}'\n用法: set-device cpu/cuda", device_str);
+                format!("不支持的设备: '{}'\n用法: set-device cpu|cuda|cuda:N", device_str);
             app.command_output.completed = true;
             return;
         }

@@ -25,10 +25,33 @@ use std::sync::Arc;
 use candle_core::quantized::gguf_file;
 use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
 use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding};
+use super::gguf_models::deepseek_v3::{DeepSeek_Model, DeepSeek_Layer, DeepSeek_Config};
 
 // ============================================================
 // 数据结构定义
 // ============================================================
+
+/// 多架构模型枚举 — 统一 Qwen3 和 DeepSeek 模型
+pub enum AnyModel {
+    Qwen3(Model_Weights),
+    DeepSeek(DeepSeek_Model),
+}
+
+impl AnyModel {
+    pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
+        match self {
+            AnyModel::Qwen3(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
+            AnyModel::DeepSeek(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
+        }
+    }
+
+    pub fn Clear_Kv_Cache(&mut self) {
+        match self {
+            AnyModel::Qwen3(m) => m.clear_kv_cache(),
+            AnyModel::DeepSeek(m) => m.Clear_Kv_Cache(),
+        }
+    }
+}
 
 /// 推理参数—仅保留模型元数据（运行时参数由 Pipeline_Params 提供）
 pub struct Inference_Config {
@@ -50,7 +73,7 @@ impl Default for Inference_Config {
 /// - tokenizer 作为独立 API 供外部组件调用，不耦合在推理过程中
 pub struct GGUF_Model {
     /// 组装好的模型权重（包含 embedding + 所有层 + norm + lm_head）
-    pub model: Model_Weights,
+    pub model: AnyModel,
     /// 从 GGUF 文件加载的 tokenizer，如果 GGUF 文件包含此 tokenizer 则加载，否则为 None
     pub tokenizer: Option<shimmytok::Tokenizer>,
     /// 推理参数配置（由 runtime 上层配置）
@@ -136,13 +159,14 @@ pub fn GGUF_Load_Model(
 
     // 2. 根据模型架构信息，匹配对应的模型架构
     let architecture = arch_info.architecture.to_lowercase();
-    match architecture.as_str() {
-        "qwen3" => { /* supported */ }
+    let is_deepseek = match architecture.as_str() {
+        "qwen3" => false,
+        "deepseek_v3" | "deepseek2" => true,
         _ => anyhow::bail!(
-            "Unsupported model architecture: '{}'. Currently only 'qwen3' is supported.",
+            "Unsupported model architecture: '{}'. Currently 'qwen3' and 'deepseek_v3' are supported.",
             arch_info.architecture
         ),
-    }
+    };
 
     // 3. 范围校验
     let max_layer_index = arch_info.num_layers + 1; // N+1 = output 层
@@ -170,25 +194,34 @@ pub fn GGUF_Load_Model(
     };
 
     // 4. 构建 RotaryEmbedding
+    //    DeepSeek 的 RoPE 应用于 head_dim = qk_rope_dim（解耦部分），而非完整 head_dim
+    let rope_head_dim = if is_deepseek {
+        // DeepSeek: 从 metadata 获取 qk_rope_dim
+        super::gguf_model_manager::Get_Metadata_Usize_From_Map(
+            &content.metadata,
+            &format!("{}.attention.qk_rope_head_dim", architecture),
+        )
+        .unwrap_or(64)
+    } else {
+        arch_info.head_dim
+    };
+
     let rotary = Arc::new(
         Rotary_Embedding::New(
             DType::F32,
-            arch_info.head_dim,
+            rope_head_dim,
             arch_info.context_length,
             arch_info.rope_freq_base,
             device,
         )
-        .map_err(|e| anyhow::anyhow!("Failed to build RotaryEmbedding: {}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to build RotaryEmbedding: {e}"))?,
     );
 
     // 5. 如果 start==0，表示包含输入层，加载 embedding；否则为 None
-    //    注意：tokenizer 不再在此处加载，请使用 MlSession::load_tokenizer() 或
-    //    shimmytok::Tokenizer::from_gguf_file() 独立加载。
     let has_input_head = start == 0;
 
     let embed_tokens: Option<candle_nn::Embedding> =
         if has_input_head {
-            // 通过 GGUF_Load_Layer 加载第 0 层（embedding）
             let mut lw = GGUF_Load_Layer(&content, &mut file, 0, device)?;
             let embed_qtensor = lw
                 .tensors
@@ -196,7 +229,7 @@ pub fn GGUF_Load_Model(
                 .ok_or_else(|| anyhow::anyhow!("Layer 0 does not contain token_embd.weight"))?;
             let embed_tensor = embed_qtensor
                 .dequantize(device)
-                .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to dequantize embedding: {e}"))?;
 
             Some(candle_nn::Embedding::new(
                 embed_tensor,
@@ -207,14 +240,89 @@ pub fn GGUF_Load_Model(
         };
 
     // 6. 根据 start 和 end，调用 GGUF_Load_Layer 逐层加载 transformer block 层
-    //    transformer block 层编号: 1..=N, 映射到 blk.0 ~ blk.(N-1)
-    let block_start = std::cmp::max(start, 1); // 至少从层 1 开始（跳过 embedding）
-    let block_end = std::cmp::min(end, arch_info.num_layers); // 至多到层 N（不包括 output）
+    let block_start = std::cmp::max(start, 1);
+    let block_end = std::cmp::min(end, arch_info.num_layers);
     let block_count = if block_start <= block_end {
         block_end - block_start + 1
     } else {
         0
     };
+
+    // 7. 如果 end==N+1，表示包含输出层
+    let has_output_head = end == max_layer_index;
+
+    if is_deepseek {
+        // ── DeepSeek V3.2 加载路径 ──
+        let ds_config = DeepSeek_Config::From_Metadata(
+            &content.metadata,
+            &architecture,
+        )?;
+
+        let mut layers = Vec::with_capacity(block_count);
+        for i in block_start..=block_end {
+            let mut lw = GGUF_Load_Layer(&content, &mut file, i, device)?;
+            let blk_idx = i - 1;
+            let layer = DeepSeek_Layer::From_Extracted(
+                &mut lw.tensors,
+                ds_config.n_heads,
+                ds_config.q_lora_rank,
+                ds_config.kv_lora_rank,
+                ds_config.qk_rope_dim,
+                ds_config.qk_nope_dim,
+                ds_config.v_head_dim,
+                ds_config.n_routed_experts,
+                ds_config.top_k,
+                ds_config.routed_scaling_factor,
+                ds_config.rms_norm_eps,
+                rotary.clone(),
+                blk_idx,
+            )
+            .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
+            layers.push(layer);
+        }
+
+        let (norm, lm_head): (Option<RmsNorm>, Option<QMatMul>) = if has_output_head {
+            let mut lw = GGUF_Load_Layer(&content, &mut file, max_layer_index, device)?;
+            let norm_qtensor = lw.tensors.remove("output_norm.weight")
+                .ok_or_else(|| anyhow::anyhow!("Output layer does not contain output_norm.weight"))?;
+            let norm = RmsNorm::from_qtensor(norm_qtensor, ds_config.rms_norm_eps)
+                .map_err(|e| anyhow::anyhow!("Failed to build output RmsNorm: {e}"))?;
+
+            let lm_head_qtensor = if let Some(qt) = lw.tensors.remove("output.weight") {
+                qt
+            } else {
+                let mut embed_lw = GGUF_Load_Layer(&content, &mut file, 0, device)?;
+                embed_lw.tensors.remove("token_embd.weight")
+                    .ok_or_else(|| anyhow::anyhow!("output.weight not found and token_embd fallback failed"))?
+            };
+            let lm_head = QMatMul::from_weights(lm_head_qtensor.into())
+                .map_err(|e| anyhow::anyhow!("Failed to build lm_head: {e}"))?;
+            (Some(norm), Some(lm_head))
+        } else {
+            (None, None)
+        };
+
+        let model = AnyModel::DeepSeek(DeepSeek_Model::From_Dynamic(
+            embed_tokens, layers, norm, lm_head,
+            device.clone(), DType::F32,
+        ));
+
+        let mut inference_config = Inference_Config::default();
+        inference_config.eos_token = arch_info.eos_token_id;
+
+        return Ok(GGUF_Model {
+            model,
+            tokenizer: None,
+            inference_config,
+            arch_info,
+            model_path: model_path.to_path_buf(),
+            device: device.clone(),
+            has_input_head,
+            has_output_head,
+        });
+    }
+
+    // ── Qwen3 加载路径（现有逻辑）───────────────────────
 
     let mut layers = Vec::with_capacity(block_count);
     for i in block_start..=block_end {
@@ -274,14 +382,14 @@ pub fn GGUF_Load_Model(
     };
 
     // 8. 组装模型并放置在对应设备上
-    let model = Model_Weights::From_Dynamic(
+    let model = AnyModel::Qwen3(Model_Weights::From_Dynamic(
         embed_tokens,
         layers,
         norm,
         lm_head,
         device.clone(),
         DType::F32,
-    );
+    ));
 
     // 9. 返回组装好的模型，eos_token 从模型 metadata 中自动获取
     let mut inference_config = Inference_Config::default();
@@ -338,7 +446,7 @@ pub fn GGUF_Model_Inference(
     let result = model
         .model
         .Forward(input, offset)
-        .map_err(|e| anyhow::anyhow!("Forward pass failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Forward pass failed: {e}"))?;
 
     Ok(result)
 }
@@ -347,7 +455,7 @@ pub fn GGUF_Model_Inference(
 ///
 /// 在每轮对话开始前调用，确保新旧对话的 KV Cache 不冲突。
 pub fn GGUF_Model_Clear_KV_Cache(model: &mut GGUF_Model) {
-    model.model.clear_kv_cache();
+    model.model.Clear_Kv_Cache();
 }
 
 // ============================================================

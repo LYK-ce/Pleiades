@@ -81,6 +81,11 @@ pub struct GGUF_Layer_Weights {
 // 辅助函数
 // ============================================================
 
+/// 从 metadata HashMap 中安全读取 u32/u64 类值并返回 usize（公开 API）
+pub fn Get_Metadata_Usize_From_Map(metadata: &HashMap<String, gguf_file::Value>, key: &str) -> Option<usize> {
+    Get_Metadata_Usize(metadata, key)
+}
+
 /// 从 metadata 中安全读取 u32/u64 类值并返回 usize
 fn Get_Metadata_Usize(metadata: &HashMap<String, gguf_file::Value>, key: &str) -> Option<usize> {
     if let Some(val) = metadata.get(key) {

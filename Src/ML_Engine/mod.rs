@@ -15,6 +15,7 @@
 
 pub mod gguf_tensor;
 pub mod lua_tensor;
+pub mod device;
 pub mod gguf_model_manager;
 pub mod gguf_model;
 pub mod context;
@@ -37,8 +38,9 @@ pub use gguf_models::{
 };
 pub use gguf_model::{
     GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
-    GGUF_Encode, GGUF_Decode, Inference_Config,
+    GGUF_Encode, GGUF_Decode, Inference_Config, AnyModel,
 };
 
 pub use context::MlSession;
 pub use capability::{analyze_model, split_model};
+pub use device::parse_device_str;

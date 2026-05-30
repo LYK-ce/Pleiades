@@ -9,6 +9,8 @@
 use candle_core::{Device, Tensor};
 use std::ops::Deref;
 
+use super::device::parse_device_str;
+
 /// Tensor 的 Lua 包装。
 ///
 /// 内存开销：Tensor 内部是 `Arc<Storage>`，LuaTensor 仅多一层 newtype，
@@ -133,15 +135,9 @@ pub fn bytes_to_tensor(data: &[u8], device: &Device) -> Result<Tensor, String> {
 }
 
 // ─── Device 解析 ──────────────────────────────────────────
-
-/// 将 Lua 设备字符串解析为 candle Device。
-pub(crate) fn parse_device_str(s: &str) -> Result<Device, String> {
-    match s.to_lowercase().as_str() {
-        "cpu" => Ok(Device::Cpu),
-        "cuda" => Device::new_cuda(0).map_err(|e| format!("cuda unavailable: {e}")),
-        other => Err(format!("unknown device: {other}")),
-    }
-}
+//
+// parse_device_str() 已移至 Src/ML_Engine/device.rs，
+// 此处通过 use super::device::parse_device_str 引用。
 
 /// bytes_to_tensor 的字符串入口 — 供绑定层使用。
 pub fn bytes_to_tensor_str(data: &[u8], device_str: &str) -> Result<Tensor, String> {

@@ -164,7 +164,7 @@ fn query_cuda_memory_mb() -> u64 {
 
 /// 按设备查询空闲内存，返回 MB。
 pub(crate) fn query_free_memory_mb(device: &str) -> u64 {
-    if device.to_lowercase() == "cuda" {
+    if device.to_lowercase().starts_with("cuda") {
         query_cuda_memory_mb()
     } else {
         query_system_memory_mb()

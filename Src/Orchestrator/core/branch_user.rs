@@ -43,7 +43,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("pipeline <model>",      "启动分布式流水线推理"),
     ("cancel <job_id>",       "取消指定作业"),
     ("dp / display-peer",     "查看节点列表"),
-    ("set-device cpu|cuda",   "切换计算设备"),
+    ("set-device cpu|cuda|cuda:N", "切换计算设备"),
     ("ls",                    "列出存储文件"),
     ("flush",                 "刷新存储索引"),
     ("reload",                "重新加载用户 Lua 脚本"),

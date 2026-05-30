@@ -11,10 +11,12 @@
 
 | # | 任务 | 涉及文件数 | 状态 |
 |---|------|-----------|------|
-| 12.1 | 调研 MLA 注意力 + DeepSeekMoE 参考实现 | 0 | ⬜ |
-| 12.2 | 新建 `deepseek_v3.rs` — 模型权重结构体 | 1 | ⬜ |
-| 12.3 | 集成到 `GGUF_Load_Model` + `MlSession` | 3 | ⬜ |
-| 12.4 | Lua 侧验证 + 编写测试脚本 | 1 | ⬜ |
+| 12.0 | 创建 `deepseek` 分支 | 0 | ✅ |
+| 12.1 | 调研 MLA 注意力 + DeepSeekMoE 参考实现 | 0 | ✅ |
+| 12.2 | 新建 `deepseek_v3.rs` — 模型权重结构体 | 1 | ✅ |
+| 12.3 | 集成到 `GGUF_Load_Model` + `MlSession` | 3 | ✅ |
+| 12.5 | 支持 `cuda:0` / `cuda:1` 等多 GPU 设备选择 | 7 | ✅ |
+| 12.6 | `pipe_5`/`pipe_6` — 2节点 × 2 GPU 流水线并行脚本 | 2 | ⬜ |
 
 ---
 
@@ -204,43 +206,176 @@ match arch_info.architecture.as_str() {
 - 当前 `forward` 调用 `GGUF_Model_Inference` → `Model_Weights::Forward`
 - 需新增 dispatch: 根据模型类型调用 `DeepSeek_Model::Forward`
 
-### 12.4 验证
+---
 
-#### 12.4a 测试脚本 `programs/user/ds_test.lua`
+### 12.5 支持 `cuda:0` / `cuda:1` 等多 GPU 设备选择
 
-```lua
-COMMAND = "ds_test"
-function execute(params)
-    local model = params.model or "DeepSeek-V3.2-Lite.pgguf"
-    local handle = caps.storage_acquire_read(model)
-    local path = handle:path()
-    local info = ml.analyze_model(path)
-    caps.print("架构: " .. (info.architecture or "unknown"))
+#### 架构原则
 
-    local sess = ml.new("cuda")
-    sess:load_model(path, 0, info.num_layers + 1)
-    handle:release()
+设备解析是 **ML Engine 的职责**，不属于 Lua VM 层。当前 `parse_device_str()` 放在 `lua_tensor.rs` 中是放错了地方。
 
-    -- 简单测试 forward
-    local tokens = sess:encode("Hello")
-    local t = sess:tensorize(tokens)
-    local logits = sess:forward(t, 0)
-    caps.print("forward 完成, logits: [" .. table.concat(logits:dims(), ",") .. "]")
-end
+#### 现状
+
+所有 CUDA 设备都硬编码为 `Device::new_cuda(0)`：
+
+| 文件 | 问题 |
+|------|------|
+| `Src/ML_Engine/context.rs` L108 | `MlSession::new()` 自己写了一段重复的设备解析，`"cuda" => new_cuda(0)` |
+| `Src/ML_Engine/lua_tensor.rs` L141 | `parse_device_str()` 定义在此处（位置不对），`"cuda" => new_cuda(0)` |
+| `Src/TUI/mod.rs` L697 | `set-device` 只接受 `cpu` / `cuda`，拒绝 `cuda:1` |
+| `Src/Orchestrator/core/branch_user.rs` L46 | 帮助文本 `"set-device cpu|cuda"` |
+| `Src/Orchestrator/mod.rs` L167 | `query_free_memory_mb()` 精确匹配 `== "cuda"` |
+
+#### 实施计划
+
+**1. 新建 `Src/ML_Engine/device.rs`** — ML Engine 唯一的设备解析入口：
+
+```rust
+//Presented by KeJi
+//Date : 2026-05-30
+
+//! 设备解析 — 将字符串转换为 candle Device
+//!
+//! ML Engine 对外暴露的唯一切入点，Lua VM 层不应自行解析设备。
+
+use candle_core::Device;
+
+/// 解析设备字符串，支持：
+/// - "cpu"              → Device::Cpu
+/// - "cuda" / "cuda:0"  → Device::new_cuda(0)
+/// - "cuda:N"           → Device::new_cuda(N)
+pub fn parse_device_str(s: &str) -> Result<Device, String> {
+    let s = s.trim().to_lowercase();
+    match s.as_str() {
+        "cpu" => Ok(Device::Cpu),
+        _ if s == "cuda" || s == "cuda:0" => {
+            Device::new_cuda(0).map_err(|e| format!("cuda:0 unavailable: {e}"))
+        }
+        _ if s.starts_with("cuda:") => {
+            let idx: usize = s[5..].parse()
+                .map_err(|_| format!("invalid cuda device index: '{s}'"))?;
+            Device::new_cuda(idx)
+                .map_err(|e| format!("cuda:{idx} unavailable: {e}"))
+        }
+        _ => Err(format!("unknown device: '{s}'. Use 'cpu', 'cuda', or 'cuda:N'")),
+    }
+}
 ```
 
-#### 12.4b 验证步骤
+**2. `Src/ML_Engine/lua_tensor.rs`** — 删除原有的 `parse_device_str()`，改为 `use super::device::parse_device_str;`
 
-1. 下载 DeepSeek-V3.2-Lite GGUF（~15GB，比完整版小很多）
-2. `flush` → `exec ds_test model=DeepSeek-V3.2-Lite.pgguf`
-3. 确认架构识别正确、forward 无报错、logits 维度正确
+**3. `Src/ML_Engine/context.rs`** — `MlSession::new()` 删除重复的 match，改为调用 `device::parse_device_str()`
+
+**4. `Src/ML_Engine/mod.rs`** — 添加 `pub mod device;` 和 `pub use device::parse_device_str;`
+
+**修改清单：**
+
+| # | 文件 | 操作 |
+|---|------|------|
+| 1 | `Src/ML_Engine/device.rs` | **新建** — ML Engine 唯一设备解析入口 |
+| 2 | `Src/ML_Engine/lua_tensor.rs` | 删除 `parse_device_str()`，改为 `use super::device` |
+| 3 | `Src/ML_Engine/context.rs` | `MlSession::new()` 删除重复解析，复用 `device::parse_device_str` |
+| 4 | `Src/ML_Engine/mod.rs` | `pub mod device;` + re-export |
+| 5 | `Src/TUI/mod.rs` | 扩展验证：允许 `cuda:N` 格式 |
+| 6 | `Src/Orchestrator/core/branch_user.rs` | 更新帮助文本 |
+| 7 | `Src/Orchestrator/mod.rs` | `query_free_memory_mb()` 改用 `starts_with("cuda")` |
+
+> 注：TUI/Orchestrator 层的改动为配套修改，核心逻辑全部收敛在 ML Engine 的 `device.rs` 中。
+
+**向后兼容：**
+- `"cuda"` 仍解析为 `cuda:0`，现有 Lua 脚本、TUI 命令、流水线协议无需修改
 
 ---
 
-## 备注
+### 12.6 `pipe_5` / `pipe_6` — 2节点 × 2 GPU 流水线并行
+
+#### 硬件环境
+
+4 × A100-SXM4-80GB，每张 80GB 显存：
+
+| 节点 | GPU | 本地设备名 | 用途 |
+|------|-----|-----------|------|
+| Node 1 | GPU 0,1 | `cuda:0`, `cuda:1` | 前半模型 (pipe_5) |
+| Node 2 | GPU 2,3 | `cuda:0`, `cuda:1` | 后半模型 (pipe_6) |
+
+通过 `CUDA_VISIBLE_DEVICES=0,1` / `CUDA_VISIBLE_DEVICES=2,3` 隔离。
+
+#### 架构
+
+```
+Node 1 (pipe_5)                              Node 2 (pipe_6)
+┌─────────────────────────┐      网络       ┌─────────────────────────┐
+│  Session                │                 │                          │
+│    │                    │                 │                          │
+│    ▼                    │                 │                          │
+│  GPU:0 (层 0 ~ mid_0)   │  hidden_state   │  GPU:0 (mid_1 ~ mid_2)  │
+│    │ to_device("cuda:1") │ ──────────────▶ │    │ to_device("cuda:1") │
+│    ▼                    │                 │    ▼                    │
+│  GPU:1 (mid_0+1 ~ end)  │                 │  GPU:1 (mid_2+1 ~ end) │
+│    │                    │                 │    │                    │
+│    │ send_tensor ───────│──hidden────────▶│─── accept_tensor        │
+│    │                    │                 │    │                    │
+│    │ accept_tensor ◀────│──logits─────────│─── send_tensor          │
+│    ▼                    │                 │    ▼                    │
+│  Session ◀──────────────│                 │  (返回 logits)          │
+└─────────────────────────┘                 └─────────────────────────┘
+```
+
+#### 与 pipe_1/pipe_2 的关键差异
+
+| | pipe_1/2 | pipe_5/6 |
+|---|---|---|
+| GPU 数/节点 | 1 | 2 |
+| 内部传输 | 无 | `tensor:to_device("cuda:1")` 跨 GPU 搬运 |
+| 设备指定 | `ml.new("cuda")` | `ml.new("cuda:0")` / `ml.new("cuda:1")` |
+| 层分割方式 | 无内部分割 | 分片内再对半分为 GPU:0 和 GPU:1 |
+
+#### pipe_5 逻辑
+
+```lua
+-- 1. 读取模型，分析 split 元数据
+-- 2. 将 [split_start, split_end] 对半分为 GPU:0 和 GPU:1 范围
+-- 3. GPU:0 = ml.new("cuda:0"), 加载前半层
+-- 4. GPU:1 = ml.new("cuda:1"), 加载后半层
+-- 5. 连接 Session (local_tensor)
+-- 6. rexec 启动 pipe_6
+-- 7. 循环:
+--    Session → recv_tensor("cuda:0")
+--    → GPU:0:forward → to_device("cuda:1")
+--    → GPU:1:forward
+--    → network.send_tensor → pipe_6
+--    ← network.recv_tensor ← pipe_6
+--    → local_tensor.send_tensor → Session
+```
+
+#### pipe_6 逻辑
+
+```lua
+-- 1. 读取模型，分析 split 元数据
+-- 2. 将 [split_start, split_end] 对半分为 GPU:0 和 GPU:1 范围
+-- 3. GPU:0 = ml.new("cuda:0"), 加载前半层
+-- 4. GPU:1 = ml.new("cuda:1"), 加载后半层
+-- 5. 发现 pipe_5 节点
+-- 6. 循环:
+--    ← network.recv_tensor ← pipe_5
+--    → GPU:0:forward → to_device("cuda:1")
+--    → GPU:1:forward
+--    → network.send_tensor → pipe_5
+```
+
+#### 涉及文件
+
+| # | 文件 | 说明 |
+|---|------|------|
+| 1 | `programs/user/pipe_5.lua` | Node 1 脚本，2 GPU 前半段 |
+| 2 | `programs/user/pipe_6.lua` | Node 2 脚本，2 GPU 后半段 |
+
+---
 
 - 基分支: `reforge`
-- 优先使用 **DeepSeek-V3.2-Lite** 测试（参数量小，GGUF 约 15GB）
+- 工作分支: `deepseek` (在 `reforge` 基础上创建)
+- DeepSeek V3.2 为 671B 参数 MoE 模型（`deepseek_v3` 架构），**不存在 Lite 版本**（此前文档中的 "V3.2-Lite" 为 AI 幻觉）
+- 测试方案待定，优先完成代码实现和编译验证
 - 第一阶段只实现 prefill + 单 token decode，暂不实现 MTP speculative decoding
 - 暂不实现 DeepSeek Sparse Attention（超长上下文优化），先用标准 causal mask
 - MLA KV Cache 采用 "吸收" 策略：prefill 时计算完整 K/V 并缓存压缩 latent，decode 时只算增量

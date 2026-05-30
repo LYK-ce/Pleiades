@@ -74,7 +74,7 @@ fn Render_Idle(frame: &mut Frame, area: Rect, device: &str) {
         )
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let device_color = if device == "cuda" {
+    let device_color = if device.starts_with("cuda") {
         Color::Green
     } else {
         Color::Cyan
