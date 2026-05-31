@@ -11,7 +11,7 @@ GPU 显存有限，当模型过大或多 session 并发时，需要将暂时不�
 ## 目标
 
 以 `MlContext`（即整个 `GGUF_Model`）为单位，提供：
-1. **GPU ↔ CPU 热迁移**：`ml.offload_to_cpu(sess)` / `ml.offload_to_cuda(sess)`
+1. **GPU 卸下 / 恢复**：`ml.offload_to_cpu(sess)` / `ml.offload_to_cuda(sess)`（CPU 不参与运算，仅暂存 KV Cache 状态）
 2. **磁盘持久化**：`ml.offload_save(sess, file_id)` / `sess = ml.offload_load(file_id, device)`
 
 ### 核心原则：权重 reload + KV Cache 序列化
@@ -97,24 +97,47 @@ sess = ml.offload_load(file_id, device)  -- 从 .kvcache/{file_id} 恢复
 
 ### 实现流程
 
-**offload_to_cpu / offload_to_cuda**：
-1. `extract_kv_cache()` 提取所有层 KV
-2. 调用 `GGUF_Load_Model(start, end, path, new_device)` 在新 device 上重建权重
-3. ⚠️ **释放原设备上的旧模型**：`GGUF_Unload_Model(old_model)` 显式 drop，释放原设备显存/内存
-4. `restore_kv_cache()` 将 KV 恢复到新模型
-5. 恢复 rng_state、offset、eos_token_id、chat_template
+**MlContext 新增挂起态**：
+```rust
+struct MlContext {
+    model: Option<GGUF_Model>,         // None = 已 offload
+    tokenizer: Option<Tokenizer>,
+    offset: usize,
+    rng_state: u64,
+    eos_token_id: u32,
+    chat_template: Option<String>,
+    device: Device,
+
+    // 新增：KV Cache 暂存（已在 CPU RAM，等 to_cuda 恢复）
+    offloaded_kv: Option<Vec<(Tensor, Tensor)>>,
+}
+```
+
+**offload_to_cpu**：
+1. `extract_kv_cache()` 提取所有层 KV → KV tensor 自然在 CPU RAM
+2. `GGUF_Unload_Model(old_model)` 释放 GPU 显存
+3. 将 KV 存入 `offloaded_kv`，model 置为 None
+4. 保持 tokenizer、rng_state、offset 等状态不变
+
+> 全程零 I/O、零权重重建。CPU 不参与运算，仅暂存状态。
+
+**offload_to_cuda**：
+1. 调用 `GGUF_Load_Model(start, end, path, device)` 在 GPU 上重建权重
+2. 从 `offloaded_kv` 取出 KV，`restore_kv_cache()` 恢复到新模型
+3. `offloaded_kv` 置为 None
+4. 恢复 rng_state、offset、eos_token_id、chat_template
 
 **offload_save**：
-1. `extract_kv_cache()` 提取 KV
+1. 若 model 已加载：`extract_kv_cache()` 提取 KV（若已 offload 直接用 `offloaded_kv`）
 2. 对每层 k/v Tensor 调用 `to_vec1::<f32>()` 获取 raw bytes
 3. 写入 header + 逐层数据到 `.kvcache/{file_id}`
-4. ⚠️ **释放模型**：`sess:unload()` 释放设备显存/内存（模型已持久化到磁盘，无需继续占用）
+4. ⚠️ **释放模型**：若 model 仍在，`unload()` 释放设备显存；KV 保留在 CPU RAM（`offloaded_kv`），方便后续 `to_cuda` 恢复
 
 **offload_load**：
 1. 读取 `.kvcache/{file_id}`，解析 header
 2. 调用 `GGUF_Load_Model` 在指定 device 上加载权重
-3. `Tensor::from_vec()` 重建 KV tensor
-4. `restore_kv_cache()` 恢复
+3. `Tensor::from_vec()` 从 raw bytes 重建 KV tensor
+4. `restore_kv_cache()` 恢复到新模型
 5. 恢复 runtime 状态，返回新 `MlSession`
 
 ### 依赖
