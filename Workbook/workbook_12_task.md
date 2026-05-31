@@ -29,7 +29,16 @@
 | 12.3 | 集成到 GGUF_Load_Model + MlSession | ✅ |
 | 12.5 | 支持 cuda:0/cuda:1 多GPU | ✅ |
 | 12.6 | pipe_5/pipe_6 2节点×2GPU 脚本 | ✅ |
-| 12.7 | 集成 Qwen MoE 支持 | ⬜ |
+| 12.7 | 集成 Qwen MoE 支持 | ✅ |
+| 12.8 | 修复：架构名/dtype/KV cache/I16 | ✅ |
+
+## 12.8 修复记录 (2026-05-30)
+
+- qwen3moe 架构名识别 → gguf_model.rs
+- dtype 从 metadata 读取（BF16/F16/F32）→ gguf_model.rs
+- pipe_2/4/6 reset_kv_cache → programs/user/
+- I8/I16/U8/U16→I32/U32 转换 → gguf_model_manager.rs
+- pipe_5/6 GPU→CPU→GPU 两步搬运 → programs/user/
 
 ## 12.7 调研 (2026-05-30)
 

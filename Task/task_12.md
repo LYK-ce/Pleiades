@@ -17,7 +17,8 @@
 | 12.3 | 集成到 `GGUF_Load_Model` + `MlSession` | 3 | ✅ |
 | 12.5 | 支持 `cuda:0` / `cuda:1` 等多 GPU 设备选择 | 7 | ✅ |
 | 12.6 | `pipe_5`/`pipe_6` — 2节点 × 2 GPU 流水线并行脚本 | 2 | ✅ |
-| 12.7 | 集成 Qwen MoE 支持（基于 candle `quantized_qwen3_moe.rs`） | TBD | ⬜ |
+| 12.7 | 集成 Qwen MoE 支持（基于 candle `quantized_qwen3_moe.rs`） | 4 | ✅ |
+| 12.8 | 修复：架构名 qwen3moe / dtype BF16 / KV cache / I16 metadata | 7 | ✅ |
 
 ---
 
@@ -450,6 +451,18 @@ struct FusedMoeGGUF {
 | 2 | `Src/ML_Engine/GGUF_Models/mod.rs` | 添加 `pub mod qwen3_moe` |
 | 3 | `Src/ML_Engine/gguf_model.rs` | `AnyModel` 新增 `Qwen3Moe` 变体 |
 | 4 | `Src/ML_Engine/mod.rs` | re-export |
+
+---
+
+### 12.8 修复汇总
+
+| 问题 | 影响 | 修复 |
+|------|------|------|
+| 架构名 `qwen3moe`（无下划线）未识别 | Qwen MoE 模型无法加载 | 添加 `qwen3moe` 匹配 |
+| dtype 硬编码 F32 | BF16 模型 forward 报错 | 从 `general.dtype` metadata 读取 |
+| pipe_2/4/6 缺少 `reset_kv_cache` | 多轮对话 KV cache 污染 | `offset==0` 时重置 |
+| shimmytok 不支持 I16 | Qwen3-235B tokenizer 加载失败 | PGGUF 转换时将 I8/I16/U8/U16→I32/U32 |
+| pipe_5/6 GPU 跨 context 失败 | 直接 GPU→GPU 报错 | GPU→CPU→GPU 两步搬运 |
 
 ---
 
