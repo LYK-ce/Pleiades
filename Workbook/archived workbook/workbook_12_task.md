@@ -2,6 +2,13 @@
 > 任务: DeepSeek V3.2 模型架构支持
 > 分支: deepseek (基于 reforge, origin/reforge 6281582)
 > 开始: 2026-05-30
+> 验证完成: 2026-05-31
+
+## 验证结果 (2026-05-31)
+- ✅ Qwen3 235B A22B MoE 模型验证通过
+- 分布式流水线 (pipe_1~6) 在 2 节点 × 4 GPU 环境正常运行
+- MoE forward + MLA attention 推理正确性确认
+- CPU/GPU 混合加载 + 多卡 (cuda:0/cuda:1) 均通过测试
 
 ## 会话初始化 (2026-05-30)
 - SSH: 权限 OK (600/644), 认证 OK (LYK-ce)
