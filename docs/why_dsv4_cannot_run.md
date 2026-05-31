@@ -18,7 +18,7 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 | HuggingFace 发布格式 | BF16 safetensors | **FP8 + FP4** mixed safetensors |
 | 社区 GGUF 文件 | ✅ Q4_K_M / Q8_0 等多种量化 | ❌ 不存在 |
 | GGUF 格式是否支持该精度 | ✅ Q4_K_M 是标准量化类型 | ❌ GGUF 规范没有 FP8/FP4 类型码 |
-| 转换后 BF16 大小 | Q4_K_M ≈ 60GB | BF16 ≈ **580GB** (FP4→BF16 膨胀 4×) |
+| 转换后 BF16 大小 | Q4_K_M ≈ 135GB | BF16 ≈ **580GB** (FP4→BF16 膨胀 4×) |
 
 **结论**: DeepSeek V4 采用 FP8/FP4 存储是先进的压缩技术——safetensors 只有 160GB。但 **candle 等开源推理后端不支持 FP8/FP4 直接运算**，必须反量化到 BF16 才能做矩阵乘法。FP4→BF16 膨胀 4 倍，导致从 160GB 暴增到 ~580GB——4 张 A100 根本放不下。
 
@@ -67,7 +67,7 @@ DeepSeek V4 Flash 发布时采用 FP8/FP4 存储 (2025 年最新精度)。
 矩阵乘法 kernel 根本不知道 FP8/FP4 是什么。
 
 反量化到 BF16 之后:
-  - Qwen3 235B:  60GB  (Q4_K_M 的 kernel 原生支持, 不膨胀)
-  - DeepSeek V4: 580GB (FP4×4 + FP8×2, 膨胀了 3.6 倍)
+  - Qwen3 235B:  135GB (Q4_K_M ≈ 4-bit, kernel 原生支持)
+  - DeepSeek V4: 580GB (FP4×4 + FP8×2, 膨胀 3.6 倍)
 
 这就好比别人送你一辆用特殊燃料的跑车——车是好车，但你手里只有 95 号汽油。\n```
