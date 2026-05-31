@@ -3,7 +3,11 @@ Date: 2026-05-31
 
 # Task 13: Safetensor 支持实现
 
-> 状态：13.1~13.8 已完成，待 13.9 集成验证（测试模型：Qwen3-0.6B）
+> 状态：阶段 1 (Qwen3) 已完成 ✅ | 阶段 2 (DeepSeek V4) 规划中
+
+---
+
+## 背景
 
 ---
 
@@ -267,7 +271,272 @@ DeepSeek 使用 MLA（Multi-head Latent Attention），命名规则不同，需�
 
 ---
 
-## 分支与文件变更总览
+## 阶段 2: DeepSeek V4 Flash 接入
+
+### 背景
+
+目标模型：`deepseek-ai/DeepSeek-V4-Flash`
+- 284B 总参数，13B 激活（MoE）
+- 混合精度：Safetensors 使用 FP8 (dense) + FP4 (expert)
+- 46 个分片，约 160GB 磁盘占用
+- 环境：4×A100 80GB + 935GB CPU RAM
+
+### 核心策略
+
+**Python 侧：FP8/FP4 → BF16 dequant → 单个完整 PGGUF 文件 (~320GB)**
+
+```
+FP8 weight  +  FP8 scale   →  dequant  →  BF16 tensor  →  GGUFWriter
+FP4 weight  +  FP8 scale   →  unpack + dequant  →  BF16 tensor  →  GGUFWriter
+```
+
+文件放到 CPU 磁盘，运行时用 `GGUF_Load_Model(start, end)` 按层加载到不同 GPU。
+
+### 资源分配
+
+```
+原始 safetensors:  160GB (FP8 + FP4 mixed)
+转换后 PGGUF:      ~320GB (全 BF16)
+CPU 磁盘:          935GB → 放 320GB ✅
+GPU VRAM:          4×80GB = 320GB → 可用 ~280GB
+
+层数 ~61 (待确认), 每层 BF16 ≈ 5.2GB
+GPU 分配: 每卡 ~15 层 × 5.2GB ≈ 78GB (含 KV cache overhead)
+剩余 ~1 层放 CPU 内存
+```
+
+### 14.1 FP8/FP4 Dequant 实现
+
+**FP8 (F8E4M3) dequant:**
+
+```python
+# 对每个 weight tensor，查找对应的 scale tensor
+# layers.{n}.attn.wq_a.weight  ← FP8
+# layers.{n}.attn.wq_a.scale   ← FP8 scale (per-block or per-channel)
+
+def dequant_fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """weight: FP8, scale: FP8 → output: BF16"""
+    w = weight.float()          # FP8 → FP32
+    s = scale.float()           # FP8 → FP32
+    return (w * s).bfloat16()   # → BF16 for GGUF
+```
+
+**FP4 (packed) dequant:**
+
+DeepSeek V4 的 MoE 专家使用 FP4 e2m1fn 格式，打包为每 int8 存 2 个值：
+
+```python
+def dequant_fp4(packed_weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """packed_weight: int8 (2×FP4 packed), scale: FP8 → output: BF16"""
+    # 1. Unpack: int8 → 2×FP4 values
+    low = packed_weight & 0x0F
+    high = (packed_weight >> 4) & 0x0F
+    # 2. Reinterpret as FP4 e2m1fn
+    # 3. Multiply by scale
+    # 4. Convert to BF16
+    ...
+```
+
+### 14.2 DeepSeek V4 Tensor 映射表
+
+基于 `model.safetensors.index.json` 分析（69,187 tensors, 61 layers + MTP modules）：
+
+```
+HF safetensors name                              GGUF name
+──────────────────────────────────────           ──────────────────────────
+embed.weight                                      token_embd.weight
+head.weight                                       output.weight
+hc_head_base / hc_head_fn / hc_head_scale         (head control params)
+
+layers.{n}.attn.wq_a.weight                       blk.{n}.attn_q_a.weight
+layers.{n}.attn.wq_a.scale                        (consumed during dequant)
+layers.{n}.attn.wq_b.weight                       blk.{n}.attn_q_b.weight
+layers.{n}.attn.wq_b.scale                        (consumed)
+layers.{n}.attn.wkv.weight                        blk.{n}.attn_kv_a.weight
+layers.{n}.attn.wkv.scale                         (consumed)
+layers.{n}.attn.wo_a.weight                       blk.{n}.attn_output_a.weight
+layers.{n}.attn.wo_a.scale                        (consumed)
+layers.{n}.attn.wo_b.weight                       blk.{n}.attn_output_b.weight
+layers.{n}.attn.wo_b.scale                        (consumed)
+layers.{n}.attn.q_norm.weight                     blk.{n}.attn_q_norm.weight
+layers.{n}.attn.kv_norm.weight                    blk.{n}.attn_kv_norm.weight
+layers.{n}.attn_norm.weight                       blk.{n}.attn_norm.weight
+layers.{n}.ffn_norm.weight                        blk.{n}.ffn_norm.weight
+layers.{n}.attn.attn_sink                         (scalar/param)
+layers.{n}.attn.compressor.*                      (compressor weights)
+layers.{n}.attn.indexer.*                         (indexer weights)
+
+layers.{n}.ffn.gate.weight                        blk.{n}.ffn_gate.weight
+layers.{n}.ffn.gate.bias                          blk.{n}.ffn_gate.bias
+layers.{n}.ffn.gate.tid2eid                       blk.{n}.ffn_gate.tid2eid
+
+layers.{n}.ffn.experts.{e}.w1.weight              blk.{n}.ffn_exps.{e}.w1.weight
+layers.{n}.ffn.experts.{e}.w1.scale               (consumed)
+layers.{n}.ffn.experts.{e}.w2.weight              blk.{n}.ffn_exps.{e}.w2.weight
+layers.{n}.ffn.experts.{e}.w2.scale               (consumed)
+layers.{n}.ffn.experts.{e}.w3.weight              blk.{n}.ffn_exps.{e}.w3.weight
+layers.{n}.ffn.experts.{e}.w3.scale               (consumed)
+
+layers.{n}.ffn.shared_experts.w1.weight           blk.{n}.ffn_shared.w1.weight
+layers.{n}.ffn.shared_experts.w1.scale            (consumed)
+layers.{n}.ffn.shared_experts.w2.weight           blk.{n}.ffn_shared.w2.weight
+layers.{n}.ffn.shared_experts.w2.scale            (consumed)
+layers.{n}.ffn.shared_experts.w3.weight           blk.{n}.ffn_shared.w3.weight
+layers.{n}.ffn.shared_experts.w3.scale            (consumed)
+
+layers.{n}.hc_attn_base / hc_attn_fn / hc_attn_scale  (head control params)
+
+mtp.{n}.*                                         (Multi-Token Prediction, 暂不处理)
+```
+
+> **注意**: `.scale` tensor 在转换时被消费（用于 dequant），不单独写入 GGUF。写入 GGUF 的是 dequant 后的 BF16 weight。
+
+### 14.3 按层切分的 PGGUF 制作
+
+DeepSeek V4 模型太大，一次性转换可能 OOM。采用分阶段转换：
+
+**方案 A: 分片转换（推荐）**
+
+```bash
+# 将 46 个 safetensors 分片按层分组，逐组转换
+python Tool/convert_hf_to_gguf.py \
+  /path/to/DeepSeek-V4-Flash \
+  --arch deepseek_v4 \
+  --output DeepSeek-V4-Flash.pgguf \
+  --shard-by-layer    # 新增参数：边读边写，不一次性加载全部
+```
+
+Python 转换器改进：
+1. 解析 `index.json` → 建立 `{layer: [tensor_names]}`
+2. 按层遍历：打开对应 shard → dequant → 写入 GGUF
+3. 内存占用 = 1 层 BF16 (~5GB) + 当前 shard (~8GB) ≈ 13GB
+
+**方案 B: 分文件转换**
+
+```bash
+# 每个 GPU 生成一个 PGGUF 文件
+python Tool/convert_hf_to_gguf.py ... --split-layers 4
+# → DeepSeek-V4-Flash.part0.pgguf (layers 0..14)
+# → DeepSeek-V4-Flash.part1.pgguf (layers 15..29)
+# → DeepSeek-V4-Flash.part2.pgguf (layers 30..44)
+# → DeepSeek-V4-Flash.part3.pgguf (layers 45..60)
+```
+
+> 方案 B 更简单，Pleiades 已有 `GGUF_Load_Model(start, end)` + `GGUF_Split_Model` 支持。
+
+### 14.4 Pipeline Lua 脚本设计
+
+分布式推理脚本 `programs/user/pipe_dsv4.lua`：
+
+```lua
+COMMAND = "dsv4"
+DESCRIPTION = "DeepSeek V4 Flash distributed inference"
+
+function execute(params)
+    -- params: {prompt, max_tokens, temperature}
+    local prompt = params.prompt or "Hello"
+    local max_tokens = params.max_tokens or 128
+    local temp = params.temperature or 0.8
+
+    -- ============================================
+    -- Phase 1: 模型加载 (由各节点并行执行)
+    -- ============================================
+    local peers = caps.get_available_peers()
+    -- 至少需要 4 个节点
+    assert(#peers >= 4, "Need at least 4 peers")
+
+    -- 分配层范围
+    -- GPU 0: layers 0..14
+    -- GPU 1: layers 15..29
+    -- GPU 2: layers 30..44
+    -- GPU 3: layers 45..60
+    local total_layers = 61  -- DeepSeek V4 Flash
+    local split_count = math.min(#peers, 4)
+    local layers_per = math.floor(total_layers / split_count)
+
+    for i = 1, split_count do
+        local start = (i - 1) * layers_per
+        local end_ = i * layers_per - 1
+        if i == split_count then
+            end_ = total_layers - 1  -- 最后一份拿剩下的
+        end
+        caps.network.send_data(peers[i], "LOAD_MODEL", {
+            model = "DeepSeek-V4-Flash.pgguf",
+            start = start,
+            end_ = end_,
+        })
+    end
+
+    -- ============================================
+    -- Phase 2: Tokenizer (coordinator node)
+    -- ============================================
+    local sess = ml.new("cpu")
+    sess:load_tokenizer("DeepSeek-V4-Flash.pgguf")
+    local tokens = sess:encode(prompt)
+
+    -- ============================================
+    -- Phase 3: Prefill (pipeline forward)
+    -- ============================================
+    local hidden = local_tensor.open_stream("fwd")
+    -- 发送 token embeddings
+    local t = sess:tensorize(tokens)
+    local_tensor.send_tensor(hidden, t, 0)
+
+    -- Pipeline 逐 GPU 传递 hidden states
+    for i = 1, #peers do
+        -- 等待当前节点完成 forward，接收输出
+        local result = caps.network.recv_tensor(
+            caps.network.accept_tensor_stream(peers[i], "fwd"), "cpu"
+        )
+        hidden = result
+    end
+
+    -- ============================================
+    -- Phase 4: Autoregressive generation
+    -- ============================================
+    local output = {}
+    local eos = sess:get_eos()
+
+    for step = 1, max_tokens do
+        -- 取 sample (由第一个节点或最后一个节点)
+        local next_token = ml.sample(hidden, temp)
+
+        if next_token == eos then break end
+
+        table.insert(output, next_token)
+        caps.echo(sess:decode(next_token))
+
+        -- 下一个 token 的 embedding
+        local next_t = sess:tensorize({next_token})
+        hidden = next_t
+
+        -- Pipeline forward
+        for i = 1, #peers do
+            local stream = caps.network.open_tensor_stream(peers[i], "fwd")
+            caps.network.send_tensor(stream, hidden, step)
+            local result = caps.network.recv_tensor(stream, "cpu")
+            hidden = result
+        end
+    end
+
+    return {tokens = output}
+end
+```
+
+### 14.5 新增任务拆解
+
+| 子任务 | 内容 | 涉及文件 |
+|--------|------|----------|
+| 14.1 | FP8/FP4 dequant 实现 | `Tool/hf2gguf/dequant.py` (新增) |
+| 14.2 | DeepSeek V4 tensor 映射表 | `Tool/hf2gguf/mappings/deepseek_v4.py` (新增) |
+| 14.3 | 分片转换支持 (按层分组) | `Tool/hf2gguf/converter.py` (修改) |
+| 14.4 | DeepSeek V4 架构 metadata 提取 | `Tool/hf2gguf/config_reader.py` (修改) |
+| 14.5 | Pipeline Lua 脚本 | `programs/user/pipe_dsv4.lua` (新增) |
+| 14.6 | 集成验证 | `tests/t14_dsv4_inference.rs` (新增) |
+
+---
+
+## 阶段 1: 分支与文件变更总览
 
 ```
 分支：reforge → hf2gguf
