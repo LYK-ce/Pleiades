@@ -146,11 +146,60 @@ struct MlContext {
 - candle-nn: `ConcatKvCache::k()`, `ConcatKvCache::v()`, `ConcatKvCache::append()`
 - 现有：`GGUF_Load_Model`, `GGUF_Unload_Model`, `MlSession`, `MlContext`
 
-## 任务分解
+## 涉及文件与变更摘要
 
-- [ ] 1. 创建 `.kvcache/` 目录（启动时）
-- [ ] 2. `AnyModel` 上实现 `extract_kv_cache()` / `restore_kv_cache()`
-- [ ] 3. 实现序列化/反序列化函数（kv cache ↔ raw bytes）
-- [ ] 4. 实现 `MlSession` 上的 offload 方法
-- [ ] 5. 注册 Lua 绑定
-- [ ] 6. 测试验证
+| # | 文件 | 变更 |
+|---|------|------|
+| 1 | `Src/main.rs` | 启动时创建 `.kvcache/` 目录 |
+| 2 | `Src/ML_Engine/gguf_model.rs` | `AnyModel` 新增 `extract_kv_cache()` / `restore_kv_cache()`，各架构分别实现 |
+| 3 | `Src/ML_Engine/context.rs` | `MlContext` 新增 `offloaded_kv` 字段；`MlSession` 新增 `offload_to_cpu/to_cuda/save/load` 方法 + 序列化逻辑 + Lua UserData 注册 |
+| 4 | `Src/VM/capability_binding.rs` | `ml` 表新增 `ml.offload_load(file_id, device)` 函数绑定 |
+
+**不需要新建文件**：序列化逻辑放在 `context.rs` 内，与 MlSession 紧密耦合。
+
+### 变更细节
+
+#### 1. `Src/main.rs` — 目录创建
+```rust
+// Phase 1 末尾，workspace_dir 创建之后
+std::fs::create_dir_all(".kvcache")?;
+```
+
+#### 2. `Src/ML_Engine/gguf_model.rs` — AnyModel KV 接口
+```rust
+impl AnyModel {
+    pub fn extract_kv_cache(&self) -> Vec<(Tensor, Tensor)> {
+        match self {
+            AnyModel::Qwen3(m) => m.layers.iter()
+                .map(|l| (l.self_attn.kv_cache.k().unwrap().clone(),
+                           l.self_attn.kv_cache.v().unwrap().clone()))
+                .collect(),
+            AnyModel::Qwen3Moe(m) => m.layers.iter()
+                .map(|l| (l.self_attn.kv_cache.k().unwrap().clone(),
+                           l.self_attn.kv_cache.v().unwrap().clone()))
+                .collect(),
+            AnyModel::DeepSeek(m) => m.layers.iter()
+                .map(|l| (l.mla.kv_cache.kv_latent.clone().unwrap(),
+                           l.mla.kv_cache.k_pe.clone().unwrap()))
+                .collect(),
+        }
+    }
+    // restore_kv_cache: 对每层 append(k, v)
+}
+```
+
+#### 3. `Src/ML_Engine/context.rs` — 核心逻辑
+- `MlContext.offloaded_kv: Option<Vec<(Tensor, Tensor)>>`（均在 CPU）
+- `MlSession::offload_to_cpu()` — extract → to_device(Cpu) → unload → 存入 offloaded_kv
+- `MlSession::offload_to_cuda()` — load_model(GPU) → KV to_device(GPU) → restore → clear
+- `MlSession::offload_save(file_id)` — 取 KV（model 或 offloaded_kv） → to_vec1 → 写 .kvcache/
+- `MlSession::offload_load(file_id, device)` — 读 .kvcache/ → load_model → from_vec → restore
+- UserData 注册：`offload_to_cpu` / `offload_to_cuda` / `offload_save`（`offload_load` 在 ml 表）
+
+#### 4. `Src/VM/capability_binding.rs` — Lua 绑定
+```rust
+ml.set("offload_load", lua.create_function(|_, (file_id, device): (String, String)| {
+    MlSession::offload_load(&file_id, &device)
+        .map_err(|e| mlua::Error::runtime(e))
+})?)?;
+```
