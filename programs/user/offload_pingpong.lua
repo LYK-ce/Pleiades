@@ -2,190 +2,115 @@
 -- Date ： 2026-06-01
 
 COMMAND = "offload_pingpong"
-DESCRIPTION = "单机双 Session 轮流 offload 演示 — 两个 MlContext 交替在 GPU 推理，验证 KV Cache 保留"
+DESCRIPTION = "单机双 Session 轮流 offload ML Thread — 一个 ML 线程管理两个 Session，通过 offload 交替推理"
 
 -- 用法:
---   exec offload_pingpong
---   或通过 session inference 调用
-
--- 场景:
---   Session A: 问 "What is 1+1?" → 得到回答 → offload 到 CPU
---   Session B: 问 "What is 2+2?" → 得到回答 → offload 到 CPU
---   Session A: 恢复到 GPU，继续问 "Now what is 3+3?" → 验证 KV Cache 保留
+--   session create <model>        → 创建 Session A (得到 id=1)
+--   session create <model>        → 创建 Session B (得到 id=2)
+--   session inference offload_pingpong 1 <model>  → 启动 ML Thread
+--     （session_B 参数由 session_id+1 自动推导）
+--
+-- 或者显式指定两个 session:
+--   exec offload_pingpong session_A=1 session_B=2 model_path=<model>
 
 function execute(params)
+    -- 支持两种参数方式：
+    -- 1. session inference 调用: params.session_id (字符串), params.model_path
+    -- 2. exec 调用: params.session_A, params.session_B (都是字符串), params.model_path
+    local session_id_A = params.session_A or params.session_id
+    local session_id_B = params.session_B or tostring(tonumber(session_id_A) + 1)
     local model_path = params.model_path
 
-    -- 1. 通过 Storage 获取模型文件路径
-    caps.print("===== Offload Ping-Pong 演示 =====")
+    caps.print("===== Offload Ping-Pong ML Thread =====")
+    caps.print("Session A: " .. session_id_A)
+    caps.print("Session B: " .. session_id_B)
+
+    -- 1. 通过 Storage 获取模型路径
     local handle = caps.storage_acquire_read(model_path)
     local path = handle:path()
     caps.print("模型路径: " .. path)
 
-    -- 2. 加载 tokenizer（两个 session 共用同一个 tokenizer 信息，但独立加载）
-    local arch_info = ml.analyze_model(path)
-    caps.print("架构: " .. arch_info.architecture .. ", 层数: " .. tostring(arch_info.num_layers))
+    -- 2. 创建 MlSession（在 GPU 上）
+    local sess = ml.new("cuda")
+    local eos = sess:get_eos()
 
-    -- ================================================================
-    -- Round 1: Session A — 第一轮推理
-    -- ================================================================
-    caps.print("\n--- Round 1: Session A 加载 & 推理 ---")
+    -- 3. 打开两个 Session 的 stream（Session 的 tokio task 在 session create 时就已启动并在 accept_async 等待）
+    local stream_A = local_tensor.open_stream("ml-" .. session_id_A)
+    caps.print("Session A stream 已连接 (ml-" .. session_id_A .. ")")
 
-    local sess_A = ml.new("cuda")
-    sess_A:load_model(path, 0, 999999)
-    sess_A:load_tokenizer(path)
-    caps.print("Session A: 模型已加载到 GPU")
-
-    -- Prefill
-    local prompt_A1 = "<|im_start|>user\nWhat is 1+1?\n<|im_end|>\n<|im_start|>assistant\n"
-    local tokens_A1 = sess_A:encode(prompt_A1)
-    caps.print("Session A: 编码完成, token 数: " .. tostring(#tokens_A1))
-
-    local tensor_A1 = sess_A:tensorize(tokens_A1)
-    local logits_A1 = sess_A:forward(tensor_A1, 0)
-
-    -- Decode a few tokens
-    local eos = sess_A:get_eos()
-    local response_A1 = ""
-    for i = 1, 5 do
-        local tok = sess_A:sample(logits_A1, 0.0)  -- greedy
-        if tok == eos then break end
-        local text = sess_A:decode(tok)
-        response_A1 = response_A1 .. text
-        local next_t = sess_A:tensorize({tok})
-        logits_A1 = sess_A:forward(next_t)
-    end
-    caps.print("Session A 回答: " .. response_A1)
-
-    -- Offload A → CPU
-    caps.print("Session A: offload to CPU ...")
-    sess_A:offload_to_cpu()
-    caps.print("Session A: GPU 显存已释放, KV Cache 保留在 CPU")
-
-    -- ================================================================
-    -- Round 2: Session B — 第一轮推理
-    -- ================================================================
-    caps.print("\n--- Round 2: Session B 加载 & 推理 ---")
-
-    local sess_B = ml.new("cuda")
-    sess_B:load_model(path, 0, 999999)
-    sess_B:load_tokenizer(path)
-    caps.print("Session B: 模型已加载到 GPU")
-
-    -- Offload B 后立即测试 save
-    local prompt_B1 = "<|im_start|>user\nWhat is 2+2?\n<|im_end|>\n<|im_start|>assistant\n"
-    local tokens_B1 = sess_B:encode(prompt_B1)
-    caps.print("Session B: 编码完成, token 数: " .. tostring(#tokens_B1))
-
-    local tensor_B1 = sess_B:tensorize(tokens_B1)
-    local logits_B1 = sess_B:forward(tensor_B1, 0)
-
-    local response_B1 = ""
-    for i = 1, 5 do
-        local tok = sess_B:sample(logits_B1, 0.0)
-        if tok == eos then break end
-        local text = sess_B:decode(tok)
-        response_B1 = response_B1 .. text
-        local next_t = sess_B:tensorize({tok})
-        logits_B1 = sess_B:forward(next_t)
-    end
-    caps.print("Session B 回答: " .. response_B1)
-
-    -- Offload B → CPU
-    caps.print("Session B: offload to CPU ...")
-    sess_B:offload_to_cpu()
-    caps.print("Session B: GPU 显存已释放, KV Cache 保留在 CPU")
-
-    -- ================================================================
-    -- Round 3: Session A — 恢复并继续推理（验证 KV Cache 保留）
-    -- ================================================================
-    caps.print("\n--- Round 3: Session A 恢复, 验证 KV Cache ---")
-
-    sess_A:offload_to_cuda()
-    caps.print("Session A: 已恢复到 GPU")
-
-    -- 继续对话（KV Cache 保留了之前的上下文）
-    local prompt_A2 = "<|im_start|>user\nNow what is 3+3?\n<|im_end|>\n<|im_start|>assistant\n"
-    local tokens_A2 = sess_A:encode(prompt_A2)
-    local tensor_A2 = sess_A:tensorize(tokens_A2)
-    local logits_A2 = sess_A:forward(tensor_A2)  -- offset 自动继续
-
-    local response_A2 = ""
-    for i = 1, 10 do
-        local tok = sess_A:sample(logits_A2, 0.0)
-        if tok == eos then break end
-        local text = sess_A:decode(tok)
-        response_A2 = response_A2 .. text
-        local next_t = sess_A:tensorize({tok})
-        logits_A2 = sess_A:forward(next_t)
-    end
-    caps.print("Session A 回答 (基于之前上下文): " .. response_A2)
-
-    -- Offload A → CPU, then save to disk
-    caps.print("Session A: offload to CPU ...")
-    sess_A:offload_to_cpu()
-    caps.print("Session A: offload_save 到磁盘 ...")
-    sess_A:offload_save("pingpong_A")
-
-    -- ================================================================
-    -- Round 4: Session B — 恢复并继续
-    -- ================================================================
-    caps.print("\n--- Round 4: Session B 恢复 ---")
-
-    sess_B:offload_to_cuda()
-    caps.print("Session B: 已恢复到 GPU")
-
-    -- 继续 B 的对话
-    local prompt_B2 = "<|im_start|>user\nNow what is 4+4?\n<|im_end|>\n<|im_start|>assistant\n"
-    local tokens_B2 = sess_B:encode(prompt_B2)
-    local tensor_B2 = sess_B:tensorize(tokens_B2)
-    local logits_B2 = sess_B:forward(tensor_B2)
-
-    local response_B2 = ""
-    for i = 1, 10 do
-        local tok = sess_B:sample(logits_B2, 0.0)
-        if tok == eos then break end
-        local text = sess_B:decode(tok)
-        response_B2 = response_B2 .. text
-        local next_t = sess_B:tensorize({tok})
-        logits_B2 = sess_B:forward(next_t)
-    end
-    caps.print("Session B 回答: " .. response_B2)
-
-    -- Save B to disk too
-    caps.print("Session B: offload_save 到磁盘 ...")
-    sess_B:offload_save("pingpong_B")
-
-    -- ================================================================
-    -- Round 5: 从磁盘恢复 Session A（验证 save/load）
-    -- ================================================================
-    caps.print("\n--- Round 5: 从磁盘恢复 Session A（验证 offload_load）---")
-
-    sess_A = nil  -- 释放旧引用
-    local sess_A2 = ml.offload_load("pingpong_A", "cuda")
-    caps.print("Session A: 从磁盘恢复成功")
-
-    -- 继续 A 的对话
-    local prompt_A3 = "<|im_start|>user\nWhat is 5+5?\n<|im_end|>\n<|im_start|>assistant\n"
-    local tokens_A3 = sess_A2:encode(prompt_A3)
-    local tensor_A3 = sess_A2:tensorize(tokens_A3)
-    local logits_A3 = sess_A2:forward(tensor_A3)
-
-    local response_A3 = ""
-    for i = 1, 10 do
-        local tok = sess_A2:sample(logits_A3, 0.0)
-        if tok == eos then break end
-        local text = sess_A2:decode(tok)
-        response_A3 = response_A3 .. text
-        local next_t = sess_A2:tensorize({tok})
-        logits_A3 = sess_A2:forward(next_t)
-    end
-    caps.print("Session A 回答 (磁盘恢复后): " .. response_A3)
-
-    -- 清理
-    sess_A2:unload()
-    sess_B:unload()
+    local stream_B = local_tensor.open_stream("ml-" .. session_id_B)
+    caps.print("Session B stream 已连接 (ml-" .. session_id_B .. ")")
 
     handle:release()
-    caps.print("\n===== Offload Ping-Pong 演示完成 =====")
+    caps.print("ML Thread 就绪，开始乒乓推理 ...\n")
+
+    -- ================================================================
+    -- 乒乓循环：在 A 和 B 之间交替
+    -- ================================================================
+    local active = "A"  -- 当前活跃的 session
+    local round = 0
+
+    -- 每个 session 的上下文状态
+    local ctx = {
+        A = { stream = stream_A, offloaded = false, offset = 0 },
+        B = { stream = stream_B, offloaded = false, offset = 0 },
+    }
+
+    -- 加载模型到 GPU（首次）
+    sess:load_model(path, 0, 999999)
+    caps.print("模型已加载到 GPU")
+
+    while true do
+        round = round + 1
+        local cur = ctx[active]
+        caps.print(string.format("\n--- Round %d: Session %s ---", round, active))
+
+        -- 如果当前 session 之前被 offload 了，先恢复到 GPU
+        if cur.offloaded then
+            caps.print("Session " .. active .. ": 从 CPU 恢复到 GPU ...")
+            sess:offload_to_cuda()
+            cur.offloaded = false
+        end
+
+        -- 处理来自 Session 的推理请求（最多处理 3 个 request，然后切换）
+        local requests_handled = 0
+        while requests_handled < 3 do
+            -- 接收 tensor（带超时，超时后切换 session）
+            local ok, result = pcall(function()
+                return local_tensor.recv_tensor(cur.stream, "cuda")
+            end)
+
+            if not ok then
+                caps.print("Session " .. active .. ": 无更多请求，准备切换")
+                break
+            end
+
+            local tensor, offset = result
+
+            -- offset=0 表示新一轮对话
+            if offset == 0 then
+                sess:reset_kv_cache()
+                cur.offset = 0
+            end
+
+            -- Forward
+            local logits = sess:forward(tensor, offset)
+            local_tensor.send_tensor(cur.stream, logits, offset)
+            cur.offset = offset + 1
+            requests_handled = requests_handled + 1
+        end
+
+        -- 收到 EOF（offset=u64::MAX, length=0），退出循环
+        if requests_handled == 0 and cur.offloaded == false then
+            -- 可能 session 已关闭
+        end
+
+        -- Offload 当前 session 到 CPU，切换到另一个
+        caps.print("Session " .. active .. ": offload to CPU ...")
+        sess:offload_to_cpu()
+        cur.offloaded = true
+
+        -- 切换
+        active = (active == "A") and "B" or "A"
+    end
 end
