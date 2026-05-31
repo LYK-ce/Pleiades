@@ -18,6 +18,7 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 | HuggingFace 发布格式 | BF16 safetensors | **FP8 + FP4** mixed safetensors |
 | 社区 GGUF 文件 | ✅ Q4_K_M / Q8_0 等多种量化 | ❌ 不存在 |
 | GGUF 格式是否支持该精度 | ✅ Q4_K_M 是标准量化类型 | ❌ GGUF 规范没有 FP8/FP4 类型码 |
+| 转换后 BF16 大小 | Q4_K_M ≈ 60GB | BF16 ≈ **580GB** (FP4→BF16 膨胀 4×) |
 
 **结论**: 必须在 Python 侧做 FP8/FP4 → BF16 dequant 才能写入 PGGUF，文件从 160GB 膨胀到 ~320GB。
 

@@ -283,11 +283,12 @@ DeepSeek 使用 MLA（Multi-head Latent Attention），命名规则不同，需�
 
 ### 核心策略
 
-**Python 侧：FP8/FP4 → BF16 dequant → 单个完整 PGGUF 文件 (~320GB)**
+**Python 侧：FP8/FP4 → BF16 dequant → 单个完整 PGGUF 文件 (~580GB)**
 
 ```
-FP8 weight  +  FP8 scale   →  dequant  →  BF16 tensor  →  GGUFWriter
-FP4 weight  +  FP8 scale   →  unpack + dequant  →  BF16 tensor  →  GGUFWriter
+Dense (FP8):   13B × 1B  =  13GB  → BF16 =  26GB
+Expert (FP4): 270B × 0.5B = 135GB → BF16 = 540GB
+总 BF16:      ~580GB
 ```
 
 文件放到 CPU 磁盘，运行时用 `GGUF_Load_Model(start, end)` 按层加载到不同 GPU。
@@ -296,13 +297,11 @@ FP4 weight  +  FP8 scale   →  unpack + dequant  →  BF16 tensor  →  GGUFWri
 
 ```
 原始 safetensors:  160GB (FP8 + FP4 mixed)
-转换后 PGGUF:      ~320GB (全 BF16)
-CPU 磁盘:          935GB → 放 320GB ✅
+转换后 PGGUF:      ~580GB (全 BF16)
+CPU 磁盘:          935GB → 580GB 勉强够但很紧张
 GPU VRAM:          4×80GB = 320GB → 可用 ~280GB
 
-层数 ~61 (待确认), 每层 BF16 ≈ 5.2GB
-GPU 分配: 每卡 ~15 层 × 5.2GB ≈ 78GB (含 KV cache overhead)
-剩余 ~1 层放 CPU 内存
+每 GPU 需装 ~580/4 ≈ 145GB BF16 → ❌ 放不下 80GB
 ```
 
 ### 14.1 FP8/FP4 Dequant 实现
