@@ -46,9 +46,9 @@ type Result<T> = candle_core::Result<T>;
 #[derive(Debug, Clone)]
 pub struct MLA_KV_Cache {
     /// 压缩后的 KV latent: [batch, seq, kv_lora_rank]
-    kv_latent: Option<Tensor>,
+    pub kv_latent: Option<Tensor>,
     /// 解耦的 RoPE key: [batch, 1, seq, qk_rope_dim]
-    k_pe: Option<Tensor>,
+    pub k_pe: Option<Tensor>,
     /// 预分配容量（cache 大小上限）
     capacity: usize,
 }
@@ -157,7 +157,7 @@ pub struct MLA_Weights {
     pub rotary: Arc<Rotary_Embedding>,
 
     // KV Cache
-    kv_cache: MLA_KV_Cache,
+    pub kv_cache: MLA_KV_Cache,
 
     span_attn: tracing::Span,
 }

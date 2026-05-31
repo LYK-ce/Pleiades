@@ -17,8 +17,9 @@
 #![allow(non_snake_case)]
 
 use std::path::Path;
+use std::path::PathBuf;
 
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Tensor, DType};
 
 use super::device::parse_device_str;
 use super::gguf_model::{
@@ -86,6 +87,16 @@ struct MlContext {
     chat_template: Option<String>,
     /// 运行设备
     device: Device,
+
+    // ─── Offload 状态 ────────────────────────────────────
+    /// offload 后的 KV Cache（均在 CPU），等 to_cuda 恢复
+    offloaded_kv: Option<Vec<(Tensor, Tensor)>>,
+    /// offload 时保存的模型路径（用于 reload）
+    offloaded_model_path: Option<PathBuf>,
+    /// offload 时的层范围起始
+    offloaded_layer_start: usize,
+    /// offload 时的层范围结束
+    offloaded_layer_end: usize,
 }
 
 // ============================================================
@@ -121,6 +132,10 @@ impl MlSession {
                 eos_token_id: 151645, // Qwen3 默认 EOS
                 chat_template: None,
                 device,
+                offloaded_kv: None,
+                offloaded_model_path: None,
+                offloaded_layer_start: 0,
+                offloaded_layer_end: 0,
             },
         })
     }
@@ -512,6 +527,389 @@ impl MlSession {
         self.ctx.rng_state = seed;
     }
 
+    // ─── Offloading ────────────────────────────────────────
+
+    /// 从 arch_info 推导层加载范围
+    fn derive_layer_range(arch_info: &super::gguf_model_manager::Model_Arch_Info) -> (usize, usize) {
+        if arch_info.is_split {
+            (arch_info.split_start, arch_info.split_end)
+        } else {
+            (0, arch_info.num_layers + 1)
+        }
+    }
+
+    /// 将模型从 GPU 卸下：提取 KV → 移到 CPU → 释放模型 → 挂起
+    pub fn offload_to_cpu(&mut self) -> Result<(), String> {
+        let model = self.ctx.model.as_ref()
+            .ok_or("offload_to_cpu: no model loaded")?;
+
+        // 1. 保存 reload 所需信息
+        let model_path = model.model_path.clone();
+        let (start, end) = Self::derive_layer_range(&model.arch_info);
+
+        // 2. 提取 KV Cache（仍在原设备）
+        let kvs = model.model.extract_kv_cache()?;
+
+        // 3. 将 KV tensor 移到 CPU
+        let kvs_cpu: Vec<(Tensor, Tensor)> = kvs.into_iter()
+            .map(|(k, v)| {
+                let k_cpu = k.to_device(&Device::Cpu)
+                    .map_err(|e| format!("k to_device cpu: {e}"))?;
+                let v_cpu = v.to_device(&Device::Cpu)
+                    .map_err(|e| format!("v to_device cpu: {e}"))?;
+                Ok((k_cpu, v_cpu))
+            })
+            .collect::<Result<_, String>>()?;
+
+        // 4. 释放 GPU 模型
+        if let Some(old) = self.ctx.model.take() {
+            GGUF_Unload_Model(old);
+        }
+
+        // 5. 保存挂起状态
+        self.ctx.offloaded_kv = Some(kvs_cpu);
+        self.ctx.offloaded_model_path = Some(model_path);
+        self.ctx.offloaded_layer_start = start;
+        self.ctx.offloaded_layer_end = end;
+
+        Ok(())
+    }
+
+    /// 将模型恢复到 GPU：reload 权重 → KV 移回 GPU → 恢复 KV Cache
+    pub fn offload_to_cuda(&mut self) -> Result<(), String> {
+        if self.ctx.model.is_some() {
+            return Err("offload_to_cuda: model is already loaded".into());
+        }
+
+        let kvs = self.ctx.offloaded_kv.take()
+            .ok_or("offload_to_cuda: no offloaded KV cache")?;
+        let model_path = self.ctx.offloaded_model_path.take()
+            .ok_or("offload_to_cuda: no offloaded model path")?;
+        let start = self.ctx.offloaded_layer_start;
+        let end = self.ctx.offloaded_layer_end;
+
+        // 1. 在目标 device 上重建权重
+        let mut model = GGUF_Load_Model(start, end, &model_path, &self.ctx.device)
+            .map_err(|e| format!("offload_to_cuda: reload model failed: {e}"))?;
+
+        // 2. 将 KV 移回目标 device 并恢复
+        let kvs_device: Vec<(Tensor, Tensor)> = kvs.into_iter()
+            .map(|(k, v)| {
+                let k_dev = k.to_device(&self.ctx.device)
+                    .map_err(|e| format!("k to_device gpu: {e}"))?;
+                let v_dev = v.to_device(&self.ctx.device)
+                    .map_err(|e| format!("v to_device gpu: {e}"))?;
+                Ok((k_dev, v_dev))
+            })
+            .collect::<Result<_, String>>()?;
+
+        model.model.restore_kv_cache(kvs_device)?;
+
+        self.ctx.model = Some(model);
+        Ok(())
+    }
+
+    /// 将 KV Cache 保存到 .kvcache/ 目录，并释放模型
+    pub fn offload_save(&mut self, file_id: &str) -> Result<(), String> {
+        // 1. 获取 KV（从模型或已 offload 状态）
+        let kvs = if let Some(ref kvs) = self.ctx.offloaded_kv {
+            // 已 offload，KV 在 CPU
+            kvs.clone()
+        } else {
+            let model = self.ctx.model.as_ref()
+                .ok_or("offload_save: no model loaded and no offloaded KV")?;
+
+            // 保存 reload 信息（如果还没保存）
+            if self.ctx.offloaded_model_path.is_none() {
+                self.ctx.offloaded_model_path = Some(model.model_path.clone());
+                let (start, end) = Self::derive_layer_range(&model.arch_info);
+                self.ctx.offloaded_layer_start = start;
+                self.ctx.offloaded_layer_end = end;
+            }
+
+            let kvs_raw = model.model.extract_kv_cache()?;
+            // 移到 CPU
+            kvs_raw.into_iter()
+                .map(|(k, v)| {
+                    let k_cpu = k.to_device(&Device::Cpu)
+                        .map_err(|e| format!("k to_device cpu: {e}"))?;
+                    let v_cpu = v.to_device(&Device::Cpu)
+                        .map_err(|e| format!("v to_device cpu: {e}"))?;
+                    Ok((k_cpu, v_cpu))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
+
+        // 2. 确定文件路径
+        let file_path = Path::new(".kvcache").join(file_id);
+
+        // 3. 序列化并写入
+        Self::serialize_kv_to_file(
+            &file_path,
+            &kvs,
+            self.ctx.offloaded_model_path.as_ref()
+                .ok_or("offload_save: missing model path")?,
+            self.ctx.offloaded_layer_start,
+            self.ctx.offloaded_layer_end,
+            &self.ctx.device,
+            self.ctx.rng_state,
+            self.ctx.offset,
+            self.ctx.eos_token_id,
+            self.ctx.chat_template.as_deref(),
+        )?;
+
+        // 4. 释放模型（如果还在）
+        if self.ctx.model.is_some() {
+            if let Some(old) = self.ctx.model.take() {
+                GGUF_Unload_Model(old);
+            }
+            // KV 保留在 CPU
+            self.ctx.offloaded_kv = Some(kvs);
+        }
+
+        Ok(())
+    }
+
+    /// 从 .kvcache/ 恢复 session
+    pub fn offload_load(file_id: &str, device_str: &str) -> Result<MlSession, String> {
+        let file_path = Path::new(".kvcache").join(file_id);
+
+        // 1. 反序列化
+        let (kvs, model_path, start, end, _device, rng_state, offset, eos_token_id, chat_template) =
+            Self::deserialize_kv_from_file(&file_path)?;
+
+        let target_device = parse_device_str(device_str)?;
+
+        // 2. 加载模型权重
+        let mut model = GGUF_Load_Model(start, end, &model_path, &target_device)
+            .map_err(|e| format!("offload_load: load model failed: {e}"))?;
+
+        // 3. KV 移到目标 device 并恢复
+        let kvs_device: Vec<(Tensor, Tensor)> = kvs.into_iter()
+            .map(|(k, v)| {
+                let k_dev = k.to_device(&target_device)
+                    .map_err(|e| format!("k to_device: {e}"))?;
+                let v_dev = v.to_device(&target_device)
+                    .map_err(|e| format!("v to_device: {e}"))?;
+                Ok((k_dev, v_dev))
+            })
+            .collect::<Result<_, String>>()?;
+
+        model.model.restore_kv_cache(kvs_device)?;
+
+        // 4. 组装 MlSession
+        let ctx = MlContext {
+            model: Some(model),
+            tokenizer: None,
+            offset,
+            rng_state,
+            eos_token_id,
+            chat_template,
+            device: target_device,
+            offloaded_kv: None,
+            offloaded_model_path: None,
+            offloaded_layer_start: 0,
+            offloaded_layer_end: 0,
+        };
+
+        Ok(MlSession { ctx })
+    }
+
+    // ─── 序列化/反序列化 ──────────────────────────────────
+
+    /// KV 文件魔数
+    const KVCX_MAGIC: [u8; 4] = *b"KVCX";
+    /// KV 文件格式版本
+    const KVCX_VERSION: u32 = 1;
+
+    fn write_u32_le(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn write_u64_le(buf: &mut Vec<u8>, v: u64) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn serialize_kv_to_file(
+        path: &Path,
+        kvs: &[(Tensor, Tensor)],
+        model_path: &Path,
+        start: usize,
+        end: usize,
+        _device: &Device,
+        rng_state: u64,
+        offset: usize,
+        eos_token_id: u32,
+        chat_template: Option<&str>,
+    ) -> Result<(), String> {
+        let mut buf: Vec<u8> = Vec::new();
+
+        // --- header ---
+        buf.extend_from_slice(&Self::KVCX_MAGIC);
+        Self::write_u32_le(&mut buf, Self::KVCX_VERSION);
+
+        let model_path_str = model_path.to_string_lossy();
+        let model_path_bytes = model_path_str.as_bytes();
+        Self::write_u32_le(&mut buf, model_path_bytes.len() as u32);
+        buf.extend_from_slice(model_path_bytes);
+
+        Self::write_u32_le(&mut buf, start as u32);
+        Self::write_u32_le(&mut buf, end as u32);
+
+        Self::write_u64_le(&mut buf, rng_state);
+        Self::write_u64_le(&mut buf, offset as u64);
+        Self::write_u32_le(&mut buf, eos_token_id);
+
+        let ct = chat_template.unwrap_or("");
+        let ct_bytes = ct.as_bytes();
+        Self::write_u32_le(&mut buf, ct_bytes.len() as u32);
+        buf.extend_from_slice(ct_bytes);
+
+        Self::write_u32_le(&mut buf, kvs.len() as u32);
+
+        // --- per-layer KV ---
+        for (k, v) in kvs {
+            Self::serialize_tensor(&mut buf, k)?;
+            Self::serialize_tensor(&mut buf, v)?;
+        }
+
+        std::fs::write(path, &buf)
+            .map_err(|e| format!("write kv file: {e}"))
+    }
+
+    fn serialize_tensor(buf: &mut Vec<u8>, t: &Tensor) -> Result<(), String> {
+        // Convert to F32 for uniform serialization
+        let t_f32 = t.to_dtype(DType::F32)
+            .map_err(|e| format!("to_dtype f32: {e}"))?;
+        let dims = t_f32.dims();
+        let flat: Vec<f32> = t_f32.to_vec1()
+            .map_err(|e| format!("to_vec1: {e}"))?;
+
+        Self::write_u32_le(buf, dims.len() as u32);
+        for d in dims.iter() {
+            Self::write_u64_le(buf, *d as u64);
+        }
+        Self::write_u64_le(buf, flat.len() as u64);
+        let raw: &[u8] = unsafe {
+            std::slice::from_raw_parts(flat.as_ptr() as *const u8, flat.len() * 4)
+        };
+        buf.extend_from_slice(raw);
+
+        Ok(())
+    }
+
+    fn deserialize_kv_from_file(
+        path: &Path,
+    ) -> Result<(Vec<(Tensor, Tensor)>, PathBuf, usize, usize, Device, u64, usize, u32, Option<String>), String> {
+        let data = std::fs::read(path)
+            .map_err(|e| format!("read kv file {}: {e}", path.display()))?;
+        let mut offset = 0usize;
+
+        // --- header ---
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        if &data[offset..offset + 4] != Self::KVCX_MAGIC {
+            return Err("bad magic: not a KVCX file".into());
+        }
+        offset += 4;
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let version = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if version != Self::KVCX_VERSION {
+            return Err(format!("unsupported version: {}", version));
+        }
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let model_path_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        if offset + model_path_len > data.len() { return Err("unexpected EOF".into()); }
+        let model_path_bytes = &data[offset..offset + model_path_len];
+        offset += model_path_len;
+        let model_path = PathBuf::from(
+            std::str::from_utf8(model_path_bytes)
+                .map_err(|e| format!("invalid utf8 in model_path: {e}"))?
+        );
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let start = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        if offset + 8 > data.len() { return Err("unexpected EOF".into()); }
+        let rng_state = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        if offset + 8 > data.len() { return Err("unexpected EOF".into()); }
+        let off = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let eos_token_id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let ct_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        if offset + ct_len > data.len() { return Err("unexpected EOF".into()); }
+        let ct_bytes = &data[offset..offset + ct_len];
+        offset += ct_len;
+        let chat_template = if ct_bytes.is_empty() {
+            None
+        } else {
+            Some(std::str::from_utf8(ct_bytes)
+                .map_err(|e| format!("invalid utf8 in chat_template: {e}"))?
+                .to_string())
+        };
+
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let num_layers = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        // --- per-layer KV ---
+        let mut kvs: Vec<(Tensor, Tensor)> = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            let (k, new_off) = Self::deserialize_tensor(&data, offset)?;
+            offset = new_off;
+            let (v, new_off) = Self::deserialize_tensor(&data, offset)?;
+            offset = new_off;
+            kvs.push((k, v));
+        }
+
+        Ok((kvs, model_path, start, end, Device::Cpu, rng_state, off, eos_token_id, chat_template))
+    }
+
+    fn deserialize_tensor(data: &[u8], mut offset: usize) -> Result<(Tensor, usize), String> {
+        if offset + 4 > data.len() { return Err("unexpected EOF".into()); }
+        let ndim = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        let mut shape: Vec<usize> = Vec::with_capacity(ndim);
+        for _ in 0..ndim {
+            if offset + 8 > data.len() { return Err("unexpected EOF".into()); }
+            shape.push(u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize);
+            offset += 8;
+        }
+
+        if offset + 8 > data.len() { return Err("unexpected EOF".into()); }
+        let data_len = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        if offset + data_len > data.len() { return Err("unexpected EOF".into()); }
+        let raw = &data[offset..offset + data_len];
+        offset += data_len;
+
+        let elem_count = raw.len() / 4;
+        let f32s: &[f32] = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr() as *const f32, elem_count)
+        };
+
+        let t = Tensor::from_vec(f32s.to_vec(), shape.as_slice(), &Device::Cpu)
+            .map_err(|e| format!("from_vec: {e}"))?;
+
+        Ok((t, offset))
+    }
+
     // ─── 辅助 ──────────────────────────────────────────────
 
     fn extract_last_logits(logits: &Tensor) -> Result<Tensor, String> {
@@ -630,6 +1028,19 @@ impl mlua::UserData for MlSession {
         methods.add_method_mut("set_seed", |_, sess, seed: u64| {
             sess.set_seed(seed);
             Ok(())
+        });
+
+        // ─── Offloading ────────────────────────────────────
+        methods.add_method_mut("offload_to_cpu", |_, sess, (): ()| {
+            sess.offload_to_cpu().map_err(|e| mlua::Error::runtime(e))
+        });
+
+        methods.add_method_mut("offload_to_cuda", |_, sess, (): ()| {
+            sess.offload_to_cuda().map_err(|e| mlua::Error::runtime(e))
+        });
+
+        methods.add_method_mut("offload_save", |_, sess, file_id: String| {
+            sess.offload_save(&file_id).map_err(|e| mlua::Error::runtime(e))
         });
     }
 }

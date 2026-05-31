@@ -258,6 +258,14 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    ml.set(
+        "offload_load",
+        lua.create_function(|_, (file_id, device): (String, String)| {
+            MlSession::offload_load(&file_id, &device)
+                .map_err(|e| mlua::Error::runtime(e))
+        })?,
+    )?;
+
     lua.globals().set("ml", ml)?;
     Ok(())
 }
