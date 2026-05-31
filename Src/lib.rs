@@ -82,6 +82,7 @@ pub use ml_engine::{
     GGUF_Encode, GGUF_Decode, Inference_Config,
 };
 pub use ml_engine::MlSession;
+pub use ml_engine::context::Message;
 pub use ml_engine::{analyze_model, split_model};
 
 // PeerManagement模块类型导出
