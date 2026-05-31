@@ -71,3 +71,40 @@ DeepSeek V4 Flash 发布时采用 FP8/FP4 存储 (2025 年最新精度)。
   - DeepSeek V4 Flash: 580GB (FP4×4 + FP8×2, 膨胀 3.6×)
 
 这就好比别人送你一辆用特殊燃料的跑车——车是好车，但你手里只有 95 号汽油。\n```
+
+---
+
+## 有没有办法绕过？
+
+**技术上可以，但需要大幅修改系统架构。**
+
+核心思路是 **swap layer 策略**：
+
+```
+CPU RAM (935GB) ← 存完整的 BF16 权重 (~580GB)
+GPU VRAM (80GB) ← 只加载当前计算层 + 下一层预取
+
+推理时:
+  1. GPU 加载 Layer 0 → 计算 → 输出 hidden
+  2. GPU 释放 Layer 0，预加载 Layer 2
+  3. GPU 加载 Layer 1 → 计算
+  4. 如此往复...
+
+每 GPU 峰值: 2 层 BF16 (~10GB) + KV cache ≈ 15GB → 完全没有压力
+```
+
+为什么目前做不到：
+
+| 需要的改动 | 说明 |
+|-----------|------|
+| **新 Storage 层** | 需实现 `LayerSwapManager`，管理 CPU↔GPU 数据传输 |
+| **异步预取** | 当前层计算时，后台 stream 预取下一层 |
+| **流水线调度** | 协调 compute stream 和 copy stream 不阻塞 |
+| **内存管理** | GPU 显存分配器需支持动态换入换出 |
+| **Orchestrator 改造** | Core 主循环需感知 layer swap 事件 |
+
+这不是"加一个功能"，而是**重构 ML Engine 的内存模型**。candle 目前的设计是将模型完整加载到设备上，不支持流式加载。需要从 `GGUF_Load_Model` 开始改造为 `GGUF_Stream_Layer` 模式。
+
+> 类比：现在 Pleiades 的 GPU 是一间 80m² 的房间，我们的家具（模型权重）是 580m² 的。swap layer 就是把家具存在走廊（CPU RAM），需要时搬进房间用完再搬出去。走廊够大（935GB），但需要"搬家工人"（GPU copy engine）和"调度员"（异步预取）——这两者目前都没有。
+
+**不是不能做，但这是几个月的大工程，不是短期可以完成的。**
