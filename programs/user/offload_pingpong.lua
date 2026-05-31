@@ -2,115 +2,99 @@
 -- Date ： 2026-06-01
 
 COMMAND = "offload_pingpong"
-DESCRIPTION = "单机双 Session 轮流 offload ML Thread — 一个 ML 线程管理两个 Session，通过 offload 交替推理"
+DESCRIPTION = "分层 offload 推理 — 两个 MlContext 轮流加载模型前后半段，服务一个 Session"
+
+-- 场景:
+--   模型太大，单 GPU 放不下完整模型。
+--   sess_first: 加载前半层 (0..mid)，forward → hidden → offload_to_cpu
+--   sess_second: 加载后半层 (mid+1..end)，hidden → forward → logits → 送回 Session
+--   两个 context 轮换使用 GPU，通过 offload 暂存对方状态
 
 -- 用法:
---   session create <model>        → 创建 Session A (得到 id=1)
---   session create <model>        → 创建 Session B (得到 id=2)
---   session inference offload_pingpong 1 <model>  → 启动 ML Thread
---     （session_B 参数由 session_id+1 自动推导）
---
--- 或者显式指定两个 session:
---   exec offload_pingpong session_A=1 session_B=2 model_path=<model>
+--   session create <model>              → 创建 Session
+--   session inference offload_pingpong <sid> <model>  → 启动分层 ML Thread
 
 function execute(params)
-    -- 支持两种参数方式：
-    -- 1. session inference 调用: params.session_id (字符串), params.model_path
-    -- 2. exec 调用: params.session_A, params.session_B (都是字符串), params.model_path
-    local session_id_A = params.session_A or params.session_id
-    local session_id_B = params.session_B or tostring(tonumber(session_id_A) + 1)
+    local session_id = params.session_id
     local model_path = params.model_path
 
-    caps.print("===== Offload Ping-Pong ML Thread =====")
-    caps.print("Session A: " .. session_id_A)
-    caps.print("Session B: " .. session_id_B)
+    caps.print("===== 分层 Offload ML Thread =====")
+    caps.print("Session: " .. session_id)
 
-    -- 1. 通过 Storage 获取模型路径
+    -- 1. 通过 Storage 获取模型路径 + 分析层数
     local handle = caps.storage_acquire_read(model_path)
     local path = handle:path()
     caps.print("模型路径: " .. path)
 
-    -- 2. 创建 MlSession（在 GPU 上）
-    local sess = ml.new("cuda")
-    local eos = sess:get_eos()
+    local arch = ml.analyze_model(path)
+    local total_layers = arch.num_layers + 2  -- embedding + blocks + output
+    local mid = math.floor(total_layers / 2)
+    caps.print(string.format("总层数: %d, 前半: 0..%d, 后半: %d..%d",
+        total_layers, mid - 1, mid, total_layers - 1))
 
-    -- 3. 打开两个 Session 的 stream（Session 的 tokio task 在 session create 时就已启动并在 accept_async 等待）
-    local stream_A = local_tensor.open_stream("ml-" .. session_id_A)
-    caps.print("Session A stream 已连接 (ml-" .. session_id_A .. ")")
+    -- 2. 创建两个空壳 MlSession（GPU）
+    local sess_first = ml.new("cuda")
+    local sess_second = ml.new("cuda")
+    local eos = sess_first:get_eos()
 
-    local stream_B = local_tensor.open_stream("ml-" .. session_id_B)
-    caps.print("Session B stream 已连接 (ml-" .. session_id_B .. ")")
-
+    -- 3. 连接 Session 的 stream
+    local stream = local_tensor.open_stream("ml-" .. session_id)
+    caps.print("Stream 已连接 (ml-" .. session_id .. ")")
     handle:release()
-    caps.print("ML Thread 就绪，开始乒乓推理 ...\n")
+    caps.print("ML Thread 就绪，等待 tensor ...\n")
 
     -- ================================================================
-    -- 乒乓循环：在 A 和 B 之间交替
+    -- 推理循环
     -- ================================================================
-    local active = "A"  -- 当前活跃的 session
-    local round = 0
 
-    -- 每个 session 的上下文状态
-    local ctx = {
-        A = { stream = stream_A, offloaded = false, offset = 0 },
-        B = { stream = stream_B, offloaded = false, offset = 0 },
-    }
-
-    -- 加载模型到 GPU（首次）
-    sess:load_model(path, 0, 999999)
-    caps.print("模型已加载到 GPU")
+    -- 预加载前半段到 GPU（首次 prefill 用）
+    caps.print("预加载前半段模型 (0.." .. (mid-1) .. ") 到 GPU ...")
+    sess_first:load_model(path, 0, mid - 1)
 
     while true do
-        round = round + 1
-        local cur = ctx[active]
-        caps.print(string.format("\n--- Round %d: Session %s ---", round, active))
+        -- ── 接收 tensor ──────────────────────────────────────────
+        local tensor, offset = local_tensor.recv_tensor(stream, "cuda")
 
-        -- 如果当前 session 之前被 offload 了，先恢复到 GPU
-        if cur.offloaded then
-            caps.print("Session " .. active .. ": 从 CPU 恢复到 GPU ...")
-            sess:offload_to_cuda()
-            cur.offloaded = false
+        -- offset=0 表示新一轮对话
+        if offset == 0 then
+            caps.print("\n--- 新一轮对话 ---")
+            sess_first:reset_kv_cache()
+            sess_second:reset_kv_cache()
         end
 
-        -- 处理来自 Session 的推理请求（最多处理 3 个 request，然后切换）
-        local requests_handled = 0
-        while requests_handled < 3 do
-            -- 接收 tensor（带超时，超时后切换 session）
-            local ok, result = pcall(function()
-                return local_tensor.recv_tensor(cur.stream, "cuda")
-            end)
+        -- ── 前半段 forward ───────────────────────────────────────
+        local hidden = sess_first:forward(tensor, offset)
+        caps.print(string.format("前半段 forward 完成 (offset=%d)", offset))
 
-            if not ok then
-                caps.print("Session " .. active .. ": 无更多请求，准备切换")
-                break
-            end
+        -- Offload 前半段 → CPU，释放 GPU
+        sess_first:offload_to_cpu()
 
-            local tensor, offset = result
-
-            -- offset=0 表示新一轮对话
-            if offset == 0 then
-                sess:reset_kv_cache()
-                cur.offset = 0
-            end
-
-            -- Forward
-            local logits = sess:forward(tensor, offset)
-            local_tensor.send_tensor(cur.stream, logits, offset)
-            cur.offset = offset + 1
-            requests_handled = requests_handled + 1
+        -- ── 后半段 forward ───────────────────────────────────────
+        -- 如果是第一轮，先加载后半段模型
+        if offset == 0 then
+            caps.print(string.format("加载后半段模型 (%d..%d) 到 GPU ...", mid, total_layers - 1))
+            sess_second:load_model(path, mid, total_layers - 1)
+        else
+            -- 不是第一轮：后半段从 CPU 恢复到 GPU
+            sess_second:offload_to_cuda()
         end
 
-        -- 收到 EOF（offset=u64::MAX, length=0），退出循环
-        if requests_handled == 0 and cur.offloaded == false then
-            -- 可能 session 已关闭
-        end
+        -- 后半段 forward（hidden 需要转到 GPU 上）
+        -- hidden 在 sess_first 的 device 上（现在是 CPU offload 状态）
+        -- 但 offload_to_cpu 时 hidden tensor 引用已被 clone，仍在 GPU
+        -- 实际上 forward 返回的 hidden 是在 forward 调用时 sess_first 还在 GPU 上，
+        -- 所以 hidden 在 GPU 上，可以直接给 sess_second 用
+        local logits = sess_second:forward(hidden, offset)
+        caps.print(string.format("后半段 forward 完成 (offset=%d)", offset))
 
-        -- Offload 当前 session 到 CPU，切换到另一个
-        caps.print("Session " .. active .. ": offload to CPU ...")
-        sess:offload_to_cpu()
-        cur.offloaded = true
+        -- Offload 后半段 → CPU，释放 GPU
+        sess_second:offload_to_cpu()
 
-        -- 切换
-        active = (active == "A") and "B" or "A"
+        -- ── 发送结果 ─────────────────────────────────────────────
+        local_tensor.send_tensor(stream, logits, offset)
+
+        -- ── 恢复前半段到 GPU，准备下一轮 ─────────────────────────
+        sess_first:offload_to_cuda()
+        caps.print("前半段已恢复到 GPU，准备下一轮")
     end
 end
