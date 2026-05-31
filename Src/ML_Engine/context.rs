@@ -149,10 +149,19 @@ impl MlSession {
     /// 仅加载 tokenizer，不加载模型权重。
     ///
     /// 从 GGUF/PGGUF 文件中提取 tokenizer 和 eos_token_id。
-    /// 适合只需要 encode/decode 能力的场景（如 Session）。
+    /// 失败时只打印 warn，不阻塞模型推理。
     pub fn load_tokenizer(&mut self, path: &Path) -> Result<(), String> {
-        let tokenizer = shimmytok::Tokenizer::from_gguf_file(path)
-            .map_err(|e| format!("Failed to load tokenizer from {}: {}", path.display(), e))?;
+        let tokenizer = match shimmytok::Tokenizer::from_gguf_file(path) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(
+                    "load_tokenizer failed for {}: {} (tokenizer will not be available)",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        };
 
         // 同时从文件中解析 eos_token_id
         let arch_info = super::gguf_model_manager::GGUF_Analyze(path)
