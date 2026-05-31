@@ -100,20 +100,22 @@ sess = ml.offload_load(file_id, device)  -- 从 .kvcache/{file_id} 恢复
 **offload_to_cpu / offload_to_cuda**：
 1. `extract_kv_cache()` 提取所有层 KV
 2. 调用 `GGUF_Load_Model(start, end, path, new_device)` 在新 device 上重建权重
-3. `restore_kv_cache()` 将 KV 恢复到新模型
-4. 恢复 rng_state、offset、eos_token_id、chat_template
+3. ⚠️ **释放原设备上的旧模型**：`GGUF_Unload_Model(old_model)` 显式 drop，释放原设备显存/内存
+4. `restore_kv_cache()` 将 KV 恢复到新模型
+5. 恢复 rng_state、offset、eos_token_id、chat_template
 
 **offload_save**：
 1. `extract_kv_cache()` 提取 KV
 2. 对每层 k/v Tensor 调用 `to_vec1::<f32>()` 获取 raw bytes
 3. 写入 header + 逐层数据到 `.kvcache/{file_id}`
+4. ⚠️ **释放模型**：`sess:unload()` 释放设备显存/内存（模型已持久化到磁盘，无需继续占用）
 
 **offload_load**：
 1. 读取 `.kvcache/{file_id}`，解析 header
-2. 调用 `GGUF_Load_Model` 加载权重
+2. 调用 `GGUF_Load_Model` 在指定 device 上加载权重
 3. `Tensor::from_vec()` 重建 KV tensor
 4. `restore_kv_cache()` 恢复
-5. 恢复 runtime 状态
+5. 恢复 runtime 状态，返回新 `MlSession`
 
 ### 依赖
 
