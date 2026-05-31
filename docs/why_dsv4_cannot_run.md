@@ -24,7 +24,7 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 
 ### 2. 推理计算
 
-| | Q4_K_M (Qwen3) | FP8/FP4 (DeepSeek V4) |
+| | Q4_K_M (Qwen3) | FP8/FP4 (DeepSeek V4 Flash) |
 |---|---|---|
 | candle 是否支持直接计算 | ✅ `QMatMul` 有 Q4_K_M kernel | ❌ 没有 FP8/FP4 matmul kernel |
 | 是否需要运行时 dequant | 不需要（量化 kernel 直接算） | **必须** dequant 到 BF16 再算 |
@@ -41,7 +41,7 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 
 **结论**: DeepSeek V4 的 MLA 结构与标准 Transformer 完全不同：
 - Qwen3: Q/K/V 投影 → attention → FFN
-- DeepSeek V4: `wq_a/wq_b` 压缩投影 → `wkv` 联合 KV → `wo_a/wo_b` 输出 → `compressor` → `indexer` → MoE
+- DeepSeek V4 Flash: `wq_a/wq_b` 压缩投影 → `wkv` 联合 KV → `wo_a/wo_b` 输出 → `compressor` → `indexer` → MoE
 
 这不是"参数多一点"的差异，是架构层的差异。
 
@@ -68,6 +68,6 @@ DeepSeek V4 Flash 发布时采用 FP8/FP4 存储 (2025 年最新精度)。
 
 反量化到 BF16 之后:
   - Qwen3 235B:  135GB (Q4_K_M ≈ 4-bit, kernel 原生支持)
-  - DeepSeek V4: 580GB (FP4×4 + FP8×2, 膨胀 3.6 倍)
+  - DeepSeek V4 Flash: 580GB (FP4×4 + FP8×2, 膨胀 3.6×)
 
 这就好比别人送你一辆用特殊燃料的跑车——车是好车，但你手里只有 95 号汽油。\n```
