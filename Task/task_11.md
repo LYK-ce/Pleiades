@@ -16,7 +16,7 @@
 | 11.3 | Session Inference 支持用户自定义 ML Thread 脚本 | 3 | ✅ |
 | 11.4 | 用户 split.lua 脚本 — PGGUF 均分切分 (含 tokenizer 分配) | 4 | ✅ |
 | 11.5 | 分布式流水线推理 pipe_1/pipe_2 — session inference + rexec 自动编排 | 3 | ✅ |
-| 11.6 | CPU/GPU 混合流水线 pipe_3/pipe_4 — 单个分片内 CPU+GPU 分层加载 | 2 | ⬜ |
+| 11.6 | CPU/GPU 混合流水线 pipe_3/pipe_4 — 单个分片内 CPU+GPU 分层加载 | 2 | ✅ |
 
 ---
 
