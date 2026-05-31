@@ -600,7 +600,17 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
     let mut metadata_pairs: Vec<(String, gguf_file::Value)> = content
         .metadata
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            // 规范化：shimmytok 不支持 U8/I8/U16/I16，统一转 U32/I32
+            let v = match v {
+                gguf_file::Value::U8(x) => gguf_file::Value::U32(*x as u32),
+                gguf_file::Value::I8(x) => gguf_file::Value::I32(*x as i32),
+                gguf_file::Value::U16(x) => gguf_file::Value::U32(*x as u32),
+                gguf_file::Value::I16(x) => gguf_file::Value::I32(*x as i32),
+                other => other.clone(),
+            };
+            (k.clone(), v)
+        })
         .collect();
     metadata_pairs.push((
         "pleiades.model_id".to_string(),
