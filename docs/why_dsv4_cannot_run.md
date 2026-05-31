@@ -20,7 +20,7 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 | GGUF 格式是否支持该精度 | ✅ Q4_K_M 是标准量化类型 | ❌ GGUF 规范没有 FP8/FP4 类型码 |
 | 转换后 BF16 大小 | Q4_K_M ≈ 60GB | BF16 ≈ **580GB** (FP4→BF16 膨胀 4×) |
 
-**结论**: 必须在 Python 侧做 FP8/FP4 → BF16 dequant 才能写入 PGGUF，文件从 160GB 膨胀到 ~320GB。
+**结论**: DeepSeek V4 采用 FP8/FP4 存储是先进的压缩技术——safetensors 只有 160GB。但 **candle 等开源推理后端不支持 FP8/FP4 直接运算**，必须反量化到 BF16 才能做矩阵乘法。FP4→BF16 膨胀 4 倍，导致从 160GB 暴增到 ~580GB——4 张 A100 根本放不下。
 
 ### 2. 推理计算
 
@@ -59,10 +59,15 @@ Qwen3 235B MoE 有社区维护的量化版 GGUF 文件 + Pleiades 已有完整 R
 ## 本质原因
 
 ```
-DeepSeek V4 Flash 是 2025 年发布的最新模型，使用 FP8(2023) + FP4(2025) 精度。
-这两个精度依赖 NVIDIA H100/H200/B200 的硬件 tensor core，开源生态尚未跟进。
-```
+DeepSeek V4 Flash 发布时采用 FP8/FP4 存储 (2025 年最新精度)。
+这确实是黑科技——160GB 能存 284B 参数。
 
-Qwen3 用的是 2023 年的 Q4_K_M 量化——这个已经在 llama.cpp 生态里打磨了 3 年，candle 完全集成。
+但问题在于：这些格式依赖 NVIDIA H100/H200/B200 的专用 tensor core
+做硬件加速，而开源推理框架 (candle, llama.cpp, vLLM 社区版) 的
+矩阵乘法 kernel 根本不知道 FP8/FP4 是什么。
 
-**等社区有人把 DeepSeek V4 转成 GGUF Q4_K_M 的那一天，它就也能跑了。**
+反量化到 BF16 之后:
+  - Qwen3 235B:  60GB  (Q4_K_M 的 kernel 原生支持, 不膨胀)
+  - DeepSeek V4: 580GB (FP4×4 + FP8×2, 膨胀了 3.6 倍)
+
+这就好比别人送你一辆用特殊燃料的跑车——车是好车，但你手里只有 95 号汽油。\n```
