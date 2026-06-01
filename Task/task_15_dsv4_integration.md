@@ -113,9 +113,41 @@ GGUF_Load_Model:
 | **KV cache** | ~80 行 | `Mla` 加 `kv_cache: Option<Tensor>`，forward 改 `&mut self`，新 token 拼接缓存而非重算全部 |
 | **hash routing** | ~10 行 | 加载前 3 层 `layers.{n}.ffn.gate.tid2eid`，`Gate::route_hashed` 查表 |
 
-**涉及文件**：
-- `Src/ML_Engine/GGUF_Models/deepseek_v4/attention.rs` — 加 KV cache
+#### 现有 KV cache 基础设施（需感知）
+
+代码库已有完善的 KV cache 体系，DeepSeek V4 需对齐：
+
+| 组件 | 位置 | 说明 |
+|------|------|------|
+| `MLA_KV_Cache` | `deepseek_v3.rs:48` | V3 的 MLA 压缩 KV 缓存，存 kv_latent 而非完整 K/V，有 `Append`/`Reset`。V4 也走 MLA，可直接复用设计 |
+| `Clear_Kv_Cache` | `gguf_model.rs:770` | 清除全部层 KV，每轮对话前调用。V4 需在 `DeepSeekV4Model` 和 `attention.rs` 实现对应方法 |
+| `extract_kv_cache` | `gguf_model.rs:66` | 提取全部层 KV 用于 offload。支持 Qwen3/Qwen3MoE/DeepSeekV3 三个分支，需新增 V4 分支 |
+| `restore_kv_cache` | `gguf_model.rs:108` | 恢复 KV 到各层。同上，需新增 V4 分支 |
+| `offload_to_cpu/cuda` | `context.rs:547` | MlSession 的 KV offload 管理，调用 extract/restore |
+| `save_kv_cache/load_kv_cache` | `context.rs:608` | `.kvcache/` 目录持久化，启动时 `main.rs:72` 自动创建目录 |
+| `reset_kv_cache` | `context.rs:519` | MlSession 暴露的 Lua API：`sess:reset_kv_cache()` |
+
+**V4 特有考虑：**
+
+- V4 的 KV 是单头 latent（`head_dim=512`，1 个 KV 头），比 V3 更简单，缓存量极小（~1KB/token/layer）
+- V4 的 `Compressor` 和 `Indexer` 有中间状态（compressed KV blocks、indexer scores），但这些都是 per-forward 重算的，不需要缓存
+- MScanter 的 `forward` 目前接受 `start_pos` 参数，天然支持增量推理——只需在 `Mla` 结构体保存上一轮的 KV tensor
+
+#### 现有 weight_format 兼容性
+
+已有 PGGUF 文件不含 `pleiades.weight_format` key。加载逻辑用 `match` 兜底：
+
+```rust
+match metadata.get("pleiades.weight_format") {
+    Some("safetensors") => /* V4 新路径 */,
+    _                   => /* 现有 GGUF 路径，兼容全部已有模型 */,
+}
+```
+
+涉及文件：
+- `Src/ML_Engine/GGUF_Models/deepseek_v4/attention.rs` — 加 KV cache（参考 `MLA_KV_Cache`）
 - `Src/ML_Engine/GGUF_Models/deepseek_v4/moe.rs` — 加 hash routing
+- `Src/ML_Engine/gguf_model.rs` — `extract_kv_cache`/`restore_kv_cache` 加 V4 分支
 
 ---
 
