@@ -21,7 +21,8 @@
 
 use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Tensor, D};
-use candle_nn::{Activation, Embedding, Module};
+use candle_nn::{Activation, Embedding, Linear, Module};
+use candle_transformers::fused_moe::FusedMoeGGUF;
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use std::collections::HashMap;
@@ -348,108 +349,117 @@ impl MLA_Weights {
 // DeepSeekMoE 权重 — Mixture of Experts
 // ============================================================
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeepSeekMoE_Weights {
-    // 共享 expert（始终激活，所有 token 经过）
     pub shared_gate: QMatMul,
     pub shared_up: QMatMul,
     pub shared_down: QMatMul,
-
-    // 细粒度 routed experts
-    pub expert_gates: Vec<QMatMul>,     // [n_routed_experts]
-    pub expert_ups: Vec<QMatMul>,
-    pub expert_downs: Vec<QMatMul>,
-
-    // 路由权重: [hidden, n_routed_experts]
-    pub router: QMatMul,
-
-    // 配置
-    pub n_routed_experts: usize,
-    pub top_k: usize,
-    pub routed_scaling_factor: f64,     // V3.2 中 e_score 的缩放因子
-
+    pub routed: Arc<FusedMoeGGUF>,
+    pub routed_scaling_factor: f64,
     span: tracing::Span,
 }
 
+impl std::fmt::Debug for DeepSeekMoE_Weights {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeepSeekMoE_Weights")
+            .field("routed_scaling_factor", &self.routed_scaling_factor)
+            .finish()
+    }
+}
+
 impl DeepSeekMoE_Weights {
-    /// 从 Gguf reader 加载 MoE 权重
     pub fn New<R: Read + Seek>(
         gg: &mut Gguf<R>,
         n_routed_experts: usize,
         top_k: usize,
         routed_scaling_factor: f64,
+        dtype: DType,
         prefix: &str,
     ) -> Result<Self> {
-        // 共享 expert
-        let shared_gate = gg.Qmatmul(&format!("{prefix}.ffn_gate.weight"))?;
-        let shared_up = gg.Qmatmul(&format!("{prefix}.ffn_up.weight"))?;
-        let shared_down = gg.Qmatmul(&format!("{prefix}.ffn_down.weight"))?;
+        let shared_gate = gg.Qmatmul(&format!("{prefix}.ffn_gate_shexp.weight"))?;
+        let shared_up = gg.Qmatmul(&format!("{prefix}.ffn_up_shexp.weight"))?;
+        let shared_down = gg.Qmatmul(&format!("{prefix}.ffn_down_shexp.weight"))?;
 
-        // Router (gate 网络): [hidden, n_routed_experts]
-        // GGUF 中可能有不同的命名: ffn_gate.weight 或 ffn_gate_inp.weight
-        let router = gg.Qmatmul(&format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_gate_exps.weight"))?);
+        let up_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_up_exps.weight"))?);
+        let down_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_down_exps.weight"))?);
+        let gate_qt = gg.Tensor(&format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate = Linear::new(gate_qt.dequantize(&gg.device)?.to_dtype(DType::F32)?, None);
 
-        // 细粒度 experts
-        let mut expert_gates = Vec::with_capacity(n_routed_experts);
-        let mut expert_ups = Vec::with_capacity(n_routed_experts);
-        let mut expert_downs = Vec::with_capacity(n_routed_experts);
-        for e in 0..n_routed_experts {
-            expert_gates.push(gg.Qmatmul(&format!("{prefix}.ffn_gate.{e}.weight"))?);
-            expert_ups.push(gg.Qmatmul(&format!("{prefix}.ffn_up.{e}.weight"))?);
-            expert_downs.push(gg.Qmatmul(&format!("{prefix}.ffn_down.{e}.weight"))?);
-        }
+        let routed = Arc::new(FusedMoeGGUF {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: Activation::Silu,
+            norm_topk_prob: false,
+            num_experts_per_tok: top_k,
+            dtype,
+        });
 
-        let span = tracing::span!(tracing::Level::TRACE, "moe");
         Ok(Self {
             shared_gate, shared_up, shared_down,
-            expert_gates, expert_ups, expert_downs,
-            router,
-            n_routed_experts,
-            top_k,
+            routed,
             routed_scaling_factor,
-            span,
+            span: tracing::span!(tracing::Level::TRACE, "moe"),
         })
     }
 
-    /// 从已提取的 QTensors 构建
     pub fn From_Extracted(
         tensors: &mut HashMap<String, QTensor>,
         n_routed_experts: usize,
         top_k: usize,
         routed_scaling_factor: f64,
+        dtype: DType,
+        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
-        fn Take_Qmatmul(tensors: &mut HashMap<String, QTensor>, key: &str) -> Result<QMatMul> {
-            let qt = tensors
-                .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
-            QMatMul::from_weights(Arc::new(qt))
-        }
+        let shared_gate = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_gate_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_shexp.weight")))?.into()
+        )?;
+        let shared_up = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_up_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up_shexp.weight")))?.into()
+        )?;
+        let shared_down = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_down_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down_shexp.weight")))?.into()
+        )?;
 
-        let shared_gate = Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate.weight"))?;
-        let shared_up = Take_Qmatmul(tensors, &format!("{prefix}.ffn_up.weight"))?;
-        let shared_down = Take_Qmatmul(tensors, &format!("{prefix}.ffn_down.weight"))?;
+        let gate_qt = tensors.remove(&format!("{prefix}.ffn_gate_inp.weight"))
+            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_inp.weight")))?;
+        let gate = Linear::new(gate_qt.dequantize(device)?.to_dtype(DType::F32)?, None);
 
-        let router = Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_gate_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_exps.weight")))?
+        );
+        let up_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_up_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up_exps.weight")))?
+        );
+        let down_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_down_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down_exps.weight")))?
+        );
 
-        let mut expert_gates = Vec::with_capacity(n_routed_experts);
-        let mut expert_ups = Vec::with_capacity(n_routed_experts);
-        let mut expert_downs = Vec::with_capacity(n_routed_experts);
-        for e in 0..n_routed_experts {
-            expert_gates.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate.{e}.weight"))?);
-            expert_ups.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_up.{e}.weight"))?);
-            expert_downs.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_down.{e}.weight"))?);
-        }
+        let routed = Arc::new(FusedMoeGGUF {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: Activation::Silu,
+            norm_topk_prob: false,
+            num_experts_per_tok: top_k,
+            dtype,
+        });
 
-        let span = tracing::span!(tracing::Level::TRACE, "moe");
         Ok(Self {
             shared_gate, shared_up, shared_down,
-            expert_gates, expert_ups, expert_downs,
-            router,
-            n_routed_experts,
-            top_k,
+            routed,
             routed_scaling_factor,
-            span,
+            span: tracing::span!(tracing::Level::TRACE, "moe"),
         })
     }
 
@@ -464,99 +474,27 @@ impl DeepSeekMoE_Weights {
     /// 6. 最终输出 = shared_out + sum(routed expert outputs × weight) × scaling_factor
     pub fn Forward(&self, x: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
-
-        // ── 共享 expert ──
         let gate = self.shared_gate.forward(x)?.apply(&Activation::Silu)?;
         let up = self.shared_up.forward(x)?;
         let shared_out = self.shared_down.forward(&(gate * up)?)?;
-
-        // ── Router: log_softmax → top-k → softmax ──
-        let router_logits = self.router.forward(x)?; // [b, l, n_routed_experts]
-
-        // log_softmax on all logits  
-        let log_sm = candle_nn::ops::log_softmax(&router_logits, 2)?;
-
-        // arg_sort descending → indices, then narrow to top_k
-        let sorted_idx = log_sm.arg_sort_last_dim(false)?; // [b, l, n_experts], descending
-        let topk_idx = sorted_idx.narrow(2, 0, self.top_k)?; // [b, l, top_k]
-
-        // Gather top-k log_softmax values and softmax them
-        let topk_log_sm = log_sm.gather(&topk_idx, D::Minus1)?; // [b, l, top_k]
-        let topk_weights = candle_nn::ops::softmax(&topk_log_sm, 2)?; // sum=1 within top-k
-
-        // ── Routed experts: 逐 token 计算 ──
-        let (b, l, _k) = topk_weights.dims3()?;
-        let mut routed_out: Option<Tensor> = None;
-
-        for bi in 0..b {
-            for li in 0..l {
-                let x_tok = x.get(bi)?.get(li)?;
-                let weights_row = topk_weights.get(bi)?.get(li)?; // [top_k]
-                let idx_row = topk_idx.get(bi)?.get(li)?; // [top_k]
-                let weights_vec: Vec<f32> = weights_row.to_vec1()?;
-                let idx_vec: Vec<u32> = idx_row.to_vec1()?;
-
-                let mut tok_sum: Option<Tensor> = None;
-                for ki in 0..idx_vec.len() {
-                    let expert_id = idx_vec[ki] as usize;
-                    let weight = weights_vec[ki];
-                    if weight > 0.0 && expert_id < self.expert_gates.len() {
-                        let e_gate = self.expert_gates[expert_id].forward(&x_tok)?.apply(&Activation::Silu)?;
-                        let e_up = self.expert_ups[expert_id].forward(&x_tok)?;
-                        let e_out = self.expert_downs[expert_id].forward(&(e_gate * e_up)?)?;
-                        let weighted = (&e_out * (weight as f64))?;
-                        tok_sum = match tok_sum {
-                            None => Some(weighted),
-                            Some(s) => {
-                                let sum = (&s + &weighted)?;
-                                Some(sum)
-                            }
-                        };
-                    }
-                }
-
-                let tok_result = tok_sum.unwrap_or_else(|| {
-                    Tensor::zeros(x_tok.shape(), x_tok.dtype(), x_tok.device()).unwrap()
-                });
-
-                let tok_result = tok_result.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, hidden]
-                routed_out = match routed_out {
-                    None => Some(tok_result),
-                    Some(prev) => {
-                        if li == 0 && bi > 0 {
-                            Some(Tensor::cat(&[&prev, &tok_result], 0)?)
-                        } else if li == 0 {
-                            Some(tok_result)
-                        } else {
-                            let last_row_idx = prev.dim(0)? - 1;
-                            let last_row = prev.get(last_row_idx)?;
-                            let new_row = Tensor::cat(&[&last_row, &tok_result], 1)?;
-                            if last_row_idx == 0 {
-                                Some(new_row)
-                            } else {
-                                let prefix = prev.narrow(0, 0, last_row_idx)?;
-                                Some(Tensor::cat(&[&prefix, &new_row], 0)?)
-                            }
-                        }
-                    }
-                };
-            }
-        }
-
-        let routed_out = routed_out.unwrap_or_else(|| {
-            Tensor::zeros(x.shape(), x.dtype(), x.device()).unwrap()
-        });
-
-        // ── 合并 ──
-        let routed_scaled = (&routed_out * self.routed_scaling_factor)?;
-        &shared_out + &routed_scaled
+        let routed_out = self.routed.forward(x, false)?;
+        &shared_out + &(routed_out * self.routed_scaling_factor)?
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DeepSeekFFN {
     Dense(Mlp_Weights),
     MoE(DeepSeekMoE_Weights),
+}
+
+impl std::fmt::Debug for DeepSeekFFN {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dense(_) => write!(f, "Dense(Mlp)"),
+            Self::MoE(_) => write!(f, "MoE(..)"),
+        }
+    }
 }
 
 impl DeepSeekFFN {
@@ -606,7 +544,7 @@ impl DeepSeek_Layer {
             rms_norm_eps, rotary, &prefix,
         )?;
         let moe = DeepSeekMoE_Weights::New(
-            gg, n_routed_experts, top_k, routed_scaling_factor, &prefix,
+            gg, n_routed_experts, top_k, routed_scaling_factor, DType::F16, &prefix,
         )?;
         Ok(Self { mla, ffn: DeepSeekFFN::MoE(moe), ln1, ln2 })
     }
@@ -626,6 +564,8 @@ impl DeepSeek_Layer {
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
         layer_idx: usize,
+        device: &Device,
+        dtype: DType,
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
 
@@ -651,7 +591,7 @@ impl DeepSeek_Layer {
             keys.sort();
             tracing::info!("MoE layer {}: tensors={:?}", layer_idx, keys);
             DeepSeekFFN::MoE(DeepSeekMoE_Weights::From_Extracted(
-                tensors, n_routed_experts, top_k, routed_scaling_factor, &prefix,
+                tensors, n_routed_experts, top_k, routed_scaling_factor, dtype, device, &prefix,
             )?)
         } else {
             DeepSeekFFN::Dense(Mlp_Weights::New_Dense(tensors, &prefix)?)

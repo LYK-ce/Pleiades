@@ -581,6 +581,8 @@ pub fn GGUF_Load_Model(
                 ds_config.rms_norm_eps,
                 rotary.clone(),
                 blk_idx,
+                device,
+                model_dtype,
             )
             .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
             layers.push(layer);
