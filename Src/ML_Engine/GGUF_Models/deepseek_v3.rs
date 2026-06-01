@@ -259,14 +259,14 @@ impl MLA_Weights {
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
         let (b, l, _) = x.dims3()?;
-        tracing::debug!("MLA forward: b={} l={} n_heads={} qk_nope={} qk_rope={} v_head={} q_head={}",
+        tracing::info!("MLA forward: b={} l={} n_heads={} qk_nope={} qk_rope={} v_head={} q_head={}",
             b, l, self.n_heads, self.qk_nope_dim, self.qk_rope_dim, self.v_head_dim, self.q_head_dim);
 
         // ── Q 路径 ──
         let q = self.q_a.forward(x)?;             // [b, l, q_lora_rank]
         let q = self.q_norm.forward(&q)?;          // LayerNorm
         let q = self.q_b.forward(&q)?;             // [b, l, n_heads * q_head_dim]
-        tracing::debug!("MLA q_b output: {:?}", q.dims());
+        tracing::info!("MLA q_b output: {:?}", q.dims());
         let q = q
             .reshape((b, l, self.n_heads, self.q_head_dim))?
             .transpose(1, 2)?;                     // [b, n_heads, l, q_head_dim]
@@ -277,7 +277,7 @@ impl MLA_Weights {
 
         // ── KV 路径 ──
         let compressed_kv = self.kv_a.forward(x)?;  // [b, l, kv_lora_rank + qk_rope_dim]
-        tracing::debug!("MLA kv_a output: {:?}", compressed_kv.dims());
+        tracing::info!("MLA kv_a output: {:?}", compressed_kv.dims());
         let kv_latent = compressed_kv.narrow(2, 0, self.kv_lora_rank)?.contiguous()?;
         let k_pe_raw = compressed_kv.narrow(2, self.kv_lora_rank, self.qk_rope_dim)?.contiguous()?;
 
@@ -289,13 +289,13 @@ impl MLA_Weights {
         // kv_latent → kv_norm → k_b / v_b
         let ckv = self.kv_norm.forward(&kv_latent)?;
         let k_nope = self.k_b.forward(&ckv)?;        // [b, l, n_heads * qk_nope_dim]
-        tracing::debug!("MLA k_b: dims={:?} qk_nope={}", k_nope.dims(), self.qk_nope_dim);
+        tracing::info!("MLA k_b: dims={:?} qk_nope={}", k_nope.dims(), self.qk_nope_dim);
         let k_nope = k_nope
             .reshape((b, l, self.n_heads, self.qk_nope_dim))?
             .transpose(1, 2)?
             .contiguous()?;                          // [b, n_heads, l, qk_nope_dim]
         let v = self.v_b.forward(&ckv)?;             // [b, l, n_heads * v_head_dim]
-        tracing::debug!("MLA v_b: dims={:?} v_head={}", v.dims(), self.v_head_dim);
+        tracing::info!("MLA v_b: dims={:?} v_head={}", v.dims(), self.v_head_dim);
         let v = v
             .reshape((b, l, self.n_heads, self.v_head_dim))?
             .transpose(1, 2)?
