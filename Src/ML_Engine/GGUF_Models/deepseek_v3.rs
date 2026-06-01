@@ -443,7 +443,7 @@ impl DeepSeekMoE_Weights {
             up_experts,
             down_experts,
             act: Activation::Silu,
-            norm_topk_prob: false,
+            norm_topk_prob: true,
             num_experts_per_tok: top_k,
             dtype,
         });
@@ -501,7 +501,7 @@ impl DeepSeekMoE_Weights {
             up_experts,
             down_experts,
             act: Activation::Silu,
-            norm_topk_prob: false,
+            norm_topk_prob: true,
             num_experts_per_tok: top_k,
             dtype,
         });
