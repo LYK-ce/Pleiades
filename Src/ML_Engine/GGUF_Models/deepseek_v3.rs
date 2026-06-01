@@ -87,8 +87,8 @@ pub struct MLA_Weights {
     // KV 路径 (联合压缩): x → kv_a → split[kv_latent | k_pe] → kv_norm → kv_b → [k_nope | v]
     pub kv_a: QMatMul,          // [hidden, kv_lora_rank + qk_rope_dim]
     pub kv_norm: RmsNorm,       // LayerNorm for compressed KV
-    pub k_b: Linear,           // [kv_lora_rank, n_heads * qk_nope_dim]
-    pub v_b: Linear,           // [kv_lora_rank, n_heads * v_head_dim]
+    pub k_b: Linear,           // [kv_lora_rank, n_heads * qk_nope_dim] (3D in GGUF)
+    pub v_b: QMatMul,           // [kv_lora_rank, n_heads * v_head_dim]
 
     // 输出投影
     pub o_proj: QMatMul,        // [n_heads * v_head_dim, hidden]
@@ -138,13 +138,7 @@ impl MLA_Weights {
             let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
             Linear::new(w, None)
         };
-        let v_b_qt = gg.Tensor(&format!("{prefix}.attn_v_b.weight"))?;
-        let v_b = {
-            let deq = v_b_qt.dequantize(&gg.device)?;
-            let dims = deq.dims();
-            let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
-            Linear::new(w, None)
-        };
+        let v_b = gg.Qmatmul(&format!("{prefix}.attn_v_b.weight"))?;
 
         let o_proj = gg.Qmatmul(&format!("{prefix}.attn_output.weight"))?;
 
@@ -242,9 +236,9 @@ impl MLA_Weights {
 
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
-        // Unsloth: k_b/v_b 可能是 3D [n_heads, kv_lora, nope_dim]，需 flatten 到 2D
+        // Unsloth: k_b 是 3D [n_heads, kv_lora, nope_dim]，v_b 是 2D OK
         let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device)?;
-        let v_b = load_linear_flatten(tensors, &format!("{prefix}.attn_v_b.weight"), device)?;
+        let v_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_v_b.weight"))?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
