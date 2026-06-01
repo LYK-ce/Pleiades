@@ -231,7 +231,7 @@ impl MLA_Weights {
             RmsNorm::from_qtensor(qt, eps)
         }
 
-        /// Load weight, if 3D flatten [d0,d1,d2] → [d0*d2,d1], if 2D reshape to [out_dim, in_dim]
+        /// Load weight, reshape to [out_dim, total/out_dim]（统一 2D/3D）  
         fn load_linear_flatten(tensors: &mut HashMap<String, QTensor>, key: &str, dev: &Device, out_dim: usize) -> Result<Linear> {
             let qt = tensors.remove(key)
                 .ok_or_else(|| candle_core::Error::Msg(format!("missing: {key}")))?;
@@ -239,15 +239,8 @@ impl MLA_Weights {
             let dims = deq.dims();
             let total: usize = dims.iter().product();
             tracing::info!("load_linear_flatten key={} raw_dims={:?} out_dim={} total={}", key, dims, out_dim, total);
-            let weight = if dims.len() == 3 {
-                let w = deq.reshape((dims[0] * dims[2], dims[1]))?;
-                tracing::info!("load_linear_flatten key={} 3D->2D={:?}", key, w.dims());
-                w
-            } else {
-                let w = deq.reshape((out_dim, total / out_dim))?;
-                tracing::info!("load_linear_flatten key={} 2D->reshape={:?}", key, w.dims());
-                w
-            };
+            let weight = deq.reshape((out_dim, total / out_dim))?;
+            tracing::info!("load_linear_flatten key={} reshaped={:?}", key, weight.dims());
             Ok(Linear::new(weight, None))
         }
 
@@ -258,7 +251,7 @@ impl MLA_Weights {
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
         // Unsloth: k_b/v_b 都是 3D，需 flatten（llama.cpp 确认）
-        let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device, n_heads * (qk_nope_dim + qk_rope_dim))?;
+        let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device, n_heads * qk_nope_dim)?;
         let v_b = load_linear_flatten(tensors, &format!("{prefix}.attn_v_b.weight"), device, n_heads * v_head_dim)?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
