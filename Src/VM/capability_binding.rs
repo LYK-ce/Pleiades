@@ -363,6 +363,70 @@ pub fn register_network_caps(
         }
     })?)?;
 
+    // ─── list_model_peers ───────────────────────────────
+    let caps_mp = capabilities.clone();
+    network.set("list_model_peers", lua.create_async_function(move |lua, model_filter: String| {
+        let caps_mp = caps_mp.clone();
+        async move {
+            let peers = caps_mp.peer_manager.Get_All_Peers().await
+                .map_err(|e| mlua::Error::runtime(format!("list_model_peers: {}", e)))?;
+
+            let result = lua.create_table()?;
+            let mut idx = 0usize;
+
+            for p in &peers {
+                // 筛选 supported_models 中 file_name 包含搜索词的条目
+                let matched: Vec<_> = p.supported_models.iter()
+                    .filter(|m| m.file_name.contains(&model_filter))
+                    .collect();
+
+                for m in matched {
+                    // 从 layer_bitmap 计算 layer_start / layer_end
+                    let (layer_start, layer_end) = {
+                        let mut min: Option<usize> = None;
+                        let mut max: Option<usize> = None;
+                        for layer in 0..256usize {
+                            let byte_idx = layer / 8;
+                            let bit_idx = layer % 8;
+                            if m.layer_bitmap[byte_idx] & (1 << bit_idx) != 0 {
+                                if min.is_none() { min = Some(layer); }
+                                max = Some(layer);
+                            }
+                        }
+                        match (min, max) {
+                            (Some(s), Some(e)) => (s as u32, e as u32),
+                            _ => (0u32, 0u32),
+                        }
+                    };
+
+                    let entry = lua.create_table()?;
+                    entry.set("peer_id", p.peer_id.to_base58())?;
+                    entry.set("name", p.name.clone())?;
+                    entry.set("layer_start", layer_start)?;
+                    entry.set("layer_end", layer_end)?;
+                    entry.set("file_name", m.file_name.clone())?;
+
+                    // devices: 所有节点固定 2 GPU
+                    let devices = lua.create_table()?;
+                    devices.set(1, "cuda:0")?;
+                    devices.set(2, "cuda:1")?;
+                    entry.set("devices", devices)?;
+
+                    // profile
+                    let profile = lua.create_table()?;
+                    if let Some(lat) = p.profile.latency_ms {
+                        profile.set("latency_ms", lat)?;
+                    }
+                    entry.set("profile", profile)?;
+
+                    idx += 1;
+                    result.set(idx, entry)?;
+                }
+            }
+            Ok(result)
+        }
+    })?)?;
+
     // ─── dial ──────────────────────────────────────────
     let caps_net = capabilities.clone();
     network.set("dial", lua.create_async_function(move |_, addr: String| {

@@ -32,6 +32,15 @@ Date: 2026-06-01
 
 ---
 
+## 设计前提
+
+- **所有节点默认 2 GPU**（`cuda:0` + `cuda:1`），不存在单卡或 3+ 卡节点
+- **模型在每台机器上均分到两张卡**：若某节点持有 `[L_start, L_end]`，则前半段在 `cuda:0`，后半段在 `cuda:1`
+- **本机流水线**：每个节点内部创建两个独立的 `ml context`（`sess_gpu0` / `sess_gpu1`），数据传输路径为 `GPU:0 → CPU → GPU:1`
+- **跨机流水线**：`caps.network.send_tensor / recv_tensor`，不经过 CPU 中转
+
+---
+
 ## 核心拓扑
 
 ```
@@ -61,6 +70,18 @@ Coordinator (任一节点)
 
 ## 任务拆解
 
+### 16.0 分支准备
+
+在当前分支 `hf2gguf` 基础上创建 `demo` 分支，Task 16 的所有后续操作（Rust 修改、Lua 脚本、归档等）均在 `demo` 分支上展开，保持 `hf2gguf` 分支不变。
+
+```bash
+git checkout -b demo hf2gguf
+```
+
+当所有工作完成后，由人类 Reviewer 确认是否合并回 `hf2gguf` 或 `master`。
+
+---
+
 ### 16.1 Rust：暴露 Peer 模型信息给 Lua
 
 **新增 Lua API**：`caps.network.list_model_peers(model_id_or_name)`
@@ -79,7 +100,15 @@ Coordinator (任一节点)
 }
 ```
 
-**实现**：在 `register_network_caps` 中新增一个 async Lua 函数，调用 `PeerManager::get_all_peers()`，过滤出 `supported_models` 中包含目标 model_id 的 peer，序列化 `SupportedModel` + `PeerProfile` → Lua table。
+**实现**：**全部在 Rust 端完成**，不涉及 Lua 侧逻辑。流程如下：
+
+1. 在 `register_network_caps` 中新增 `list_model_peers` 绑定函数（Rust 原生函数，注册为 Lua callable）
+2. 函数内部调用 `PeerManager::get_all_peers()` 获取所有在线 peer
+3. 遍历结果，筛选 `supported_models` 中 `model_id`（或 `file_name`）匹配参数的 peer
+4. 对每个匹配 peer，将其 `SupportedModel` 字段（`layer_start`, `layer_end`, `file_name`, `devices`）和 `PeerProfile` 字段（`latency_ms`）合并序列化为 Lua table
+5. 返回 Lua table 数组，Lua 侧直接使用，无需任何处理逻辑
+
+Lua 侧调用示例：`local peers = caps.network.list_model_peers("DeepSeek-V4-Flash.pgguf")`，拿到的是已经过滤、格式化好的 table。
 
 **涉及文件**：
 - `Src/VM/capability_binding.rs` — 新增 `list_model_peers` 绑定 (~40 行)
@@ -196,7 +225,64 @@ pipe_worker.lua 执行流程（在远程节点上运行）：
 
 ---
 
-### 16.4 清理：归档旧 pipe 脚本
+### 16.4 Lua：单卡 Worker 脚本
+
+**新建** `programs/user/pipe_worker_single.lua`，`COMMAND = "pipe_worker_single"`。
+
+与 `pipe_worker.lua` 的区别：**只用 `cuda:0`，不涉及第二张卡**，因此没有本机 GPU→CPU→GPU 桥接。
+
+接受参数：
+```
+{
+  model, layer_start, layer_end,
+  upstream, downstream,
+  inference_id,
+}
+```
+
+#### 流程
+
+```
+pipe_worker_single.lua 执行流程：
+
+1. caps.storage_acquire_read(model) → model_path
+
+2. 单卡加载:
+   sess = ml.new("cuda:0")  → load_model(model_path, layer_start, layer_end)
+
+3. 建立流（与双卡版相同）:
+   if upstream:    accept_tensor_stream(upstream, inference_id, timeout=120s)
+   if downstream:  open_tensor_stream(downstream, inference_id)
+
+4. 推理循环（无 CPU 中转）:
+   loop:
+     hidden = recv_tensor(upstream_stream, "cuda:0")
+     │
+     └─ hidden = sess:forward(hidden)
+     │
+     if downstream:
+       send_tensor(downstream_stream, hidden)
+     else:
+       send_tensor(return_stream, hidden)
+```
+
+**涉及文件**：
+- `programs/user/pipe_worker_single.lua` — 新增 (~60 行)
+
+---
+
+### 16.5 Lua：单卡 Coordinator 脚本
+
+**新建** `programs/user/pipeline_coord_single.lua`，`COMMAND = "pipeline_coord_single"`。
+
+与 `pipeline_coord.lua` 唯一区别：第 3 步 rexec 时下发 `pipe_worker_single` 而非 `pipe_worker`。其余流程（发现、排序、验证、推理循环）完全一致。
+
+**涉及文件**：
+- `programs/user/pipeline_coord_single.lua` — 新增 (~120 行，基本复制 pipeline_coord.lua 后改一处)
+
+---
+
+### 16.6 清理：归档旧 pipe 脚本
 
 `pipe_1.lua` ~ `pipe_8.lua` + `pipeline1.lua`/`pipeline2.lua` 共 10 个文件移入 `programs/archived/`。
 
@@ -207,12 +293,14 @@ pipe_worker.lua 执行流程（在远程节点上运行）：
 ## 文件变更总览
 
 ```
-分支：hf2gguf
+分支：demo（从 hf2gguf 创建）
 
 新增：
-  programs/user/pipeline_coord.lua   — Coordinator (120 行)
-  programs/user/pipe_worker.lua      — 通用 Worker (100 行)
-  Task/task_16_dynamic_pipeline.md   — 本文档
+  programs/user/pipeline_coord.lua         — 双卡 Coordinator (120 行)
+  programs/user/pipe_worker.lua            — 双卡 Worker (100 行)
+  programs/user/pipeline_coord_single.lua  — 单卡 Coordinator (120 行)
+  programs/user/pipe_worker_single.lua     — 单卡 Worker (60 行)
+  Task/task_16_dynamic_pipeline.md         — 本文档
 
 修改：
   Src/VM/capability_binding.rs       — list_model_peers 绑定 (~40 行)
