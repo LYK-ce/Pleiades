@@ -241,7 +241,7 @@ impl MLA_Weights {
             } else {
                 deq.reshape((out_dim, total / out_dim))?
             };
-            Linear::new(weight, None)
+            Ok(Linear::new(weight, None))
         }
 
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
