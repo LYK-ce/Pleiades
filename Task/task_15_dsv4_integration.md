@@ -15,6 +15,12 @@ DeepSeek V4 Flash（284B, 43 层, Flash 版）只有 safetensors 格式发布，
 - **nsparks** 的 llama.cpp fork 实现了 DeepSeek V4 的 GGUF 支持（新增 F8_E4M3_B128 + MXFP4 类型），但上游 candle 未合并
 - **MScanter** 的 `deepseek-v4-candle` 用纯 Rust + candle 重写了 DeepSeek V4 全部架构组件，并通过 59 个 TDD 测试验证正确性
 
+MScanter 仓库信息：
+- 地址：`https://github.com/MScanter/deepseek-v4-candle`
+- MIT 许可，独立实现，非 fork
+- 核心模块：`quant.rs` (FP4/FP8 dequant), `loader.rs` (safetensors mmap), `attention.rs` (MLA), `moe.rs` (MoE), `mhc.rs` (超连接), `block.rs`, `model.rs`
+- 使用方式：**直接 clone 后复制/参考代码，不作为 git submodule**
+
 本任务利用 MScanter 的架构实现，通过 PGGUF 容器包装 safetensors 权重，将 DeepSeek V4 Flash 集成到 Pleiades。
 
 ---
