@@ -226,7 +226,14 @@ impl MLA_Weights {
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
         let k_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_k_b.weight"))?;
-        let v_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_v_b.weight"))?;
+        let v_b_qt = tensors.get(&format!("{prefix}.attn_v_b.weight"))
+            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.attn_v_b.weight")))?;
+        let v_b_deq = v_b_qt.dequantize(device)?;
+        let v_b_dims = v_b_deq.dims();
+        let v_head_dim = v_b_dims[v_b_dims.len() - 1] / n_heads;
+        let v_b = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.attn_v_b.weight")).unwrap().into()
+        )?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
