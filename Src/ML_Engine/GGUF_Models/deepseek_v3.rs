@@ -21,14 +21,15 @@
 
 use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Tensor, D};
-use candle_nn::{Activation, Embedding, Module};
+use candle_nn::{Activation, Embedding, Linear, Module};
+use candle_transformers::fused_moe::FusedMoeGGUF;
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
-use super::qwen3::{Rotary_Embedding, Gguf};
+use super::qwen3::{Rotary_Embedding, Gguf, Mlp_Weights};
 
 type Result<T> = candle_core::Result<T>;
 
@@ -45,83 +46,30 @@ type Result<T> = candle_core::Result<T>;
 ///   → 大幅减少 KV Cache 显存占用
 #[derive(Debug, Clone)]
 pub struct MLA_KV_Cache {
-    /// 压缩后的 KV latent: [batch, seq, kv_lora_rank]
-    kv_latent: Option<Tensor>,
-    /// 解耦的 RoPE key: [batch, 1, seq, qk_rope_dim]
-    k_pe: Option<Tensor>,
-    /// 预分配容量（cache 大小上限）
-    capacity: usize,
+    pub k: Option<Tensor>,
+    pub v: Option<Tensor>,
 }
 
 impl MLA_KV_Cache {
-    pub fn New(capacity: usize) -> Self {
-        Self {
-            kv_latent: None,
-            k_pe: None,
-            capacity,
-        }
+    pub fn New(_capacity: usize) -> Self {
+        Self { k: None, v: None }
     }
 
-    /// 追加新的 KV latent 和 k_pe 到缓存
-    pub fn Append(
-        &mut self,
-        kv_latent: &Tensor,
-        k_pe: &Tensor,
-    ) -> Result<()> {
-        // kv_latent: [batch, seq, kv_lora_rank]
-        // k_pe:       [batch, 1, seq, qk_rope_dim]
-        self.kv_latent = match self.kv_latent.take() {
-            None => Some(kv_latent.clone()),
-            Some(old) => {
-                let cat = Tensor::cat(&[&old, kv_latent], 1)?;
-                // 如果超过 capacity，截断最早的部分
-                let seq_len = cat.dim(1)?;
-                if seq_len > self.capacity {
-                    Some(cat.narrow(1, seq_len - self.capacity, self.capacity)?)
-                } else {
-                    Some(cat)
-                }
-            }
+    pub fn Append(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
+        self.k = match self.k.take() {
+            None => Some(k.clone()),
+            Some(old) => Some(Tensor::cat(&[&old, k], 2)?),
         };
-
-        self.k_pe = match self.k_pe.take() {
-            None => Some(k_pe.clone()),
-            Some(old) => {
-                let cat = Tensor::cat(&[&old, k_pe], 2)?;
-                let seq_len = cat.dim(2)?;
-                if seq_len > self.capacity {
-                    Some(cat.narrow(2, seq_len - self.capacity, self.capacity)?)
-                } else {
-                    Some(cat)
-                }
-            }
+        self.v = match self.v.take() {
+            None => Some(v.clone()),
+            Some(old) => Some(Tensor::cat(&[&old, v], 2)?),
         };
-
         Ok(())
     }
 
-    /// 获取当前缓存的总序列长度
-    pub fn Seq_Len(&self) -> usize {
-        match &self.kv_latent {
-            Some(t) => t.dim(1).unwrap_or(0),
-            None => 0,
-        }
-    }
-
-    /// 获取压缩后的 KV latent (全部序列)
-    pub fn Kv_Latent(&self) -> Option<&Tensor> {
-        self.kv_latent.as_ref()
-    }
-
-    /// 获取解耦的 RoPE key (全部序列)
-    pub fn K_Pe(&self) -> Option<&Tensor> {
-        self.k_pe.as_ref()
-    }
-
-    /// 重置缓存
     pub fn Reset(&mut self) {
-        self.kv_latent = None;
-        self.k_pe = None;
+        self.k = None;
+        self.v = None;
     }
 }
 
@@ -139,7 +87,8 @@ pub struct MLA_Weights {
     // KV 路径 (联合压缩): x → kv_a → split[kv_latent | k_pe] → kv_norm → kv_b → [k_nope | v]
     pub kv_a: QMatMul,          // [hidden, kv_lora_rank + qk_rope_dim]
     pub kv_norm: RmsNorm,       // LayerNorm for compressed KV
-    pub kv_b: QMatMul,          // [kv_lora_rank, n_heads * (qk_nope_dim + v_head_dim)]
+    pub k_b: Linear,           // [kv_lora_rank, n_heads * qk_nope_dim] (3D in GGUF)
+    pub v_b: Linear,           // [kv_lora_rank, n_heads * v_head_dim] (3D in GGUF)
 
     // 输出投影
     pub o_proj: QMatMul,        // [n_heads * v_head_dim, hidden]
@@ -157,7 +106,7 @@ pub struct MLA_Weights {
     pub rotary: Arc<Rotary_Embedding>,
 
     // KV Cache
-    kv_cache: MLA_KV_Cache,
+    pub kv_cache: MLA_KV_Cache,
 
     span_attn: tracing::Span,
 }
@@ -175,15 +124,38 @@ impl MLA_Weights {
         rotary: Arc<Rotary_Embedding>,
         prefix: &str,
     ) -> Result<Self> {
-        let q_a = gg.Qmatmul(&format!("{prefix}.attn.q_a.weight"))?;
-        let q_norm = gg.Rms_Norm(&format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
-        let q_b = gg.Qmatmul(&format!("{prefix}.attn.q_b.weight"))?;
+        let q_a = gg.Qmatmul(&format!("{prefix}.attn_q_a.weight"))?;
+        let q_norm = gg.Rms_Norm(&format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
+        let q_b = gg.Qmatmul(&format!("{prefix}.attn_q_b.weight"))?;
 
-        let kv_a = gg.Qmatmul(&format!("{prefix}.attn.kv_a_proj_with_mqa.weight"))?;
-        let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn.kv_a_layernorm.weight"), rms_norm_eps)?;
-        let kv_b = gg.Qmatmul(&format!("{prefix}.attn.kv_b.weight"))?;
+        let kv_a = gg.Qmatmul(&format!("{prefix}.attn_kv_a_mqa.weight"))?;
+        let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
+        // Unsloth: k_b/v_b 可能是 3D，dequantize + flatten + Linear
+        let k_b_qt = gg.Tensor(&format!("{prefix}.attn_k_b.weight"))?;
+        let k_b = {
+            let deq = k_b_qt.dequantize(&gg.device)?;
+            let dims = deq.dims();
+            let w = if dims.len() == 3 { deq.permute((2, 0, 1))?.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
+            Linear::new(w, None)
+        };
+        // v_b: Unsloth [v_head, n_head, kv_lora] → permute(1,0,2) → flatten [n_head*v_head, kv_lora]
+        let v_b_qt = gg.Tensor(&format!("{prefix}.attn_v_b.weight"))?;
+        let v_b = {
+            let deq = v_b_qt.dequantize(&gg.device)?;
+            let dims = deq.dims();
+            tracing::info!("v_b New: raw_dims={:?} v_head={} n_heads={}", dims, v_head_dim, n_heads);
+            let w = if dims.len() == 3 {
+                deq.permute((1, 0, 2))?.reshape((dims[0] * dims[1], dims[2]))?
+            } else {
+                let out_dim = n_heads * v_head_dim;
+                let total: usize = dims.iter().product();
+                deq.reshape((out_dim, total / out_dim))?
+            };
+            tracing::info!("v_b New: reshaped={:?}", w.dims());
+            Linear::new(w, None)
+        };
 
-        let o_proj = gg.Qmatmul(&format!("{prefix}.attn.o.weight"))?;
+        let o_proj = gg.Qmatmul(&format!("{prefix}.attn_output.weight"))?;
 
         let kv_cache = MLA_KV_Cache::New(8192); // 默认 8K context
         let span_attn = tracing::span!(tracing::Level::TRACE, "mla");
@@ -194,7 +166,8 @@ impl MLA_Weights {
             q_b,
             kv_a,
             kv_norm,
-            kv_b,
+            k_b,
+            v_b,
             o_proj,
             n_heads,
             q_lora_rank,
@@ -220,6 +193,7 @@ impl MLA_Weights {
         v_head_dim: usize,
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
+        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
         fn Take_Qmatmul(
@@ -228,7 +202,14 @@ impl MLA_Weights {
         ) -> Result<QMatMul> {
             let qt = tensors
                 .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+                .ok_or_else(|| {
+                    let mut available: Vec<&String> = tensors.keys().collect();
+                    available.sort();
+                    candle_core::Error::Msg(format!(
+                        "missing tensor: {}. Available tensors for this layer: {:?}",
+                        key, available
+                    ))
+                })?;
             QMatMul::from_weights(Arc::new(qt))
         }
 
@@ -239,26 +220,54 @@ impl MLA_Weights {
         ) -> Result<RmsNorm> {
             let qt = tensors
                 .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+                .ok_or_else(|| {
+                    let mut available: Vec<&String> = tensors.keys().collect();
+                    available.sort();
+                    candle_core::Error::Msg(format!(
+                        "missing tensor: {}. Available tensors for this layer: {:?}",
+                        key, available
+                    ))
+                })?;
             RmsNorm::from_qtensor(qt, eps)
         }
 
-        let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn.q_a.weight"))?;
-        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
-        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn.q_b.weight"))?;
+        /// 加载 k_b/v_b 权重为 Linear，Unsloth 3D 张量需 permute 后 flatten
+        ///   k_b: [qk_nope, kv_lora, n_head] → permute(2,0,1) → [n_head, qk_nope, kv_lora]
+        ///   v_b: [v_head, n_head, kv_lora]   → permute(1,0,2) → [n_head, v_head, kv_lora]
+        fn load_3d_linear(tensors: &mut HashMap<String, QTensor>, key: &str, dev: &Device, out_dim: usize, perm: Option<(usize, usize, usize)>) -> Result<Linear> {
+            let qt = tensors.remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {key}")))?;
+            let deq = qt.dequantize(dev)?;
+            let dims = deq.dims();
+            let total: usize = dims.iter().product();
+            tracing::info!("load_3d_linear key={} raw_dims={:?} out_dim={} total={}", key, dims, out_dim, total);
+            let weight = if let (3, Some((a, b, c))) = (dims.len(), perm) {
+                deq.permute((a, b, c))?.reshape((out_dim, total / out_dim))?
+            } else {
+                deq.reshape((out_dim, total / out_dim))?
+            };
+            tracing::info!("load_3d_linear key={} reshaped={:?}", key, weight.dims());
+            Ok(Linear::new(weight, None))
+        }
 
-        let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn.kv_a_proj_with_mqa.weight"))?;
-        let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn.kv_a_layernorm.weight"), rms_norm_eps)?;
-        let kv_b = Take_Qmatmul(tensors, &format!("{prefix}.attn.kv_b.weight"))?;
+        let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
+        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
+        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_b.weight"))?;
 
-        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn.o.weight"))?;
+        let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
+        let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
+        // Unsloth: k_b/v_b 都是 3D，需 permute 后 flatten
+        let k_b = load_3d_linear(tensors, &format!("{prefix}.attn_k_b.weight"), device, n_heads * qk_nope_dim, Some((2, 0, 1)))?;
+        let v_b = load_3d_linear(tensors, &format!("{prefix}.attn_v_b.weight"), device, n_heads * v_head_dim, Some((1, 0, 2)))?;
+
+        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
         let kv_cache = MLA_KV_Cache::New(8192);
         let span_attn = tracing::span!(tracing::Level::TRACE, "mla");
 
         Ok(Self {
             q_a, q_norm, q_b,
-            kv_a, kv_norm, kv_b,
+            kv_a, kv_norm, k_b, v_b,
             o_proj,
             n_heads,
             q_lora_rank,
@@ -293,38 +302,47 @@ impl MLA_Weights {
     ) -> Result<Tensor> {
         let _enter = self.span_attn.enter();
         let (b, l, _) = x.dims3()?;
+        tracing::info!("MLA forward: b={} l={} n_heads={} qk_nope={} qk_rope={} v_head={} q_head={}",
+            b, l, self.n_heads, self.qk_nope_dim, self.qk_rope_dim, self.v_head_dim, self.q_head_dim);
 
         // ── Q 路径 ──
         let q = self.q_a.forward(x)?;             // [b, l, q_lora_rank]
         let q = self.q_norm.forward(&q)?;          // LayerNorm
         let q = self.q_b.forward(&q)?;             // [b, l, n_heads * q_head_dim]
+        tracing::info!("MLA q_b output: {:?}", q.dims());
         let q = q
             .reshape((b, l, self.n_heads, self.q_head_dim))?
             .transpose(1, 2)?;                     // [b, n_heads, l, q_head_dim]
 
         // 分割 Q: 前 qk_nope_dim → q_nope, 后 qk_rope_dim → q_pe
-        let q_nope = q.narrow(3, 0, self.qk_nope_dim)?;
-        let q_pe = q.narrow(3, self.qk_nope_dim, self.qk_rope_dim)?;
+        let q_nope = q.narrow(3, 0, self.qk_nope_dim)?.contiguous()?;
+        let q_pe = q.narrow(3, self.qk_nope_dim, self.qk_rope_dim)?.contiguous()?;
 
         // ── KV 路径 ──
         let compressed_kv = self.kv_a.forward(x)?;  // [b, l, kv_lora_rank + qk_rope_dim]
-        let kv_latent = compressed_kv.narrow(2, 0, self.kv_lora_rank)?;
-        let k_pe_raw = compressed_kv.narrow(2, self.kv_lora_rank, self.qk_rope_dim)?;
+        tracing::info!("MLA kv_a output: {:?}", compressed_kv.dims());
+        let kv_latent = compressed_kv.narrow(2, 0, self.kv_lora_rank)?.contiguous()?;
+        let k_pe_raw = compressed_kv.narrow(2, self.kv_lora_rank, self.qk_rope_dim)?.contiguous()?;
 
         // k_pe: [b, 1, l, qk_rope_dim]
         let k_pe = k_pe_raw
             .reshape((b, l, 1, self.qk_rope_dim))?
             .transpose(1, 2)?;
 
-        // kv_latent → kv_norm → kv_b
+        // kv_latent → kv_norm → k_b / v_b
         let ckv = self.kv_norm.forward(&kv_latent)?;
-        let kv = self.kv_b.forward(&ckv)?;           // [b, l, n_heads * (qk_nope_dim + v_head_dim)]
-        let kv = kv
-            .reshape((b, l, self.n_heads, self.qk_nope_dim + self.v_head_dim))?
-            .transpose(1, 2)?;                       // [b, n_heads, l, qk_nope_dim + v_head_dim]
-
-        let k_nope = kv.narrow(3, 0, self.qk_nope_dim)?;
-        let v = kv.narrow(3, self.qk_nope_dim, self.v_head_dim)?;
+        let k_nope = self.k_b.forward(&ckv)?;        // [b, l, n_heads * qk_nope_dim]
+        tracing::info!("MLA k_b: dims={:?} qk_nope={}", k_nope.dims(), self.qk_nope_dim);
+        let k_nope = k_nope
+            .reshape((b, l, self.n_heads, self.qk_nope_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;                          // [b, n_heads, l, qk_nope_dim]
+        let v = self.v_b.forward(&ckv)?;             // [b, l, n_heads * v_head_dim]
+        tracing::info!("MLA v_b fwd: out={:?} v_head={} weight={:?}", v.dims(), self.v_head_dim, self.v_b.weight().dims());
+        let v = v
+            .reshape((b, l, self.n_heads, self.v_head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;                          // [b, n_heads, l, v_head_dim]
 
         // ── 解耦 RoPE ──
         // 仅对 q_pe 和 k_pe 做旋转编码
@@ -336,8 +354,17 @@ impl MLA_Weights {
         let k = Tensor::cat(&[&k_nope, &k_pe_broadcast], 3)?;
         let q = Tensor::cat(&[&q_nope, &q_pe_roped], 3)?;
 
-        // ── 更新 KV Cache ──
-        self.kv_cache.Append(&kv_latent, &k_pe)?;
+        // ── 更新 KV Cache（展开的 K, V）──
+        let (k, v) = match (&self.kv_cache.k, &self.kv_cache.v) {
+            (Some(prev_k), Some(prev_v)) => {
+                let k = Tensor::cat(&[prev_k, &k], 2)?;
+                let v = Tensor::cat(&[prev_v, &v], 2)?;
+                (k, v)
+            }
+            _ => (k, v),
+        };
+        self.kv_cache.k = Some(k.clone());
+        self.kv_cache.v = Some(v.clone());
 
         // ── Scaled Dot-Product Attention ──
         let scale = 1.0 / (self.q_head_dim as f64).sqrt();
@@ -373,108 +400,117 @@ impl MLA_Weights {
 // DeepSeekMoE 权重 — Mixture of Experts
 // ============================================================
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeepSeekMoE_Weights {
-    // 共享 expert（始终激活，所有 token 经过）
     pub shared_gate: QMatMul,
     pub shared_up: QMatMul,
     pub shared_down: QMatMul,
-
-    // 细粒度 routed experts
-    pub expert_gates: Vec<QMatMul>,     // [n_routed_experts]
-    pub expert_ups: Vec<QMatMul>,
-    pub expert_downs: Vec<QMatMul>,
-
-    // 路由权重: [hidden, n_routed_experts]
-    pub router: QMatMul,
-
-    // 配置
-    pub n_routed_experts: usize,
-    pub top_k: usize,
-    pub routed_scaling_factor: f64,     // V3.2 中 e_score 的缩放因子
-
+    pub routed: Arc<FusedMoeGGUF>,
+    pub routed_scaling_factor: f64,
     span: tracing::Span,
 }
 
+impl std::fmt::Debug for DeepSeekMoE_Weights {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeepSeekMoE_Weights")
+            .field("routed_scaling_factor", &self.routed_scaling_factor)
+            .finish()
+    }
+}
+
 impl DeepSeekMoE_Weights {
-    /// 从 Gguf reader 加载 MoE 权重
     pub fn New<R: Read + Seek>(
         gg: &mut Gguf<R>,
         n_routed_experts: usize,
         top_k: usize,
         routed_scaling_factor: f64,
+        dtype: DType,
         prefix: &str,
     ) -> Result<Self> {
-        // 共享 expert
-        let shared_gate = gg.Qmatmul(&format!("{prefix}.ffn_gate.weight"))?;
-        let shared_up = gg.Qmatmul(&format!("{prefix}.ffn_up.weight"))?;
-        let shared_down = gg.Qmatmul(&format!("{prefix}.ffn_down.weight"))?;
+        let shared_gate = gg.Qmatmul(&format!("{prefix}.ffn_gate_shexp.weight"))?;
+        let shared_up = gg.Qmatmul(&format!("{prefix}.ffn_up_shexp.weight"))?;
+        let shared_down = gg.Qmatmul(&format!("{prefix}.ffn_down_shexp.weight"))?;
 
-        // Router (gate 网络): [hidden, n_routed_experts]
-        // GGUF 中可能有不同的命名: ffn_gate.weight 或 ffn_gate_inp.weight
-        let router = gg.Qmatmul(&format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_gate_exps.weight"))?);
+        let up_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_up_exps.weight"))?);
+        let down_experts = Arc::new(gg.Tensor(&format!("{prefix}.ffn_down_exps.weight"))?);
+        let gate_qt = gg.Tensor(&format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate = Linear::new(gate_qt.dequantize(&gg.device)?.to_dtype(DType::F32)?, None);
 
-        // 细粒度 experts
-        let mut expert_gates = Vec::with_capacity(n_routed_experts);
-        let mut expert_ups = Vec::with_capacity(n_routed_experts);
-        let mut expert_downs = Vec::with_capacity(n_routed_experts);
-        for e in 0..n_routed_experts {
-            expert_gates.push(gg.Qmatmul(&format!("{prefix}.ffn_gate.{e}.weight"))?);
-            expert_ups.push(gg.Qmatmul(&format!("{prefix}.ffn_up.{e}.weight"))?);
-            expert_downs.push(gg.Qmatmul(&format!("{prefix}.ffn_down.{e}.weight"))?);
-        }
+        let routed = Arc::new(FusedMoeGGUF {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: Activation::Silu,
+            norm_topk_prob: true,
+            num_experts_per_tok: top_k,
+            dtype,
+        });
 
-        let span = tracing::span!(tracing::Level::TRACE, "moe");
         Ok(Self {
             shared_gate, shared_up, shared_down,
-            expert_gates, expert_ups, expert_downs,
-            router,
-            n_routed_experts,
-            top_k,
+            routed,
             routed_scaling_factor,
-            span,
+            span: tracing::span!(tracing::Level::TRACE, "moe"),
         })
     }
 
-    /// 从已提取的 QTensors 构建
     pub fn From_Extracted(
         tensors: &mut HashMap<String, QTensor>,
         n_routed_experts: usize,
         top_k: usize,
         routed_scaling_factor: f64,
+        dtype: DType,
+        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
-        fn Take_Qmatmul(tensors: &mut HashMap<String, QTensor>, key: &str) -> Result<QMatMul> {
-            let qt = tensors
-                .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
-            QMatMul::from_weights(Arc::new(qt))
-        }
+        let shared_gate = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_gate_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_shexp.weight")))?.into()
+        )?;
+        let shared_up = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_up_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up_shexp.weight")))?.into()
+        )?;
+        let shared_down = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.ffn_down_shexp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down_shexp.weight")))?.into()
+        )?;
 
-        let shared_gate = Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate.weight"))?;
-        let shared_up = Take_Qmatmul(tensors, &format!("{prefix}.ffn_up.weight"))?;
-        let shared_down = Take_Qmatmul(tensors, &format!("{prefix}.ffn_down.weight"))?;
+        let gate_qt = tensors.remove(&format!("{prefix}.ffn_gate_inp.weight"))
+            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_inp.weight")))?;
+        let gate = Linear::new(gate_qt.dequantize(device)?.to_dtype(DType::F32)?, None);
 
-        let router = Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate_inp.weight"))?;
+        let gate_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_gate_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_exps.weight")))?
+        );
+        let up_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_up_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up_exps.weight")))?
+        );
+        let down_experts = Arc::new(
+            tensors.remove(&format!("{prefix}.ffn_down_exps.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down_exps.weight")))?
+        );
 
-        let mut expert_gates = Vec::with_capacity(n_routed_experts);
-        let mut expert_ups = Vec::with_capacity(n_routed_experts);
-        let mut expert_downs = Vec::with_capacity(n_routed_experts);
-        for e in 0..n_routed_experts {
-            expert_gates.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate.{e}.weight"))?);
-            expert_ups.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_up.{e}.weight"))?);
-            expert_downs.push(Take_Qmatmul(tensors, &format!("{prefix}.ffn_down.{e}.weight"))?);
-        }
+        let routed = Arc::new(FusedMoeGGUF {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: Activation::Silu,
+            norm_topk_prob: true,
+            num_experts_per_tok: top_k,
+            dtype,
+        });
 
-        let span = tracing::span!(tracing::Level::TRACE, "moe");
         Ok(Self {
             shared_gate, shared_up, shared_down,
-            expert_gates, expert_ups, expert_downs,
-            router,
-            n_routed_experts,
-            top_k,
+            routed,
             routed_scaling_factor,
-            span,
+            span: tracing::span!(tracing::Level::TRACE, "moe"),
         })
     }
 
@@ -489,92 +525,35 @@ impl DeepSeekMoE_Weights {
     /// 6. 最终输出 = shared_out + sum(routed expert outputs × weight) × scaling_factor
     pub fn Forward(&self, x: &Tensor) -> Result<Tensor> {
         let _enter = self.span.enter();
-
-        // ── 共享 expert ──
         let gate = self.shared_gate.forward(x)?.apply(&Activation::Silu)?;
         let up = self.shared_up.forward(x)?;
         let shared_out = self.shared_down.forward(&(gate * up)?)?;
+        let routed_out = self.routed.forward(x, false)?;
+        &shared_out + &(routed_out * self.routed_scaling_factor)?
+    }
+}
 
-        // ── Router: log_softmax → top-k → softmax ──
-        let router_logits = self.router.forward(x)?; // [b, l, n_routed_experts]
+#[derive(Clone)]
+pub enum DeepSeekFFN {
+    Dense(Mlp_Weights),
+    MoE(DeepSeekMoE_Weights),
+}
 
-        // log_softmax on all logits  
-        let log_sm = candle_nn::ops::log_softmax(&router_logits, 2)?;
-
-        // arg_sort descending → indices, then narrow to top_k
-        let sorted_idx = log_sm.arg_sort_last_dim(false)?; // [b, l, n_experts], descending
-        let topk_idx = sorted_idx.narrow(2, 0, self.top_k)?; // [b, l, top_k]
-
-        // Gather top-k log_softmax values and softmax them
-        let topk_log_sm = log_sm.gather(&topk_idx, D::Minus1)?; // [b, l, top_k]
-        let topk_weights = candle_nn::ops::softmax(&topk_log_sm, 2)?; // sum=1 within top-k
-
-        // ── Routed experts: 逐 token 计算 ──
-        let (b, l, _k) = topk_weights.dims3()?;
-        let mut routed_out: Option<Tensor> = None;
-
-        for bi in 0..b {
-            for li in 0..l {
-                let x_tok = x.get(bi)?.get(li)?;
-                let weights_row = topk_weights.get(bi)?.get(li)?; // [top_k]
-                let idx_row = topk_idx.get(bi)?.get(li)?; // [top_k]
-                let weights_vec: Vec<f32> = weights_row.to_vec1()?;
-                let idx_vec: Vec<u32> = idx_row.to_vec1()?;
-
-                let mut tok_sum: Option<Tensor> = None;
-                for ki in 0..idx_vec.len() {
-                    let expert_id = idx_vec[ki] as usize;
-                    let weight = weights_vec[ki];
-                    if weight > 0.0 && expert_id < self.expert_gates.len() {
-                        let e_gate = self.expert_gates[expert_id].forward(&x_tok)?.apply(&Activation::Silu)?;
-                        let e_up = self.expert_ups[expert_id].forward(&x_tok)?;
-                        let e_out = self.expert_downs[expert_id].forward(&(e_gate * e_up)?)?;
-                        let weighted = (&e_out * (weight as f64))?;
-                        tok_sum = match tok_sum {
-                            None => Some(weighted),
-                            Some(s) => {
-                                let sum = (&s + &weighted)?;
-                                Some(sum)
-                            }
-                        };
-                    }
-                }
-
-                let tok_result = tok_sum.unwrap_or_else(|| {
-                    Tensor::zeros(x_tok.shape(), x_tok.dtype(), x_tok.device()).unwrap()
-                });
-
-                let tok_result = tok_result.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, hidden]
-                routed_out = match routed_out {
-                    None => Some(tok_result),
-                    Some(prev) => {
-                        if li == 0 && bi > 0 {
-                            Some(Tensor::cat(&[&prev, &tok_result], 0)?)
-                        } else if li == 0 {
-                            Some(tok_result)
-                        } else {
-                            let last_row_idx = prev.dim(0)? - 1;
-                            let last_row = prev.get(last_row_idx)?;
-                            let new_row = Tensor::cat(&[&last_row, &tok_result], 1)?;
-                            if last_row_idx == 0 {
-                                Some(new_row)
-                            } else {
-                                let prefix = prev.narrow(0, 0, last_row_idx)?;
-                                Some(Tensor::cat(&[&prefix, &new_row], 0)?)
-                            }
-                        }
-                    }
-                };
-            }
+impl std::fmt::Debug for DeepSeekFFN {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dense(_) => write!(f, "Dense(Mlp)"),
+            Self::MoE(_) => write!(f, "MoE(..)"),
         }
+    }
+}
 
-        let routed_out = routed_out.unwrap_or_else(|| {
-            Tensor::zeros(x.shape(), x.dtype(), x.device()).unwrap()
-        });
-
-        // ── 合并 ──
-        let routed_scaled = (&routed_out * self.routed_scaling_factor)?;
-        &shared_out + &routed_scaled
+impl DeepSeekFFN {
+    pub fn Forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(m) => m.forward(x),
+            Self::MoE(m) => m.Forward(x),
+        }
     }
 }
 
@@ -585,7 +564,7 @@ impl DeepSeekMoE_Weights {
 #[derive(Debug, Clone)]
 pub struct DeepSeek_Layer {
     pub mla: MLA_Weights,
-    pub moe: DeepSeekMoE_Weights,
+    pub ffn: DeepSeekFFN,
     pub ln1: RmsNorm,     // pre-attention norm
     pub ln2: RmsNorm,     // pre-MoE norm
 }
@@ -616,9 +595,9 @@ impl DeepSeek_Layer {
             rms_norm_eps, rotary, &prefix,
         )?;
         let moe = DeepSeekMoE_Weights::New(
-            gg, n_routed_experts, top_k, routed_scaling_factor, &prefix,
+            gg, n_routed_experts, top_k, routed_scaling_factor, DType::F16, &prefix,
         )?;
-        Ok(Self { mla, moe, ln1, ln2 })
+        Ok(Self { mla, ffn: DeepSeekFFN::MoE(moe), ln1, ln2 })
     }
 
     /// 从已提取的 QTensors 构建
@@ -636,6 +615,8 @@ impl DeepSeek_Layer {
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
         layer_idx: usize,
+        device: &Device,
+        dtype: DType,
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
 
@@ -651,12 +632,22 @@ impl DeepSeek_Layer {
         let mla = MLA_Weights::From_Extracted(
             tensors, n_heads, q_lora_rank, kv_lora_rank,
             qk_rope_dim, qk_nope_dim, v_head_dim,
-            rms_norm_eps, rotary, &prefix,
+            rms_norm_eps, rotary, device, &prefix,
         )?;
-        let moe = DeepSeekMoE_Weights::From_Extracted(
-            tensors, n_routed_experts, top_k, routed_scaling_factor, &prefix,
-        )?;
-        Ok(Self { mla, moe, ln1, ln2 })
+        // 自动检测：有 router(ffn_gate_inp) → MoE，否则 → Dense FFN
+        let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate_inp.weight"));
+        let ffn = if has_experts {
+            // Log available MoE tensors for debugging
+            let mut keys: Vec<&String> = tensors.keys().collect();
+            keys.sort();
+            tracing::info!("MoE layer {}: tensors={:?}", layer_idx, keys);
+            DeepSeekFFN::MoE(DeepSeekMoE_Weights::From_Extracted(
+                tensors, n_routed_experts, top_k, routed_scaling_factor, dtype, device, &prefix,
+            )?)
+        } else {
+            DeepSeekFFN::Dense(Mlp_Weights::New_Dense(tensors, &prefix)?)
+        };
+        Ok(Self { mla, ffn, ln1, ln2 })
     }
 
     /// 单层 Forward
@@ -672,7 +663,7 @@ impl DeepSeek_Layer {
         let x = (x + h)?;
         // Pre-MoE norm → MoE → residual
         let h2 = self.ln2.forward(&x)?;
-        let h2 = self.moe.Forward(&h2)?;
+        let h2 = self.ffn.Forward(&h2)?;
         x + h2
     }
 
@@ -892,6 +883,12 @@ impl DeepSeek_Config {
                     .map_err(|_| candle_core::Error::Msg(format!("cannot convert {s} to usize")))
             })
         };
+        let md_get_usize_opt = |s: &str| -> Option<usize> {
+            metadata.get(s).and_then(|v| {
+                v.to_u32().map(|u| u as usize)
+                    .or_else(|_| v.to_u64().map(|u| u as usize)).ok()
+            })
+        };
 
         let md_get_f64 = |s: &str| {
             md_get(s).and_then(|v| {
@@ -901,6 +898,11 @@ impl DeepSeek_Config {
                     .map_err(|_| candle_core::Error::Msg(format!("cannot convert {s} to f64")))
             })
         };
+        let md_get_f64_opt = |s: &str| -> Option<f64> {
+            metadata.get(s).and_then(|v| {
+                v.to_f32().map(|f| f as f64).or_else(|_| v.to_f64()).ok()
+            })
+        };
 
         let prefix = |key: &str| format!("{arch}.{key}");
 
@@ -908,19 +910,20 @@ impl DeepSeek_Config {
         let n_kv_heads = md_get_usize(&prefix("attention.head_count_kv")).unwrap_or(n_heads);
         let q_lora_rank = md_get_usize(&prefix("attention.q_lora_rank")).unwrap_or(1536);
         let kv_lora_rank = md_get_usize(&prefix("attention.kv_lora_rank")).unwrap_or(512);
-        let qk_rope_dim = md_get_usize(&prefix("attention.qk_rope_head_dim")).unwrap_or(64);
-        // key_length 在 DeepSeek GGUF 中表示非 RoPE 的 head 维度
-        let qk_nope_dim = md_get_usize(&prefix("attention.key_length")).unwrap_or(128);
-        let v_head_dim = md_get_usize(&prefix("attention.v_head_dim")).unwrap_or(128);
+        // Unsloth: key_length_mla=q_head_dim, rope.dimension_count=qk_rope_dim, value_length_mla=v_head_dim
+        let q_head_dim = md_get_usize_opt(&prefix("attention.key_length_mla")).unwrap_or(192);
+        let qk_rope_dim = md_get_usize_opt(&prefix("rope.dimension_count")).unwrap_or(64);
+        let qk_nope_dim = q_head_dim - qk_rope_dim;
+        let v_head_dim = md_get_usize_opt(&prefix("attention.value_length_mla")).unwrap_or(128);
         let num_layers = md_get_usize(&prefix("block_count"))?;
         let hidden_size = md_get_usize(&prefix("embedding_length"))?;
         let max_position_embeddings = md_get_usize(&prefix("context_length")).unwrap_or(131072);
         let rms_norm_eps = md_get_f64(&prefix("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6);
         let rope_freq_base = md_get_f64(&prefix("rope.freq_base")).unwrap_or(10000.0);
-        let n_routed_experts = md_get_usize(&prefix("ffn.n_routed_experts")).unwrap_or(256);
-        let n_shared_experts = md_get_usize(&prefix("ffn.n_shared_experts")).unwrap_or(1);
-        let top_k = md_get_usize(&prefix("ffn.top_k")).unwrap_or(8);
-        let routed_scaling_factor = md_get_f64(&prefix("ffn.routed_scaling_factor")).unwrap_or(1.0);
+        let n_routed_experts = md_get_usize_opt(&prefix("expert_count")).unwrap_or(256);
+        let n_shared_experts = md_get_usize_opt(&prefix("expert_shared_count")).unwrap_or(1);
+        let top_k = md_get_usize_opt(&prefix("expert_used_count")).unwrap_or(8);
+        let routed_scaling_factor = md_get_f64_opt(&prefix("expert_weights_scale")).unwrap_or(2.5);
         let vocab_size = md_get_usize(&prefix("vocab_size")).unwrap_or(129280);
 
         Ok(Self {

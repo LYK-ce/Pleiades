@@ -58,6 +58,88 @@ impl AnyModel {
             AnyModel::DeepSeek(m) => m.Clear_Kv_Cache(),
         }
     }
+
+    /// 提取所有层的 KV Cache，返回 Vec<(tensor_a, tensor_b)>
+    /// - Qwen3/Qwen3Moe: (k, v)
+    /// - DeepSeek V3:    (kv_latent, k_pe)
+    /// 返回的 Tensor 与原模型共享存储（clone 仅增加引用计数）
+    pub fn extract_kv_cache(&self) -> Result<Vec<(Tensor, Tensor)>, String> {
+        match self {
+            AnyModel::Qwen3(m) => {
+                if m.layers.is_empty() {
+                    return Err("extract_kv_cache: model has no layers".into());
+                }
+                m.layers.iter().map(|layer| {
+                    let k = layer.self_attn.kv_cache.k()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    let v = layer.self_attn.kv_cache.v()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    Ok((k.clone(), v.clone()))
+                }).collect()
+            }
+            AnyModel::Qwen3Moe(m) => {
+                if m.layers.is_empty() {
+                    return Err("extract_kv_cache: model has no layers".into());
+                }
+                m.layers.iter().map(|layer| {
+                    let k = layer.self_attn.kv_cache.k()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    let v = layer.self_attn.kv_cache.v()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    Ok((k.clone(), v.clone()))
+                }).collect()
+            }
+            AnyModel::DeepSeek(m) => {
+                if m.layers.is_empty() {
+                    return Err("extract_kv_cache: model has no layers".into());
+                }
+                m.layers.iter().map(|layer| {
+                    let k = layer.mla.kv_cache.k.clone()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    let v = layer.mla.kv_cache.v.clone()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    Ok((k, v))
+                }).collect()
+            }
+        }
+    }
+
+    /// 恢复所有层的 KV Cache（假设当前 cache 为空，即刚加载的模型）
+    pub fn restore_kv_cache(&mut self, kvs: Vec<(Tensor, Tensor)>) -> Result<(), String> {
+        match self {
+            AnyModel::Qwen3(m) => {
+                if kvs.len() != m.layers.len() {
+                    return Err(format!("restore_kv_cache: layer count mismatch (expected {}, got {})",
+                        m.layers.len(), kvs.len()));
+                }
+                for (layer, (k, v)) in m.layers.iter_mut().zip(kvs) {
+                    layer.self_attn.kv_cache.append(&k, &v)
+                        .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
+                }
+            }
+            AnyModel::Qwen3Moe(m) => {
+                if kvs.len() != m.layers.len() {
+                    return Err(format!("restore_kv_cache: layer count mismatch (expected {}, got {})",
+                        m.layers.len(), kvs.len()));
+                }
+                for (layer, (k, v)) in m.layers.iter_mut().zip(kvs) {
+                    layer.self_attn.kv_cache.append(&k, &v)
+                        .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
+                }
+            }
+            AnyModel::DeepSeek(m) => {
+                if kvs.len() != m.layers.len() {
+                    return Err(format!("restore_kv_cache: layer count mismatch (expected {}, got {})",
+                        m.layers.len(), kvs.len()));
+                }
+                for (layer, (k, v)) in m.layers.iter_mut().zip(kvs) {
+                    layer.mla.kv_cache.Append(&k, &v)
+                        .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// 推理参数—仅保留模型元数据（运行时参数由 Pipeline_Params 提供）
@@ -288,11 +370,17 @@ pub fn GGUF_Load_Model(
     // 4. 构建 RotaryEmbedding
     //    DeepSeek 的 RoPE 应用于 head_dim = qk_rope_dim（解耦部分），而非完整 head_dim
     let rope_head_dim = if is_deepseek {
-        // DeepSeek: 从 metadata 获取 qk_rope_dim
+        // DeepSeek: 从 metadata 获取 qk_rope_dim（优先 Unsloth rope.dimension_count）
         super::gguf_model_manager::Get_Metadata_Usize_From_Map(
             &content.metadata,
-            &format!("{}.attention.qk_rope_head_dim", architecture),
+            &format!("{}.rope.dimension_count", architecture),
         )
+        .or_else(|| {
+            super::gguf_model_manager::Get_Metadata_Usize_From_Map(
+                &content.metadata,
+                &format!("{}.attention.qk_rope_head_dim", architecture),
+            )
+        })
         .unwrap_or(64)
     } else {
         arch_info.head_dim
@@ -499,6 +587,8 @@ pub fn GGUF_Load_Model(
                 ds_config.rms_norm_eps,
                 rotary.clone(),
                 blk_idx,
+                device,
+                model_dtype,
             )
             .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
             layers.push(layer);

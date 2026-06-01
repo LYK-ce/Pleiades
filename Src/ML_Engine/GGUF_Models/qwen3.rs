@@ -131,6 +131,33 @@ impl Mlp_Weights {
         })
     }
 
+    /// 从已提取的 QTensors 构建 Dense FFN（DeepSeek dense 层用）
+    pub fn New_Dense(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> Result<Self> {
+        let gate_proj = {
+            let qt = tensors.remove(&format!("{prefix}.ffn_gate.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate.weight")))?;
+            QMatMul::from_weights(Arc::new(qt))
+                .map_err(|e| candle_core::Error::Msg(format!("ffn_gate: {e}")))?
+        };
+        let up_proj = {
+            let qt = tensors.remove(&format!("{prefix}.ffn_up.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up.weight")))?;
+            QMatMul::from_weights(Arc::new(qt))
+                .map_err(|e| candle_core::Error::Msg(format!("ffn_up: {e}")))?
+        };
+        let down_proj = {
+            let qt = tensors.remove(&format!("{prefix}.ffn_down.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down.weight")))?;
+            QMatMul::from_weights(Arc::new(qt))
+                .map_err(|e| candle_core::Error::Msg(format!("ffn_down: {e}")))?
+        };
+        Ok(Self {
+            gate_proj, up_proj, down_proj,
+            act_fn: Activation::Silu,
+            span: tracing::span!(tracing::Level::TRACE, "mlp"),
+        })
+    }
+
 }
 
 impl Module for Mlp_Weights {

@@ -68,6 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&workspace_dir)?;
 
+    // 创建 KV Cache offload 缓存目录
+    std::fs::create_dir_all(".kvcache")?;
+
     // ══════════════════════════════════════════════════════
     // Phase 2: 初始化 tracing 日志
     // ══════════════════════════════════════════════════════

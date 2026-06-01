@@ -17,9 +17,9 @@ impl LuaContext {
     pub fn new() -> mlua::Result<Lua> {
         let lua = Lua::new();
 
-        // 禁用危险的全局函数
+        // 禁用危险的全局函数（保留 os 供 clock/date 等安全函数）
         let globals = lua.globals();
-        globals.set("os", Value::Nil)?;
+        // globals.set("os", Value::Nil)?;  // 注释掉，pipe_7/8 计时需要
         globals.set("io", Value::Nil)?;
         globals.set("require", Value::Nil)?;
         globals.set("dofile", Value::Nil)?;
