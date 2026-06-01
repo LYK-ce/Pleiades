@@ -957,7 +957,8 @@ impl mlua::UserData for MlSession {
 
         // ─── 编解码 ────────────────────────────────────────
         methods.add_method("encode", |_, sess, text: String| {
-            sess.encode(&text).map_err(|e| mlua::Error::runtime(e))
+            let messages = vec![Message { role: "user".into(), content: text }];
+            sess.encode_messages(&messages).map_err(|e| mlua::Error::runtime(e))
         });
 
         methods.add_method("decode", |_, sess, token_id: u32| {
