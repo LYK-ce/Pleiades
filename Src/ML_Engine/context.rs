@@ -577,7 +577,7 @@ impl MlSession {
 
         let kvs = self.ctx.offloaded_kv.take()
             .ok_or("offload_to_cuda: no offloaded KV cache")?;
-        let model_path = self.ctx.offloaded_model_path.take()
+        let model_path = self.ctx.offloaded_model_path.clone()
             .ok_or("offload_to_cuda: no offloaded model path")?;
         let start = self.ctx.offloaded_layer_start;
         let end = self.ctx.offloaded_layer_end;
@@ -600,6 +600,8 @@ impl MlSession {
         model.model.restore_kv_cache(kvs_device)?;
 
         self.ctx.model = Some(model);
+        // 重新保存 reload 信息，供下一轮 offload_to_cpu 使用
+        self.ctx.offloaded_model_path = Some(model_path);
         Ok(())
     }
 
