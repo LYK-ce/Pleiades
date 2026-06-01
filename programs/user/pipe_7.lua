@@ -24,7 +24,9 @@ end
 -- offset==0 时用 load_model（新对话，不用旧 KV），offset>0 时用 offload_to_cuda（恢复 KV）
 local function gpu_chunked_forward(sessions, input, offset, path, starts, ends, gpu_name)
     local hidden = input
+    local t_load, t_fwd, t_off = 0, 0, 0
     for i = 1, #sessions do
+        local t0 = os.clock()
         if offset == 0 then
             caps.print(string.format("  %s chunk %d/%d: load_model [%d,%d]",
                 gpu_name, i, #sessions, starts[i], ends[i]))
@@ -34,11 +36,18 @@ local function gpu_chunked_forward(sessions, input, offset, path, starts, ends, 
                 gpu_name, i, #sessions))
             sessions[i]:offload_to_cuda()
         end
+        t_load = t_load + os.clock() - t0
+        t0 = os.clock()
         hidden = sessions[i]:forward(hidden, offset)
+        t_fwd = t_fwd + os.clock() - t0
         caps.print(string.format("  %s chunk %d/%d: forward done → offload_to_cpu",
             gpu_name, i, #sessions))
+        t0 = os.clock()
         sessions[i]:offload_to_cpu()
+        t_off = t_off + os.clock() - t0
     end
+    caps.print(string.format("  %s: load=%.3fs forward=%.3fs offload=%.3fs",
+        gpu_name, t_load, t_fwd, t_off))
     return hidden
 end
 
@@ -138,7 +147,10 @@ function execute(params)
 
     -- 6. 桥接循环
     caps.print("pipe_7: 桥接循环开始 (GPU:0{chunks}→GPU:1{chunks}→网络)")
+    local iter = 0
     while true do
+        iter = iter + 1
+        local t_iter = os.clock()
         -- 从 Session 收 tensor (放在 GPU:0)
         local tensor, offset = local_tensor.recv_tensor(session_stream, "cuda:0")
 
@@ -171,5 +183,6 @@ function execute(params)
 
         -- 回传 logits 给 Session
         local_tensor.send_tensor(session_stream, logits, offset)
+        caps.print(string.format("pipe_7 iter %d total=%.3fs", iter, os.clock() - t_iter))
     end
 end
