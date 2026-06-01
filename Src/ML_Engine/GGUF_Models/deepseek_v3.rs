@@ -135,14 +135,14 @@ impl MLA_Weights {
         let k_b = {
             let deq = k_b_qt.dequantize(&gg.device)?;
             let dims = deq.dims();
-            let w = if dims.len() == 3 { deq.reshape((dims[1], dims[0] * dims[2]))? } else { deq };
+            let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
             Linear::new(w, None)
         };
         let v_b_qt = gg.Tensor(&format!("{prefix}.attn_v_b.weight"))?;
         let v_b = {
             let deq = v_b_qt.dequantize(&gg.device)?;
             let dims = deq.dims();
-            let w = if dims.len() == 3 { deq.reshape((dims[1], dims[0] * dims[2]))? } else { deq };
+            let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
             Linear::new(w, None)
         };
 
@@ -229,7 +229,7 @@ impl MLA_Weights {
             let deq = qt.dequantize(dev)?;
             let dims = deq.dims();
             let weight = if dims.len() == 3 {
-                deq.reshape((dims[1], dims[0] * dims[2]))?
+                deq.reshape((dims[0] * dims[2], dims[1]))?  // [n*d2, d1] = [out, in]
             } else {
                 deq
             };
