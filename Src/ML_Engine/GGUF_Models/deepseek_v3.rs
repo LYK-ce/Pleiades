@@ -228,7 +228,14 @@ impl MLA_Weights {
         ) -> Result<QMatMul> {
             let qt = tensors
                 .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+                .ok_or_else(|| {
+                    let mut available: Vec<&String> = tensors.keys().collect();
+                    available.sort();
+                    candle_core::Error::Msg(format!(
+                        "missing tensor: {}. Available tensors for this layer: {:?}",
+                        key, available
+                    ))
+                })?;
             QMatMul::from_weights(Arc::new(qt))
         }
 
@@ -239,7 +246,14 @@ impl MLA_Weights {
         ) -> Result<RmsNorm> {
             let qt = tensors
                 .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+                .ok_or_else(|| {
+                    let mut available: Vec<&String> = tensors.keys().collect();
+                    available.sort();
+                    candle_core::Error::Msg(format!(
+                        "missing tensor: {}. Available tensors for this layer: {:?}",
+                        key, available
+                    ))
+                })?;
             RmsNorm::from_qtensor(qt, eps)
         }
 
