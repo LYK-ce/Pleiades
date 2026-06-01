@@ -643,8 +643,9 @@ impl DeepSeek_Layer {
             qk_rope_dim, qk_nope_dim, v_head_dim,
             rms_norm_eps, rotary, &prefix,
         )?;
-        // 自动检测：有 routed experts → MoE，否则 → Dense FFN
-        let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate.0.weight"));
+        // 自动检测：有 router → MoE，否则 → Dense FFN
+        let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate_inp.weight"))
+            || tensors.keys().any(|k| k.starts_with(&format!("{prefix}.ffn_gate.")));
         let ffn = if has_experts {
             // Log available MoE tensors for debugging
             let mut keys: Vec<&String> = tensors.keys().collect();
