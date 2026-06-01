@@ -849,8 +849,9 @@ impl DeepSeek_Config {
         let q_lora_rank = md_get_usize(&prefix("attention.q_lora_rank")).unwrap_or(1536);
         let kv_lora_rank = md_get_usize(&prefix("attention.kv_lora_rank")).unwrap_or(512);
         let qk_rope_dim = md_get_usize(&prefix("attention.qk_rope_head_dim")).unwrap_or(64);
-        // key_length 在 DeepSeek GGUF 中表示非 RoPE 的 head 维度
-        let qk_nope_dim = md_get_usize(&prefix("attention.key_length")).unwrap_or(128);
+        let qk_nope_dim = md_get_usize(&prefix("attention.qk_nope_head_dim"))
+            .or_else(|_| md_get_usize(&prefix("attention.key_length")))
+            .unwrap_or(128);
         let v_head_dim = md_get_usize(&prefix("attention.v_head_dim")).unwrap_or(128);
         let num_layers = md_get_usize(&prefix("block_count"))?;
         let hidden_size = md_get_usize(&prefix("embedding_length"))?;
