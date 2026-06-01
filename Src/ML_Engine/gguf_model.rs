@@ -27,6 +27,7 @@ use std::sync::Arc;
 use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
 use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding, Attention_Weights, Mlp_Weights};
 use super::gguf_models::deepseek_v3::{DeepSeek_Model, DeepSeek_Layer, DeepSeek_Config};
+use super::gguf_models::deepseek_v4::DeepSeekV4Model;
 use super::gguf_models::qwen3_moe::{Qwen3MoE_Model, Qwen3MoE_Layer, MoeOrMlp};
 use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
 use candle_nn::Linear;
@@ -40,6 +41,7 @@ pub enum AnyModel {
     Qwen3(Model_Weights),
     Qwen3Moe(Qwen3MoE_Model),
     DeepSeek(DeepSeek_Model),
+    DeepSeekV4(DeepSeekV4Model),
 }
 
 impl AnyModel {
@@ -48,6 +50,7 @@ impl AnyModel {
             AnyModel::Qwen3(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
             AnyModel::Qwen3Moe(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
             AnyModel::DeepSeek(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
+            AnyModel::DeepSeekV4(m) => m.forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
         }
     }
 
@@ -56,6 +59,7 @@ impl AnyModel {
             AnyModel::Qwen3(m) => m.clear_kv_cache(),
             AnyModel::Qwen3Moe(m) => m.Clear_Kv_Cache(),
             AnyModel::DeepSeek(m) => m.Clear_Kv_Cache(),
+            AnyModel::DeepSeekV4(m) => m.clear_kv_cache(),
         }
     }
 
@@ -101,6 +105,9 @@ impl AnyModel {
                     Ok((k, v))
                 }).collect()
             }
+            AnyModel::DeepSeekV4(m) => {
+                m.extract_kv_cache().map_err(|e| format!("extract_kv_cache V4: {e}"))
+            }
         }
     }
 
@@ -136,6 +143,9 @@ impl AnyModel {
                     layer.mla.kv_cache.Append(&k, &v)
                         .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
                 }
+            }
+            AnyModel::DeepSeekV4(m) => {
+                m.restore_kv_cache(kvs).map_err(|e| format!("restore_kv_cache V4: {e}"))?;
             }
         }
         Ok(())
@@ -335,8 +345,61 @@ pub fn GGUF_Load_Model(
     let is_deepseek = match architecture.as_str() {
         "qwen3" | "qwen3moe" => false,
         "deepseek_v3" | "deepseek2" => true,
+        "deepseek_v4" => {
+            // ── DeepSeek V4 safetensors 加载路径 ──
+            let weight_format = arch_info.weight_format.as_deref();
+            if weight_format != Some("safetensors") {
+                anyhow::bail!(
+                    "deepseek_v4 requires weight_format=safetensors, got: {:?}",
+                    weight_format
+                );
+            }
+
+            // 构建 Config
+            let cfg = super::gguf_models::deepseek_v4::config::Config::from_gguf_metadata(
+                &content.metadata,
+            )?;
+
+            // 加载所有 safetensors/shard-* tensor blobs
+            let num_shards = arch_info.num_shards.unwrap_or(0);
+            if num_shards == 0 {
+                anyhow::bail!("deepseek_v4 safetensors: num_shards is 0");
+            }
+            let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(num_shards);
+            for i in 0..num_shards {
+                let tensor_name = format!("safetensors/shard-{}", i);
+                let qtensor = content
+                    .tensor(&mut file, &tensor_name, &Device::Cpu)
+                    .map_err(|e| anyhow::anyhow!("Failed to load shard {}: {}", i, e))?;
+                let data = qtensor
+                    .dequantize(&Device::Cpu)
+                    .map_err(|e| anyhow::anyhow!("Failed to dequantize shard {}: {}", i, e))?;
+                let bytes = data
+                    .to_vec1::<u8>()
+                    .map_err(|e| anyhow::anyhow!("Failed to convert shard {} to bytes: {}", i, e))?;
+                shard_bytes.push(bytes);
+            }
+
+            // 构建模型
+            let model = DeepSeekV4Model::from_pgguf(&cfg, &shard_bytes, device)
+                .map_err(|e| anyhow::anyhow!("DeepSeekV4 from_pgguf failed: {e}"))?;
+
+            let mut inference_config = Inference_Config::default();
+            inference_config.eos_token = arch_info.eos_token_id;
+
+            return Ok(GGUF_Model {
+                model: AnyModel::DeepSeekV4(model),
+                tokenizer: None,
+                inference_config,
+                arch_info,
+                model_path: model_path.to_path_buf(),
+                device: device.clone(),
+                has_input_head: true,
+                has_output_head: true,
+            });
+        }
         _ => anyhow::bail!(
-            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3moe', and 'deepseek_v3' are supported.",
+            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3moe', 'deepseek_v3', and 'deepseek_v4' are supported.",
             arch_info.architecture
         ),
     };

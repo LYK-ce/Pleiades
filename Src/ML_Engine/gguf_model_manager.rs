@@ -54,6 +54,11 @@ pub struct Model_Arch_Info {
     pub model_id: Option<u32>,
     /// 256 位层位图，bit N=1 表示文件含第 N 层
     pub layer_bitmap: Option<[u8; 32]>,
+    /// 权重格式标记: None = 标准 GGUF 量化, Some("safetensors") = safetensors 原样打包
+    /// （由 Python --wrap-native 模式写入，DeepSeek V4 使用）
+    pub weight_format: Option<String>,
+    /// safetensors 分片数量（仅 weight_format == "safetensors" 时有效）
+    pub num_shards: Option<usize>,
 }
 
 /// 每层的信息
@@ -338,6 +343,8 @@ pub fn GGUF_Analyze(gguf_file_path: &Path) -> Result<Model_Arch_Info> {
         split_end,
         model_id: None,
         layer_bitmap: None,
+        weight_format: Get_Metadata_String(&content.metadata, "pleiades.weight_format"),
+        num_shards: Get_Metadata_Usize(&content.metadata, "pleiades.num_shards"),
     })
 }
 
@@ -499,6 +506,8 @@ pub fn GGUF_Analyze_From_Content(content: &gguf_file::Content) -> Result<Model_A
         split_end,
         model_id: None,
         layer_bitmap: None,
+        weight_format: Get_Metadata_String(&content.metadata, "pleiades.weight_format"),
+        num_shards: Get_Metadata_Usize(&content.metadata, "pleiades.num_shards"),
     })
 }
 
@@ -545,6 +554,15 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
 
     // 2. 从 Content 提取架构信息（零 I/O）
     let mut arch_info = GGUF_Analyze_From_Content(&content)?;
+
+    // 2.5 如果是 safetensors 原样打包模式，跳过 GGUF→PGGUF 转换
+    if arch_info.weight_format.as_deref() == Some("safetensors") {
+        arch_info.model_id = Get_Metadata_Usize(&content.metadata, "pleiades.model_id")
+            .map(|id| id as u32);
+        arch_info.layer_bitmap = Get_Metadata_String(&content.metadata, "pleiades.layer_bitmap")
+            .map(|hex| Parse_Bitmap_Hex(&hex));
+        return Ok((arch_info, gguf_file_path.to_path_buf()));
+    }
 
     // 3. 检查是否已是 PGGUF（metadata 中有 pleiades.model_id）
     let existing_model_id = Get_Metadata_Usize(&content.metadata, "pleiades.model_id");

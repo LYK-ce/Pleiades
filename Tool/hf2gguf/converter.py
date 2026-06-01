@@ -220,3 +220,19 @@ def _get_tensor_map(arch: str) -> dict[str, str]:
     if arch in ("qwen3",):
         return QWEN3_TENSOR_MAP
     return {}
+
+
+def convert_hf_to_pgguf_wrap_native(
+    model_dir: Path,
+    output_path: Path | None = None,
+) -> Path:
+    """Wrap-native mode: pack safetensors shards as-is into PGGUF (no precision conversion).
+
+    This is the entry point for DeepSeek V4 Flash models.
+    """
+    from .wrap_native import wrap_native_to_pgguf
+
+    if output_path is None:
+        output_path = model_dir.parent / f"{model_dir.name}.pgguf"
+
+    return wrap_native_to_pgguf(model_dir, output_path.resolve())

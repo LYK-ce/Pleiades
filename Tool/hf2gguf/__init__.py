@@ -3,12 +3,13 @@
 # Presented by KeJi
 # Date: 2026-05-31
 
-from .converter import convert_hf_to_pgguf
+from .converter import convert_hf_to_pgguf, convert_hf_to_pgguf_wrap_native
 from .config_reader import read_config
 from .utils import discover_model_dir, resolve_tensor_source
 
 __all__ = [
     "convert_hf_to_pgguf",
+    "convert_hf_to_pgguf_wrap_native",
     "read_config",
     "discover_model_dir",
     "resolve_tensor_source",

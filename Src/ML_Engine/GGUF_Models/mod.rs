@@ -10,6 +10,7 @@
 pub mod qwen3;
 pub mod qwen3_moe;
 pub mod deepseek_v3;
+pub mod deepseek_v4;
 
 // 重新导出 Qwen3 相关类型，便于外部使用
 pub use qwen3::{
