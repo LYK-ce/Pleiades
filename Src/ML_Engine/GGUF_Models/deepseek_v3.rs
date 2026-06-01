@@ -143,6 +143,7 @@ impl MLA_Weights {
         let v_b = {
             let deq = v_b_qt.dequantize(&gg.device)?;
             let dims = deq.dims();
+            tracing::info!("v_b New: raw_dims={:?} v_head={} n_heads={}", dims, v_head_dim, n_heads);
             let w = if dims.len() == 3 {
                 deq.reshape((dims[0] * dims[2], dims[1]))?
             } else {
@@ -150,6 +151,7 @@ impl MLA_Weights {
                 let total: usize = dims.iter().product();
                 deq.reshape((out_dim, total / out_dim))?
             };
+            tracing::info!("v_b New: reshaped={:?}", w.dims());
             Linear::new(w, None)
         };
 
@@ -332,7 +334,7 @@ impl MLA_Weights {
             .transpose(1, 2)?
             .contiguous()?;                          // [b, n_heads, l, qk_nope_dim]
         let v = self.v_b.forward(&ckv)?;             // [b, l, n_heads * v_head_dim]
-        tracing::info!("MLA v_b: dims={:?} v_head={}", v.dims(), self.v_head_dim);
+        tracing::info!("MLA v_b fwd: out={:?} v_head={} weight={:?}", v.dims(), self.v_head_dim, self.v_b.weight().dims());
         let v = v
             .reshape((b, l, self.n_heads, self.v_head_dim))?
             .transpose(1, 2)?
