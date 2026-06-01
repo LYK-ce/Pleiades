@@ -269,13 +269,13 @@ impl MLA_Weights {
             .transpose(1, 2)?;                     // [b, n_heads, l, q_head_dim]
 
         // 分割 Q: 前 qk_nope_dim → q_nope, 后 qk_rope_dim → q_pe
-        let q_nope = q.narrow(3, 0, self.qk_nope_dim)?;
-        let q_pe = q.narrow(3, self.qk_nope_dim, self.qk_rope_dim)?;
+        let q_nope = q.narrow(3, 0, self.qk_nope_dim)?.contiguous()?;
+        let q_pe = q.narrow(3, self.qk_nope_dim, self.qk_rope_dim)?.contiguous()?;
 
         // ── KV 路径 ──
         let compressed_kv = self.kv_a.forward(x)?;  // [b, l, kv_lora_rank + qk_rope_dim]
-        let kv_latent = compressed_kv.narrow(2, 0, self.kv_lora_rank)?;
-        let k_pe_raw = compressed_kv.narrow(2, self.kv_lora_rank, self.qk_rope_dim)?;
+        let kv_latent = compressed_kv.narrow(2, 0, self.kv_lora_rank)?.contiguous()?;
+        let k_pe_raw = compressed_kv.narrow(2, self.kv_lora_rank, self.qk_rope_dim)?.contiguous()?;
 
         // k_pe: [b, 1, l, qk_rope_dim]
         let k_pe = k_pe_raw
