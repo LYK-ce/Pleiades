@@ -158,6 +158,11 @@ impl MlSession {
         self.ctx.model = Some(model);
         self.ctx.offset = 0;
 
+        // 保存实际加载范围，供 offload 使用
+        self.ctx.offloaded_model_path = Some(path.to_path_buf());
+        self.ctx.offloaded_layer_start = start;
+        self.ctx.offloaded_layer_end = end;
+
         Ok(())
     }
 
@@ -529,28 +534,20 @@ impl MlSession {
 
     // ─── Offloading ────────────────────────────────────────
 
-    /// 从 arch_info 推导层加载范围
-    fn derive_layer_range(arch_info: &super::gguf_model_manager::Model_Arch_Info) -> (usize, usize) {
-        if arch_info.is_split {
-            (arch_info.split_start, arch_info.split_end)
-        } else {
-            (0, arch_info.num_layers + 1)
-        }
-    }
-
     /// 将模型从 GPU 卸下：提取 KV → 移到 CPU → 释放模型 → 挂起
     pub fn offload_to_cpu(&mut self) -> Result<(), String> {
         let model = self.ctx.model.as_ref()
             .ok_or("offload_to_cpu: no model loaded")?;
 
-        // 1. 保存 reload 所需信息
-        let model_path = model.model_path.clone();
-        let (start, end) = Self::derive_layer_range(&model.arch_info);
+        // 验证 reload 信息已在 load_model 时保存
+        if self.ctx.offloaded_model_path.is_none() {
+            return Err("offload_to_cpu: missing model path (call load_model first)".into());
+        }
 
-        // 2. 提取 KV Cache（仍在原设备）
+        // 1. 提取 KV Cache（仍在原设备）
         let kvs = model.model.extract_kv_cache()?;
 
-        // 3. 将 KV tensor 移到 CPU
+        // 2. 将 KV tensor 移到 CPU
         let kvs_cpu: Vec<(Tensor, Tensor)> = kvs.into_iter()
             .map(|(k, v)| {
                 let k_cpu = k.to_device(&Device::Cpu)
@@ -561,16 +558,13 @@ impl MlSession {
             })
             .collect::<Result<_, String>>()?;
 
-        // 4. 释放 GPU 模型
+        // 3. 释放 GPU 模型
         if let Some(old) = self.ctx.model.take() {
             GGUF_Unload_Model(old);
         }
 
-        // 5. 保存挂起状态
+        // 4. 保存挂起状态（reload 信息已在 load_model 时保存）
         self.ctx.offloaded_kv = Some(kvs_cpu);
-        self.ctx.offloaded_model_path = Some(model_path);
-        self.ctx.offloaded_layer_start = start;
-        self.ctx.offloaded_layer_end = end;
 
         Ok(())
     }
@@ -613,22 +607,12 @@ impl MlSession {
     pub fn offload_save(&mut self, file_id: &str) -> Result<(), String> {
         // 1. 获取 KV（从模型或已 offload 状态）
         let kvs = if let Some(ref kvs) = self.ctx.offloaded_kv {
-            // 已 offload，KV 在 CPU
             kvs.clone()
         } else {
             let model = self.ctx.model.as_ref()
                 .ok_or("offload_save: no model loaded and no offloaded KV")?;
 
-            // 保存 reload 信息（如果还没保存）
-            if self.ctx.offloaded_model_path.is_none() {
-                self.ctx.offloaded_model_path = Some(model.model_path.clone());
-                let (start, end) = Self::derive_layer_range(&model.arch_info);
-                self.ctx.offloaded_layer_start = start;
-                self.ctx.offloaded_layer_end = end;
-            }
-
             let kvs_raw = model.model.extract_kv_cache()?;
-            // 移到 CPU
             kvs_raw.into_iter()
                 .map(|(k, v)| {
                     let k_cpu = k.to_device(&Device::Cpu)
