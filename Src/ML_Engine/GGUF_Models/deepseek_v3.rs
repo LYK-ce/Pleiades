@@ -87,8 +87,8 @@ pub struct MLA_Weights {
     // KV 路径 (联合压缩): x → kv_a → split[kv_latent | k_pe] → kv_norm → kv_b → [k_nope | v]
     pub kv_a: QMatMul,          // [hidden, kv_lora_rank + qk_rope_dim]
     pub kv_norm: RmsNorm,       // LayerNorm for compressed KV
-    pub k_b: QMatMul,           // [kv_lora_rank, n_heads * qk_nope_dim]
-    pub v_b: QMatMul,           // [kv_lora_rank, n_heads * v_head_dim]
+    pub k_b: Linear,           // [kv_lora_rank, n_heads * qk_nope_dim]
+    pub v_b: Linear,           // [kv_lora_rank, n_heads * v_head_dim]
 
     // 输出投影
     pub o_proj: QMatMul,        // [n_heads * v_head_dim, hidden]
@@ -130,8 +130,21 @@ impl MLA_Weights {
 
         let kv_a = gg.Qmatmul(&format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
-        let k_b = gg.Qmatmul(&format!("{prefix}.attn_k_b.weight"))?;
-        let v_b = gg.Qmatmul(&format!("{prefix}.attn_v_b.weight"))?;
+        // Unsloth: k_b/v_b 可能是 3D，dequantize + flatten + Linear
+        let k_b_qt = gg.Tensor(&format!("{prefix}.attn_k_b.weight"))?;
+        let k_b = {
+            let deq = k_b_qt.dequantize(&gg.device)?;
+            let dims = deq.dims();
+            let w = if dims.len() == 3 { deq.reshape((dims[1], dims[0] * dims[2]))? } else { deq };
+            Linear::new(w, None)
+        };
+        let v_b_qt = gg.Tensor(&format!("{prefix}.attn_v_b.weight"))?;
+        let v_b = {
+            let deq = v_b_qt.dequantize(&gg.device)?;
+            let dims = deq.dims();
+            let w = if dims.len() == 3 { deq.reshape((dims[1], dims[0] * dims[2]))? } else { deq };
+            Linear::new(w, None)
+        };
 
         let o_proj = gg.Qmatmul(&format!("{prefix}.attn_output.weight"))?;
 
@@ -171,6 +184,7 @@ impl MLA_Weights {
         v_head_dim: usize,
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
+        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
         fn Take_Qmatmul(
@@ -208,14 +222,29 @@ impl MLA_Weights {
             RmsNorm::from_qtensor(qt, eps)
         }
 
+        /// Flatten 3D GGUF weight [d0, d1, d2] → 2D [d1, d0*d2]，返回 Linear
+        fn load_linear_flatten(tensors: &mut HashMap<String, QTensor>, key: &str, dev: &Device) -> Result<Linear> {
+            let qt = tensors.remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {key}")))?;
+            let deq = qt.dequantize(dev)?;
+            let dims = deq.dims();
+            let weight = if dims.len() == 3 {
+                deq.reshape((dims[1], dims[0] * dims[2]))?
+            } else {
+                deq
+            };
+            Linear::new(weight, None).map_err(|e| candle_core::Error::Msg(format!("{e}")))
+        }
+
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
         let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
         let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_b.weight"))?;
 
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
-        let k_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_k_b.weight"))?;
-        let v_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_v_b.weight"))?;
+        // Unsloth: k_b/v_b 可能是 3D [n_heads, kv_lora, nope_dim]，需 flatten 到 2D
+        let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device)?;
+        let v_b = load_linear_flatten(tensors, &format!("{prefix}.attn_v_b.weight"), device)?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
@@ -589,7 +618,7 @@ impl DeepSeek_Layer {
         let mla = MLA_Weights::From_Extracted(
             tensors, n_heads, q_lora_rank, kv_lora_rank,
             qk_rope_dim, qk_nope_dim, v_head_dim,
-            rms_norm_eps, rotary, &prefix,
+            rms_norm_eps, rotary, device, &prefix,
         )?;
         // 自动检测：有 router(ffn_gate_inp) → MoE，否则 → Dense FFN
         let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate_inp.weight"));
