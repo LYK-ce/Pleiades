@@ -171,7 +171,6 @@ impl MLA_Weights {
         v_head_dim: usize,
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
-        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
         fn Take_Qmatmul(
@@ -211,39 +210,12 @@ impl MLA_Weights {
 
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
         let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
-
-        // 从 q_b 实际权重维度推导 q_head_dim（Unsloth metadata key_length 不准确）
-        let q_b_qt = tensors.get(&format!("{prefix}.attn_q_b.weight"))
-            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.attn_q_b.weight")))?;
-        let q_b_deq = q_b_qt.dequantize(device)?;
-        let q_b_dims = q_b_deq.dims();
-        let q_head_dim = q_b_dims[q_b_dims.len() - 1] / n_heads;
-        let qk_nope_dim = q_head_dim - qk_rope_dim;
-        let q_b = QMatMul::from_weights(
-            tensors.remove(&format!("{prefix}.attn_q_b.weight")).unwrap().into()
-        )?;
+        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_b.weight"))?;
 
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
-
-        // 从 k_b 权重推导 qk_nope_dim（Unsloth metadata 不准确）
-        let k_b_qt = tensors.get(&format!("{prefix}.attn_k_b.weight"))
-            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.attn_k_b.weight")))?;
-        let k_b_deq = k_b_qt.dequantize(device)?;
-        let k_b_dims = k_b_deq.dims();
-        let qk_nope_dim = k_b_dims[k_b_dims.len() - 1] / n_heads;
-        let k_b = QMatMul::from_weights(
-            tensors.remove(&format!("{prefix}.attn_k_b.weight")).unwrap().into()
-        )?;
-        let qk_rope_dim = q_head_dim - qk_nope_dim;
-        let v_b_qt = tensors.get(&format!("{prefix}.attn_v_b.weight"))
-            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.attn_v_b.weight")))?;
-        let v_b_deq = v_b_qt.dequantize(device)?;
-        let v_b_dims = v_b_deq.dims();
-        let v_head_dim = v_b_dims[v_b_dims.len() - 1] / n_heads;
-        let v_b = QMatMul::from_weights(
-            tensors.remove(&format!("{prefix}.attn_v_b.weight")).unwrap().into()
-        )?;
+        let k_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_k_b.weight"))?;
+        let v_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_v_b.weight"))?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
@@ -609,7 +581,7 @@ impl DeepSeek_Layer {
         let mla = MLA_Weights::From_Extracted(
             tensors, n_heads, q_lora_rank, kv_lora_rank,
             qk_rope_dim, qk_nope_dim, v_head_dim,
-            rms_norm_eps, rotary, device, &prefix,
+            rms_norm_eps, rotary, &prefix,
         )?;
         // 自动检测：有 router(ffn_gate_inp) → MoE，否则 → Dense FFN
         let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate_inp.weight"));
@@ -860,6 +832,12 @@ impl DeepSeek_Config {
                     .map_err(|_| candle_core::Error::Msg(format!("cannot convert {s} to usize")))
             })
         };
+        let md_get_usize_opt = |s: &str| -> Option<usize> {
+            metadata.get(s).and_then(|v| {
+                v.to_u32().map(|u| u as usize)
+                    .or_else(|_| v.to_u64().map(|u| u as usize)).ok()
+            })
+        };
 
         let md_get_f64 = |s: &str| {
             md_get(s).and_then(|v| {
@@ -869,6 +847,11 @@ impl DeepSeek_Config {
                     .map_err(|_| candle_core::Error::Msg(format!("cannot convert {s} to f64")))
             })
         };
+        let md_get_f64_opt = |s: &str| -> Option<f64> {
+            metadata.get(s).and_then(|v| {
+                v.to_f32().map(|f| f as f64).or_else(|_| v.to_f64()).ok()
+            })
+        };
 
         let prefix = |key: &str| format!("{arch}.{key}");
 
@@ -876,20 +859,20 @@ impl DeepSeek_Config {
         let n_kv_heads = md_get_usize(&prefix("attention.head_count_kv")).unwrap_or(n_heads);
         let q_lora_rank = md_get_usize(&prefix("attention.q_lora_rank")).unwrap_or(1536);
         let kv_lora_rank = md_get_usize(&prefix("attention.kv_lora_rank")).unwrap_or(512);
-        let qk_rope_dim = md_get_usize(&prefix("attention.qk_rope_head_dim")).unwrap_or(64);
-        let qk_nope_dim = md_get_usize(&prefix("attention.qk_nope_head_dim"))
-            .or_else(|_| md_get_usize(&prefix("attention.key_length")))
-            .unwrap_or(128);
-        let v_head_dim = md_get_usize(&prefix("attention.v_head_dim")).unwrap_or(128);
+        // Unsloth: key_length_mla=q_head_dim, rope.dimension_count=qk_rope_dim, value_length_mla=v_head_dim
+        let q_head_dim = md_get_usize_opt(&prefix("attention.key_length_mla")).unwrap_or(192);
+        let qk_rope_dim = md_get_usize_opt(&prefix("rope.dimension_count")).unwrap_or(64);
+        let qk_nope_dim = q_head_dim - qk_rope_dim;
+        let v_head_dim = md_get_usize_opt(&prefix("attention.value_length_mla")).unwrap_or(128);
         let num_layers = md_get_usize(&prefix("block_count"))?;
         let hidden_size = md_get_usize(&prefix("embedding_length"))?;
         let max_position_embeddings = md_get_usize(&prefix("context_length")).unwrap_or(131072);
         let rms_norm_eps = md_get_f64(&prefix("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6);
         let rope_freq_base = md_get_f64(&prefix("rope.freq_base")).unwrap_or(10000.0);
-        let n_routed_experts = md_get_usize(&prefix("ffn.n_routed_experts")).unwrap_or(256);
-        let n_shared_experts = md_get_usize(&prefix("ffn.n_shared_experts")).unwrap_or(1);
-        let top_k = md_get_usize(&prefix("ffn.top_k")).unwrap_or(8);
-        let routed_scaling_factor = md_get_f64(&prefix("ffn.routed_scaling_factor")).unwrap_or(1.0);
+        let n_routed_experts = md_get_usize_opt(&prefix("expert_count")).unwrap_or(256);
+        let n_shared_experts = md_get_usize_opt(&prefix("expert_shared_count")).unwrap_or(1);
+        let top_k = md_get_usize_opt(&prefix("expert_used_count")).unwrap_or(8);
+        let routed_scaling_factor = md_get_f64_opt(&prefix("expert_weights_scale")).unwrap_or(2.5);
         let vocab_size = md_get_usize(&prefix("vocab_size")).unwrap_or(129280);
 
         Ok(Self {
