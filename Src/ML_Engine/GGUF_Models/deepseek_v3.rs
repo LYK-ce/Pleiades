@@ -233,7 +233,7 @@ impl MLA_Weights {
             } else {
                 deq
             };
-            Linear::new(weight, None).map_err(|e| candle_core::Error::Msg(format!("{e}")))
+            Ok(Linear::new(weight, None))
         }
 
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
