@@ -94,11 +94,11 @@ impl AnyModel {
                     return Err("extract_kv_cache: model has no layers".into());
                 }
                 m.layers.iter().map(|layer| {
-                    let kv_latent = layer.mla.kv_cache.kv_latent.clone()
+                    let k = layer.mla.kv_cache.k.clone()
                         .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
-                    let k_pe = layer.mla.kv_cache.k_pe.clone()
+                    let v = layer.mla.kv_cache.v.clone()
                         .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
-                    Ok((kv_latent, k_pe))
+                    Ok((k, v))
                 }).collect()
             }
         }
@@ -132,8 +132,8 @@ impl AnyModel {
                     return Err(format!("restore_kv_cache: layer count mismatch (expected {}, got {})",
                         m.layers.len(), kvs.len()));
                 }
-                for (layer, (kv_latent, k_pe)) in m.layers.iter_mut().zip(kvs) {
-                    layer.mla.kv_cache.Append(&kv_latent, &k_pe)
+                for (layer, (k, v)) in m.layers.iter_mut().zip(kvs) {
+                    layer.mla.kv_cache.Append(&k, &v)
                         .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
                 }
             }

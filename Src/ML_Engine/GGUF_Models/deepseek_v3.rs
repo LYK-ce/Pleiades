@@ -45,83 +45,30 @@ type Result<T> = candle_core::Result<T>;
 ///   → 大幅减少 KV Cache 显存占用
 #[derive(Debug, Clone)]
 pub struct MLA_KV_Cache {
-    /// 压缩后的 KV latent: [batch, seq, kv_lora_rank]
-    pub kv_latent: Option<Tensor>,
-    /// 解耦的 RoPE key: [batch, 1, seq, qk_rope_dim]
-    pub k_pe: Option<Tensor>,
-    /// 预分配容量（cache 大小上限）
-    capacity: usize,
+    pub k: Option<Tensor>,
+    pub v: Option<Tensor>,
 }
 
 impl MLA_KV_Cache {
-    pub fn New(capacity: usize) -> Self {
-        Self {
-            kv_latent: None,
-            k_pe: None,
-            capacity,
-        }
+    pub fn New(_capacity: usize) -> Self {
+        Self { k: None, v: None }
     }
 
-    /// 追加新的 KV latent 和 k_pe 到缓存
-    pub fn Append(
-        &mut self,
-        kv_latent: &Tensor,
-        k_pe: &Tensor,
-    ) -> Result<()> {
-        // kv_latent: [batch, seq, kv_lora_rank]
-        // k_pe:       [batch, 1, seq, qk_rope_dim]
-        self.kv_latent = match self.kv_latent.take() {
-            None => Some(kv_latent.clone()),
-            Some(old) => {
-                let cat = Tensor::cat(&[&old, kv_latent], 1)?;
-                // 如果超过 capacity，截断最早的部分
-                let seq_len = cat.dim(1)?;
-                if seq_len > self.capacity {
-                    Some(cat.narrow(1, seq_len - self.capacity, self.capacity)?)
-                } else {
-                    Some(cat)
-                }
-            }
+    pub fn Append(&mut self, k: &Tensor, v: &Tensor) -> Result<()> {
+        self.k = match self.k.take() {
+            None => Some(k.clone()),
+            Some(old) => Some(Tensor::cat(&[&old, k], 2)?),
         };
-
-        self.k_pe = match self.k_pe.take() {
-            None => Some(k_pe.clone()),
-            Some(old) => {
-                let cat = Tensor::cat(&[&old, k_pe], 2)?;
-                let seq_len = cat.dim(2)?;
-                if seq_len > self.capacity {
-                    Some(cat.narrow(2, seq_len - self.capacity, self.capacity)?)
-                } else {
-                    Some(cat)
-                }
-            }
+        self.v = match self.v.take() {
+            None => Some(v.clone()),
+            Some(old) => Some(Tensor::cat(&[&old, v], 2)?),
         };
-
         Ok(())
     }
 
-    /// 获取当前缓存的总序列长度
-    pub fn Seq_Len(&self) -> usize {
-        match &self.kv_latent {
-            Some(t) => t.dim(1).unwrap_or(0),
-            None => 0,
-        }
-    }
-
-    /// 获取压缩后的 KV latent (全部序列)
-    pub fn Kv_Latent(&self) -> Option<&Tensor> {
-        self.kv_latent.as_ref()
-    }
-
-    /// 获取解耦的 RoPE key (全部序列)
-    pub fn K_Pe(&self) -> Option<&Tensor> {
-        self.k_pe.as_ref()
-    }
-
-    /// 重置缓存
     pub fn Reset(&mut self) {
-        self.kv_latent = None;
-        self.k_pe = None;
+        self.k = None;
+        self.v = None;
     }
 }
 
@@ -355,8 +302,17 @@ impl MLA_Weights {
         let k = Tensor::cat(&[&k_nope, &k_pe_broadcast], 3)?;
         let q = Tensor::cat(&[&q_nope, &q_pe_roped], 3)?;
 
-        // ── 更新 KV Cache ──
-        self.kv_cache.Append(&kv_latent, &k_pe)?;
+        // ── 更新 KV Cache（展开的 K, V）──
+        let (k, v) = match (&self.kv_cache.k, &self.kv_cache.v) {
+            (Some(prev_k), Some(prev_v)) => {
+                let k = Tensor::cat(&[prev_k, &k], 2)?;
+                let v = Tensor::cat(&[prev_v, &v], 2)?;
+                (k, v)
+            }
+            _ => (k, v),
+        };
+        self.kv_cache.k = Some(k.clone());
+        self.kv_cache.v = Some(v.clone());
 
         // ── Scaled Dot-Product Attention ──
         let scale = 1.0 / (self.q_head_dim as f64).sqrt();
