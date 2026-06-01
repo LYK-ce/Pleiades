@@ -171,6 +171,7 @@ impl MLA_Weights {
         v_head_dim: usize,
         rms_norm_eps: f64,
         rotary: Arc<Rotary_Embedding>,
+        device: &Device,
         prefix: &str,
     ) -> Result<Self> {
         fn Take_Qmatmul(
@@ -210,7 +211,17 @@ impl MLA_Weights {
 
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
         let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
-        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_b.weight"))?;
+
+        // 从 q_b 实际权重维度推导 q_head_dim（Unsloth metadata key_length 不准确）
+        let q_b_qt = tensors.get(&format!("{prefix}.attn_q_b.weight"))
+            .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.attn_q_b.weight")))?;
+        let q_b_deq = q_b_qt.dequantize(device)?;
+        let q_b_dims = q_b_deq.dims();
+        let q_head_dim = q_b_dims[q_b_dims.len() - 1] / n_heads;
+        let qk_nope_dim = q_head_dim - qk_rope_dim;
+        let q_b = QMatMul::from_weights(
+            tensors.remove(&format!("{prefix}.attn_q_b.weight")).unwrap().into()
+        )?;
 
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
@@ -581,7 +592,7 @@ impl DeepSeek_Layer {
         let mla = MLA_Weights::From_Extracted(
             tensors, n_heads, q_lora_rank, kv_lora_rank,
             qk_rope_dim, qk_nope_dim, v_head_dim,
-            rms_norm_eps, rotary, &prefix,
+            rms_norm_eps, rotary, device, &prefix,
         )?;
         // 自动检测：有 router(ffn_gate_inp) → MoE，否则 → Dense FFN
         let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate_inp.weight"));
