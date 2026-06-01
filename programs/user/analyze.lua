@@ -54,4 +54,19 @@ function execute(params)
         "总层范围", total_layers, info.num_layers))
 
     caps.print("===== 分析完成 =====")
+
+    -- 打印原始 metadata（GGUF 所有 key-value）
+    if info.metadata_raw then
+        caps.print("\n--- GGUF Metadata Raw ---")
+        local keys = {}
+        for k, _ in pairs(info.metadata_raw) do
+            table.insert(keys, k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            caps.print(string.format("  %s = %s", k, info.metadata_raw[k]))
+        end
+    end
+
+    caps.print("===== 分析完成 =====")
 end

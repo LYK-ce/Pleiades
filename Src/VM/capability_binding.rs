@@ -240,6 +240,14 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
             t.set("is_split", info.is_split)?;
             t.set("split_start", info.split_start)?;
             t.set("split_end", info.split_end)?;
+
+            // 原始 metadata（所有 GGUF key-value）
+            let meta = lua.create_table()?;
+            for (k, v) in &info.metadata_raw {
+                meta.set(k.as_str(), v.as_str())?;
+            }
+            t.set("metadata_raw", meta)?;
+
             Ok(t)
         })?,
     )?;
