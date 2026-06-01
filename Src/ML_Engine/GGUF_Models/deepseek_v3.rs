@@ -238,10 +238,15 @@ impl MLA_Weights {
             let deq = qt.dequantize(dev)?;
             let dims = deq.dims();
             let total: usize = dims.iter().product();
+            tracing::info!("load_linear_flatten key={} raw_dims={:?} out_dim={} total={}", key, dims, out_dim, total);
             let weight = if dims.len() == 3 {
-                deq.reshape((dims[0] * dims[2], dims[1]))?
+                let w = deq.reshape((dims[0] * dims[2], dims[1]))?;
+                tracing::info!("load_linear_flatten key={} 3D->2D={:?}", key, w.dims());
+                w
             } else {
-                deq.reshape((out_dim, total / out_dim))?
+                let w = deq.reshape((out_dim, total / out_dim))?;
+                tracing::info!("load_linear_flatten key={} 2D->reshape={:?}", key, w.dims());
+                w
             };
             Ok(Linear::new(weight, None))
         }
