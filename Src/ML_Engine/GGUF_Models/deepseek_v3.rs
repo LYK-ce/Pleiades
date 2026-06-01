@@ -135,7 +135,7 @@ impl MLA_Weights {
         let k_b = {
             let deq = k_b_qt.dequantize(&gg.device)?;
             let dims = deq.dims();
-            let w = if dims.len() == 3 { deq.permute(&[2, 0, 1])?.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
+            let w = if dims.len() == 3 { deq.permute((2, 0, 1))?.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
             Linear::new(w, None)
         };
         // v_b: Unsloth [v_head, n_head, kv_lora] → permute(1,0,2) → flatten [n_head*v_head, kv_lora]
@@ -145,7 +145,7 @@ impl MLA_Weights {
             let dims = deq.dims();
             tracing::info!("v_b New: raw_dims={:?} v_head={} n_heads={}", dims, v_head_dim, n_heads);
             let w = if dims.len() == 3 {
-                deq.permute(&[1, 0, 2])?.reshape((dims[0] * dims[1], dims[2]))?
+                deq.permute((1, 0, 2))?.reshape((dims[0] * dims[1], dims[2]))?
             } else {
                 let out_dim = n_heads * v_head_dim;
                 let total: usize = dims.iter().product();
@@ -242,7 +242,7 @@ impl MLA_Weights {
             let total: usize = dims.iter().product();
             tracing::info!("load_3d_linear key={} raw_dims={:?} out_dim={} total={}", key, dims, out_dim, total);
             let weight = if let (3, Some((a, b, c))) = (dims.len(), perm) {
-                deq.permute(&[a, b, c])?.reshape((out_dim, total / out_dim))?
+                deq.permute((a, b, c))?.reshape((out_dim, total / out_dim))?
             } else {
                 deq.reshape((out_dim, total / out_dim))?
             };
