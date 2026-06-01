@@ -282,16 +282,18 @@ impl MLA_Weights {
             .reshape((b, l, 1, self.qk_rope_dim))?
             .transpose(1, 2)?;
 
-        // kv_latent → kv_norm → k_b / v_b (Unsloth: split projections)
+        // kv_latent → kv_norm → k_b / v_b
         let ckv = self.kv_norm.forward(&kv_latent)?;
         let k_nope = self.k_b.forward(&ckv)?;        // [b, l, n_heads * qk_nope_dim]
         let k_nope = k_nope
             .reshape((b, l, self.n_heads, self.qk_nope_dim))?
-            .transpose(1, 2)?;                       // [b, n_heads, l, qk_nope_dim]
+            .transpose(1, 2)?
+            .contiguous()?;                          // [b, n_heads, l, qk_nope_dim]
         let v = self.v_b.forward(&ckv)?;             // [b, l, n_heads * v_head_dim]
         let v = v
             .reshape((b, l, self.n_heads, self.v_head_dim))?
-            .transpose(1, 2)?;                       // [b, n_heads, l, v_head_dim]
+            .transpose(1, 2)?
+            .contiguous()?;                          // [b, n_heads, l, v_head_dim]
 
         // ── 解耦 RoPE ──
         // 仅对 q_pe 和 k_pe 做旋转编码
