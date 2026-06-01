@@ -21,17 +21,11 @@ local function find_remote_peer()
 end
 
 -- 辅助函数：GPU chunk 迭代 forward
--- sessions:   MlSession 数组
--- is_first:   是否第一轮 prefill（true=load_model，false=offload_to_cuda）
--- input:      输入 tensor
--- offset:     KV cache offset
--- path:       模型文件路径
--- starts:     各 chunk 起始层
--- ends:       各 chunk 结束层
-local function gpu_chunked_forward(sessions, is_first, input, offset, path, starts, ends)
+-- offset==0 时用 load_model（新对话，不用旧 KV），offset>0 时用 offload_to_cuda（恢复 KV）
+local function gpu_chunked_forward(sessions, input, offset, path, starts, ends)
     local hidden = input
     for i = 1, #sessions do
-        if is_first then
+        if offset == 0 then
             sessions[i]:load_model(path, starts[i], ends[i])
         else
             sessions[i]:offload_to_cuda()
@@ -138,20 +132,20 @@ function execute(params)
 
     -- 6. 桥接循环
     caps.print("pipe_7: 桥接循环开始 (GPU:0{chunks}→GPU:1{chunks}→网络)")
-    local is_first = true
     while true do
         -- 从 Session 收 tensor (放在 GPU:0)
         local tensor, offset = local_tensor.recv_tensor(session_stream, "cuda:0")
 
         if offset == 0 then
-            -- 新一轮对话：重置所有 session 的 KV Cache（下次 offload_to_cuda 时自然为空）
+            -- 新一轮对话：重置所有 session 的 KV Cache
+            -- （next offload_to_cuda 时 load_model 重建，无需恢复旧 KV）
             for _, s in ipairs(gpu0_sessions) do s:reset_kv_cache() end
             for _, s in ipairs(gpu1_sessions) do s:reset_kv_cache() end
         end
 
         -- GPU:0 chunked forward
         local hidden0 = gpu_chunked_forward(
-            gpu0_sessions, is_first, tensor, offset,
+            gpu0_sessions, tensor, offset,
             full_path, gpu0_starts, gpu0_ends)
 
         -- 跨 GPU 搬运: GPU:0 → CPU → GPU:1
@@ -160,7 +154,7 @@ function execute(params)
 
         -- GPU:1 chunked forward
         local hidden_out = gpu_chunked_forward(
-            gpu1_sessions, is_first, hidden1, offset,
+            gpu1_sessions, hidden1, offset,
             full_path, gpu1_starts, gpu1_ends)
 
         -- 发送到 pipe_8
@@ -171,7 +165,5 @@ function execute(params)
 
         -- 回传 logits 给 Session
         local_tensor.send_tensor(session_stream, logits, offset)
-
-        is_first = false
     end
 end

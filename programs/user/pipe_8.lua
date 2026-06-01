@@ -20,10 +20,11 @@ local function find_remote_peer()
 end
 
 -- GPU chunk 迭代 forward（同 pipe_7）
-local function gpu_chunked_forward(sessions, is_first, input, offset, path, starts, ends)
+-- offset==0 时用 load_model（新对话），offset>0 时用 offload_to_cuda（恢复 KV）
+local function gpu_chunked_forward(sessions, input, offset, path, starts, ends)
     local hidden = input
     for i = 1, #sessions do
-        if is_first then
+        if offset == 0 then
             sessions[i]:load_model(path, starts[i], ends[i])
         else
             sessions[i]:offload_to_cuda()
@@ -103,7 +104,6 @@ function execute(params)
 
     -- 5. 循环: 收 hidden → GPU:0{chunks} → GPU:1{chunks} → 发 logits
     caps.print("pipe_8: 推理循环开始 (网络→GPU:0{chunks}→GPU:1{chunks})")
-    local is_first = true
     while true do
         local ok, hidden, offset = pcall(function()
             return caps.network.recv_tensor(fwd, "cuda:0")
@@ -120,7 +120,7 @@ function execute(params)
 
         -- GPU:0 chunked forward
         local hidden0 = gpu_chunked_forward(
-            gpu0_sessions, is_first, hidden, offset,
+            gpu0_sessions, hidden, offset,
             full_path, gpu0_starts, gpu0_ends)
 
         -- 跨 GPU 搬运: GPU:0 → CPU → GPU:1
@@ -129,13 +129,11 @@ function execute(params)
 
         -- GPU:1 chunked forward
         local logits = gpu_chunked_forward(
-            gpu1_sessions, is_first, hidden1, offset,
+            gpu1_sessions, hidden1, offset,
             full_path, gpu1_starts, gpu1_ends)
 
         -- 发送 logits 回 pipe_7
         caps.network.send_tensor(bwd, logits, offset)
-
-        is_first = false
     end
 
     -- 清理
