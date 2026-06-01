@@ -123,9 +123,9 @@ impl MLA_Weights {
         rotary: Arc<Rotary_Embedding>,
         prefix: &str,
     ) -> Result<Self> {
-        let q_a = gg.Qmatmul(&format!("{prefix}.attn.q_a.weight"))?;
-        let q_norm = gg.Rms_Norm(&format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
-        let q_b = gg.Qmatmul(&format!("{prefix}.attn.q_b.weight"))?;
+        let q_a = gg.Qmatmul(&format!("{prefix}.attn_q_a.weight"))?;
+        let q_norm = gg.Rms_Norm(&format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
+        let q_b = gg.Qmatmul(&format!("{prefix}.attn_q_b.weight"))?;
 
         let kv_a = gg.Qmatmul(&format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
@@ -207,9 +207,9 @@ impl MLA_Weights {
             RmsNorm::from_qtensor(qt, eps)
         }
 
-        let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn.q_a.weight"))?;
-        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
-        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn.q_b.weight"))?;
+        let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
+        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_a_norm.weight"), rms_norm_eps)?;
+        let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_b.weight"))?;
 
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
