@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
-use super::qwen3::{Rotary_Embedding, Gguf};
+use super::qwen3::{Rotary_Embedding, Gguf, Mlp_Weights};
 
 type Result<T> = candle_core::Result<T>;
 
@@ -139,7 +139,8 @@ pub struct MLA_Weights {
     // KV 路径 (联合压缩): x → kv_a → split[kv_latent | k_pe] → kv_norm → kv_b → [k_nope | v]
     pub kv_a: QMatMul,          // [hidden, kv_lora_rank + qk_rope_dim]
     pub kv_norm: RmsNorm,       // LayerNorm for compressed KV
-    pub kv_b: QMatMul,          // [kv_lora_rank, n_heads * (qk_nope_dim + v_head_dim)]
+    pub k_b: QMatMul,           // [kv_lora_rank, n_heads * qk_nope_dim]
+    pub v_b: QMatMul,           // [kv_lora_rank, n_heads * v_head_dim]
 
     // 输出投影
     pub o_proj: QMatMul,        // [n_heads * v_head_dim, hidden]
@@ -179,11 +180,12 @@ impl MLA_Weights {
         let q_norm = gg.Rms_Norm(&format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
         let q_b = gg.Qmatmul(&format!("{prefix}.attn.q_b.weight"))?;
 
-        let kv_a = gg.Qmatmul(&format!("{prefix}.attn.kv_a_proj_with_mqa.weight"))?;
-        let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn.kv_a_layernorm.weight"), rms_norm_eps)?;
-        let kv_b = gg.Qmatmul(&format!("{prefix}.attn.kv_b.weight"))?;
+        let kv_a = gg.Qmatmul(&format!("{prefix}.attn_kv_a_mqa.weight"))?;
+        let kv_norm = gg.Rms_Norm(&format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
+        let k_b = gg.Qmatmul(&format!("{prefix}.attn_k_b.weight"))?;
+        let v_b = gg.Qmatmul(&format!("{prefix}.attn_v_b.weight"))?;
 
-        let o_proj = gg.Qmatmul(&format!("{prefix}.attn.o.weight"))?;
+        let o_proj = gg.Qmatmul(&format!("{prefix}.attn_output.weight"))?;
 
         let kv_cache = MLA_KV_Cache::New(8192); // 默认 8K context
         let span_attn = tracing::span!(tracing::Level::TRACE, "mla");
@@ -194,7 +196,8 @@ impl MLA_Weights {
             q_b,
             kv_a,
             kv_norm,
-            kv_b,
+            k_b,
+            v_b,
             o_proj,
             n_heads,
             q_lora_rank,
@@ -261,18 +264,19 @@ impl MLA_Weights {
         let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn.q_a_norm.weight"), rms_norm_eps)?;
         let q_b = Take_Qmatmul(tensors, &format!("{prefix}.attn.q_b.weight"))?;
 
-        let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn.kv_a_proj_with_mqa.weight"))?;
-        let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn.kv_a_layernorm.weight"), rms_norm_eps)?;
-        let kv_b = Take_Qmatmul(tensors, &format!("{prefix}.attn.kv_b.weight"))?;
+        let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
+        let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
+        let k_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_k_b.weight"))?;
+        let v_b = Take_Qmatmul(tensors, &format!("{prefix}.attn_v_b.weight"))?;
 
-        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn.o.weight"))?;
+        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
         let kv_cache = MLA_KV_Cache::New(8192);
         let span_attn = tracing::span!(tracing::Level::TRACE, "mla");
 
         Ok(Self {
             q_a, q_norm, q_b,
-            kv_a, kv_norm, kv_b,
+            kv_a, kv_norm, k_b, v_b,
             o_proj,
             n_heads,
             q_lora_rank,
@@ -330,15 +334,16 @@ impl MLA_Weights {
             .reshape((b, l, 1, self.qk_rope_dim))?
             .transpose(1, 2)?;
 
-        // kv_latent → kv_norm → kv_b
+        // kv_latent → kv_norm → k_b / v_b (Unsloth: split projections)
         let ckv = self.kv_norm.forward(&kv_latent)?;
-        let kv = self.kv_b.forward(&ckv)?;           // [b, l, n_heads * (qk_nope_dim + v_head_dim)]
-        let kv = kv
-            .reshape((b, l, self.n_heads, self.qk_nope_dim + self.v_head_dim))?
-            .transpose(1, 2)?;                       // [b, n_heads, l, qk_nope_dim + v_head_dim]
-
-        let k_nope = kv.narrow(3, 0, self.qk_nope_dim)?;
-        let v = kv.narrow(3, self.qk_nope_dim, self.v_head_dim)?;
+        let k_nope = self.k_b.forward(&ckv)?;        // [b, l, n_heads * qk_nope_dim]
+        let k_nope = k_nope
+            .reshape((b, l, self.n_heads, self.qk_nope_dim))?
+            .transpose(1, 2)?;                       // [b, n_heads, l, qk_nope_dim]
+        let v = self.v_b.forward(&ckv)?;             // [b, l, n_heads * v_head_dim]
+        let v = v
+            .reshape((b, l, self.n_heads, self.v_head_dim))?
+            .transpose(1, 2)?;                       // [b, n_heads, l, v_head_dim]
 
         // ── 解耦 RoPE ──
         // 仅对 q_pe 和 k_pe 做旋转编码
@@ -592,6 +597,21 @@ impl DeepSeekMoE_Weights {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum DeepSeekFFN {
+    Dense(Mlp_Weights),
+    MoE(DeepSeekMoE_Weights),
+}
+
+impl DeepSeekFFN {
+    pub fn Forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(m) => m.forward(x),
+            Self::MoE(m) => m.Forward(x),
+        }
+    }
+}
+
 // ============================================================
 // DeepSeek_Layer — 单个 Transformer 层
 // ============================================================
@@ -599,7 +619,7 @@ impl DeepSeekMoE_Weights {
 #[derive(Debug, Clone)]
 pub struct DeepSeek_Layer {
     pub mla: MLA_Weights,
-    pub moe: DeepSeekMoE_Weights,
+    pub ffn: DeepSeekFFN,
     pub ln1: RmsNorm,     // pre-attention norm
     pub ln2: RmsNorm,     // pre-MoE norm
 }
@@ -632,7 +652,7 @@ impl DeepSeek_Layer {
         let moe = DeepSeekMoE_Weights::New(
             gg, n_routed_experts, top_k, routed_scaling_factor, &prefix,
         )?;
-        Ok(Self { mla, moe, ln1, ln2 })
+        Ok(Self { mla, ffn: DeepSeekFFN::MoE(moe), ln1, ln2 })
     }
 
     /// 从已提取的 QTensors 构建
@@ -667,10 +687,16 @@ impl DeepSeek_Layer {
             qk_rope_dim, qk_nope_dim, v_head_dim,
             rms_norm_eps, rotary, &prefix,
         )?;
-        let moe = DeepSeekMoE_Weights::From_Extracted(
-            tensors, n_routed_experts, top_k, routed_scaling_factor, &prefix,
-        )?;
-        Ok(Self { mla, moe, ln1, ln2 })
+        // 自动检测：有 routed experts → MoE，否则 → Dense FFN
+        let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate.0.weight"));
+        let ffn = if has_experts {
+            DeepSeekFFN::MoE(DeepSeekMoE_Weights::From_Extracted(
+                tensors, n_routed_experts, top_k, routed_scaling_factor, &prefix,
+            )?)
+        } else {
+            DeepSeekFFN::Dense(Mlp_Weights::New_Dense(tensors, &prefix)?)
+        };
+        Ok(Self { mla, ffn, ln1, ln2 })
     }
 
     /// 单层 Forward
@@ -686,7 +712,7 @@ impl DeepSeek_Layer {
         let x = (x + h)?;
         // Pre-MoE norm → MoE → residual
         let h2 = self.ln2.forward(&x)?;
-        let h2 = self.moe.Forward(&h2)?;
+        let h2 = self.ffn.Forward(&h2)?;
         x + h2
     }
 
