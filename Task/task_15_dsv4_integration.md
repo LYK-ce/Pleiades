@@ -23,11 +23,6 @@ DeepSeek V4 Flash（284B, 43 层, Flash 版）只有 safetensors 格式发布，
 
 在 Pleiades 中支持 DeepSeek V4 Flash 模型，借助 MScanter 的 candle 实现，将 safetensors 权重原样存入 PGGUF（不膨胀），Rust 侧根据 metadata 标记自动分发到 safetensors 加载路径。
 
-### 环境
-
-- 4×A100 80GB + 935GB CPU RAM
-- 模型：`deepseek-ai/DeepSeek-V4-Flash`，160GB safetensors
-
 ---
 
 ## 方案
@@ -50,10 +45,9 @@ Rust:   GGUF_Analyze 读 metadata → 检测 safetensors 标记
 
 ```
 GGUF_Load_Model:
-  if metadata["pleiades.weight_format"] == "safetensors":
-      → DeepSeekV4Model::from_pgguf()  [新路径]
-  else:
-      → gguf_file::Content → QMatMul   [现有路径]
+  match metadata.get("pleiades.weight_format"):
+      Some("safetensors") → DeepSeekV4Model::from_pgguf()  [新路径]
+      _                   → gguf_file::Content → QMatMul   [现有路径，兼容所有已有 PGGUF]
 ```
 
 ---
