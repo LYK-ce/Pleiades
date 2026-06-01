@@ -646,6 +646,10 @@ impl DeepSeek_Layer {
         // 自动检测：有 routed experts → MoE，否则 → Dense FFN
         let has_experts = tensors.contains_key(&format!("{prefix}.ffn_gate.0.weight"));
         let ffn = if has_experts {
+            // Log available MoE tensors for debugging
+            let mut keys: Vec<&String> = tensors.keys().collect();
+            keys.sort();
+            tracing::info!("MoE layer {}: tensors={:?}", layer_idx, keys);
             DeepSeekFFN::MoE(DeepSeekMoE_Weights::From_Extracted(
                 tensors, n_routed_experts, top_k, routed_scaling_factor, &prefix,
             )?)
