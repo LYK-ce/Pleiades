@@ -22,15 +22,21 @@ end
 
 -- 辅助函数：GPU chunk 迭代 forward
 -- offset==0 时用 load_model（新对话，不用旧 KV），offset>0 时用 offload_to_cuda（恢复 KV）
-local function gpu_chunked_forward(sessions, input, offset, path, starts, ends)
+local function gpu_chunked_forward(sessions, input, offset, path, starts, ends, gpu_name)
     local hidden = input
     for i = 1, #sessions do
         if offset == 0 then
+            caps.print(string.format("  %s chunk %d/%d: load_model [%d,%d]",
+                gpu_name, i, #sessions, starts[i], ends[i]))
             sessions[i]:load_model(path, starts[i], ends[i])
         else
+            caps.print(string.format("  %s chunk %d/%d: offload_to_cuda",
+                gpu_name, i, #sessions))
             sessions[i]:offload_to_cuda()
         end
         hidden = sessions[i]:forward(hidden, offset)
+        caps.print(string.format("  %s chunk %d/%d: forward done → offload_to_cpu",
+            gpu_name, i, #sessions))
         sessions[i]:offload_to_cpu()
     end
     return hidden
@@ -146,7 +152,7 @@ function execute(params)
         -- GPU:0 chunked forward
         local hidden0 = gpu_chunked_forward(
             gpu0_sessions, tensor, offset,
-            full_path, gpu0_starts, gpu0_ends)
+            full_path, gpu0_starts, gpu0_ends, "GPU:0")
 
         -- 跨 GPU 搬运: GPU:0 → CPU → GPU:1
         local hidden_cpu = hidden0:to_device("cpu")
@@ -155,7 +161,7 @@ function execute(params)
         -- GPU:1 chunked forward
         local hidden_out = gpu_chunked_forward(
             gpu1_sessions, hidden1, offset,
-            full_path, gpu1_starts, gpu1_ends)
+            full_path, gpu1_starts, gpu1_ends, "GPU:1")
 
         -- 发送到 pipe_8
         caps.network.send_tensor(fwd, hidden_out, offset)
