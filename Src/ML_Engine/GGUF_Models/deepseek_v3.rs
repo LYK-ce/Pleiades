@@ -138,11 +138,18 @@ impl MLA_Weights {
             let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
             Linear::new(w, None)
         };
+        // v_b: Unsloth 存为 [n_heads, n_heads*kv_lora]，reshape 到 [out, in]
         let v_b_qt = gg.Tensor(&format!("{prefix}.attn_v_b.weight"))?;
         let v_b = {
             let deq = v_b_qt.dequantize(&gg.device)?;
             let dims = deq.dims();
-            let w = if dims.len() == 3 { deq.reshape((dims[0] * dims[2], dims[1]))? } else { deq };
+            let w = if dims.len() == 3 {
+                deq.reshape((dims[0] * dims[2], dims[1]))?
+            } else {
+                let out_dim = n_heads * v_head_dim;
+                let total = dims.iter().product::<usize>();
+                deq.reshape((out_dim, total / out_dim))?
+            };
             Linear::new(w, None)
         };
 
@@ -222,18 +229,19 @@ impl MLA_Weights {
             RmsNorm::from_qtensor(qt, eps)
         }
 
-        /// Flatten 3D GGUF weight [d0, d1, d2] → 2D [d1, d0*d2]，返回 Linear
-        fn load_linear_flatten(tensors: &mut HashMap<String, QTensor>, key: &str, dev: &Device) -> Result<Linear> {
+        /// Load weight, if 3D flatten [d0,d1,d2] → [d0*d2,d1], if 2D reshape to [out_dim, in_dim]
+        fn load_linear_flatten(tensors: &mut HashMap<String, QTensor>, key: &str, dev: &Device, out_dim: usize) -> Result<Linear> {
             let qt = tensors.remove(key)
                 .ok_or_else(|| candle_core::Error::Msg(format!("missing: {key}")))?;
             let deq = qt.dequantize(dev)?;
             let dims = deq.dims();
+            let total: usize = dims.iter().product();
             let weight = if dims.len() == 3 {
-                deq.reshape((dims[0] * dims[2], dims[1]))?  // [n*d2, d1] = [out, in]
+                deq.reshape((dims[0] * dims[2], dims[1]))?
             } else {
-                deq
+                deq.reshape((out_dim, total / out_dim))?
             };
-            Ok(Linear::new(weight, None))
+            Linear::new(weight, None)
         }
 
         let q_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_q_a.weight"))?;
@@ -243,8 +251,8 @@ impl MLA_Weights {
         let kv_a = Take_Qmatmul(tensors, &format!("{prefix}.attn_kv_a_mqa.weight"))?;
         let kv_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_kv_a_norm.weight"), rms_norm_eps)?;
         // Unsloth: k_b/v_b 都是 3D，需 flatten（llama.cpp 确认）
-        let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device)?;
-        let v_b = load_linear_flatten(tensors, &format!("{prefix}.attn_v_b.weight"), device)?;
+        let k_b = load_linear_flatten(tensors, &format!("{prefix}.attn_k_b.weight"), device, n_heads * q_head_dim)?;
+        let v_b = load_linear_flatten(tensors, &format!("{prefix}.attn_v_b.weight"), device, n_heads * v_head_dim)?;
 
         let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
 
