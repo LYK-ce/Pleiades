@@ -142,8 +142,28 @@ def _write_tokenizer_kv(model_dir: Path) -> list[tuple[str, bytes]]:
     for e in added:
         if e.get("special", False) and "content" in e:
             sm[e["content"]] = e["id"]
-    eos = sm.get("</s>") or sm.get("<|endoftext|>") or sm.get("<|im_end|>")
-    bos = sm.get("<s>") or sm.get("<|beginoftext|>") or sm.get("<|im_start|>")
+
+    # 先尝试从 tokenizer_config.json 拿 EOS/BOS（最权威）
+    eos = None
+    bos = None
+    tcp = model_dir / "tokenizer_config.json"
+    if tcp.exists():
+        with open(tcp, "r", encoding="utf-8") as f:
+            tcfg = json.load(f)
+        # 直接字段（int）
+        eos = tcfg.get("eos_token_id")
+        bos = tcfg.get("bos_token_id")
+        if eos is None and isinstance(tcfg.get("eos_token"), dict):
+            eos = sm.get(tcfg["eos_token"].get("content", ""))
+        if bos is None and isinstance(tcfg.get("bos_token"), dict):
+            bos = sm.get(tcfg["bos_token"].get("content", ""))
+
+    # fallback: 匹配常见 content 字符串
+    if eos is None:
+        eos = sm.get("</s>") or sm.get("<|endoftext|>") or sm.get("<|im_end|>") or sm.get("<｜end▁of▁sentence｜>")
+    if bos is None:
+        bos = sm.get("<s>") or sm.get("<|beginoftext|>") or sm.get("<|im_start|>") or sm.get("<｜begin▁of▁sentence｜>")
+
     if eos is not None:
         kvs.append(("tokenizer.ggml.eos_token_id", _kv_uint32("tokenizer.ggml.eos_token_id", eos)))
     if bos is not None:
