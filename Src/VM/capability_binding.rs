@@ -368,64 +368,229 @@ pub fn register_network_caps(
 
     // ─── list_model_peers ───────────────────────────────
     let caps_mp = capabilities.clone();
+    let caps_st = capabilities.storage.clone();
     network.set("list_model_peers", lua.create_async_function(move |lua, model_id: u32| {
         let caps_mp = caps_mp.clone();
+        let caps_st = caps_st.clone();
         async move {
+            // helper: 从文件名解析 _split_S_E.pgguf → (S, E) in pipeline 坐标
+            fn parse_split_range(name: &str) -> Option<(u32, u32)> {
+                let name = name.strip_suffix(".pgguf").unwrap_or(name);
+                let marker = "_split_";
+                if let Some(pos) = name.rfind(marker) {
+                    let range_part = &name[pos + marker.len()..];
+                    let parts: Vec<&str> = range_part.split('_').collect();
+                    if parts.len() == 2 {
+                        let s = parts[0].parse::<u32>().ok()?;
+                        let e = parts[1].parse::<u32>().ok()?;
+                        return Some((s, e));
+                    }
+                }
+                None
+            }
+
+            // helper: bitmap → (min_bit, max_bit)
+            fn bitmap_range(bitmap: &[u8; 32]) -> (u32, u32) {
+                let mut min: Option<u32> = None;
+                let mut max: Option<u32> = None;
+                for layer in 0..256u32 {
+                    if bitmap[layer as usize / 8] & (1 << (layer % 8)) != 0 {
+                        if min.is_none() { min = Some(layer); }
+                        max = Some(layer);
+                    }
+                }
+                (min.unwrap_or(0), max.unwrap_or(0))
+            }
+
+            // helper: 修正 layer_start/layer_end 到 pipeline 坐标
+            // pipeline 坐标: 0=embedding, 1..N=blocks, N+1=output
+            fn adjust_range(
+                min_bit: u32, max_bit: u32,
+                file_name: &str,
+                num_layers: Option<u32>,
+            ) -> (u32, u32) {
+                // 优先从文件名解析 split 范围（已是 pipeline 坐标）
+                if let Some((s, e)) = parse_split_range(file_name) {
+                    return (s, e);
+                }
+                // 非 split 模型：blk 位全覆盖 → layer_start=0, layer_end=N+1
+                if let Some(n) = num_layers {
+                    if n > 0 && (max_bit - min_bit + 1) >= n {
+                        return (0, n + 1);
+                    }
+                }
+                (min_bit, max_bit)
+            }
+
+            // ── 1. 收集 Storage 中匹配 model_id 的文件 ──
+            let storage_files: std::collections::HashMap<String, u32> = {
+                let mut map = std::collections::HashMap::new();
+                if let Ok(entries) = caps_st.list().await {
+                    for e in entries {
+                        if e.model_id == Some(model_id) {
+                            map.insert(e.file_name, e.num_layers.unwrap_or(0));
+                        }
+                    }
+                }
+                map
+            };
+
+            // ── 2. 收集所有 peer 条目 ────────────────────
+            #[derive(Clone)]
+            struct RawEntry {
+                peer_id: String,
+                name: String,
+                file_name: String,
+                model_id: u32,
+                min_bit: u32,
+                max_bit: u32,
+                num_layers: Option<u32>,
+                latency_ms: Option<u64>,
+            }
+
             let peers = caps_mp.peer_manager.Get_All_Peers().await
                 .map_err(|e| mlua::Error::runtime(format!("list_model_peers: {}", e)))?;
 
-            let result = lua.create_table()?;
-            let mut idx = 0usize;
+            let mut entries: Vec<RawEntry> = Vec::new();
+            let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             for p in &peers {
-                // 筛选 supported_models 中 id 匹配的条目
-                let matched: Vec<_> = p.supported_models.iter()
-                    .filter(|m| m.id == model_id)
-                    .collect();
-
-                for m in matched {
-                    // 从 layer_bitmap 计算 layer_start / layer_end
-                    let (layer_start, layer_end) = {
-                        let mut min: Option<usize> = None;
-                        let mut max: Option<usize> = None;
-                        for layer in 0..256usize {
-                            let byte_idx = layer / 8;
-                            let bit_idx = layer % 8;
-                            if m.layer_bitmap[byte_idx] & (1 << bit_idx) != 0 {
-                                if min.is_none() { min = Some(layer); }
-                                max = Some(layer);
-                            }
-                        }
-                        match (min, max) {
-                            (Some(s), Some(e)) => (s as u32, e as u32),
-                            _ => (0u32, 0u32),
-                        }
-                    };
-
-                    let entry = lua.create_table()?;
-                    entry.set("peer_id", p.peer_id.to_base58())?;
-                    entry.set("name", p.name.clone())?;
-                    entry.set("layer_start", layer_start)?;
-                    entry.set("layer_end", layer_end)?;
-                    entry.set("file_name", m.file_name.clone())?;
-                    entry.set("model_id", m.id)?;
-
-                    // devices: 所有节点固定 2 GPU
-                    let devices = lua.create_table()?;
-                    devices.set(1, "cuda:0")?;
-                    devices.set(2, "cuda:1")?;
-                    entry.set("devices", devices)?;
-
-                    // profile
-                    let profile = lua.create_table()?;
-                    if let Some(lat) = p.profile.latency_ms {
-                        profile.set("latency_ms", lat)?;
-                    }
-                    entry.set("profile", profile)?;
-
-                    idx += 1;
-                    result.set(idx, entry)?;
+                for m in &p.supported_models {
+                    if m.id != model_id { continue; }
+                    let (min_bit, max_bit) = bitmap_range(&m.layer_bitmap);
+                    let nl = storage_files.get(&m.file_name).copied();
+                    entries.push(RawEntry {
+                        peer_id: p.peer_id.to_base58(),
+                        name: p.name.clone(),
+                        file_name: m.file_name.clone(),
+                        model_id: m.id,
+                        min_bit, max_bit,
+                        num_layers: nl,
+                        latency_ms: p.profile.latency_ms,
+                    });
+                    seen_files.insert(m.file_name.clone());
                 }
+            }
+
+            // ── 3. 补充 Storage 本地文件（未在 peer 条目中出现的） ──
+            if let Ok(local) = caps_mp.peer_manager.Get_Local_Peer().await {
+                if let Ok(file_entries) = caps_st.list().await {
+                    for fe in &file_entries {
+                        let file_name = &fe.file_name;
+                        if seen_files.contains(file_name) { continue; }
+                        if fe.model_id != Some(model_id) { continue; }
+                        let (min_bit, max_bit) = fe.layer_bitmap.as_ref()
+                            .map(|b| bitmap_range(b))
+                            .unwrap_or((0, 0));
+                        let nl = fe.num_layers;
+                        entries.push(RawEntry {
+                            peer_id: local.peer_id.to_base58(),
+                            name: local.name.clone(),
+                            file_name: file_name.clone(),
+                            model_id,
+                            min_bit, max_bit,
+                            num_layers: nl,
+                            latency_ms: None,
+                        });
+                    }
+                }
+            }
+
+            // ── 3.5. 合并同一 peer 的重叠条目 ──────────────────
+            // 先计算 pipeline 坐标，按 peer_id 分组，
+            // 重叠条目取并集范围（保留最宽分片的 file_name）
+            {
+                use std::collections::HashMap;
+                // 计算 pipeline 坐标，附带原始信息
+                struct Ranged {
+                    peer_id: String, name: String, file_name: String,
+                    model_id: u32, start: u32, end: u32, latency_ms: Option<u64>,
+                }
+                let mut ranged: Vec<Ranged> = entries.iter().map(|re| {
+                    let (s, e) = adjust_range(re.min_bit, re.max_bit, &re.file_name, re.num_layers);
+                    Ranged {
+                        peer_id: re.peer_id.clone(), name: re.name.clone(),
+                        file_name: re.file_name.clone(), model_id: re.model_id,
+                        start: s, end: e, latency_ms: re.latency_ms,
+                    }
+                }).collect();
+
+                // 按 peer_id 分组
+                let mut groups: HashMap<String, Vec<Ranged>> = HashMap::new();
+                for r in ranged {
+                    groups.entry(r.peer_id.clone()).or_default().push(r);
+                }
+
+                // 合并每组的重叠条目
+                let mut merged: Vec<RawEntry> = Vec::new();
+                for (_pid, mut group) in groups {
+                    // 按 layer_start 升序，同起点按范围降序（宽优先）
+                    group.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+
+                    let mut i = 0;
+                    while i < group.len() {
+                        let mut cur_end = group[i].end;
+                        let mut best = i; // 当前合并块中范围最宽的条目索引
+                        let mut best_width = cur_end as i64 - group[i].start as i64;
+                        let mut j = i + 1;
+                        while j < group.len() && group[j].start <= cur_end {
+                            // 重叠：扩展并集终点
+                            if group[j].end > cur_end {
+                                cur_end = group[j].end;
+                            }
+                            let w = group[j].end as i64 - group[j].start as i64;
+                            if w > best_width {
+                                best = j;
+                                best_width = w;
+                            }
+                            j += 1;
+                        }
+                        // 以最宽分片的 file_name 代表合并后的条目
+                        merged.push(RawEntry {
+                            peer_id: group[i].peer_id.clone(),
+                            name: group[i].name.clone(),
+                            file_name: group[best].file_name.clone(),
+                            model_id: group[i].model_id,
+                            min_bit: group[i].start,
+                            max_bit: cur_end,
+                            num_layers: None,
+                            latency_ms: group[i].latency_ms,
+                        });
+                        i = j;
+                    }
+                }
+                entries = merged;
+            }
+
+            // ── 4. 构建 Lua 结果表 ────────────────────────
+            // 注：min_bit/max_bit 此时已存储 pipeline 坐标 (经由步骤 3.5 的 adjust_range)
+            let result = lua.create_table()?;
+            for (i, e) in entries.iter().enumerate() {
+                let layer_start = e.min_bit;
+                let layer_end = e.max_bit;
+
+                let entry = lua.create_table()?;
+                entry.set("peer_id", e.peer_id.clone())?;
+                entry.set("name", e.name.clone())?;
+                entry.set("layer_start", layer_start)?;
+                entry.set("layer_end", layer_end)?;
+                entry.set("file_name", e.file_name.clone())?;
+                entry.set("model_id", e.model_id)?;
+
+                // devices: 所有节点固定 2 GPU
+                let devices = lua.create_table()?;
+                devices.set(1, "cuda:0")?;
+                devices.set(2, "cuda:1")?;
+                entry.set("devices", devices)?;
+
+                // profile
+                let profile = lua.create_table()?;
+                if let Some(lat) = e.latency_ms {
+                    profile.set("latency_ms", lat)?;
+                }
+                entry.set("profile", profile)?;
+
+                result.set(i + 1, entry)?;
             }
             Ok(result)
         }

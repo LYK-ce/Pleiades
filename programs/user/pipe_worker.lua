@@ -116,6 +116,12 @@ function execute(params)
         end
     end
 
+    -- 级联传播 EOF 到下游
+    if bwd then
+        caps.network.send_eof(bwd)
+        caps.print("[worker] EOF 已传播到下游")
+    end
+
     sess_gpu0:unload()
     sess_gpu1:unload()
     caps.print("[worker] 任务完成")

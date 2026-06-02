@@ -49,16 +49,31 @@ function execute(params)
 
     -- rexec pipe_worker_single (不是 pipe_worker)
     for i, p in ipairs(peers) do
+        if p.peer_id == my_id then goto continue end
         local upstream = (i > 1) and peers[i - 1].peer_id or nil
         local downstream = (i < N) and peers[i + 1].peer_id or nil
-        local payload = string.format(
-            'EXEC|pipe_worker_single|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","session_id":"%d"}',
-            p.file_name, p.layer_start, p.layer_end,
-            upstream or "", downstream or "", my_id, inference_id)
-        caps.network.send_data(p.peer_id, "Command", payload)
+        local fields = {}
+        fields[#fields+1] = string.format('"model":"%s"', p.file_name)
+        fields[#fields+1] = string.format('"layer_start":%d', p.layer_start)
+        fields[#fields+1] = string.format('"layer_end":%d', p.layer_end)
+        if upstream and upstream ~= "" then
+            fields[#fields+1] = string.format('"upstream":"%s"', upstream)
+        end
+        if downstream and downstream ~= "" then
+            fields[#fields+1] = string.format('"downstream":"%s"', downstream)
+        end
+        fields[#fields+1] = string.format('"coordinator":"%s"', my_id)
+        fields[#fields+1] = string.format('"session_id":"%d"', inference_id)
+        local payload = "EXEC|pipe_worker_single|{" .. table.concat(fields, ",") .. "}"
+        pcall(function() caps.network.send_data(p.peer_id, "Command", payload) end)
+        ::continue::
     end
 
-    local fwd = caps.network.open_tensor_stream(peers[1].peer_id, inference_id)
+    local fwd_peer, bwd_peer = nil, nil
+    for i = 1, N do if peers[i].peer_id ~= my_id then fwd_peer = peers[i]; break end end
+    for i = N, 1, -1 do if peers[i].peer_id ~= my_id then bwd_peer = peers[i]; break end end
+    if not fwd_peer or not bwd_peer then caps.print("EXP_ERROR: no remote peers"); return end
+    local fwd = caps.network.open_tensor_stream(fwd_peer.peer_id, inference_id)
     local bwd = caps.network.accept_tensor_stream(inference_id, 300)
 
     local sess = ml.new("cpu")

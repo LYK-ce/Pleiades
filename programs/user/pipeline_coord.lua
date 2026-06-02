@@ -141,30 +141,79 @@ function execute(params)
     caps.print("│ 正在向各节点启动 pipe_worker ...");
     caps.print("│")
 
+    local my_id = caps.network.get_local_peer_id()
+
     for i, p in ipairs(peers) do
+        -- 跳过本机：coordinator 不向自己发网络指令
+        if p.peer_id == my_id then
+            caps.print(string.format("│   [%d/%d] %s  跳过 (本机)", i, N, p.name))
+            goto continue
+        end
+
         local upstream = (i > 1) and peers[i - 1].peer_id or nil
         local downstream = (i < N) and peers[i + 1].peer_id or nil
 
-        local payload = string.format(
-            'EXEC|pipe_worker|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","session_id":"%s"}',
-            p.file_name, p.layer_start, p.layer_end,
-            upstream or "", downstream or "", my_id, session_id)
+        -- 构造 JSON: 不发送空字符串字段
+        local fields = {}
+        fields[#fields+1] = string.format('"model":"%s"', p.file_name)
+        fields[#fields+1] = string.format('"layer_start":%d', p.layer_start)
+        fields[#fields+1] = string.format('"layer_end":%d', p.layer_end)
+        if upstream and upstream ~= "" then
+            fields[#fields+1] = string.format('"upstream":"%s"', upstream)
+        end
+        if downstream and downstream ~= "" then
+            fields[#fields+1] = string.format('"downstream":"%s"', downstream)
+        end
+        fields[#fields+1] = string.format('"coordinator":"%s"', my_id)
+        fields[#fields+1] = string.format('"session_id":"%s"', session_id)
+        local payload = "EXEC|pipe_worker|{" .. table.concat(fields, ",") .. "}"
 
         caps.print(string.format("│   [%d/%d] → %s  启动 pipe_worker", i, N, p.name))
-        local resp = caps.network.send_data(p.peer_id, "Command", payload)
-        caps.print(string.format("│         响应: %s", resp.payload or "nil"))
+        local ok, resp = pcall(function()
+            return caps.network.send_data(p.peer_id, "Command", payload)
+        end)
+        if ok and resp and resp.payload == "OK" then
+            caps.print(string.format("│         响应: OK"))
+        elseif ok and resp then
+            caps.print(string.format("│         ✗ 远程拒绝: %s", resp.payload or "nil"))
+            caps.print("│ 请确认远程节点已部署 pipe_worker 脚本")
+            caps.print("└──────────────────────────────────────────────┘")
+            handle:release()
+            return
+        else
+            caps.print(string.format("│         ✗ 网络失败: %s", tostring(resp)))
+            caps.print("└──────────────────────────────────────────────┘")
+            handle:release()
+            return
+        end
+        ::continue::
     end
 
     caps.print("│")
     caps.print("│ 建立网络张量流 ...")
 
-    -- 打开前向流 (→ 第一个 worker)
-    local fwd = caps.network.open_tensor_stream(peers[1].peer_id, sid_num)
-    caps.print(string.format("│   fwd: coord → %s  ✓", peers[1].name))
+    -- 找第一个 / 最后一个远程节点（跳过本机）
+    local fwd_peer, bwd_peer = nil, nil
+    for i = 1, N do
+        if peers[i].peer_id ~= my_id then fwd_peer = peers[i]; break end
+    end
+    for i = N, 1, -1 do
+        if peers[i].peer_id ~= my_id then bwd_peer = peers[i]; break end
+    end
+    if not fwd_peer or not bwd_peer then
+        caps.print("│ ✗ 错误: 所有节点均为本机，无法建立远程流水线")
+        caps.print("└──────────────────────────────────────────────┘")
+        handle:release()
+        return
+    end
 
-    -- 接受返回流 (← 最后一个 worker)
+    -- 打开前向流 (→ 第一个远程 worker)
+    local fwd = caps.network.open_tensor_stream(fwd_peer.peer_id, sid_num)
+    caps.print(string.format("│   fwd: coord → %s  ✓", fwd_peer.name))
+
+    -- 接受返回流 (← 最后一个远程 worker)
     local bwd = caps.network.accept_tensor_stream(sid_num, 300)
-    caps.print(string.format("│   bwd: %s → coord  ✓", peers[N].name))
+    caps.print(string.format("│   bwd: %s → coord  ✓", bwd_peer.name))
 
     caps.print("│")
     caps.print("│ 连接 Session ...")
@@ -213,6 +262,10 @@ function execute(params)
             caps.print(string.format("[coord] %d tokens (%.2fs/tok)", iter, elapsed))
         end
     end
+
+    -- 通知链尾 worker 流结束
+    caps.network.send_eof(fwd)
+    caps.print("[coord] 已发送 EOF → 流水线链头")
 
     handle:release()
     caps.print("[coord] 流水线演示结束")

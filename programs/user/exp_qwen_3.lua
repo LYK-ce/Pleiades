@@ -37,17 +37,23 @@ function execute(params)
     local N = 3
 
     for i, p in ipairs(peers) do
+        if p.peer_id == my_id then goto continue end
         local upstream = (i > 1) and peers[i - 1].peer_id or nil
         local downstream = (i < N) and peers[i + 1].peer_id or nil
         local payload = string.format(
             'EXEC|exp_worker|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","stream_id":"%d"}',
             p.file_name, p.layer_start, p.layer_end,
             upstream or "", downstream or "", my_id, stream_id)
-        caps.network.send_data(p.peer_id, "Command", payload)
+        pcall(function() caps.network.send_data(p.peer_id, "Command", payload) end)
+        ::continue::
     end
 
     -- 4. 建立 tensor stream
-    local fwd = caps.network.open_tensor_stream(peers[1].peer_id, stream_id)
+    local fwd_peer, bwd_peer = nil, nil
+    for i = 1, N do if peers[i].peer_id ~= my_id then fwd_peer = peers[i]; break end end
+    for i = N, 1, -1 do if peers[i].peer_id ~= my_id then bwd_peer = peers[i]; break end end
+    if not fwd_peer or not bwd_peer then caps.print("EXP_ERROR: no remote peers"); return end
+    local fwd = caps.network.open_tensor_stream(fwd_peer.peer_id, stream_id)
     local bwd = caps.network.accept_tensor_stream(stream_id, 300)
 
     -- 5. Tokenizer (CPU)

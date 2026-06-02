@@ -89,21 +89,53 @@ function execute(params)
 
     caps.print("│ 分发 pipe_worker_single ...")
     for i, p in ipairs(peers) do
+        -- 跳过本机
+        if p.peer_id == my_id then
+            caps.print(string.format("│   [%d/%d] %s  跳过 (本机)", i, N, p.name))
+            goto continue
+        end
+
         local upstream = (i > 1) and peers[i - 1].peer_id or nil
         local downstream = (i < N) and peers[i + 1].peer_id or nil
-        local payload = string.format(
-            'EXEC|pipe_worker_single|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","session_id":"%s"}',
-            p.file_name, p.layer_start, p.layer_end,
-            upstream or "", downstream or "", my_id, session_id)
+        local fields = {}
+        fields[#fields+1] = string.format('"model":"%s"', p.file_name)
+        fields[#fields+1] = string.format('"layer_start":%d', p.layer_start)
+        fields[#fields+1] = string.format('"layer_end":%d', p.layer_end)
+        if upstream and upstream ~= "" then
+            fields[#fields+1] = string.format('"upstream":"%s"', upstream)
+        end
+        if downstream and downstream ~= "" then
+            fields[#fields+1] = string.format('"downstream":"%s"', downstream)
+        end
+        fields[#fields+1] = string.format('"coordinator":"%s"', my_id)
+        fields[#fields+1] = string.format('"session_id":"%s"', session_id)
+        local payload = "EXEC|pipe_worker_single|{" .. table.concat(fields, ",") .. "}"
         caps.print(string.format("│   [%d/%d] → %s", i, N, p.name))
-        local resp = caps.network.send_data(p.peer_id, "Command", payload)
-        caps.print(string.format("│         响应: %s", resp.payload or "nil"))
+        local ok, resp = pcall(function()
+            return caps.network.send_data(p.peer_id, "Command", payload)
+        end)
+        if ok then
+            caps.print(string.format("│         响应: %s", resp.payload or "nil"))
+        else
+            caps.print(string.format("│         失败: %s", tostring(resp)))
+        end
+        ::continue::
+    end
+
+    -- 找第一个 / 最后一个远程节点
+    local fwd_peer, bwd_peer = nil, nil
+    for i = 1, N do if peers[i].peer_id ~= my_id then fwd_peer = peers[i]; break end end
+    for i = N, 1, -1 do if peers[i].peer_id ~= my_id then bwd_peer = peers[i]; break end end
+    if not fwd_peer or not bwd_peer then
+        caps.print("│ ✗ 所有节点均为本机")
+        handle:release()
+        return
     end
 
     caps.print("│")
-    local fwd = caps.network.open_tensor_stream(peers[1].peer_id, sid_num)
+    local fwd = caps.network.open_tensor_stream(fwd_peer.peer_id, sid_num)
     local bwd = caps.network.accept_tensor_stream(sid_num, 300)
-    caps.print(string.format("│ fwd: → %s  ✓  bwd: ← %s  ✓", peers[1].name, peers[N].name))
+    caps.print(string.format("│ fwd: → %s  ✓  bwd: ← %s  ✓", fwd_peer.name, bwd_peer.name))
 
     local stream_id = "ml-" .. session_id
     local session_stream = local_tensor.open_stream(stream_id)
