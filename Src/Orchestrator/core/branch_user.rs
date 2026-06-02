@@ -294,6 +294,29 @@ impl Core {
                 });
             }
 
+            // ─── 手动 dial 节点 ─────────────────────────
+            UserCommand::Dial { addr } => {
+                let caps = self.capabilities.clone();
+                tokio::spawn(async move {
+                    match addr.parse::<libp2p::Multiaddr>() {
+                        Ok(ma) => match caps.network.dial(ma).await {
+                            Ok(()) => caps.event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!("dial {} 成功", addr),
+                            }),
+                            Err(e) => caps.event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("dial {} 失败: {}", addr, e),
+                            }),
+                        },
+                        Err(e) => caps.event_bus.Publish(Bus_Event::Notify {
+                            level: NotifyLevel::Error,
+                            message: format!("无效 Multiaddr: {}", e),
+                        }),
+                    }
+                });
+            }
+
             // ─── 发送文件 (fire-and-forget) ──────────────
             UserCommand::Send { file_path, peer_id } => {
                 let Some(entry) = self.program_registry.get("send").cloned() else {

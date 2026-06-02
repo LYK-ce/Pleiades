@@ -76,6 +76,7 @@ pub enum UserCommand {
         command: String,
         params: std::collections::HashMap<String, String>,
     },
+    Dial { addr: String },
 }
 
 // ============================================================

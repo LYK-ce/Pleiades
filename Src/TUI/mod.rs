@@ -672,6 +672,13 @@ pub fn parse_user_command(input: &str) -> Result<Option<UserCommand>, String> {
         return Ok(Some(UserCommand::Profile { model_id: model_id.to_string() }));
     }
 
+    // ---- dial <multiaddr> ----
+    if let Some(addr) = trimmed.strip_prefix("dial ") {
+        let addr = addr.trim();
+        if addr.is_empty() { return Err("用法: dial <multiaddr>".to_string()); }
+        return Ok(Some(UserCommand::Dial { addr: addr.to_string() }));
+    }
+
     // ---- exec <command> [key=value ...] ----
     if let Some(rest) = trimmed.strip_prefix("exec ") {
         let args: Vec<&str> = rest.split_whitespace().collect();
@@ -758,6 +765,7 @@ fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<U
                 UserCommand::DistributeModel { model_path, .. } =>
                     format!("执行命令: distribute {}", model_path),
                 UserCommand::Profile { model_id } => format!("执行命令: profile {}", model_id),
+                UserCommand::Dial { addr } => format!("执行命令: dial {}", addr),
                 _ => String::new(),
             };
             if !label.is_empty() {
