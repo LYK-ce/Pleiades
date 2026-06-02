@@ -307,6 +307,10 @@ def wrap_native_to_pgguf(model_dir: Path, output_path: Path) -> Path:
     # 4. metadata
     print("\n[4/5] Building metadata…")
     kvs = _make_metadata_kvs(config, len(shard_files), model_dir)
+    # 追加 shard 真实字节数（Rust 侧 seek+read 需要）
+    shard_sizes_str = ",".join(str(len(sd)) for sd in shard_data)
+    kvs.append(("pleiades.shard_sizes", _kv_string("pleiades.shard_sizes", shard_sizes_str)))
+    kvs.sort(key=lambda x: x[0])
     n_kv = len(kvs)
     n_tensors = len(shard_files)
 

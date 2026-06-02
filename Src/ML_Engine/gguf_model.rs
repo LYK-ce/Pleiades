@@ -365,19 +365,41 @@ pub fn GGUF_Load_Model(
             if num_shards == 0 {
                 anyhow::bail!("deepseek_v4 safetensors: num_shards is 0");
             }
+
+            // 从 metadata 读取每个 shard 的真实字节数
+            let shard_sizes_str = arch_info
+                .metadata_raw
+                .get("pleiades.shard_sizes")
+                .cloned()
+                .unwrap_or_default();
+            let shard_sizes: Vec<usize> = shard_sizes_str
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if shard_sizes.len() != num_shards {
+                anyhow::bail!(
+                    "pleiades.shard_sizes count ({}) != num_shards ({})",
+                    shard_sizes.len(), num_shards
+                );
+            }
+
             let mut shard_bytes: Vec<Vec<u8>> = Vec::with_capacity(num_shards);
             for i in 0..num_shards {
                 let tensor_name = format!("safetensors/shard-{}", i);
-                let qtensor = content
-                    .tensor(&mut file, &tensor_name, &Device::Cpu)
-                    .map_err(|e| anyhow::anyhow!("Failed to load shard {}: {}", i, e))?;
-                let data = qtensor
-                    .dequantize(&Device::Cpu)
-                    .map_err(|e| anyhow::anyhow!("Failed to dequantize shard {}: {}", i, e))?;
-                let bytes = data
-                    .to_vec1::<u8>()
-                    .map_err(|e| anyhow::anyhow!("Failed to convert shard {} to bytes: {}", i, e))?;
-                shard_bytes.push(bytes);
+                let info = content
+                    .tensor_infos
+                    .get(&tensor_name)
+                    .ok_or_else(|| anyhow::anyhow!("tensor not found: {}", tensor_name))?;
+                let offset = info.offset as u64;
+                let size = shard_sizes[i];
+
+                use std::io::{Read, Seek, SeekFrom};
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| anyhow::anyhow!("seek shard {}: {}", i, e))?;
+                let mut buf = vec![0u8; size];
+                file.read_exact(&mut buf)
+                    .map_err(|e| anyhow::anyhow!("read shard {}: {}", i, e))?;
+                shard_bytes.push(buf);
             }
 
             // 构建模型
