@@ -47,6 +47,8 @@ def identify_architecture(config: dict[str, Any]) -> str:
         return "qwen3moe"
     if "Qwen3" in hf_arch:
         return "qwen3"
+    if "DeepseekV4" in hf_arch or "DeepSeekV4" in hf_arch:
+        return "deepseek_v4"
     if "DeepSeekV3" in hf_arch or "DeepSeek" in hf_arch:
         return "deepseek_v3"
     if "deepseek2" in hf_arch.lower():
