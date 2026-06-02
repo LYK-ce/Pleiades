@@ -11,14 +11,7 @@ import numpy as np
 import xxhash
 
 from .config_reader import read_config, identify_architecture
-from .tokenizer_writer import write_tokenizer
 from .pgguf_writer import build_layer_bitmap, bitmap_to_hex
-from .utils import resolve_tensor_source
-from .mappings.qwen3 import (
-    QWEN3_TENSOR_MAP,
-    QWEN3_CONFIG_TO_GGUF,
-    QWEN3_GGUF_KEY_HEAD_DIM,
-)
 
 
 def _compute_model_id_for_tensors(hf_tensors: dict[str, Any]) -> int:
@@ -75,10 +68,14 @@ def convert_hf_to_pgguf(
     num_layers = _write_gguf_metadata(writer, config, arch)
 
     # 4. Write tokenizer (FLOAT64 already removed for shimmytok compatibility)
+    from .tokenizer_writer import write_tokenizer  # lazy import
+
     print(f"[4/6] Writing tokenizer…")
     write_tokenizer(writer, model_dir)
 
     # 5. Load safetensors (do this before PGGUF metadata so we can hash)
+    from .utils import resolve_tensor_source  # lazy import
+
     print(f"[5/6] Loading safetensors…")
     hf_tensors = resolve_tensor_source(model_dir)
     print(f"  loaded {len(hf_tensors)} tensors")
@@ -221,6 +218,7 @@ def _match_layered_tensor(
 def _get_tensor_map(arch: str) -> dict[str, str]:
     """Get the tensor name mapping dict for a given architecture."""
     if arch in ("qwen3",):
+        from .mappings.qwen3 import QWEN3_TENSOR_MAP  # lazy import
         return QWEN3_TENSOR_MAP
     return {}
 
