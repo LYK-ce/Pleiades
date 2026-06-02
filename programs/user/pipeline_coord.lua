@@ -138,7 +138,7 @@ function execute(params)
 
     caps.print(string.format("│ 推理会话 ID: %d", sid_num))
     caps.print("│")
-    caps.print("│ 正在向各节点分发 pipe_worker ...")
+    caps.print("│ 正在向各节点启动 pipe_worker ...");
     caps.print("│")
 
     for i, p in ipairs(peers) do
@@ -150,7 +150,7 @@ function execute(params)
             p.file_name, p.layer_start, p.layer_end,
             upstream or "", downstream or "", my_id, session_id)
 
-        caps.print(string.format("│   [%d/%d] → %s  rexec pipe_worker", i, N, p.name))
+        caps.print(string.format("│   [%d/%d] → %s  启动 pipe_worker", i, N, p.name))
         local resp = caps.network.send_data(p.peer_id, "Command", payload)
         caps.print(string.format("│         响应: %s", resp.payload or "nil"))
     end

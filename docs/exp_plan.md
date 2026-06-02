@@ -29,7 +29,19 @@ Qwen3-235B-A22B_split_40_59.pgguf
 
 > **注意**: 每个分片共享同一个 `model_id`（xxhash32），可跨分片互相识别。第一份保留 tokenizer。
 
-#### ② 模型分发
+#### ② 部署 Lua 脚本到各节点
+
+```bash
+# pipe_worker 脚本需预先存在于各节点的 programs/user/ 目录
+# 方式1: git pull (如果各节点从同一仓库运行)
+# 方式2: scp 脚本文件
+scp programs/user/pipe_worker.lua haoxiang01:/path/to/Pleiades/programs/user/
+scp programs/user/pipe_worker.lua haoxiang02:/path/to/Pleiades/programs/user/
+```
+
+> `rexec` 只触发远程节点执行本地已有的脚本，不传输脚本文件。
+
+#### ③ 模型分发
 
 ```bash
 # 将分片 scp 到各节点的 Pleiades_Workspace 目录
@@ -38,7 +50,7 @@ scp Qwen3-235B-A22B_split_21_40.pgguf haoxiang02:/data/.../Pleiades_Workspace/
 scp Qwen3-235B-A22B_split_41_59.pgguf yatao:/data/.../Pleiades_Workspace/
 ```
 
-#### ③ 各节点 flush + 启动
+#### ④ 各节点 flush + 启动
 
 ```bash
 # 【每个节点】
@@ -52,7 +64,7 @@ scp Qwen3-235B-A22B_split_41_59.pgguf yatao:/data/.../Pleiades_Workspace/
 Session 1 created
 ```
 
-#### ④ 网络验证
+#### ⑤ 网络验证
 
 ```bash
 # 【Coordinator 节点】
@@ -116,7 +128,7 @@ Session 1 created
 ┌─ 阶段 4/4: 分发 + 推理 ──────────────────────┐
 │ 推理会话 ID: 1
 │
-│ 正在向各节点分发 pipe_worker ...
+│ 正在向各节点启动 pipe_worker ...
 │
 │   [1/3] → haoxiang01  rexec pipe_worker
 │         响应: OK
