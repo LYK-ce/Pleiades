@@ -16,20 +16,18 @@
 # 进入 Pleiades CLI
 ./Pleiades cli
 
-# 拆分 Qwen3-235B-A22B (假设 total_layers=60，根据实际调整)
-> exec split model=Qwen3-235B-A22B.pgguf start=0 end=20
-> exec split model=Qwen3-235B-A22B.pgguf start=21 end=40
-> exec split model=Qwen3-235B-A22B.pgguf start=41 end=59
+# 按份数均分 PGGUF（自动计算每份层数，余数分给前几份）
+> exec split path=Qwen3-235B-A22B.pgguf num=3
 ```
 
 输出文件:
 ```
-Qwen3-235B-A22B_split_0_20.pgguf
-Qwen3-235B-A22B_split_21_40.pgguf
-Qwen3-235B-A22B_split_41_59.pgguf
+Qwen3-235B-A22B_split_0_19.pgguf
+Qwen3-235B-A22B_split_20_39.pgguf
+Qwen3-235B-A22B_split_40_59.pgguf
 ```
 
-> **注意**: 每个分片共享同一个 `model_id`（xxhash32），可跨分片互相识别。
+> **注意**: 每个分片共享同一个 `model_id`（xxhash32），可跨分片互相识别。第一份保留 tokenizer。
 
 #### ② 模型分发
 
@@ -49,9 +47,9 @@ scp Qwen3-235B-A22B_split_41_59.pgguf yatao:/data/.../Pleiades_Workspace/
 > flush                    # 索引模型文件
 [Storage] flush 完成: 新增 1 个文件
 
-# 验证模型已被发现（Coordinator 节点可查）
-> ls
-Qwen3-235B-A22B_split_0_20.pgguf  135GB  model_id=12345678  [0-20]
+# Coordinator 节点额外执行: 创建推理会话
+> session create Qwen3-235B-A22B_split_0_19.pgguf
+Session 1 created
 ```
 
 #### ④ 网络验证
@@ -69,47 +67,96 @@ Qwen3-235B-A22B_split_0_20.pgguf  135GB  model_id=12345678  [0-20]
 #### 命令
 
 ```bash
-> exec pipeline model=Qwen3-235B-A22B_split_0_20.pgguf prompt=你好
+# Coordinator 节点执行
+> session inference pipeline 1 Qwen3-235B-A22B_split_0_19.pgguf
 ```
 
-> Coordinator 节点必须持有参数中指定的分片文件（用于获取 model_id + tokenizer）。
+> - `pipeline` = 双卡 Coordinator（COMMAND="pipeline"）
+> - `1` = session_id（由 `session create` 返回）
+> - `Qwen3-235B-A22B_split_0_19.pgguf` = coordinator 本地模型文件（用于获取 model_id）
+
+> 单卡模式: `session inference pipeline_coord_single 1 model.pgguf`
 
 #### 预期输出
 
 ```
-[coord] 模型: /data/.../Qwen3-235B-A22B_split_0_20.pgguf, id=12345678, 总层: 60
-[coord] 链条: 3 个节点
-  [1] haoxiang01: layers [0,20] file=Qwen3-235B-A22B_split_0_20.pgguf
-  [2] haoxiang02: layers [21,40] file=Qwen3-235B-A22B_split_21_40.pgguf
-  [3] yatao:      layers [41,59] file=Qwen3-235B-A22B_split_41_59.pgguf
-[coord] rexec → haoxiang01: EXEC|pipe_worker|{"model":"Qwen3-235B-A22B_split_0_20.pgguf",...}
-[coord] haoxiang01 响应: OK
-[coord] rexec → haoxiang02: EXEC|pipe_worker|{"model":"Qwen3-235B-A22B_split_21_40.pgguf",...}
-[coord] haoxiang02 响应: OK
-[coord] rexec → yatao: EXEC|pipe_worker|{"model":"Qwen3-235B-A22B_split_41_59.pgguf",...}
-[coord] yatao 响应: OK
-[coord] 建立 tensor stream ...
-[coord] fwd stream 已打开 (→ haoxiang01)
-[coord] bwd stream 已建立 (← yatao)
-[coord] tokenizer 已加载
-[coord] Prompt: 你好
-[coord] 编码: 2 tokens
-[coord] hidden 已发送
-[worker] layers=[0,20] up=nil down=12D3...haoxiang02 coord=12D3...haoxiang01 id=1717...
-[worker] 模型: /data/.../Qwen3-235B-A22B_split_0_20.pgguf
-[worker] cuda:0 ← [0,10]  cuda:1 ← [11,20]
-[worker] GPU:0 模型加载完成
-[worker] GPU:1 模型加载完成
-[worker] 等待入站 stream (timeout=120s)...
-[worker] 入站 stream 已建立
-[worker] 打开出站 stream → 12D3...haoxiang02
-[worker] 出站 stream 已打开
-[worker] GPU:0 forward done (0.23s)
-[worker] GPU:1 forward done (0.18s)
-[worker] iter 1 完成
+╔══════════════════════════════════════════════╗
+║   Pleiades 动态流水线 — 分布式推理演示       ║
+╚══════════════════════════════════════════════╝
+
+┌─ 阶段 1/4: 模型识别 ─────────────────────────┐
+│ 模型文件 : Qwen3-235B-A22B_split_0_19.pgguf
+│ 架构     : qwen3moe
+│ 总层数   : 60 (embedding + 58 blocks + output)
+│ Model ID : 12345678 (xxhash32, 跨分片唯一)
+└──────────────────────────────────────────────┘
+
+┌─ 阶段 2/4: 集群发现 ─────────────────────────┐
+│ 搜索 Model ID = 12345678 的节点...
+│ ✓ 发现 3 个节点持有该模型:
+│   [1] haoxiang01           层 [ 0 - 19]  Qwen3-235B-A22B_split_0_19.pgguf
+│   [2] haoxiang02           层 [20 - 39]  Qwen3-235B-A22B_split_20_39.pgguf
+│   [3] yatao                层 [40 - 59]  Qwen3-235B-A22B_split_40_59.pgguf
+└──────────────────────────────────────────────┘
+
+┌─ 阶段 3/4: 构建推理链条 ─────────────────────┐
+│ ✓ 链条验证通过 — 层覆盖完整无间隙
+│
+│ 流水线拓扑 (3 节点, 每节点 2×GPU):
+│
+│   ┌─ [1] haoxiang01
+│   │   层 0→19  GPU:0→CPU→GPU:1 ← 本机(协调者)
+│   ├─ [2] haoxiang02
+│   │   层 20→39  GPU:0→CPU→GPU:1
+│   └─ [3] yatao
+│       层 40→59  GPU:0→CPU→GPU:1
+│   Session ←→ 节点[1] ←→ 节点[2] ←→ 节点[3] ←→ Session
+└──────────────────────────────────────────────┘
+
+┌─ 阶段 4/4: 分发 + 推理 ──────────────────────┐
+│ 推理会话 ID: 1
+│
+│ 正在向各节点分发 pipe_worker ...
+│
+│   [1/3] → haoxiang01  rexec pipe_worker
+│         响应: OK
+│   [2/3] → haoxiang02  rexec pipe_worker
+│         响应: OK
+│   [3/3] → yatao  rexec pipe_worker
+│         响应: OK
+│
+│ 建立网络张量流 ...
+│   fwd: coord → haoxiang01  ✓
+│   bwd: yatao → coord  ✓
+│
+│ 连接 Session ...
+│   local_tensor: session ↔ coord  ✓
+│
+│ ╔══════════════════════════════════╗
+│ ║  ✓ 流水线就绪，开始推理          ║
+│ ╚══════════════════════════════════╝
+└──────────────────────────────────────────────┘
+
+[worker] ═══ 收到分片任务: 层 [0 → 19] (共 20 层) ═══
+[worker] GPU:0 ← 层 [0,9]  |  GPU:1 ← 层 [10,19]
+[worker] GPU:0 加载完成 (3.12s)
+[worker] GPU:1 加载完成 (2.98s)
+[worker] 等待上游张量流...
+[worker] ✓ 入站流已建立 (← coordinator)
+[worker] ✓ 出站流已打开 (→ haoxiang02)
+[worker] ═══ Worker 就绪，等待推理任务 ═══
+
+[worker] ═══ 收到分片任务: 层 [20 → 39] (共 20 层) ═══
+... (类似)
+
+[worker] ═══ 收到分片任务: 层 [40 → 59] (共 20 层) ═══
+... (类似)
+
+[coord] Prefill 完成 (1.85s)
 你好！我是 Qwen，一个由阿里巴巴开发的大语言模型...
-<eos>
-[coord] 完成, 共 42 tokens
+... (Session 输出生成的文本) ...
+[coord] Session 流结束
+[coord] 流水线演示结束
 ```
 
 ### 1.3 演示要点（给观众看）
