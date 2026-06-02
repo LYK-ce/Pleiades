@@ -28,6 +28,7 @@ use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Analyze_From_Cont
 use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding, Attention_Weights, Mlp_Weights};
 use super::gguf_models::deepseek_v3::{DeepSeek_Model, DeepSeek_Layer, DeepSeek_Config};
 use super::gguf_models::deepseek_v4::DeepSeekV4Model;
+use super::gguf_models::llama::{Llama_Layer, Llama_Model};
 use super::gguf_models::qwen3_moe::{Qwen3MoE_Model, Qwen3MoE_Layer, MoeOrMlp};
 use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
 use candle_nn::Linear;
@@ -42,6 +43,7 @@ pub enum AnyModel {
     Qwen3Moe(Qwen3MoE_Model),
     DeepSeek(DeepSeek_Model),
     DeepSeekV4(DeepSeekV4Model),
+    Llama(Llama_Model),
 }
 
 impl AnyModel {
@@ -51,6 +53,7 @@ impl AnyModel {
             AnyModel::Qwen3Moe(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
             AnyModel::DeepSeek(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
             AnyModel::DeepSeekV4(m) => m.forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
+            AnyModel::Llama(m) => m.Forward(input, offset).map_err(|e| anyhow::anyhow!("{e}")),
         }
     }
 
@@ -60,6 +63,7 @@ impl AnyModel {
             AnyModel::Qwen3Moe(m) => m.Clear_Kv_Cache(),
             AnyModel::DeepSeek(m) => m.Clear_Kv_Cache(),
             AnyModel::DeepSeekV4(m) => m.clear_kv_cache(),
+            AnyModel::Llama(m) => m.Clear_Kv_Cache(),
         }
     }
 
@@ -108,6 +112,18 @@ impl AnyModel {
             AnyModel::DeepSeekV4(m) => {
                 m.extract_kv_cache().map_err(|e| format!("extract_kv_cache V4: {e}"))
             }
+            AnyModel::Llama(m) => {
+                if m.layers.is_empty() {
+                    return Err("extract_kv_cache: model has no layers".into());
+                }
+                m.layers.iter().map(|layer| {
+                    let k = layer.self_attn.kv_cache.k()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    let v = layer.self_attn.kv_cache.v()
+                        .ok_or_else(|| "extract_kv_cache: KV cache is empty (no inference done yet)".to_string())?;
+                    Ok((k.clone(), v.clone()))
+                }).collect()
+            }
         }
     }
 
@@ -146,6 +162,16 @@ impl AnyModel {
             }
             AnyModel::DeepSeekV4(m) => {
                 m.restore_kv_cache(kvs).map_err(|e| format!("restore_kv_cache V4: {e}"))?;
+            }
+            AnyModel::Llama(m) => {
+                if kvs.len() != m.layers.len() {
+                    return Err(format!("restore_kv_cache: layer count mismatch (expected {}, got {})",
+                        m.layers.len(), kvs.len()));
+                }
+                for (layer, (k, v)) in m.layers.iter_mut().zip(kvs) {
+                    layer.self_attn.kv_cache.append(&k, &v)
+                        .map_err(|e| format!("restore_kv_cache: append failed: {e}"))?;
+                }
             }
         }
         Ok(())
@@ -343,7 +369,7 @@ pub fn GGUF_Load_Model(
     // 2. 根据模型架构信息，匹配对应的模型架构
     let architecture = arch_info.architecture.to_lowercase();
     let is_deepseek = match architecture.as_str() {
-        "qwen3" | "qwen3moe" => false,
+        "qwen3" | "qwen3moe" | "llama" => false,
         "deepseek_v3" | "deepseek2" => true,
         "deepseek_v4" => {
             // ── DeepSeek V4 safetensors 加载路径 ──
@@ -399,7 +425,7 @@ pub fn GGUF_Load_Model(
             });
         }
         _ => anyhow::bail!(
-            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3moe', 'deepseek_v3', and 'deepseek_v4' are supported.",
+            "Unsupported model architecture: '{}'. Currently 'qwen3', 'qwen3moe', 'deepseek_v3', 'deepseek_v4', and 'llama' are supported.",
             arch_info.architecture
         ),
     };
@@ -699,6 +725,68 @@ pub fn GGUF_Load_Model(
     }
 
     // ── Qwen3 加载路径（现有逻辑）───────────────────────
+
+    let is_llama = architecture.as_str() == "llama";
+
+    if is_llama {
+        // ── Llama 3.1 加载路径 ──
+        let mut layers = Vec::with_capacity(block_count);
+        for i in block_start..=block_end {
+            let mut lw = GGUF_Load_Layer(&content, &mut file, i, device)?;
+            let blk_idx = i - 1;
+            let layer = Llama_Layer::From_Extracted(
+                &mut lw.tensors,
+                arch_info.head_count,
+                arch_info.head_count_kv,
+                arch_info.head_dim,
+                arch_info.rms_norm_eps,
+                rotary.clone(),
+                blk_idx,
+            )
+            .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
+            layers.push(layer);
+        }
+
+        let has_output_head = end == max_layer_index;
+        let (norm, lm_head): (Option<RmsNorm>, Option<QMatMul>) = if has_output_head {
+            let mut lw = GGUF_Load_Layer(&content, &mut file, max_layer_index, device)?;
+            let norm_qtensor = lw.tensors.remove("output_norm.weight")
+                .ok_or_else(|| anyhow::anyhow!("Output layer does not contain output_norm.weight"))?;
+            let norm = RmsNorm::from_qtensor(norm_qtensor, arch_info.rms_norm_eps)
+                .map_err(|e| anyhow::anyhow!("Failed to build output RmsNorm: {}", e))?;
+            let lm_head_qtensor = if let Some(qt) = lw.tensors.remove("output.weight") {
+                qt
+            } else {
+                let mut embed_lw = GGUF_Load_Layer(&content, &mut file, 0, device)?;
+                embed_lw.tensors.remove("token_embd.weight")
+                    .ok_or_else(|| anyhow::anyhow!("output.weight not found and token_embd fallback failed"))?
+            };
+            let lm_head = QMatMul::from_weights(lm_head_qtensor.into())
+                .map_err(|e| anyhow::anyhow!("Failed to build lm_head: {}", e))?;
+            (Some(norm), Some(lm_head))
+        } else {
+            (None, None)
+        };
+
+        let model = AnyModel::Llama(Llama_Model::From_Dynamic(
+            embed_tokens, layers, norm, lm_head,
+            device.clone(), model_dtype,
+        ));
+
+        let mut inference_config = Inference_Config::default();
+        inference_config.eos_token = arch_info.eos_token_id;
+
+        return Ok(GGUF_Model {
+            model,
+            tokenizer: None,
+            inference_config,
+            arch_info,
+            model_path: model_path.to_path_buf(),
+            device: device.clone(),
+            has_input_head,
+            has_output_head,
+        });
+    }
 
     let mut layers = Vec::with_capacity(block_count);
     for i in block_start..=block_end {
