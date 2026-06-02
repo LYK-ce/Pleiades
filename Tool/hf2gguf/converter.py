@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import xxhash
-from gguf import GGUFWriter, GGMLQuantizationType
 
 from .config_reader import read_config, identify_architecture
 from .tokenizer_writer import write_tokenizer
@@ -65,6 +64,8 @@ def convert_hf_to_pgguf(
     print(f"  output: {output_path}")
 
     # 2. Set up GGUFWriter
+    from gguf import GGUFWriter  # lazy import, only needed for standard conversion
+
     print(f"[2/6] Initializing GGUF writer…")
     gguf_arch = _hf_arch_to_gguf_arch(arch)
     writer = GGUFWriter(str(output_path), gguf_arch)
@@ -162,6 +163,7 @@ def _add_tensors(
 ) -> int:
     """Map HF tensor names to GGUF names and add to GGUFWriter."""
     import torch  # lazy import, only needed for BF16 detection
+    from gguf import GGMLQuantizationType  # lazy import
 
     tensor_map = _get_tensor_map(arch)
     count = 0
