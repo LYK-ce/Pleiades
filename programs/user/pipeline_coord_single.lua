@@ -99,8 +99,8 @@ function execute(params)
         local downstream = (i < N) and peers[i + 1].peer_id or nil
         local fields = {}
         fields[#fields+1] = string.format('"model":"%s"', p.file_name)
-        fields[#fields+1] = string.format('"layer_start":%d', p.layer_start)
-        fields[#fields+1] = string.format('"layer_end":%d', p.layer_end)
+        fields[#fields+1] = string.format('"layer_start":"%d"', p.layer_start)
+        fields[#fields+1] = string.format('"layer_end":"%d"', p.layer_end)
         if upstream and upstream ~= "" then
             fields[#fields+1] = string.format('"upstream":"%s"', upstream)
         end

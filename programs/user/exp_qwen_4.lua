@@ -38,7 +38,7 @@ function execute(params)
         local upstream = (i > 1) and peers[i - 1].peer_id or nil
         local downstream = (i < N) and peers[i + 1].peer_id or nil
         local payload = string.format(
-            'EXEC|exp_worker|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","stream_id":"%d"}',
+            'EXEC|exp_worker|{"model":"%s","layer_start":"%d","layer_end":"%d","upstream":"%s","downstream":"%s","coordinator":"%s","stream_id":"%d"}',
             p.file_name, p.layer_start, p.layer_end,
             upstream or "", downstream or "", my_id, stream_id)
         pcall(function() caps.network.send_data(p.peer_id, "Command", payload) end)
