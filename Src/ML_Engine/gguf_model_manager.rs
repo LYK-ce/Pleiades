@@ -575,28 +575,21 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
         return Ok((arch_info, gguf_file_path.to_path_buf()));
     }
 
-    // 4. 原始 GGUF → 计算 model_id + layer_bitmap
-    //    读全量字节计算 xxhash32
-    let file_size = file.metadata()
-        .map(|m| m.len())
-        .unwrap_or(0);
-    tracing::info!(
-        "GGUF → PGGUF 转换开始: {} ({:.1} GB)",
-        gguf_file_path.display(),
-        file_size as f64 / 1e9
-    );
-
-    let mut raw_bytes = Vec::new();
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| anyhow::anyhow!("Failed to seek to start: {}", e))?;
-    file.read_to_end(&mut raw_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to read file bytes: {}", e))?;
+    // 4. 原始 GGUF → 计算 model_id (从 tensor 元数据, 不读全文件)
     let mut hasher = XxHash32::with_seed(0);
-    hasher.write(&raw_bytes);
+    let mut sorted_names: Vec<&String> = content.tensor_infos.keys().collect();
+    sorted_names.sort();
+    for name in &sorted_names {
+        hasher.write(name.as_bytes());
+        let info = &content.tensor_infos[*name];
+        // Hash shape dims to make model_id unique per architecture
+        for dim in info.shape.dims() {
+            hasher.write(&(*dim as u64).to_le_bytes());
+        }
+    }
     let model_id = hasher.finish() as u32;
 
-    // 5. 从 Content 的 tensor_infos 构建 layer_bitmap
-    //    先重建 layer_tensors_map（与 GGUF_Analyze_From_Content 相同逻辑）
+    // 5. 构建 layer_bitmap
     let mut layer_tensors_map: HashMap<usize, Vec<Tensor_Detail>> = HashMap::new();
     for (tensor_name, _tensor_info) in &content.tensor_infos {
         if tensor_name.starts_with("blk.") {
@@ -610,16 +603,57 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
     }
     let layer_bitmap = Build_Layer_Bitmap(&layer_tensors_map, arch_info.num_layers);
 
-    // 6. 写入 .pgguf：在原始 metadata 基础上追加 pleiades.model_id + layer_bitmap
+    // 6. 流式写入 PGGUF (不加载全部 tensor 到内存)
     let pgguf_path = gguf_file_path.with_extension("pgguf");
-    let out_file = std::fs::File::create(&pgguf_path)?;
-    let mut writer = BufWriter::new(out_file);
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    tracing::info!(
+        "GGUF → PGGUF 转换开始: {} ({:.1} GB)",
+        gguf_file_path.display(),
+        file_size as f64 / 1e9
+    );
+    streaming_write_pgguf(
+        &mut file,
+        &content,
+        &pgguf_path,
+        model_id,
+        &layer_bitmap,
+    )?;
 
-    let mut metadata_pairs: Vec<(String, gguf_file::Value)> = content
+    let output_size = std::fs::metadata(&pgguf_path).map(|m| m.len()).unwrap_or(0);
+    tracing::info!(
+        "GGUF → PGGUF 转换完成: {} ({:.1} GB)",
+        pgguf_path.display(),
+        output_size as f64 / 1e9
+    );
+
+    // 7. 删除原始 .gguf
+    drop(file);
+    std::fs::remove_file(gguf_file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to remove original GGUF: {}", e))?;
+
+    arch_info.model_id = Some(model_id);
+    arch_info.layer_bitmap = Some(layer_bitmap);
+    Ok((arch_info, pgguf_path))
+}
+
+/// 流式写入 PGGUF 文件: 头 + 元数据 (含新增 model_id/layer_bitmap) + 流式拷贝 tensor 数据
+fn streaming_write_pgguf(
+    reader: &mut (impl Read + Seek),
+    content: &gguf_file::Content,
+    pgguf_path: &Path,
+    model_id: u32,
+    layer_bitmap: &[u8; 32],
+) -> Result<()> {
+    use std::io::Write;
+
+    let out_file = std::fs::File::create(pgguf_path)?;
+    let mut w = BufWriter::new(out_file);
+
+    // Normalize metadata: U8/I8/U16/I16 → U32/I32
+    let mut metadata: Vec<(String, gguf_file::Value)> = content
         .metadata
         .iter()
         .map(|(k, v)| {
-            // 规范化：shimmytok 不支持 U8/I8/U16/I16，统一转 U32/I32
             let v = match v {
                 gguf_file::Value::U8(x) => gguf_file::Value::U32(*x as u32),
                 gguf_file::Value::I8(x) => gguf_file::Value::I32(*x as i32),
@@ -630,65 +664,170 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
             (k.clone(), v)
         })
         .collect();
-    metadata_pairs.push((
-        "pleiades.model_id".to_string(),
-        gguf_file::Value::U32(model_id),
-    ));
-    metadata_pairs.push((
-        "pleiades.layer_bitmap".to_string(),
-        gguf_file::Value::String(Bitmap_To_Hex(&layer_bitmap)),
-    ));
-    metadata_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    metadata.push(("pleiades.model_id".to_string(), gguf_file::Value::U32(model_id)));
+    metadata.push(("pleiades.layer_bitmap".to_string(), gguf_file::Value::String(Bitmap_To_Hex(layer_bitmap))));
+    metadata.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 加载所有 tensor 数据（CPU 设备，仅用于复制）
-    let device = Device::Cpu;
-    let mut loaded_tensors: Vec<(String, QTensor)> = Vec::new();
-    for tensor_name in content.tensor_infos.keys() {
-        let qtensor = content
-            .tensor(&mut file, tensor_name, &device)
-            .map_err(|e| anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e))?;
-        loaded_tensors.push((tensor_name.clone(), qtensor));
+    // Sort tensor names for deterministic output
+    let mut tensor_names: Vec<&String> = content.tensor_infos.keys().collect();
+    tensor_names.sort();
+
+    // === Write GGUF Header ===
+    w.write_all(&0x46554747u32.to_le_bytes())?;  // magic "GGUF"
+    w.write_all(&2u32.to_le_bytes())?;            // version 2
+    w.write_all(&(tensor_names.len() as u64).to_le_bytes())?;
+    w.write_all(&(metadata.len() as u64).to_le_bytes())?;
+
+    // === Write Metadata ===
+    for (name, value) in &metadata {
+        write_gguf_string(&mut w, name)?;
+        w.write_all(&(value.value_type() as u32).to_le_bytes())?;
+        write_gguf_value(&mut w, value)?;
     }
 
-    let total_loaded: usize = loaded_tensors.iter()
-        .map(|(_, t)| t.storage_size_in_bytes())
-        .sum();
-    tracing::info!(
-        "GGUF → PGGUF: 加载 {} 个 tensor, 总大小 {:.1} GB",
-        loaded_tensors.len(),
-        total_loaded as f64 / 1e9
-    );
+    // === Write Tensor Infos (with recalculated offsets) ===
+    let mut tensor_sizes: Vec<usize> = Vec::with_capacity(tensor_names.len());
+    for name in &tensor_names {
+        let info = &content.tensor_infos[*name];
+        write_gguf_string(&mut w, name)?;
+        let dims = info.shape.dims();
+        w.write_all(&(dims.len() as u32).to_le_bytes())?;
+        for &dim in dims.iter().rev() {
+            w.write_all(&(dim as u64).to_le_bytes())?;
+        }
+        // GgmlDType to u32
+        let dtype_u32 = match info.ggml_dtype {
+            candle_core::quantized::GgmlDType::F32 => 0,
+            candle_core::quantized::GgmlDType::F16 => 1,
+            candle_core::quantized::GgmlDType::Q4_0 => 2,
+            candle_core::quantized::GgmlDType::Q4_1 => 3,
+            candle_core::quantized::GgmlDType::Q5_0 => 6,
+            candle_core::quantized::GgmlDType::Q5_1 => 7,
+            candle_core::quantized::GgmlDType::Q8_0 => 8,
+            candle_core::quantized::GgmlDType::Q8_1 => 9,
+            candle_core::quantized::GgmlDType::Q2K => 10,
+            candle_core::quantized::GgmlDType::Q3K => 11,
+            candle_core::quantized::GgmlDType::Q4K => 12,
+            candle_core::quantized::GgmlDType::Q5K => 13,
+            candle_core::quantized::GgmlDType::Q6K => 14,
+            _ => anyhow::bail!("unsupported ggml dtype: {:?}", info.ggml_dtype),
+        };
+        w.write_all(&(dtype_u32 as u32).to_le_bytes())?;
 
-    let metadata_refs: Vec<(&str, &gguf_file::Value)> = metadata_pairs
-        .iter()
-        .map(|(k, v)| (k.as_str(), v))
-        .collect();
-    let tensor_refs: Vec<(&str, &QTensor)> = loaded_tensors
-        .iter()
-        .map(|(n, t)| (n.as_str(), t))
-        .collect();
+        // Offset placeholder (filled below via seek)
+        let _offset_pos = w.stream_position()?;
+        w.write_all(&0u64.to_le_bytes())?;
 
-    gguf_file::write(&mut writer, &metadata_refs, &tensor_refs)
-        .map_err(|e| anyhow::anyhow!("Failed to write PGGUF file: {}", e))?;
-    drop(writer);
+        let size_in_bytes = info.shape.elem_count() / info.ggml_dtype.block_size()
+            * info.ggml_dtype.type_size();
+        tensor_sizes.push(size_in_bytes);
+    }
 
-    // 验证输出文件大小
-    let output_size = std::fs::metadata(&pgguf_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    tracing::info!(
-        "GGUF → PGGUF 转换完成: {} ({:.1} GB)",
-        pgguf_path.display(),
-        output_size as f64 / 1e9
-    );
+    // Pad to 32-byte alignment before tensor data
+    let pos = w.stream_position()? as usize;
+    let padding = (32 - (pos % 32)) % 32;
+    if padding > 0 {
+        w.write_all(&vec![0u8; padding])?;
+    }
+    let tensor_data_start = w.stream_position()?;
 
-    // 7. 删除原始 .gguf，保留 .pgguf
-    std::fs::remove_file(gguf_file_path)
-        .map_err(|e| anyhow::anyhow!("Failed to remove original GGUF: {}", e))?;
+    // === Now go back and fill in tensor offsets ===
+    let mut offset: u64 = 0;
+    let mut offset_positions: Vec<(u64, usize)> = Vec::with_capacity(tensor_names.len());
+    // Recalculate where each offset field is in the file
+    // Header: 24 bytes
+    let mut pos: u64 = 24;
+    for (name, value) in &metadata {
+        pos += 8 + name.len() as u64;  // string length + data
+        pos += 4; // value_type
+        pos += gguf_value_size(value);
+    }
+    for (i, name) in tensor_names.iter().enumerate() {
+        pos += 8 + name.len() as u64;  // string
+        let info = &content.tensor_infos[*name];
+        pos += 4; // n_dims
+        pos += (info.shape.dims().len() * 8) as u64; // dims
+        pos += 4; // dtype
+        // offset field is at pos
+        offset_positions.push((pos, tensor_sizes[i]));
+        pos += 8; // offset (u64)
+    }
+    // Add padding
+    let align_pad = (32 - (pos as usize % 32)) % 32;
+    pos += align_pad as u64;
 
-    arch_info.model_id = Some(model_id);
-    arch_info.layer_bitmap = Some(layer_bitmap);
-    Ok((arch_info, pgguf_path))
+    for (off_pos, size) in &offset_positions {
+        w.seek(SeekFrom::Start(*off_pos))?;
+        w.write_all(&offset.to_le_bytes())?;
+        let pad = (32 - (size % 32)) % 32;
+        offset += (*size + pad) as u64;
+    }
+
+    // Seek to tensor data start
+    w.seek(SeekFrom::Start(tensor_data_start))?;
+
+    // === Stream tensor data from original file ===
+    reader.seek(SeekFrom::Start(content.tensor_data_offset))?;
+    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        w.write_all(&buf[..n])?;
+    }
+
+    drop(w);
+    Ok(())
+}
+
+/// Write a GGUF string: u64 length + bytes
+fn write_gguf_string(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
+    w.write_all(&(s.len() as u64).to_le_bytes())?;
+    w.write_all(s.as_bytes())
+}
+
+/// Get the binary size of a GGUF value (for offset calculation)
+fn gguf_value_size(value: &gguf_file::Value) -> u64 {
+    match value {
+        gguf_file::Value::U8(_) | gguf_file::Value::I8(_) | gguf_file::Value::Bool(_) => 1,
+        gguf_file::Value::U16(_) | gguf_file::Value::I16(_) => 2,
+        gguf_file::Value::U32(_) | gguf_file::Value::I32(_) | gguf_file::Value::F32(_) => 4,
+        gguf_file::Value::U64(_) | gguf_file::Value::I64(_) | gguf_file::Value::F64(_) => 8,
+        gguf_file::Value::String(s) => 8 + s.len() as u64,
+        gguf_file::Value::Array(arr) => {
+            let mut size = 12u64; // type(u32) + len(u64)
+            for elem in arr {
+                size += gguf_value_size(elem);
+            }
+            size
+        }
+    }
+}
+
+/// Write a GGUF value (mirrors candle's Value::write)
+fn write_gguf_value(w: &mut impl std::io::Write, value: &gguf_file::Value) -> std::io::Result<()> {
+    match value {
+        gguf_file::Value::U8(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::I8(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::U16(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::I16(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::U32(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::I32(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::U64(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::I64(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::F32(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::F64(v) => w.write_all(&v.to_le_bytes()),
+        gguf_file::Value::Bool(v) => w.write_all(&u8::from(*v).to_le_bytes()),
+        gguf_file::Value::String(v) => write_gguf_string(w, v.as_str()),
+        gguf_file::Value::Array(arr) => {
+            let vt = if arr.is_empty() { 4u32 } else { arr[0].value_type() as u32 };
+            w.write_all(&vt.to_le_bytes())?;
+            w.write_all(&(arr.len() as u64).to_le_bytes())?;
+            for elem in arr {
+                write_gguf_value(w, elem)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// 根据模型名称在 workspace 中查找模型文件。

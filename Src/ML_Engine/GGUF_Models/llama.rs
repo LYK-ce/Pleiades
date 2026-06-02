@@ -203,7 +203,7 @@ impl Llama_Model {
     }
 
     pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
-        let (b_sz, seq_len) = input.dims2()?;
+        let (_b_sz, seq_len) = input.dims2()?;
         let mask = if seq_len > 1 {
             Some(Self::causal_mask(seq_len, offset, &self.device)?)
         } else {
