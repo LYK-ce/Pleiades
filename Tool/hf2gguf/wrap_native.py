@@ -82,7 +82,7 @@ def _arr_str(s: str) -> bytes:
 # Tokenizer
 # ═══════════════════════════════════════════════════════════
 
-def _write_tokenizer_kv(model_dir: Path) -> list[tuple[str, bytes]]:
+def _write_tokenizer_kv(model_dir: Path, config: dict[str, Any]) -> list[tuple[str, bytes]]:
     kvs: list[tuple[str, bytes]] = []
 
     tok_path = model_dir / "tokenizer.json"
@@ -143,9 +143,9 @@ def _write_tokenizer_kv(model_dir: Path) -> list[tuple[str, bytes]]:
         if e.get("special", False) and "content" in e:
             sm[e["content"]] = e["id"]
 
-    # 先尝试从 tokenizer_config.json 拿 EOS/BOS（最权威）
-    eos = None
-    bos = None
+    # EOS/BOS: 优先从 config.json 直接拿（DeepSeek V4 在 config 里写了 bos_token_id=0, eos_token_id=1）
+    eos = config.get("eos_token_id")
+    bos = config.get("bos_token_id")
     tcp = model_dir / "tokenizer_config.json"
     if tcp.exists():
         with open(tcp, "r", encoding="utf-8") as f:
@@ -209,31 +209,35 @@ def _make_metadata_kvs(config: dict[str, Any], num_shards: int, model_dir: Path)
     s("pleiades.weight_format", "safetensors")
     u("pleiades.num_shards", num_shards)
 
-    nl = config.get("num_hidden_layers", config.get("n_layers", 0))
-    hs = config.get("hidden_size", config.get("dim", 0))
+    # config.json 字段名适配 DeepSeek V4 实际命名
+    nl = config.get("num_hidden_layers", 0)
+    hs = config.get("hidden_size", 0)
 
     u("deepseek_v4.block_count", nl)
     u("deepseek_v4.embedding_length", hs)
     u("deepseek_v4.vocab_size", config.get("vocab_size", 0))
-    u("deepseek_v4.attention.head_count", config.get("num_attention_heads", config.get("n_heads", 0)))
+    u("deepseek_v4.attention.head_count", config.get("num_attention_heads", 0))
     u("deepseek_v4.attention.key_length", config.get("head_dim", 0))
-    u("deepseek_v4.feed_forward_length", config.get("moe_inter_dim", config.get("intermediate_size", 0)))
-    u("deepseek_v4.context_length", config.get("max_seq_len", config.get("max_position_embeddings", 4096)))
-    f("deepseek_v4.attention.layer_norm_rms_epsilon", config.get("rms_norm_eps", config.get("norm_eps", 1e-6)))
+    u("deepseek_v4.feed_forward_length", config.get("moe_intermediate_size", 0))
+    u("deepseek_v4.context_length", config.get("max_position_embeddings", 4096))
+    f("deepseek_v4.attention.layer_norm_rms_epsilon", config.get("rms_norm_eps", 1e-6))
     f("deepseek_v4.rope.freq_base", config.get("rope_theta", 10000.0))
 
     u("deepseek_v4.n_routed_experts", config.get("n_routed_experts", 0))
     u("deepseek_v4.n_shared_experts", config.get("n_shared_experts", 0))
-    u("deepseek_v4.n_activated_experts", config.get("n_activated_experts", 0))
+    u("deepseek_v4.n_activated_experts", config.get("num_experts_per_tok", 0))
     u("deepseek_v4.q_lora_rank", config.get("q_lora_rank", 0))
-    u("deepseek_v4.rope_head_dim", config.get("rope_head_dim", 0))
+    u("deepseek_v4.rope_head_dim", config.get("qk_rope_head_dim", 0))
     u("deepseek_v4.hc_mult", config.get("hc_mult", 0))
-    u("deepseek_v4.window_size", config.get("window_size", 0))
-    f("deepseek_v4.rope_factor", config.get("rope_factor", 1.0))
-    f("deepseek_v4.beta_fast", config.get("beta_fast", 32.0))
-    f("deepseek_v4.beta_slow", config.get("beta_slow", 1.0))
-    f("deepseek_v4.compress_rope_theta", config.get("compress_rope_theta", config.get("rope_theta", 10000.0)))
-    u("deepseek_v4.original_seq_len", config.get("original_seq_len", 0))
+    u("deepseek_v4.window_size", config.get("sliding_window", 0))
+    # YaRN
+    rs = config.get("rope_scaling", {})
+    f("deepseek_v4.rope_factor", rs.get("factor", 1.0))
+    f("deepseek_v4.beta_fast", rs.get("beta_fast", 32.0))
+    f("deepseek_v4.beta_slow", rs.get("beta_slow", 1.0))
+    f("deepseek_v4.compress_rope_theta", config.get("compress_rope_theta", 10000.0))
+    u("deepseek_v4.original_seq_len", rs.get("original_max_position_embeddings", 0))
+
     u("deepseek_v4.index_n_heads", config.get("index_n_heads", 0))
     u("deepseek_v4.index_head_dim", config.get("index_head_dim", 0))
     u("deepseek_v4.index_topk", config.get("index_topk", 0))
@@ -241,27 +245,27 @@ def _make_metadata_kvs(config: dict[str, Any], num_shards: int, model_dir: Path)
     f("deepseek_v4.hc_eps", config.get("hc_eps", 1e-6))
     u("deepseek_v4.o_groups", config.get("o_groups", 1))
     u("deepseek_v4.o_lora_rank", config.get("o_lora_rank", 0))
-    s("deepseek_v4.score_func", config.get("score_func", "sqrtsoftplus"))
+    s("deepseek_v4.score_func", config.get("scoring_func", "sqrtsoftplus"))
     f("deepseek_v4.swiglu_limit", config.get("swiglu_limit", 0.0))
-    f("deepseek_v4.route_scale", config.get("route_scale", 1.0))
-    u("deepseek_v4.n_hash_layers", config.get("n_hash_layers", 0))
+    f("deepseek_v4.route_scale", config.get("routed_scaling_factor", 1.0))
+    u("deepseek_v4.n_hash_layers", config.get("num_hash_layers", 0))
 
-    dt = config.get("dtype", "")
-    if dt: s("deepseek_v4.dtype", dt)
-    sf = config.get("scale_fmt", "")
-    if sf: s("deepseek_v4.scale_fmt", sf)
-    ed = config.get("expert_dtype", "")
-    if ed: s("deepseek_v4.expert_dtype", ed)
+    qc = config.get("quantization_config", {})
+    dt = config.get("torch_dtype", "") or qc.get("fmt", "")
+    if dt: s("deepseek_v4.dtype", str(dt))
+    sf = qc.get("scale_fmt", "")
+    if sf: s("deepseek_v4.scale_fmt", str(sf))
+    s("deepseek_v4.expert_dtype", str(config.get("expert_dtype", "")))
 
     cr = config.get("compress_ratios", [])
     s("deepseek_v4.compress_ratios", ",".join(str(r) for r in cr) if cr else "")
 
-    print(f"  blocks={nl}, hidden={hs}, heads={config.get('n_heads', 0)}")
-    print(f"  moe={config.get('n_routed_experts', 0)}/{config.get('n_shared_experts', 0)}/{config.get('n_activated_experts', 0)}")
+    print(f"  blocks={nl}, hidden={hs}, heads={config.get('num_attention_heads', 0)}")
+    print(f"  moe={config.get('n_routed_experts', 0)}/{config.get('n_shared_experts', 0)}/{config.get('num_experts_per_tok', 0)}")
 
     # Tokenizer
     print("  writing tokenizer metadata…")
-    tok_kvs = _write_tokenizer_kv(model_dir)
+    tok_kvs = _write_tokenizer_kv(model_dir, config)
     kvs.extend(tok_kvs)
 
     # PGGUF
