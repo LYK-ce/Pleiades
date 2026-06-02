@@ -3,7 +3,7 @@ Date: 2026-06-01
 
 # Task 16: 动态流水线编排
 
-> 状态：16.0~16.11 已完成，16.12 待实现
+> 状态：16.0~16.12 已完成，16.13 待实现
 
 ---
 
@@ -387,6 +387,35 @@ PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
 
 ---
 
+### 16.13 Llama 3.1 架构支持
+
+Pleiades 使用的 candle 0.10.2 支持 Llama 架构，但 `gguf_model.rs` 的架构分发尚未包含 `"llama"`。
+
+#### 可行性
+
+| 维度 | 结论 |
+|------|------|
+| candle-core | ✅ 支持 Llama GGUF 加载 |
+| candle-transformers | ✅ 提供 Llama 模型实现 |
+| GGUF 架构标识 | `"llama"` |
+| Tokenizer | shimmytok 0.7.1 支持 tiktoken-based tokenizer |
+
+#### 任务
+
+1. `gguf_model.rs`：架构分发新增 `"llama"` 分支
+2. 新建 `Src/ML_Engine/GGUF_Models/llama.rs`：Llama 模型权重结构 + loader
+3. `gguf_model.rs`：新增 `LLAMA_CFG_From_Metadata` 从 GGUF 元数据提取超参数
+4. `Src/ML_Engine/GGUF_Models/mod.rs`：注册 llama 模块
+5. Python 转换工具（可选）：`Tool/hf2gguf/mappings/` 新增 Llama 张量映射
+6. 验证：`cargo check` 通过
+
+**涉及文件**：
+- `Src/ML_Engine/gguf_model.rs` — 架构分发 + 元数据提取
+- `Src/ML_Engine/GGUF_Models/llama.rs` — 新增
+- `Src/ML_Engine/GGUF_Models/mod.rs` — 注册模块
+
+---
+
 ## 文件变更总览
 
 ```
@@ -402,6 +431,7 @@ PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
   programs/user/exp_qwen_3.lua             — 3节点流水线实验
   programs/user/exp_qwen_4.lua             — 4节点流水线实验
   programs/user/exp_qwen_5.lua             — 5节点流水线实验
+  programs/user/exp_worker.lua             — 实验用轻量 Worker (63 行)
   docs/exp_info.md                         — Fleet 实验环境总结
   docs/exp_plan.md                         — 演示+实验计划
   Task/task_16_dynamic_pipeline.md         — 本文档
@@ -410,6 +440,10 @@ PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
   Src/VM/capability_binding.rs       — list_model_peers (model_id 过滤) + analyze_model (model_id 字段)
   Src/TUI/mod.rs                      — 提取 parse_user_command + 重构 Handle_Command_Input
   Src/main.rs                         — CLI 模式 ./Pleiades cli
+
+待实现 (16.13):
+  Src/ML_Engine/gguf_model.rs         — 新增 "llama" 架构分发
+  Src/ML_Engine/GGUF_Models/llama.rs  — Llama 模型实现
 
 归档：
   programs/user/pipe_1.lua ~ pipe_8.lua  → programs/archived/
