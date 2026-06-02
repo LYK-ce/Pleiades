@@ -724,7 +724,7 @@ pub fn GGUF_Load_Model(
         });
     }
 
-    // ── Qwen3 加载路径（现有逻辑）───────────────────────
+    // ── Llama / Qwen3 非 MoE 加载路径 ─────────────────
 
     let is_llama = architecture.as_str() == "llama";
 

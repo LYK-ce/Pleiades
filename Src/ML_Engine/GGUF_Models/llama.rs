@@ -21,7 +21,7 @@ use std::sync::Arc;
 type Result<T> = candle_core::Result<T>;
 
 // Re-use public types from Qwen3
-use super::qwen3::{Gguf, Mlp_Weights, Rotary_Embedding};
+use super::qwen3::{Mlp_Weights, Rotary_Embedding};
 
 // ============================================================
 // Llama Attention (no QK normalization)
@@ -195,11 +195,11 @@ impl Llama_Model {
         let mask: Vec<f32> = (0..seq_len)
             .flat_map(|i| {
                 (0..offset + seq_len).map(move |j| {
-                    if j < offset || j > offset + i { f32::NEG_INFINITY } else { 0f32 }
+                    if j > offset + i { f32::NEG_INFINITY } else { 0f32 }
                 })
             })
             .collect();
-        Tensor::from_vec(mask, (seq_len, offset + seq_len), device)
+        Tensor::from_vec(mask, (1, 1, seq_len, offset + seq_len), device)
     }
 
     pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
