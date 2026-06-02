@@ -17,22 +17,26 @@ function execute(params)
         return
     end
 
-    -- 1. 通过 Storage 获取模型路径 + 分析元数据
-    local model_path
-    local total_layers
-    do
-        local handle = caps.storage_acquire_read(model)
-        model_path = handle:path()
-        local info = ml.analyze_model(model_path)
-        total_layers = info.num_layers + 2   -- embedding(0) + blocks(1..N) + output(N+1)
-        handle:release()
-    end
-    caps.print(string.format("[coord] 模型: %s, 总层: %d", model_path, total_layers))
+    -- 1. 从本地模型文件获取 model_id + tokenizer 路径
+    local model_handle = caps.storage_acquire_read(model)
+    local model_path = model_handle:path()
+    local info = ml.analyze_model(model_path)
+    local model_id = info.model_id
+    local total_layers = info.num_layers + 2   -- embedding(0) + blocks(1..N) + output(N+1)
 
-    -- 2. 发现集群中持有该模型的节点
-    local peers = caps.network.list_model_peers(model)
+    if not model_id then
+        caps.print("[coord] 错误: 模型文件缺少 model_id")
+        model_handle:release()
+        return
+    end
+
+    caps.print(string.format("[coord] 模型: %s, id=%d, 总层: %d", model_path, model_id, total_layers))
+
+    -- 2. 通过 model_id 发现集群中持有该模型的节点
+    local peers = caps.network.list_model_peers(model_id)
     if #peers == 0 then
-        caps.print("[coord] 错误: 没有节点持有模型 " .. model)
+        caps.print(string.format("[coord] 错误: 没有节点持有 model_id=%d", model_id))
+        model_handle:release()
         return
     end
 
@@ -75,7 +79,7 @@ function execute(params)
 
         local payload = string.format(
             'EXEC|pipe_worker|{"model":"%s","layer_start":%d,"layer_end":%d,"upstream":"%s","downstream":"%s","coordinator":"%s","inference_id":%d}',
-            model, p.layer_start, p.layer_end,
+            p.file_name, p.layer_start, p.layer_end,
             upstream or "", downstream or "", my_id, inference_id)
 
         caps.print(string.format("[coord] rexec → %s: %s", p.name, payload))
@@ -132,4 +136,5 @@ function execute(params)
     caps.network.send_eof(fwd)
     caps.print(string.format("[coord] 完成, 共 %d tokens", generated))
     sess:unload()
+    model_handle:release()
 end
