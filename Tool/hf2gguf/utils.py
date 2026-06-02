@@ -7,9 +7,7 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-import torch
 import numpy as np
-import safetensors
 
 
 def discover_model_dir(path: Path) -> Path:
@@ -33,6 +31,8 @@ def has_sharded_tensors(model_dir: Path) -> bool:
 
 def load_single_tensor_file(model_dir: Path) -> dict[str, np.ndarray]:
     """Load tensors from a single model.safetensors file."""
+    import safetensors  # lazy import
+
     st_path = model_dir / "model.safetensors"
     if not st_path.exists():
         raise FileNotFoundError(f"model.safetensors not found in {model_dir}")
@@ -45,6 +45,8 @@ def load_single_tensor_file(model_dir: Path) -> dict[str, np.ndarray]:
 
 def load_sharded_tensors(model_dir: Path) -> dict[str, np.ndarray]:
     """Load tensors from sharded safetensors using index.json."""
+    import safetensors  # lazy import
+
     index_path = model_dir / "model.safetensors.index.json"
     with open(index_path, "r", encoding="utf-8") as f:
         index = json.load(f)
