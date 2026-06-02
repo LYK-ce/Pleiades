@@ -47,6 +47,7 @@ REQUIRED_METADATA_KEYS = [
     "general.architecture",
     "pleiades.weight_format",
     "pleiades.num_shards",
+    "pleiades.shard_sizes",
     "pleiades.model_id",
     "pleiades.layer_bitmap",
     "deepseek_v4.block_count",
@@ -217,6 +218,30 @@ def main() -> None:
     if extra_tensors:
         warnings.append(f"{len(extra_tensors)} non-shard tensors found: {extra_tensors}")
         print(f"    ⚠️  extra tensors: {extra_tensors}")
+
+    # 3b. shard_sizes 校验
+    shard_sizes_str = metadata.get("pleiades.shard_sizes", "")
+    if shard_sizes_str:
+        declared_sizes = [int(x) for x in shard_sizes_str.split(",") if x.strip()]
+        if len(declared_sizes) != num_shards:
+            errors.append(f"shard_sizes count ({len(declared_sizes)}) != num_shards ({num_shards})")
+            print(f"    ❌ shard_sizes count mismatch: {len(declared_sizes)} vs {num_shards}")
+        else:
+            # 每个 shard 的实际数据 ≤ 声明的 tensor size
+            all_ok = True
+            for i in range(num_shards):
+                info = tensor_infos.get(f"safetensors/shard-{i}")
+                if info is None:
+                    continue
+                real_bytes = declared_sizes[i]
+                stored_bytes = info["size"]
+                if real_bytes > stored_bytes:
+                    errors.append(f"shard-{i}: real size {real_bytes} > stored {stored_bytes}")
+                    print(f"    ❌ shard-{i}: {real_bytes} > {stored_bytes}")
+                    all_ok = False
+            if all_ok:
+                total_real = sum(declared_sizes)
+                print(f"    ✅ shard_sizes: {num_shards} entries, total {total_real / (1024**3):.1f} GB")
 
     # ── 4. Safetensors 格式验证 ──
     print(f"\n[4] Safetensors format validation")
