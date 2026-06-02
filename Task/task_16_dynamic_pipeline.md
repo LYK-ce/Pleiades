@@ -366,25 +366,21 @@ PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
 
 ---
 
-### 16.12 实验脚本：单节点～五节点流水线
+### 16.12 实验脚本：三节点～五节点流水线
 
-**新建 5 个独立实验脚本**，每个脚本自身包含完整的流水线逻辑（模型加载、offloading、forward、网络桥接），不依赖 pipe_worker。
+**新建 3 个独立实验脚本**，每个脚本自身包含完整的流水线逻辑（模型加载、forward、网络桥接）。不依赖 pipe_worker，不涉及 offloading。
 
-| 脚本 | 节点 | 每卡载荷 | offload | 描述 |
-|------|------|---------|:---:|------|
-| `exp_qwen_1.lua` | 1 | 135GB | ✅ | 单机 chunked offloading |
-| `exp_qwen_2.lua` | 2 | 67.5GB | ✅ | 双机 + chunked offloading |
-| `exp_qwen_3.lua` | 3 | 45GB | ❌ | 三机流水线（刚好装下） |
-| `exp_qwen_4.lua` | 4 | 33.8GB | ❌ | 四机流水线 |
-| `exp_qwen_5.lua` | 5 | 27GB | ❌ | 五机流水线 |
+| 脚本 | 节点 | 每卡载荷 | 描述 |
+|------|------|---------|------|
+| `exp_qwen_3.lua` | 3 | 45GB | 三机流水线（刚好装下） |
+| `exp_qwen_4.lua` | 4 | 33.8GB | 四机流水线 |
+| `exp_qwen_5.lua` | 5 | 27GB | 五机流水线 |
 
 每个脚本用法：`exec exp_qwen_N model=xxx.pgguf tokens=M`
 
 输出格式与 `exp_scale` 一致（`==== EXP_QWEN_N RESULT ==== ... ====`）。
 
 **涉及文件**：
-- `programs/user/exp_qwen_1.lua` — 新增
-- `programs/user/exp_qwen_2.lua` — 新增
 - `programs/user/exp_qwen_3.lua` — 新增
 - `programs/user/exp_qwen_4.lua` — 新增
 - `programs/user/exp_qwen_5.lua` — 新增
@@ -403,8 +399,6 @@ PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
   programs/user/pipe_worker_single.lua     — 单卡 Worker (88 行)
   programs/user/exp_scale.lua              — E1 Scaling 实验 (133 行)
   programs/user/exp_single.lua             — E3 单卡实验 (122 行)
-  programs/user/exp_qwen_1.lua             — 1节点 offloading 实验
-  programs/user/exp_qwen_2.lua             — 2节点 offloading 实验
   programs/user/exp_qwen_3.lua             — 3节点流水线实验
   programs/user/exp_qwen_4.lua             — 4节点流水线实验
   programs/user/exp_qwen_5.lua             — 5节点流水线实验

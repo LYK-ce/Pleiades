@@ -139,38 +139,33 @@ scp DeepSeek-V3.2_split_*.pgguf       node1..5:/path/Pleiades_Workspace/
 
 ## 二、实验矩阵
 
-> 实验仅用 Qwen3-235B。DeepSeek V3.2 仅参与演示。
+> 实验仅用 Qwen3-235B (3/4/5 节点, 无需 offloading)。DeepSeek V3.2 仅演示。
 
-### 2.1 实验总览
+### 实验总览
 
-| # | 实验 | 节点 | 指标 |
-|---|------|------|------|
-| E1 | Pipeline Scaling | 2->3->4->6->8 | tok/s, 扩展效率 |
-| E2 | 机内桥接开销 | 2->4 | 双卡 vs 单卡 per-token 延迟 |
-| E3 | 网络带宽影响 | 2 | 1G vs 100G tok/s |
-| E4 | Pipeline Bubble 分析 | 同节点数 | 每层 forward 耗时分布 |
-| E5 | 单节点极限 | 1 | chunked offloading 兜底 |
-| E6 | Chunked Offloading | 2 | chunks=1/2/4/8 延迟分布 |
+| # | 脚本 | 节点 | 每 GPU 载荷 | 说明 |
+|---|------|------|-----------|------|
+| E1 | `exp_qwen_3.lua` | 3 | ~22.5GB | 三机流水线，刚好装下 |
+| E2 | `exp_qwen_4.lua` | 4 | ~16.9GB | 四机流水线 |
+| E3 | `exp_qwen_5.lua` | 5 | ~13.5GB | 五机流水线 |
 
-### 2.2 E1: Pipeline Scaling 曲线
+每个脚本是独立的自包含流水线，`exec exp_qwen_3 model=xxx.pgguf tokens=128` 直接跑。
 
-节点: 2/3/4/6/8，每配置 prefill 512 + decode 128 tokens。
+输出格式:
+```
+==== EXP_QWEN_3 RESULT ====
+NODES:3  TOKENS:87  TOTAL_S:28.5  ENCODE_S:0.31
+PREFILL_S:1.82  DECODE_S:26.4  TOK_S:3.30  TOK_S_E2E:3.05
+==== EXP_QWEN_3 END ====
+```
 
-| 配置 | 跨机跳 | tok/s | 扩展效率 |
-|------|--------|-------|---------|
-| 2节点 | 1 | T2 | 1.00 |
-| 3节点 | 2 | T3 | T3/(T2x3/2) |
-| 4节点 | 3 | T4 | T4/(T2x2) |
-| 6节点 | 5 | T6 | T6/(T2x3) |
-| 8节点 | 7 | T8 | T8/(T2x4) |
+### 分析维度
 
-### 2.3-2.7 其他实验
-
-E2: 双卡(pipe_worker) vs 单卡(pipe_worker_single) per-token 延迟
-E3: eno1(1G) vs enp2s0np0(100G) 吞吐对比
-E4: 每层 forward 耗时, pipeline bubble 占比
-E5: 单节点 chunked offloading 作为 baseline
-E6: chunks=1/2/4/8 的 load/forward/offload 时间比
+| 指标 | 含义 |
+|------|------|
+| `TOK_S_E2E` vs 节点数 | 扩展效率曲线 |
+| `PREFILL_S` vs 节点数 | prefill 是否随节点增加而加速 |
+| `DECODE_S` 占比 | 网络通信在总延迟中的比重 |
 
 ---
 
@@ -191,11 +186,10 @@ E6: chunks=1/2/4/8 的 load/forward/offload 时间比
 
 ## 四、待办
 
-- [ ] Qwen3 split num=8 + 分发到各节点
+- [ ] Qwen3 split num=5 + 分发到各节点
 - [ ] DS V3.2 split num=5 + 分发到 5 节点
 - [ ] 100G 链路配 IP
 - [ ] 打通 yatao <-> haoxiang 双向网络
-- [ ] 冒烟测试: 2 节点 Qwen3 pipeline
-- [ ] pipe_worker 加 per-layer 计时 (E4)
-- [ ] 自动化实验脚本 (一键跑 E1-E6)
+- [ ] 冒烟测试: 3 节点 Qwen3 pipeline
+- [ ] 实现 exp_qwen_3.lua / exp_qwen_4.lua / exp_qwen_5.lua
 - [ ] 实验数据收集 + 绘图
