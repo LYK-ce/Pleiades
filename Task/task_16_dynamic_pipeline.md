@@ -3,7 +3,7 @@ Date: 2026-06-01
 
 # Task 16: 动态流水线编排
 
-> 状态：方案已完成，待执行 Phase 1
+> 状态：16.0~16.11 已完成，16.12 待实现
 
 ---
 
@@ -290,20 +290,132 @@ pipe_worker_single.lua 执行流程：
 
 ---
 
+### 16.7 CLI 模式
+
+新增 `./Pleiades cli` 交互式命令行模式。
+
+- `Src/TUI/mod.rs`：提取 `pub fn parse_user_command()` 供 CLI/TUI 共用
+- `Src/main.rs`：新增 CLI 分支
+  - EventBus 订阅者 → stdout（Notify + Output 事件）
+  - stdin REPL → parse_user_command → UserCommand → Core
+
+**涉及文件**：
+- `Src/TUI/mod.rs` — 提取 parse_user_command + 重构 Handle_Command_Input
+- `Src/main.rs` — 新增 cli_mode 分支（~60 行）
+
+---
+
+### 16.8 修复：model_id 发现
+
+`list_model_peers` 过滤条件从 `file_name.contains()` 改为 `m.id` 精确匹配。
+
+- `Src/VM/capability_binding.rs`：`list_model_peers` 参数类型 `String` → `u32`，过滤改为 `m.id == model_id`
+- `Src/VM/capability_binding.rs`：`analyze_model` 绑定新增 `model_id` 字段
+- `pipeline_coord.lua` / `pipeline_coord_single.lua`：先 `analyze` 取 model_id → `list_model_peers(model_id)`，rexec 传 `p.file_name`
+- 返回条目新增 `model_id` 字段
+
+**涉及文件**：
+- `Src/VM/capability_binding.rs` — analyze_model + model_id / list_model_peers 过滤改写
+
+---
+
+### 16.9 Session 模式重构
+
+`pipeline_coord.lua` / `pipe_worker.lua` 从独立模式改为 Session 桥接模式。
+
+- **用法变更**：`exec pipeline model=xxx` → `session inference pipeline <sid> <model>`
+- **Coordinator**：不再自己做 tokenizer/encode/decode，改为桥接 `Session ↔ local_tensor ↔ network chain`
+- **Worker**：接受 `session_id` 参数（用于 tensor stream 配对），增加演示级日志输出
+- 同步更新单卡版本 `pipeline_coord_single.lua` / `pipe_worker_single.lua`
+
+**涉及文件**：
+- `programs/user/pipeline_coord.lua` — 重写为 Session 桥接模式
+- `programs/user/pipe_worker.lua` — 适配 session_id + 演示日志
+- `programs/user/pipeline_coord_single.lua` — 同步
+- `programs/user/pipe_worker_single.lua` — 同步
+
+---
+
+### 16.10 实验脚本：E1 Scaling
+
+**新建** `programs/user/exp_scale.lua`，`COMMAND = "exp_scale"`。
+
+用法：`exec exp_scale model=xxx.pgguf nodes=N tokens=M`。coordinator 自己做 tokenizer → 发现 N 个节点 → rexec `pipe_worker` → encode + decode 计时 → 输出结构化结果。
+
+输出格式：
+```
+==== EXP_SCALE RESULT ====
+NODES:4  TOKENS:87  TOTAL_S:35.6  ENCODE_S:0.31
+PREFILL_S:2.15  DECODE_S:33.2  TOK_S:2.62  TOK_S_E2E:2.44
+==== EXP_SCALE END ====
+```
+
+**涉及文件**：
+- `programs/user/exp_scale.lua` — 新增 (~130 行)
+
+---
+
+### 16.11 实验脚本：E3 单卡模式
+
+**新建** `programs/user/exp_single.lua`，`COMMAND = "exp_single"`。
+
+与 `exp_scale` 唯一区别：rexec `pipe_worker_single` 而非 `pipe_worker`。
+
+**涉及文件**：
+- `programs/user/exp_single.lua` — 新增 (~120 行)
+
+---
+
+### 16.12 实验脚本：单节点～五节点流水线
+
+**新建 5 个独立实验脚本**，每个脚本自身包含完整的流水线逻辑（模型加载、offloading、forward、网络桥接），不依赖 pipe_worker。
+
+| 脚本 | 节点 | 每卡载荷 | offload | 描述 |
+|------|------|---------|:---:|------|
+| `exp_qwen_1.lua` | 1 | 135GB | ✅ | 单机 chunked offloading |
+| `exp_qwen_2.lua` | 2 | 67.5GB | ✅ | 双机 + chunked offloading |
+| `exp_qwen_3.lua` | 3 | 45GB | ❌ | 三机流水线（刚好装下） |
+| `exp_qwen_4.lua` | 4 | 33.8GB | ❌ | 四机流水线 |
+| `exp_qwen_5.lua` | 5 | 27GB | ❌ | 五机流水线 |
+
+每个脚本用法：`exec exp_qwen_N model=xxx.pgguf tokens=M`
+
+输出格式与 `exp_scale` 一致（`==== EXP_QWEN_N RESULT ==== ... ====`）。
+
+**涉及文件**：
+- `programs/user/exp_qwen_1.lua` — 新增
+- `programs/user/exp_qwen_2.lua` — 新增
+- `programs/user/exp_qwen_3.lua` — 新增
+- `programs/user/exp_qwen_4.lua` — 新增
+- `programs/user/exp_qwen_5.lua` — 新增
+
+---
+
 ## 文件变更总览
 
 ```
 分支：demo（从 hf2gguf 创建）
 
 新增：
-  programs/user/pipeline_coord.lua         — 双卡 Coordinator (120 行)
-  programs/user/pipe_worker.lua            — 双卡 Worker (100 行)
-  programs/user/pipeline_coord_single.lua  — 单卡 Coordinator (120 行)
-  programs/user/pipe_worker_single.lua     — 单卡 Worker (60 行)
+  programs/user/pipeline_coord.lua         — Session 模式 Coordinator (219 行)
+  programs/user/pipe_worker.lua            — Session 模式 Worker (122 行)
+  programs/user/pipeline_coord_single.lua  — 单卡 Coordinator (137 行)
+  programs/user/pipe_worker_single.lua     — 单卡 Worker (88 行)
+  programs/user/exp_scale.lua              — E1 Scaling 实验 (133 行)
+  programs/user/exp_single.lua             — E3 单卡实验 (122 行)
+  programs/user/exp_qwen_1.lua             — 1节点 offloading 实验
+  programs/user/exp_qwen_2.lua             — 2节点 offloading 实验
+  programs/user/exp_qwen_3.lua             — 3节点流水线实验
+  programs/user/exp_qwen_4.lua             — 4节点流水线实验
+  programs/user/exp_qwen_5.lua             — 5节点流水线实验
+  docs/exp_info.md                         — Fleet 实验环境总结
+  docs/exp_plan.md                         — 演示+实验计划
   Task/task_16_dynamic_pipeline.md         — 本文档
 
 修改：
-  Src/VM/capability_binding.rs       — list_model_peers 绑定 (~40 行)
+  Src/VM/capability_binding.rs       — list_model_peers (model_id 过滤) + analyze_model (model_id 字段)
+  Src/TUI/mod.rs                      — 提取 parse_user_command + 重构 Handle_Command_Input
+  Src/main.rs                         — CLI 模式 ./Pleiades cli
 
 归档：
   programs/user/pipe_1.lua ~ pipe_8.lua  → programs/archived/
