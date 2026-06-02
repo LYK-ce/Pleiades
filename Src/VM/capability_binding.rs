@@ -240,6 +240,9 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
             t.set("is_split", info.is_split)?;
             t.set("split_start", info.split_start)?;
             t.set("split_end", info.split_end)?;
+            if let Some(id) = info.model_id {
+                t.set("model_id", id)?;
+            }
 
             // 原始 metadata（所有 GGUF key-value）
             let meta = lua.create_table()?;
@@ -365,7 +368,7 @@ pub fn register_network_caps(
 
     // ─── list_model_peers ───────────────────────────────
     let caps_mp = capabilities.clone();
-    network.set("list_model_peers", lua.create_async_function(move |lua, model_filter: String| {
+    network.set("list_model_peers", lua.create_async_function(move |lua, model_id: u32| {
         let caps_mp = caps_mp.clone();
         async move {
             let peers = caps_mp.peer_manager.Get_All_Peers().await
@@ -375,9 +378,9 @@ pub fn register_network_caps(
             let mut idx = 0usize;
 
             for p in &peers {
-                // 筛选 supported_models 中 file_name 包含搜索词的条目
+                // 筛选 supported_models 中 id 匹配的条目
                 let matched: Vec<_> = p.supported_models.iter()
-                    .filter(|m| m.file_name.contains(&model_filter))
+                    .filter(|m| m.id == model_id)
                     .collect();
 
                 for m in matched {
@@ -405,6 +408,7 @@ pub fn register_network_caps(
                     entry.set("layer_start", layer_start)?;
                     entry.set("layer_end", layer_end)?;
                     entry.set("file_name", m.file_name.clone())?;
+                    entry.set("model_id", m.id)?;
 
                     // devices: 所有节点固定 2 GPU
                     let devices = lua.create_table()?;

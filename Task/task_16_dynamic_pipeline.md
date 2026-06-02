@@ -84,7 +84,7 @@ git checkout -b demo hf2gguf
 
 ### 16.1 Rust：暴露 Peer 模型信息给 Lua
 
-**新增 Lua API**：`caps.network.list_model_peers(model_id_or_name)`
+**新增 Lua API**：`caps.network.list_model_peers(model_id)` — 接受 `u32` 类型的 model_id（xxhash32(tensor metadata)，跨分片唯一）
 
 返回所有拥有目标模型的 peer 及其层范围：
 
@@ -104,7 +104,7 @@ git checkout -b demo hf2gguf
 
 1. 在 `register_network_caps` 中新增 `list_model_peers` 绑定函数（Rust 原生函数，注册为 Lua callable）
 2. 函数内部调用 `PeerManager::get_all_peers()` 获取所有在线 peer
-3. 遍历结果，筛选 `supported_models` 中 `model_id`（或 `file_name`）匹配参数的 peer
+3. 遍历结果，筛选 `supported_models` 中 `id` 匹配 `model_id` 的 peer
 4. 对每个匹配 peer，将其 `SupportedModel` 字段（`layer_start`, `layer_end`, `file_name`, `devices`）和 `PeerProfile` 字段（`latency_ms`）合并序列化为 Lua table
 5. 返回 Lua table 数组，Lua 侧直接使用，无需任何处理逻辑
 
