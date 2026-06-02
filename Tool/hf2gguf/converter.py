@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 import xxhash
 from gguf import GGUFWriter, GGMLQuantizationType
 
@@ -162,6 +161,8 @@ def _add_tensors(
     num_layers: int,
 ) -> int:
     """Map HF tensor names to GGUF names and add to GGUFWriter."""
+    import torch  # lazy import, only needed for BF16 detection
+
     tensor_map = _get_tensor_map(arch)
     count = 0
 
