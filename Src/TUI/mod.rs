@@ -507,514 +507,274 @@ fn Handle_Mouse_Event(app: &mut App, kind: MouseEventKind, _column: u16, row: u1
 // ============================================================
 
 /// 处理用户输入的命令，通过 user_cmd_tx 发送 UserCommand 给 Orchestrator Core
+// ============================================================
+// 命令解析（TUI + CLI 共用）
+// ============================================================
+
+/// 解析用户输入并构造 `UserCommand`，不依赖 TUI App 状态。
+/// CLI 和 TUI 共用此函数。
+///
+/// 返回 `Ok(Some(cmd))` — 成功解析
+/// 返回 `Ok(None)` — 本地命令（quit/clear 等），无需发送
+/// 返回 `Err(msg)` — 解析失败，msg 为错误提示
+pub fn parse_user_command(input: &str) -> Result<Option<UserCommand>, String> {
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed == "quit" || trimmed == "exit" {
+        return Ok(None); // 调用方自行处理（需构造 oneshot）
+    }
+
+    if trimmed == "clear" {
+        return Ok(None); // CLI 忽略
+    }
+
+    if trimmed == "help" {
+        return Ok(Some(UserCommand::Help));
+    }
+
+    // ---- session create <model> ----
+    if let Some(model) = trimmed.strip_prefix("session create ") {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err("用法: session create <model_name>".to_string());
+        }
+        return Ok(Some(UserCommand::Session { model_id: model.to_string() }));
+    }
+
+    // ---- api <session_id> ----
+    if trimmed.starts_with("api ") || trimmed.starts_with("API ") {
+        let sid_str = trimmed
+            .strip_prefix("api ").or_else(|| trimmed.strip_prefix("API ")).unwrap_or("").trim();
+        match sid_str.parse::<u64>() {
+            Ok(session_id) => return Ok(Some(UserCommand::Api { session_id })),
+            Err(_) => return Err(format!("无效 session_id: '{}'\\n用法: api <session_id>", sid_str)),
+        }
+    }
+
+    // ---- session inference [command] <session_id> <model_path> ----
+    if let Some(rest) = trimmed.strip_prefix("session inference ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        if args.len() < 2 {
+            return Err("用法: session inference [command] <session_id> <model_path>".to_string());
+        }
+        let (command, sid_str, model_path) = if args.len() >= 3 {
+            (args[0].to_string(), args[1], args[2])
+        } else {
+            ("single_inf".to_string(), args[0], args[1])
+        };
+        match sid_str.parse::<u64>() {
+            Ok(session_id) => return Ok(Some(UserCommand::SessionInference {
+                command, session_id, model_path: model_path.to_string(),
+            })),
+            Err(_) => return Err(format!("无效 session_id: '{}'", sid_str)),
+        }
+    }
+
+    // ---- run <model_path> ----
+    if let Some(p) = trimmed.strip_prefix("run ") {
+        let p = p.trim();
+        if p.is_empty() { return Err("用法: run <model_path>".to_string()); }
+        return Ok(Some(UserCommand::Run { script: String::new(), model_path: p.to_string() }));
+    }
+
+    // ---- cancel <job_id> ----
+    if let Some(id_str) = trimmed.strip_prefix("cancel ") {
+        match id_str.trim().parse::<u64>() {
+            Ok(id) => return Ok(Some(UserCommand::Cancel { job_id: JobId(id) })),
+            Err(_) => return Err(format!("无效 Job ID: '{}'", id_str.trim())),
+        }
+    }
+
+    // ---- display-peer / dp ----
+    if trimmed == "display-peer" || trimmed == "dp" {
+        return Ok(Some(UserCommand::DisplayPeer));
+    }
+
+    // ---- set-device <cpu|cuda|cuda:N> ----
+    if let Some(d) = trimmed.strip_prefix("set-device ") {
+        let d = d.trim().to_lowercase();
+        if d != "cpu" && d != "cuda" && !d.starts_with("cuda:") {
+            return Err(format!("不支持的设备: '{}'\\n用法: set-device cpu|cuda|cuda:N", d));
+        }
+        return Ok(Some(UserCommand::SetDevice { device: d }));
+    }
+
+    // ---- ls ----
+    if trimmed == "ls" {
+        return Ok(Some(UserCommand::List));
+    }
+
+    // ---- flush ----
+    if trimmed == "flush" {
+        return Ok(Some(UserCommand::Flush));
+    }
+
+    // ---- reload ----
+    if trimmed == "reload" {
+        return Ok(Some(UserCommand::Reload));
+    }
+
+    // ---- set-name <name> ----
+    if let Some(name) = trimmed.strip_prefix("set-name ") {
+        let name = name.trim();
+        if name.is_empty() { return Err("名称不能为空".to_string()); }
+        return Ok(Some(UserCommand::SetName { name: name.to_string() }));
+    }
+
+    // ---- send <file> <peer> ----
+    if let Some(rest) = trimmed.strip_prefix("send ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        if args.len() != 2 {
+            return Err("用法: send <file> <peer_id>".to_string());
+        }
+        return Ok(Some(UserCommand::Send {
+            file_path: args[0].to_string(), peer_id: args[1].to_string(),
+        }));
+    }
+
+    // ---- distribute <model_path> <peer_id:start-end> ... ----
+    if let Some(rest) = trimmed.strip_prefix("distribute ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        if args.len() < 2 {
+            return Err("用法: distribute <model_path> <peer_id:start-end> ...".to_string());
+        }
+        let model_path = args[0].to_string();
+        let mut peers: Vec<(String, usize, usize)> = Vec::new();
+        for arg in &args[1..] {
+            let assignment = Parse_Peer_Assignment(arg)
+                .map_err(|e| format!("解析 '{}' 失败: {}", arg, e))?;
+            peers.push(assignment);
+        }
+        return Ok(Some(UserCommand::DistributeModel { model_path, peers }));
+    }
+
+    // ---- pipeline <model_path> ----
+    if let Some(rest) = trimmed.strip_prefix("pipeline ") {
+        let model = rest.split_whitespace().next().unwrap_or("");
+        if model.is_empty() {
+            return Err("用法: pipeline <model_path>".to_string());
+        }
+        let mut params = std::collections::HashMap::new();
+        params.insert("model_path".to_string(), model.to_string());
+        return Ok(Some(UserCommand::Execute { command: "pipeline".to_string(), params }));
+    }
+
+    // ---- profile <model_id> ----
+    if let Some(model_id) = trimmed.strip_prefix("profile ") {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return Err("用法: profile <model_id>".to_string());
+        }
+        return Ok(Some(UserCommand::Profile { model_id: model_id.to_string() }));
+    }
+
+    // ---- exec <command> [key=value ...] ----
+    if let Some(rest) = trimmed.strip_prefix("exec ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        let command = args.first().copied().unwrap_or("");
+        if command.is_empty() {
+            return Err("用法: exec <command> [key=value ...]".to_string());
+        }
+        let mut params = std::collections::HashMap::new();
+        for arg in &args[1..] {
+            let (k, v) = arg.split_once('=')
+                .ok_or_else(|| format!("参数格式无效: '{}'", arg))?;
+            params.insert(k.to_string(), v.to_string());
+        }
+        return Ok(Some(UserCommand::Execute { command: command.to_string(), params }));
+    }
+
+    // ---- rexec <peer> <command> [key=value ...] ----
+    if let Some(rest) = trimmed.strip_prefix("rexec ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        if args.len() < 2 {
+            return Err("用法: rexec <peer> <command> [key=value ...]".to_string());
+        }
+        let peer = args[0].to_string();
+        let command = args[1].to_string();
+        let mut params = std::collections::HashMap::new();
+        for arg in &args[2..] {
+            let (k, v) = arg.split_once('=')
+                .ok_or_else(|| format!("参数格式无效: '{}'", arg))?;
+            params.insert(k.to_string(), v.to_string());
+        }
+        return Ok(Some(UserCommand::ExecRemote { peer, command, params }));
+    }
+
+    Err(format!("未知命令: '{}'\\n输入 help 查看可用命令", trimmed))
+}
+
+
+// ============================================================
+// TUI 命令处理（含 App 状态更新）
+// ============================================================
+
 fn Handle_Command_Input(app: &mut App, input: &str, user_cmd_tx: &mpsc::Sender<UserCommand>) {
     let trimmed = input.trim();
 
-    // ---- 本地命令（不发给 Core） ----
-
+    // 本地命令：quit / clear
     if trimmed == "quit" || trimmed == "exit" {
         app.should_quit = true;
         return;
     }
-
     if trimmed == "clear" {
         app.logs.clear();
         app.log_scroll = 0;
         return;
     }
 
-    if trimmed == "help" {
-        app.command_output = Command_Output::New();
-        app.command_scroll = 0;
-        app.command_output.output_text = "正在获取帮助信息...".to_string();
-        if user_cmd_tx.blocking_send(UserCommand::Help).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // 每次新命令清空 Command 面板并重置滚动
+    // 每次新命令清空 Command 面板
     app.command_output = Command_Output::New();
     app.command_scroll = 0;
 
-    // ---- session create <model> ----
+    if trimmed == "help" {
+        app.command_output.output_text = "正在获取帮助信息...".to_string();
+    }
 
-    if trimmed.starts_with("session create ") {
-        let model = trimmed.strip_prefix("session create ").unwrap_or("").trim();
-        if model.is_empty() {
-            app.command_output.output_text =
-                "错误: 缺少 model 参数\n用法: session create <model_name>".to_string();
-        } else {
-            app.command_output.output_text = format!("正在创建 Session: {}...", model);
-            let cmd = UserCommand::Session { model_id: model.to_string() };
+    match parse_user_command(trimmed) {
+        Ok(Some(cmd)) => {
+            // 日志
+            let label = match &cmd {
+                UserCommand::Execute { command, .. } => format!("执行脚本: {}", command),
+                UserCommand::ExecRemote { peer, command, .. } => format!("远程执行: rexec {} {}", peer, command),
+                UserCommand::Session { model_id } => format!("创建 Session: {}", model_id),
+                UserCommand::Api { session_id } => format!("启动 API Server -> Session {}", session_id),
+                UserCommand::SessionInference { command, session_id, .. } =>
+                    format!("ML Thread ({}) -> Session {}", command, session_id),
+                UserCommand::Run { model_path, .. } => format!("执行命令: run {}", model_path),
+                UserCommand::Cancel { job_id } => format!("执行命令: cancel {}", job_id.0),
+                UserCommand::DisplayPeer => "执行命令: display-peer".to_string(),
+                UserCommand::SetDevice { device } => format!("执行命令: set-device {}", device),
+                UserCommand::List => "执行命令: ls".to_string(),
+                UserCommand::Flush => "执行命令: flush".to_string(),
+                UserCommand::Reload => "执行命令: reload".to_string(),
+                UserCommand::SetName { name } => format!("执行命令: set-name {}", name),
+                UserCommand::Send { file_path, peer_id } =>
+                    format!("执行命令: send {} → {}", file_path, peer_id),
+                UserCommand::DistributeModel { model_path, .. } =>
+                    format!("执行命令: distribute {}", model_path),
+                UserCommand::Profile { model_id } => format!("执行命令: profile {}", model_id),
+                _ => String::new(),
+            };
+            if !label.is_empty() {
+                app.Add_Log(label);
+            }
+
             if user_cmd_tx.blocking_send(cmd).is_err() {
                 app.Add_Log("[错误] Orchestrator 已关闭".to_string());
+                app.should_quit = true;
             }
         }
-        return;
-    }
-
-    // ---- api <session_id> ----
-
-    if trimmed.starts_with("api ") || trimmed.starts_with("API ") {
-        let sid_str = trimmed
-            .strip_prefix("api ")
-            .or_else(|| trimmed.strip_prefix("API "))
-            .unwrap_or("")
-            .trim();
-        let sid = sid_str.parse::<u64>();
-        match sid {
-            Ok(session_id) => {
-                app.command_output.output_text =
-                    format!("正在启动 API Server -> Session {}...", session_id);
-                let cmd = UserCommand::Api { session_id };
-                if user_cmd_tx.blocking_send(cmd).is_err() {
-                    app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-                }
-            }
-            Err(_) => {
-                app.command_output.output_text =
-                    format!("错误: '{}' 不是有效的 session_id\n用法: api <session_id>", sid_str);
-            }
-        }
-        return;
-    }
-
-    // ---- session inference [command] <session_id> <model_path> ----
-
-    if trimmed.starts_with("session inference ") {
-        let rest = trimmed.strip_prefix("session inference ").unwrap_or("").trim();
-        let args: Vec<&str> = rest.split_whitespace().collect();
-        if args.len() < 2 {
-            app.command_output.output_text =
-                "错误: 参数不足\n用法: session inference [command] <session_id> <model_path>".to_string();
-        } else {
-            // 2 参数: <sid> <model> → command="single_inf"
-            // 3 参数: <command> <sid> <model>
-            let (command, sid_str, model_path) = if args.len() >= 3 {
-                (args[0].to_string(), args[1], args[2])
-            } else {
-                ("single_inf".to_string(), args[0], args[1])
-            };
-            match sid_str.parse::<u64>() {
-                Ok(session_id) => {
-                    app.command_output.output_text =
-                        format!("正在启动 ML Thread ({}）-> Session {} (模型: {})...",
-                            command, session_id, model_path);
-                    let cmd = UserCommand::SessionInference {
-                        command,
-                        session_id,
-                        model_path: model_path.to_string(),
-                    };
-                    if user_cmd_tx.blocking_send(cmd).is_err() {
-                        app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-                    }
-                }
-                Err(_) => {
-                    app.command_output.output_text =
-                        format!("错误: '{}' 不是有效的 session_id", sid_str);
-                }
-            }
-        }
-        return;
-    }
-
-    // ---- run <model_path> ----
-
-    if trimmed.starts_with("run ") {
-        let model_path_str = trimmed.strip_prefix("run ").unwrap_or("").trim();
-
-        if model_path_str.is_empty() {
-            app.command_output.output_text =
-                "错误: 缺少 model_path 参数\n用法: run <model_path>".to_string();
+        Ok(None) => {} // 空输入
+        Err(msg) => {
+            app.command_output.output_text = msg;
             app.command_output.completed = true;
-            return;
         }
-
-        let cmd = UserCommand::Run {
-            script: String::new(),
-            model_path: model_path_str.to_string(),
-        };
-
-        app.Add_Log(format!("执行命令: run {}", model_path_str));
-        app.command_output.output_text = "建立推理会话中...".to_string();
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
     }
-
-    // ---- cancel <job_id> ----
-
-    if trimmed.starts_with("cancel ") {
-        let id_str = trimmed.strip_prefix("cancel ").unwrap_or("").trim();
-        let job_id = match id_str.parse::<u64>() {
-            Ok(id) => JobId(id),
-            Err(_) => {
-                app.command_output.output_text =
-                    format!("错误: 无效的 Job ID '{}'\n用法: cancel <job_id>", id_str);
-                app.command_output.completed = true;
-                return;
-            }
-        };
-
-        let cmd = UserCommand::Cancel { job_id };
-
-        app.Add_Log(format!("执行命令: cancel {}", id_str));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- display-peer / dp ----
-
-    if trimmed == "display-peer" || trimmed == "dp" {
-        let cmd = UserCommand::DisplayPeer;
-
-        app.Add_Log("执行命令: display-peer".to_string());
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- set-device <cpu|cuda|cuda:N> ----
-
-    if trimmed.starts_with("set-device ") {
-        let device_str = trimmed
-            .strip_prefix("set-device ")
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        // 验证：cpu、cuda、cuda:N 均为合法设备
-        let is_valid = device_str == "cpu"
-            || device_str == "cuda"
-            || device_str.starts_with("cuda:");
-        if !is_valid {
-            app.command_output.output_text =
-                format!("不支持的设备: '{}'\n用法: set-device cpu|cuda|cuda:N", device_str);
-            app.command_output.completed = true;
-            return;
-        }
-
-        let cmd = UserCommand::SetDevice {
-            device: device_str.clone(),
-        };
-
-        app.Add_Log(format!("执行命令: set-device {}", device_str));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- ls (列出存储文件) ----
-
-    if trimmed == "ls" {
-        let cmd = UserCommand::List;
-
-        app.Add_Log("执行命令: ls".to_string());
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- flush (刷新存储索引) ----
-
-    if trimmed == "flush" {
-        let cmd = UserCommand::Flush;
-
-        app.Add_Log("执行命令: flush".to_string());
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- reload (重新加载用户脚本) ----
-
-    if trimmed == "reload" {
-        let cmd = UserCommand::Reload;
-
-        app.Add_Log("执行命令: reload".to_string());
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- set-name <name> ----
-
-    if let Some(name) = trimmed.strip_prefix("set-name ") {
-        let name = name.trim();
-        if name.is_empty() {
-            app.command_output.output_text =
-                "错误: 名称不能为空\n用法: set-name <name>".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-        let cmd = UserCommand::SetName { name: name.to_string() };
-        app.Add_Log(format!("执行命令: set-name {}", name));
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- send <file> <peer> ----
-
-    if trimmed.starts_with("send ") {
-        let args: Vec<&str> = trimmed
-            .strip_prefix("send ")
-            .unwrap_or("")
-            .trim()
-            .split_whitespace()
-            .collect();
-
-        if args.len() != 2 {
-            app.command_output.output_text =
-                "错误: 参数不正确\n用法: send <file> <peer_id>".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let file_path = args[0].to_string();
-        let peer_id = args[1].to_string();
-
-        let cmd = UserCommand::Send {
-            file_path: file_path.clone(),
-            peer_id: peer_id.clone(),
-        };
-
-        app.Add_Log(format!("执行命令: send {} → {}", file_path, peer_id));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- distribute <model_path> <peer_id:start-end> ... ----
-
-    if trimmed.starts_with("distribute ") {
-        let args: Vec<&str> = trimmed
-            .strip_prefix("distribute ")
-            .unwrap_or("")
-            .trim()
-            .split_whitespace()
-            .collect();
-
-        if args.len() < 2 {
-            app.command_output.output_text =
-                "错误: 参数不足\n用法: distribute <model_path> <peer_id:start-end> ...".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let model_path = args[0].to_string();
-        let mut peers: Vec<(String, usize, usize)> = Vec::new();
-
-        for arg in &args[1..] {
-            match Parse_Peer_Assignment(arg) {
-                Ok(assignment) => peers.push(assignment),
-                Err(e) => {
-                    app.command_output.output_text =
-                        format!("错误: 解析 '{}' 失败: {}\n格式: peer_id:start-end", arg, e);
-                    app.command_output.completed = true;
-                    return;
-                }
-            }
-        }
-
-        let cmd = UserCommand::DistributeModel {
-            model_path: model_path.clone(),
-            peers,
-        };
-
-        app.Add_Log(format!("执行命令: distribute {}", model_path));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- pipeline <model_path> [strategy] ----
-
-    if trimmed.starts_with("pipeline ") {
-        let args: Vec<&str> = trimmed
-            .strip_prefix("pipeline ")
-            .unwrap_or("")
-            .trim()
-            .split_whitespace()
-            .collect();
-        let model_path_str = args.first().copied().unwrap_or("");
-
-        if model_path_str.is_empty() {
-            app.command_output.output_text =
-                "错误: 缺少 model_path 参数\n用法: pipeline <model_path>".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let mut params = std::collections::HashMap::new();
-        params.insert("model_path".to_string(), model_path_str.to_string());
-        let cmd = UserCommand::Execute {
-            command: "pipeline".to_string(),
-            params,
-        };
-
-        app.Add_Log(format!("执行命令: pipeline {}", model_path_str));
-        app.command_output.output_text = "Pipeline 功能已移除，请使用 execute 命令".to_string();
-        app.command_output.completed = true;
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    if trimmed.starts_with("profile ") {
-        let model_id = trimmed[8..].trim();
-        if model_id.is_empty() {
-            app.command_output.output_text =
-                "错误: 缺少 model_id 参数\n用法: profile <model_id>".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let cmd = UserCommand::Profile {
-            model_id: model_id.to_string(),
-        };
-
-        app.Add_Log(format!("执行命令: profile {}", model_id));
-        app.command_output.output_text = "启动 Profile 中...".to_string();
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- exec <command> [key=value ...] ----
-
-    if trimmed.starts_with("exec ") {
-        let args: Vec<&str> = trimmed
-            .strip_prefix("exec ")
-            .unwrap_or("")
-            .trim()
-            .split_whitespace()
-            .collect();
-        let command = args.first().copied().unwrap_or("");
-        if command.is_empty() {
-            app.command_output.output_text =
-                "错误: 缺少命令名\n用法: exec <command> [key=value ...]".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let mut params = std::collections::HashMap::new();
-        for arg in &args[1..] {
-            if let Some((k, v)) = arg.split_once('=') {
-                params.insert(k.to_string(), v.to_string());
-            } else {
-                app.command_output.output_text = format!(
-                    "错误: 参数格式无效 '{}'\n用法: exec <command> [key=value ...]",
-                    arg
-                );
-                app.command_output.completed = true;
-                return;
-            }
-        }
-
-        let cmd = UserCommand::Execute {
-            command: command.to_string(),
-            params,
-        };
-
-        app.Add_Log(format!("执行脚本: {}", command));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- rexec <peer> <command> [key=value ...] ----
-
-    if trimmed.starts_with("rexec ") {
-        let args: Vec<&str> = trimmed
-            .strip_prefix("rexec ")
-            .unwrap_or("")
-            .trim()
-            .split_whitespace()
-            .collect();
-        if args.len() < 2 {
-            app.command_output.output_text =
-                "错误: 缺少参数\n用法: rexec <peer> <command> [key=value ...]".to_string();
-            app.command_output.completed = true;
-            return;
-        }
-
-        let peer = args[0].to_string();
-        let command = args[1].to_string();
-
-        let mut params = std::collections::HashMap::new();
-        for arg in &args[2..] {
-            if let Some((k, v)) = arg.split_once('=') {
-                params.insert(k.to_string(), v.to_string());
-            } else {
-                app.command_output.output_text = format!(
-                    "错误: 参数格式无效 '{}'\n用法: rexec <peer> <command> [key=value ...]",
-                    arg
-                );
-                app.command_output.completed = true;
-                return;
-            }
-        }
-
-        let cmd = UserCommand::ExecRemote {
-            peer,
-            command,
-            params,
-        };
-
-        app.Add_Log(format!("远程执行: rexec {} {}", args[0], args[1]));
-
-        if user_cmd_tx.blocking_send(cmd).is_err() {
-            app.Add_Log("[错误] Orchestrator 已关闭".to_string());
-            app.should_quit = true;
-        }
-        return;
-    }
-
-    // ---- 未识别的命令 ----
-
-    app.command_output.output_text = format!("未知命令: '{}'\n输入 help 查看可用命令", trimmed);
-    app.command_output.completed = true;
 }
 
 /// 从 EventBus JSON 中解析模型列表

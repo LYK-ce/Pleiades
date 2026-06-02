@@ -38,6 +38,7 @@ use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
 use pleiades::tui::TUI_Loop;
+use pleiades::tui::parse_user_command;
 
 /// 配置目录路径（固定）
 const CONFIG_DIR: &str = ".config";
@@ -101,6 +102,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Pleiades 启动中...");
     info!("工作目录: {}", workspace_dir.display());
     info!("日志目录: {}", log_dir.display());
+
+    // ══════════════════════════════════════════════════════
+    // 检测运行模式: ./Pleiades cli 启动 CLI 模式
+    // ══════════════════════════════════════════════════════
+    let cli_mode = std::env::args().nth(1).map_or(false, |a| a == "cli");
 
     // ══════════════════════════════════════════════════════
     // Phase 3: 创建基础组件
@@ -232,15 +238,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 16. 启动 TUI
-    let event_rx = event_bus.Subscribe();
-    tokio::task::spawn_blocking(move || {
-        TUI_Loop(event_rx, user_cmd_tx);
-    });
+    if cli_mode {
+        // ────────────────────────────────────────────────
+        // CLI 模式: EventBus → stdout + stdin REPL + Core
+        // ────────────────────────────────────────────────
 
-    // 17. Core 主循环
-    info!("进入 Orchestrator 主循环");
-    core.run().await;
+        // ① EventBus 订阅者 → stdout
+        {
+            let mut notify_rx = event_bus.Subscribe();
+            tokio::spawn(async move {
+                use pleiades::event_bus::Bus_Event;
+                loop {
+                    match notify_rx.recv().await {
+                        Ok(Bus_Event::Notify { level, message }) => {
+                            use pleiades::event_bus::NotifyLevel;
+                            match level {
+                                NotifyLevel::Info  => println!("{message}"),
+                                NotifyLevel::Warn  => eprintln!("[WARN] {message}"),
+                                NotifyLevel::Error => eprintln!("[ERROR] {message}"),
+                            }
+                        }
+                        Ok(Bus_Event::Output { payload }) => {
+                            println!("{payload}");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("[CLI] 丢失 {} 条事件", n);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // ② stdin → UserCommand 读取线程
+        let cmd_tx = user_cmd_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::{self, BufRead, Write};
+            let stdin = io::stdin();
+            let mut stdout = io::stdout();
+            println!("Pleiades CLI. 输入 'quit' 退出, 'help' 查看命令.");
+            loop {
+                print!("> ");
+                let _ = stdout.flush();
+                let mut line = String::new();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) => {
+                        // EOF
+                        let (reply_tx, _) = tokio::sync::oneshot::channel();
+                        let _ = cmd_tx.blocking_send(UserCommand::Quit { reply: reply_tx });
+                        break;
+                    }
+                    Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                // quit/exit 需构造 oneshot（parse_user_command 不处理）
+                if line == "quit" || line == "exit" {
+                    let (reply_tx, _) = tokio::sync::oneshot::channel();
+                    let _ = cmd_tx.blocking_send(UserCommand::Quit { reply: reply_tx });
+                    break;
+                }
+                match parse_user_command(&line) {
+                    Ok(Some(cmd)) => {
+                        if cmd_tx.blocking_send(cmd).is_err() {
+                            eprintln!("[CLI] Orchestrator 已关闭");
+                            break;
+                        }
+                    }
+                    Ok(None) => {} // 空 / clear
+                    Err(msg) => eprintln!("{msg}"),
+                }
+            }
+        });
+
+        // ③ Core 主循环
+        info!("进入 Orchestrator 主循环 (CLI 模式)");
+        core.run().await;
+
+    } else {
+        // ────────────────────────────────────────────────
+        // TUI 模式（原封不动）
+        // ────────────────────────────────────────────────
+
+        // 16. 启动 TUI
+        let event_rx = event_bus.Subscribe();
+        tokio::task::spawn_blocking(move || {
+            TUI_Loop(event_rx, user_cmd_tx);
+        });
+
+        // 17. Core 主循环
+        info!("进入 Orchestrator 主循环");
+        core.run().await;
+    }
 
     info!("Pleiades 已退出");
     Ok(())
