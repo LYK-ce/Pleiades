@@ -27,14 +27,13 @@ function execute(params)
     local model_id = info.model_id
     local total_layers = info.num_layers
 
-    if not model_id then
-        caps.print("[exp] 错误: 模型缺少 model_id")
-        handle:release()
-        return
+    if model_id then
+        caps.print(string.format("[exp] %s | layers=%d | model_id=%d",
+            info.architecture, total_layers, model_id))
+    else
+        caps.print(string.format("[exp] %s | layers=%d | model_id=N/A (fallback to filename)",
+            info.architecture, total_layers))
     end
-
-    caps.print(string.format("[exp] %s | layers=%d | model_id=%d",
-        info.architecture, total_layers, model_id))
 
     -- 加载 tokenizer
     local sess = ml.new("cuda:0")
@@ -45,7 +44,21 @@ function execute(params)
     -- 阶段 2: 集群发现
     -- ═══════════════════════════════════════════════
     caps.print("[exp] 阶段 2: 集群发现...")
-    local peers = caps.network.list_model_peers(model_id)
+    local peers
+    if model_id then
+        peers = caps.network.list_model_peers(model_id)
+    else
+        -- fallback: 无 model_id，取所有已连接节点
+        local all = caps.network.get_all_peers()
+        peers = {}
+        for _, p in ipairs(all) do
+            table.insert(peers, {
+                name = p.name,
+                peer_id = p.peer_id,
+                file_name = model_path,
+            })
+        end
+    end
 
     -- 过滤本机
     local my_id = caps.network.get_local_peer_id()
