@@ -22,9 +22,23 @@ impl Core {
                 );
                 match Parse_Network_Command(&req.payload) {
                     Ok(NetworkProtocol::ExecRemote { command, params_json }) => {
-                        // 反序列化参数
+                        // 反序列化参数：先用 Value 解析，数字/布尔等转为字符串
                         let params: std::collections::HashMap<String, String> =
-                            serde_json::from_str(&params_json).unwrap_or_default();
+                            serde_json::from_str::<serde_json::Value>(&params_json)
+                                .map(|v| {
+                                    let mut map = std::collections::HashMap::new();
+                                    if let serde_json::Value::Object(obj) = v {
+                                        for (k, val) in obj {
+                                            let s = match val {
+                                                serde_json::Value::String(s) => s,
+                                                other => other.to_string(),
+                                            };
+                                            map.insert(k, s);
+                                        }
+                                    }
+                                    map
+                                })
+                                .unwrap_or_default();
 
                         // 查找脚本
                         match self.program_registry.get_user(&command) {

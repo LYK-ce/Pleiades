@@ -43,6 +43,17 @@ pub fn register_local_stream_caps(
 pub fn register_caps(lua: &Lua) -> mlua::Result<()> {
     let caps = lua.create_table()?;
 
+    // ─── monotonic_time: 高精度挂钟时间 (秒) ────────────
+    caps.set(
+        "monotonic_time",
+        lua.create_function(|_, (): ()| {
+            use std::sync::OnceLock;
+            static START: OnceLock<std::time::Instant> = OnceLock::new();
+            let start = START.get_or_init(|| std::time::Instant::now());
+            Ok::<_, mlua::Error>(start.elapsed().as_secs_f64())
+        })?,
+    )?;
+
     // ─── echo: 同步函数，直接返回参数 ───────────────────
     caps.set(
         "echo",
@@ -671,15 +682,22 @@ pub fn register_network_caps(
     // ─── send_tensor ─────────────────────────────────────
     network.set("send_tensor", lua.create_async_function(move |_, (stream, tensor, offset): (mlua::AnyUserData, mlua::AnyUserData, u64)| {
         async move {
+            let t0 = std::time::Instant::now();
             let t = tensor.borrow::<LuaTensor>()
                 .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
             let bytes = tensor_to_bytes(&t)
                 .map_err(|e| mlua::Error::runtime(e))?;
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
+            let serialized_ms = t0.elapsed().as_secs_f64() * 1000.0;
             let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
             Send_Tensor_Frame(&mut *guard, offset, &bytes).await
                 .map_err(|e| mlua::Error::runtime(format!("send_tensor: {e}")))?;
+            let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            tracing::debug!(
+                "[perf] send_tensor (Lua): offset={} bytes={} serialize={:.3}ms total={:.3}ms",
+                offset, bytes.len(), serialized_ms, total_ms,
+            );
             Ok(())
         }
     })?)?;
@@ -687,12 +705,14 @@ pub fn register_network_caps(
     // ─── recv_tensor ─────────────────────────────────────
     network.set("recv_tensor", lua.create_async_function(move |_, (stream, device): (mlua::AnyUserData, String)| {
         async move {
+            let t0 = std::time::Instant::now();
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
             let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
             let mut buffer = Tensor_Buffer::New(256 * 1024);  // 256KB, auto-grows for prefill
             let offset = Receive_Tensor_Frame(&mut *guard, &mut buffer).await
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
+            let recv_ms = t0.elapsed().as_secs_f64() * 1000.0;
             drop(guard);
             drop(stream_ud);
             if offset == crate::network::tensor_stream::protocol::TENSOR_EOF_OFFSET {
@@ -700,6 +720,12 @@ pub fn register_network_caps(
             }
             let tensor = bytes_to_tensor_str(buffer.As_Slice(), &device)
                 .map_err(|e| mlua::Error::runtime(e))?;
+            let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let deser_ms = total_ms - recv_ms;
+            tracing::debug!(
+                "[perf] recv_tensor (Lua): offset={} bytes={} recv={:.3}ms deser={:.3}ms total={:.3}ms",
+                offset, buffer.Len(), recv_ms, deser_ms, total_ms,
+            );
             Ok((LuaTensor(tensor), offset))
         }
     })?)?;

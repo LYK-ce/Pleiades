@@ -124,6 +124,8 @@ pub async fn Send_Tensor_Frame(
     offset: u64,
     data: &[u8],
 ) -> io::Result<()> {
+    let t0 = std::time::Instant::now();
+
     // 1. 写入 header: [8B offset LE][8B length LE] (合并为单次 write 避免 yamux 帧碎片)
     let mut header = [0u8; 16];
     header[..8].copy_from_slice(&offset.to_le_bytes());
@@ -135,6 +137,14 @@ pub async fn Send_Tensor_Frame(
 
     // 3. flush 确保数据发出
     stream.flush().await?;
+
+    let elapsed = t0.elapsed();
+    tracing::debug!(
+        "[perf] Send_Tensor_Frame: offset={} len={} total={:.3}ms",
+        offset,
+        data.len(),
+        elapsed.as_secs_f64() * 1000.0,
+    );
 
     Ok(())
 }
@@ -155,6 +165,8 @@ pub async fn Receive_Tensor_Frame(
     stream: &mut libp2p::Stream,
     buffer: &mut Tensor_Buffer,
 ) -> io::Result<u64> {
+    let t0 = std::time::Instant::now();
+
     // 1. 读取 16 字节 header: [8B offset][8B length]
     let mut header = [0u8; 16];
     stream.read_exact(&mut header).await?;
@@ -184,6 +196,14 @@ pub async fn Receive_Tensor_Frame(
     let slice = buffer.As_Mut_Slice(len);
     stream.read_exact(slice).await?;
 
+    let elapsed = t0.elapsed();
+    tracing::debug!(
+        "[perf] Receive_Tensor_Frame: offset={} len={} total={:.3}ms",
+        offset,
+        len,
+        elapsed.as_secs_f64() * 1000.0,
+    );
+
     Ok(offset)
 }
 
@@ -195,10 +215,19 @@ pub async fn Receive_Tensor_Frame(
 /// # Arguments
 /// * `stream` - 已打开的双向流
 pub async fn Send_EOF(stream: &mut libp2p::Stream) -> io::Result<()> {
+    let t0 = std::time::Instant::now();
+
     // 写入 EOF: offset=u64::MAX, length=0
     stream.write_all(&TENSOR_EOF_OFFSET.to_le_bytes()).await?;
     stream.write_all(&0u64.to_le_bytes()).await?;
     stream.flush().await?;
+
+    let elapsed = t0.elapsed();
+    tracing::debug!(
+        "[perf] Send_EOF: total={:.3}ms",
+        elapsed.as_secs_f64() * 1000.0,
+    );
+
     Ok(())
 }
 
