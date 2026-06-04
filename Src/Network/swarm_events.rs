@@ -43,21 +43,18 @@ impl Network_Service {
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
                 // 向新节点发送本机信息（name + models + sessions）
-                let local_name =
-                    if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
-                        let payload = super::build_local_info_payload(&local).into_bytes();
-                        let request = Network_Data { data_type: DataType::Info, payload };
-                        self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                        local.name
-                    } else {
-                        String::new()
-                    };
+                if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
+                    let payload = super::build_local_info_payload(&local).into_bytes();
+                    let request = Network_Data { data_type: DataType::Info, payload };
+                    self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                } else {
+                    warn!("无法获取本地 PeerInfo，跳过 Info 交换");
+                }
 
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
                         "type": "peer_connected",
                         "peer_id": peer_id.to_string(),
-                        "peer_name": local_name,
                     }).to_string(),
                 });
             }
@@ -99,7 +96,12 @@ impl Network_Service {
                         self.swarm
                             .behaviour_mut()
                             .kademlia
-                            .add_address(&peer_id, addr);
+                            .add_address(&peer_id, addr.clone());
+                        // 主动 dial 以建立 TCP 连接，触发 ConnectionEstablished
+                        // → PeerManager 注册 → Info 交换 (name + models)
+                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                            debug!("mDNS dial {} 失败 (可能已连接): {:?}", peer_id, e);
+                        }
                         self.event_bus.Publish(Bus_Event::State {
                             payload: serde_json::json!({
                                 "type": "peer_discovered",

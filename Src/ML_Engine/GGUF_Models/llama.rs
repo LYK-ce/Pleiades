@@ -8,7 +8,7 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
-use candle_core::quantized::{gguf_file, QTensor};
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::kv_cache::ConcatKvCache;
 use candle_nn::{Embedding, Module};
@@ -159,7 +159,7 @@ impl Llama_Layer {
         let residual = &x;
         let x = self.ln2.forward(&x)?;
         let x = self.mlp.forward(&x)?;
-        (x + residual)
+        x + residual
     }
 
     pub fn Clear_Kv_Cache(&mut self) { self.self_attn.Clear_Kv_Cache(); }
