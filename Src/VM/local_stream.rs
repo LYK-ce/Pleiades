@@ -103,7 +103,7 @@ pub fn register_local_stream_caps(
                     .stream
                     .lock()
                     .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {}", e)))?;
-                let mut buf = Tensor_Buffer::New(16 * 1024 * 1024);
+                let mut buf = Tensor_Buffer::New(256 * 1024);  // 256KB, auto-grows for prefill
                 let offset = frames::local_recv_frame(&mut *guard, &mut buf)
                     .await
                     .map_err(|e| {

@@ -124,17 +124,16 @@ pub async fn Send_Tensor_Frame(
     offset: u64,
     data: &[u8],
 ) -> io::Result<()> {
-    // 1. 写入 offset (8 bytes, u64 LE)
-    stream.write_all(&offset.to_le_bytes()).await?;
+    // 1. 写入 header: [8B offset LE][8B length LE] (合并为单次 write 避免 yamux 帧碎片)
+    let mut header = [0u8; 16];
+    header[..8].copy_from_slice(&offset.to_le_bytes());
+    header[8..].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    stream.write_all(&header).await?;
 
-    // 2. 写入 data length (8 bytes, u64 LE)
-    let length = data.len() as u64;
-    stream.write_all(&length.to_le_bytes()).await?;
-
-    // 3. 写入 data
+    // 2. 写入 data
     stream.write_all(data).await?;
 
-    // 4. flush 确保数据发出
+    // 3. flush 确保数据发出
     stream.flush().await?;
 
     Ok(())

@@ -690,7 +690,7 @@ pub fn register_network_caps(
             let stream_ud = stream.borrow::<NetworkStream>()
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
             let mut guard = stream_ud.stream.lock().unwrap_or_else(|e| e.into_inner());
-            let mut buffer = Tensor_Buffer::New(16 * 1024 * 1024);
+            let mut buffer = Tensor_Buffer::New(256 * 1024);  // 256KB, auto-grows for prefill
             let offset = Receive_Tensor_Frame(&mut *guard, &mut buffer).await
                 .map_err(|e| mlua::Error::runtime(format!("recv_tensor: {e}")))?;
             drop(guard);

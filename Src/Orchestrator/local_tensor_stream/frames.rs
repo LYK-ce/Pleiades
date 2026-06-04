@@ -18,8 +18,10 @@ pub async fn local_send_frame<S: AsyncWriteExt + Unpin>(
     offset: u64,
     data: &[u8],
 ) -> io::Result<()> {
-    stream.write_all(&offset.to_le_bytes()).await?;
-    stream.write_all(&(data.len() as u64).to_le_bytes()).await?;
+    let mut header = [0u8; 16];
+    header[..8].copy_from_slice(&offset.to_le_bytes());
+    header[8..].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    stream.write_all(&header).await?;
     stream.write_all(data).await?;
     stream.flush().await?;
     Ok(())
