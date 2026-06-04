@@ -177,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
 
     // 13. 创建 Core
+    let caps_for_flush = capabilities.clone();
     let core = Core::new(
         capabilities.clone(),
         user_cmd_rx,
@@ -193,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let storage = capabilities.storage.clone();
         let peer_manager = peer_manager_arc.clone();
         let event_bus_5_5 = event_bus.clone();
+        let caps = caps_for_flush.clone();
         tokio::spawn(async move {
             if let Ok((added, _removed)) = storage.flush().await {
                 info!("启动后台 flush 完成: 新增 {} 个文件", added);
@@ -223,6 +225,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                 }
+                // 广播本地节点信息到所有已连接 peer
+                pleiades::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
             }
         });
     }

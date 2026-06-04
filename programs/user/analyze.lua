@@ -23,6 +23,7 @@ function execute(params)
     -- 打印所有字段
     local fields = {
         {"architecture",     "架构"},
+        {"model_id",         "模型 ID"},
         {"num_layers",       "总层数 (transformer blocks)"},
         {"embedding_length", "隐藏维度"},
         {"head_count",       "注意力头数"},
