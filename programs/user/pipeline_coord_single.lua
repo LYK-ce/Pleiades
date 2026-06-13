@@ -1,11 +1,11 @@
 -- Presented by KeJi
--- Date: 2026-06-02
--- 动态流水线 — 单卡 Coordinator (Session 模式)
--- 与 pipeline.lua 唯一区别: rexec 下发 pipe_worker_single
+-- Date: 2026-06-13
+-- 动态流水线 — 单卡 Coordinator (Session 模式, 自动分配层)
 -- 用法: session inference pipeline_coord_single <session_id> <model_path>
+-- Coordinator 不加载层，只做桥接。所有层分配给远程 worker（单卡）。
 
 COMMAND = "pipeline_coord_single"
-DESCRIPTION = "动态流水线协调者(单卡): 发现→构建→桥接→推理"
+DESCRIPTION = "动态流水线单卡协调者: 发现集群→动态分层→分发worker→桥接Session→推理"
 
 function execute(params)
     local session_id = params.session_id
@@ -32,49 +32,49 @@ function execute(params)
     local total_layers = info.num_layers + 2
 
     if not model_id then
-        caps.print("│ ✗ 错误: 模型文件缺少 model_id")
-        caps.print("└──────────────────────────────────────────────┘")
+        caps.print("│ ✗ 模型文件缺少 model_id")
+        caps.print("└──")
         handle:release()
         return
     end
-
     caps.print(string.format("│ 模型: %s  id=%d  总层: %d", model_path, model_id, total_layers))
-    caps.print("└──────────────────────────────────────────────┘")
+    caps.print("└──")
     caps.print("")
 
     -- 阶段 2: 集群发现
     caps.print("┌─ 阶段 2/4: 集群发现 ─────────────────────────┐")
-    local peers = caps.network.list_model_peers(model_id)
-    if #peers == 0 then
-        caps.print(string.format("│ ✗ 未找到 model_id=%d 的节点", model_id))
-        caps.print("└──────────────────────────────────────────────┘")
+    local all_peers = caps.network.list_model_peers(model_id)
+    local my_id = caps.network.get_local_peer_id()
+
+    local remote_peers = {}
+    for _, p in ipairs(all_peers) do
+        if p.peer_id ~= my_id then table.insert(remote_peers, p) end
+    end
+
+    if #remote_peers == 0 then
+        caps.print("│ ✗ 没有远程节点持有该模型")
+        caps.print("└──")
         handle:release()
         return
     end
-    caps.print(string.format("│ ✓ 发现 %d 个节点:", #peers))
-    for i, p in ipairs(peers) do
-        caps.print(string.format("│   [%d] %-20s  层 [%d,%d]  %s",
-            i, p.name, p.layer_start, p.layer_end, p.file_name))
+
+    caps.print(string.format("│ 发现 %d 个远程节点:", #remote_peers))
+    for i, p in ipairs(remote_peers) do
+        caps.print(string.format("│   [%d] %s  %s", i, p.name, p.file_name))
     end
-    caps.print("└──────────────────────────────────────────────┘")
+    caps.print("└──")
     caps.print("")
 
-    -- 阶段 3: 构建链条（动态分配层范围）
-    caps.print("┌─ 阶段 3/4: 构建推理链条 ─────────────────────┐")
+    -- 阶段 3: 动态分配层
+    caps.print("┌─ 阶段 3/4: 分配层范围 ───────────────────────┐")
+    table.sort(remote_peers, function(a, b) return a.peer_id < b.peer_id end)
 
-    local my_id = caps.network.get_local_peer_id()
-
-    -- 按 peer_id 排序保证确定性
-    table.sort(peers, function(a, b) return a.peer_id < b.peer_id end)
-
-    -- 均匀分配 pipeline 层范围
-    local N = #peers
-    local pipeline_slots = total_layers
-    local layers_per_node = math.floor(pipeline_slots / N)
-    local remainder = pipeline_slots % N
+    local N = #remote_peers
+    local layers_per_node = math.floor(total_layers / N)
+    local remainder = total_layers % N
     local current_start = 0
 
-    for i, p in ipairs(peers) do
+    for i, p in ipairs(remote_peers) do
         local count = layers_per_node
         if i <= remainder then count = count + 1 end
         p.layer_start = current_start
@@ -82,69 +82,45 @@ function execute(params)
         current_start = current_start + count
     end
 
-    caps.print(string.format("│ 链条: %d 节点 (单卡模式, 自动分配)", N))
-    for i, p in ipairs(peers) do
-        local role = ""
-        if p.peer_id == my_id then role = " (本机)" end
-        caps.print(string.format("│   [%d] %s  → 层 [%d,%d]%s", i, p.name, p.layer_start, p.layer_end, role))
+    caps.print(string.format("│ Coordinator (本机) ← 桥接，不加载层"))
+    caps.print(string.format("│ %d 远程节点 (单卡):", N))
+    for i, p in ipairs(remote_peers) do
+        caps.print(string.format("│   [%d] %s  层 [%d - %d]", i, p.name, p.layer_start, p.layer_end))
     end
-    caps.print("└──────────────────────────────────────────────┘")
+    caps.print("└──")
     caps.print("")
 
     -- 阶段 4: 分发 + 推理
     caps.print("┌─ 阶段 4/4: 分发 + 推理 ──────────────────────┐")
-    local N = #peers
-    local my_id = caps.network.get_local_peer_id()
 
-    caps.print("│ 分发 pipe_worker_single ...")
-    for i, p in ipairs(peers) do
-        -- 跳过本机
-        if p.peer_id == my_id then
-            caps.print(string.format("│   [%d/%d] %s  跳过 (本机)", i, N, p.name))
-            goto continue
-        end
+    -- 分发 worker
+    for i, p in ipairs(remote_peers) do
+        local upstream = (i > 1) and remote_peers[i - 1].peer_id or nil
+        local downstream = (i < N) and remote_peers[i + 1].peer_id or nil
 
-        local upstream = (i > 1) and peers[i - 1].peer_id or nil
-        local downstream = (i < N) and peers[i + 1].peer_id or nil
         local fields = {}
         fields[#fields+1] = string.format('"model":"%s"', p.file_name)
         fields[#fields+1] = string.format('"layer_start":"%d"', p.layer_start)
         fields[#fields+1] = string.format('"layer_end":"%d"', p.layer_end)
-        if upstream and upstream ~= "" then
-            fields[#fields+1] = string.format('"upstream":"%s"', upstream)
-        end
-        if downstream and downstream ~= "" then
-            fields[#fields+1] = string.format('"downstream":"%s"', downstream)
-        end
+        if upstream then fields[#fields+1] = string.format('"upstream":"%s"', upstream) end
+        if downstream then fields[#fields+1] = string.format('"downstream":"%s"', downstream) end
         fields[#fields+1] = string.format('"coordinator":"%s"', my_id)
         fields[#fields+1] = string.format('"session_id":"%s"', session_id)
         local payload = "EXEC|pipe_worker_single|{" .. table.concat(fields, ",") .. "}"
+
         caps.print(string.format("│   [%d/%d] → %s", i, N, p.name))
-        local ok, resp = pcall(function()
-            return caps.network.send_data(p.peer_id, "Command", payload)
-        end)
+        local ok, resp = pcall(caps.network.send_data, p.peer_id, "Command", payload)
         if ok then
             caps.print(string.format("│         响应: %s", resp.payload or "nil"))
         else
             caps.print(string.format("│         失败: %s", tostring(resp)))
         end
-        ::continue::
-    end
-
-    -- 找第一个 / 最后一个远程节点
-    local fwd_peer, bwd_peer = nil, nil
-    for i = 1, N do if peers[i].peer_id ~= my_id then fwd_peer = peers[i]; break end end
-    for i = N, 1, -1 do if peers[i].peer_id ~= my_id then bwd_peer = peers[i]; break end end
-    if not fwd_peer or not bwd_peer then
-        caps.print("│ ✗ 所有节点均为本机")
-        handle:release()
-        return
     end
 
     caps.print("│")
-    local fwd = caps.network.open_tensor_stream(fwd_peer.peer_id, sid_num)
+    local fwd = caps.network.open_tensor_stream(remote_peers[1].peer_id, sid_num)
     local bwd = caps.network.accept_tensor_stream(sid_num, 300)
-    caps.print(string.format("│ fwd: → %s  ✓  bwd: ← %s  ✓", fwd_peer.name, bwd_peer.name))
+    caps.print(string.format("│ fwd: → %s  ✓  bwd: ← %s  ✓", remote_peers[1].name, remote_peers[N].name))
 
     local stream_id = "ml-" .. session_id
     local session_stream = local_tensor.open_stream(stream_id)
@@ -152,7 +128,7 @@ function execute(params)
     caps.print("│ ╔══════════════════════════════════╗")
     caps.print("│ ║  ✓ 流水线就绪，开始推理          ║")
     caps.print("│ ╚══════════════════════════════════╝")
-    caps.print("└──────────────────────────────────────────────┘")
+    caps.print("└──")
     caps.print("")
 
     -- 桥接循环
@@ -173,6 +149,7 @@ function execute(params)
         end
     end
 
+    caps.network.send_eof(fwd)
     handle:release()
     caps.print("[coord_single] 演示结束")
 end
