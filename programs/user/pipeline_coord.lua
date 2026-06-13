@@ -73,59 +73,40 @@ function execute(params)
     caps.print("")
 
     -- ═══════════════════════════════════════════════
-    -- 阶段 3: 构建推理链条
+    -- 阶段 3: 构建推理链条（动态分配层范围）
     -- ═══════════════════════════════════════════════
     caps.print("┌─ 阶段 3/4: 构建推理链条 ─────────────────────┐")
 
-    -- 按 layer_start 排序
-    table.sort(peers, function(a, b) return a.layer_start < b.layer_start end)
-
-    -- 验证链: 无间隙、首尾覆盖完整
-    local valid = true
-    for i = 1, #peers - 1 do
-        if peers[i].layer_end + 1 ~= peers[i + 1].layer_start then
-            caps.print(string.format("│ ✗ 层范围不连续: [%d,%d] → [%d,%d]",
-                peers[i].layer_start, peers[i].layer_end,
-                peers[i + 1].layer_start, peers[i + 1].layer_end))
-            valid = false
-        end
-    end
-    if peers[1].layer_start ~= 0 then
-        caps.print(string.format("│ ✗ 链条未从 layer 0 开始 (start=%d)", peers[1].layer_start))
-        valid = false
-    end
-    if peers[#peers].layer_end ~= total_layers - 1 then
-        caps.print(string.format("│ ✗ 链条未覆盖到 layer %d (end=%d)", total_layers - 1, peers[#peers].layer_end))
-        valid = false
-    end
-
-    if not valid then
-        caps.print("│ 请检查模型分片是否完整覆盖了所有层")
-        caps.print("└──────────────────────────────────────────────┘")
-        handle:release()
-        return
-    end
-
-    caps.print("│ ✓ 链条验证通过 — 层覆盖完整无间隙")
-    caps.print("│")
-    caps.print(string.format("│ 流水线拓扑 (%d 节点, 每节点 2×GPU):", #peers))
-    caps.print("│")
     local my_id = caps.network.get_local_peer_id()
+
+    -- 按 peer_id 排序保证确定性
+    table.sort(peers, function(a, b) return a.peer_id < b.peer_id end)
+
+    -- 均匀分配 pipeline 层范围 (0=embedding, 1..N=blocks, N+1=output)
+    local N = #peers
+    local pipeline_slots = total_layers  -- = num_layers + 2
+    local layers_per_node = math.floor(pipeline_slots / N)
+    local remainder = pipeline_slots % N
+    local current_start = 0
+
+    for i, p in ipairs(peers) do
+        local count = layers_per_node
+        if i <= remainder then count = count + 1 end
+        p.layer_start = current_start
+        p.layer_end = current_start + count - 1
+        current_start = current_start + count
+    end
+
+    caps.print(string.format("│ 流水线拓扑 (%d 节点, 每节点 2×GPU, 自动分配):", N))
+    caps.print("│")
     for i, p in ipairs(peers) do
         local role = ""
         if p.peer_id == my_id then role = " ← 本机(协调者)" end
-        if i == 1 then
-            caps.print(string.format("│   ┌─ [%d] %s", i, p.name))
-            caps.print(string.format("│   │   层 %d→%d  GPU:0→CPU→GPU:1%s", p.layer_start, p.layer_end, role))
-        elseif i == #peers then
-            caps.print(string.format("│   └─ [%d] %s", i, p.name))
-            caps.print(string.format("│       层 %d→%d  GPU:0→CPU→GPU:1%s", p.layer_start, p.layer_end, role))
-        else
-            caps.print(string.format("│   ├─ [%d] %s", i, p.name))
-            caps.print(string.format("│   │   层 %d→%d  GPU:0→CPU→GPU:1%s", p.layer_start, p.layer_end, role))
-        end
+        caps.print(string.format("│   [%d] %-20s  层 [%2d - %2d]%s",
+            i, p.name, p.layer_start, p.layer_end, role))
     end
-    caps.print(string.format("│   Session ←→ 节点[1] ←→ ... ←→ 节点[%d] ←→ Session", #peers))
+    caps.print("│")
+    caps.print(string.format("│   Session ←→ 节点[1] ←→ ... ←→ 节点[%d] ←→ Session", N))
     caps.print("└──────────────────────────────────────────────┘")
     caps.print("")
 

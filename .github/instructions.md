@@ -148,3 +148,174 @@ Agent 在首次启动时必须执行以下初始化步骤：
    - **禁止**直接 `git checkout <branch>` 而不先 fetch 远程引用，这会使用本地过时版本。
 
 > **注意**：`.ssh` 目录应当以 **rw** 模式挂载。只读挂载会导致无法修正私钥权限和无法写入 `known_hosts`，从而阻碍 SSH 正常工作。
+
+---
+
+# 分布式推理测试验证流程
+
+## 测试环境
+
+- 测试目录：`/vepfs-mlp2/c20250205/240804016/Test_Environment/`
+- 节点 1/2/3 对应子目录 `1/`、`2/`、`3/`
+- 每节点含：`Pleiades` binary、`.config/`、`Pleiades_Workspace/`、`programs/`、`Log/`
+- 模型：`Qwen3-30B-A3B-Q4_K_M.pgguf`（18.5GB），三个节点均有副本
+- 共 4 张物理 GPU（编号 0-3）
+- chat 客户端：`Test_Environment/1/Tool/chat.py`
+
+## 步骤 0：编译 & 同步
+
+```bash
+cd /root/code/Pleiades
+cargo build --release
+
+cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/1/
+cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/2/
+cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/3/
+
+cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/1/programs/
+cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/2/programs/
+cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/3/programs/
+```
+
+---
+
+## 测试 1：双卡模式（2 节点）
+
+### GPU 分配
+
+| 节点 | 物理 GPU | CUDA_VISIBLE_DEVICES |
+|------|---------|---------------------|
+| A (目录1) | 0, 1 | `0,1` |
+| B (目录2) | 2, 3 | `0,1` |
+
+### 启动
+
+| 终端 | 命令 |
+|------|------|
+| T1 | `cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1 && CUDA_VISIBLE_DEVICES=0,1 ./Pleiades` |
+| T2 | `cd /vepfs-mlp2/c20250205/240804016/Test_Environment/2 && CUDA_VISIBLE_DEVICES=0,1 ./Pleiades` |
+
+### T1 操作序列
+
+```
+session create Qwen3-30B-A3B-Q4_K_M.pgguf
+  → session_id = 1
+
+session inference pipeline 1 Qwen3-30B-A3B-Q4_K_M.pgguf
+  → 等待 "流水线就绪"
+
+api 1
+  → API 启动在 http://127.0.0.1:{port}
+```
+
+### 多轮对话 (chat.py)
+
+```bash
+cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Tool/
+python chat.py --url http://127.0.0.1:{port} -s "你是一个乐于助人的助手"
+```
+
+```
+> 你好，接下来你的每一句话要以meow~结尾
+  ← 应回复: ...meow~
+
+> 今天天气真好，我们去散步吧
+  ← 上下文记忆: 仍以 meow~ 结尾
+
+> 请背诵一下静夜思
+  ← 长文本 + meow~
+
+> /clear
+  ← 历史清空
+
+> 你最喜欢的动物是什么？
+  ← /clear 后不再带 meow~（验证上下文已清除）
+
+> /exit
+```
+
+### 退出
+
+```
+T1> quit
+T2> quit
+```
+
+---
+
+## 测试 2：单卡模式（3 节点）
+
+### GPU 分配
+
+| 节点 | 物理 GPU | CUDA_VISIBLE_DEVICES |
+|------|---------|---------------------|
+| A (目录1) | 0 | `0` |
+| B (目录2) | 1 | `0` |
+| C (目录3) | 2 | `0` |
+
+### 启动
+
+| 终端 | 命令 |
+|------|------|
+| T1 | `cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1 && CUDA_VISIBLE_DEVICES=0 ./Pleiades` |
+| T2 | `cd /vepfs-mlp2/c20250205/240804016/Test_Environment/2 && CUDA_VISIBLE_DEVICES=0 ./Pleiades` |
+| T3 | `cd /vepfs-mlp2/c20250205/240804016/Test_Environment/3 && CUDA_VISIBLE_DEVICES=0 ./Pleiades` |
+
+### T1 操作序列
+
+```
+session create Qwen3-30B-A3B-Q4_K_M.pgguf
+  → session_id = 1
+
+session inference pipeline_coord_single 1 Qwen3-30B-A3B-Q4_K_M.pgguf
+  → 等待模型加载完成
+
+api 1
+  → API 启动
+```
+
+### 多轮对话
+
+```bash
+cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Tool/
+python chat.py --url http://127.0.0.1:{port} -s "你是一个乐于助人的助手"
+```
+
+```
+> 你好，接下来你的每一句话要以meow~结尾
+  ← 应回复: ...meow~
+
+> 用一句话总结一下量子力学
+  ← 上下文记忆: 仍以 meow~ 结尾
+
+> /clear
+  ← 历史清空
+
+> 你最喜欢什么颜色？
+  ← /clear 后不再带 meow~（验证上下文已清除）
+
+> /exit
+```
+
+### 退出
+
+```
+T1> quit
+T2> quit
+T3> quit
+```
+
+---
+
+## 验证要点
+
+| 验证项 | 测试 1 双卡 | 测试 2 单卡 |
+|--------|:---:|:---:|
+| 节点 mDNS 自动发现 | ✓ | ✓ |
+| 模型加载成功 | ✓ | ✓ |
+| 流水线桥接建立 | ✓ | ✓ |
+| 首 token 正常生成 | ✓ | ✓ |
+| 流式输出逐 token 显示 | ✓ | ✓ |
+| 多轮上下文记忆（meow~） | ✓ | ✓ |
+| /clear 后上下文正确清除 | ✓ | ✓ |
+| quit 正常退出 | ✓ | ✓ |

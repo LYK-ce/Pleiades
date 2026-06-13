@@ -43,6 +43,8 @@ seed = 299792458
 workspace_dir = "Pleiades_Workspace"
 # 存储配额（单位：GB），0 表示不限制
 quota_gb = 0
+# KV Cache offload 缓存目录
+kvcache_dir = ".kvcache"
 
 
 [Scheduler]

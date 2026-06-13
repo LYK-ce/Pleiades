@@ -18,11 +18,10 @@
 //!   keypair.bin
 //! Pleiades_Workspace/       ← 工作目录（可配置，默认 Pleiades_Workspace）
 //!   Log/                    ← 日志文件
-//!     pleiades.log.YYYY-MM-DD
+//!     pleiades.log.2026-06-09-14-30-05
 //!   (files...)              ← Storage 管理的文件
 //! ```
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use libp2p::PeerId;
@@ -38,16 +37,6 @@ use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
 use pleiades::tui::TUI_Loop;
-use pleiades::tui::parse_user_command;
-
-/// 配置目录路径（固定）
-const CONFIG_DIR: &str = ".config";
-
-/// 默认工作目录名
-const DEFAULT_WORKSPACE: &str = "Pleiades_Workspace";
-
-/// 工作目录下的日志子目录
-const LOG_SUBDIR: &str = "Log";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,39 +48,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (config, _config_path) = Ensure_Config()?;
 
     // 2. 确保节点身份密钥对（持久化到 .config/keypair.bin）
-    let keypair = Ensure_Identity(Path::new(CONFIG_DIR))?;
+    let keypair = Ensure_Identity(
+        std::path::Path::new(pleiades::config::CONFIG_DIR)
+    )?;
 
     // 3. 确定工作目录
-    let workspace_dir: PathBuf = config.Storage.as_ref()
-        .and_then(|s| s.workspace_dir.as_deref())
-        .unwrap_or(DEFAULT_WORKSPACE)
-        .into();
-
+    let workspace_dir = config.workspace_dir();
     std::fs::create_dir_all(&workspace_dir)?;
 
-    // 创建 KV Cache offload 缓存目录
-    std::fs::create_dir_all(".kvcache")?;
+    // 4. 创建 KV Cache offload 缓存目录
+    std::fs::create_dir_all(pleiades::config::kvcache_dir())?;
 
     // ══════════════════════════════════════════════════════
     // Phase 2: 初始化 tracing 日志
     // ══════════════════════════════════════════════════════
 
-    let log_dir: PathBuf = config.Log.as_ref()
-        .and_then(|l| l.log_file_path.as_deref())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_dir.join(LOG_SUBDIR));
-
+    let log_dir = config.log_dir(&workspace_dir);
     std::fs::create_dir_all(&log_dir)?;
 
-    let log_level = config.Log.as_ref()
-        .and_then(|l| l.level.as_deref())
-        .unwrap_or("info");
+    let log_level = config.log_level();
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "pleiades.log");
-    let (non_blocking, _log_guard) = tracing_appender::non_blocking(file_appender);
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+    let log_path = log_dir.join(format!("pleiades.log.{timestamp}"));
+    let log_file = std::fs::File::create(&log_path)?;
+    let (non_blocking, _log_guard) = tracing_appender::non_blocking(log_file);
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -102,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Pleiades 启动中...");
     info!("工作目录: {}", workspace_dir.display());
     info!("日志目录: {}", log_dir.display());
+    info!("日志文件: {}", log_path.display());
 
     // ══════════════════════════════════════════════════════
     // 检测运行模式: ./Pleiades cli 启动 CLI 模式
@@ -173,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_stream_hub: Arc::new(pleiades::orchestrator::local_tensor_stream::LocalStreamHub::new()),
     });
 
-    // 12. 用户命令通道 (TUI → Core)
+    // 12. 用户命令通道 (用户输入 → Core)
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
 
     // 13. 创建 Core
@@ -243,98 +227,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     if cli_mode {
-        // ────────────────────────────────────────────────
-        // CLI 模式: EventBus → stdout + stdin REPL + Core
-        // ────────────────────────────────────────────────
-
-        // ① EventBus 订阅者 → stdout
-        {
-            let mut notify_rx = event_bus.Subscribe();
-            tokio::spawn(async move {
-                use pleiades::event_bus::Bus_Event;
-                loop {
-                    match notify_rx.recv().await {
-                        Ok(Bus_Event::Notify { level, message }) => {
-                            use pleiades::event_bus::NotifyLevel;
-                            match level {
-                                NotifyLevel::Info  => println!("{message}"),
-                                NotifyLevel::Warn  => eprintln!("[WARN] {message}"),
-                                NotifyLevel::Error => eprintln!("[ERROR] {message}"),
-                            }
-                        }
-                        Ok(Bus_Event::Output { payload }) => {
-                            println!("{payload}");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[CLI] 丢失 {} 条事件", n);
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        }
-
-        // ② stdin → UserCommand 读取线程
-        let cmd_tx = user_cmd_tx.clone();
-        std::thread::spawn(move || {
-            use std::io::{self, BufRead, Write};
-            let stdin = io::stdin();
-            let mut stdout = io::stdout();
-            println!("Pleiades CLI. 输入 'quit' 退出, 'help' 查看命令.");
-            loop {
-                print!("> ");
-                let _ = stdout.flush();
-                let mut line = String::new();
-                match stdin.lock().read_line(&mut line) {
-                    Ok(0) => {
-                        // EOF
-                        let (reply_tx, _) = tokio::sync::oneshot::channel();
-                        let _ = cmd_tx.blocking_send(UserCommand::Quit { reply: reply_tx });
-                        break;
-                    }
-                    Err(_) => break,
-                    Ok(_) => {}
-                }
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
-                }
-                // quit/exit 需构造 oneshot（parse_user_command 不处理）
-                if line == "quit" || line == "exit" {
-                    let (reply_tx, _) = tokio::sync::oneshot::channel();
-                    let _ = cmd_tx.blocking_send(UserCommand::Quit { reply: reply_tx });
-                    break;
-                }
-                match parse_user_command(&line) {
-                    Ok(Some(cmd)) => {
-                        if cmd_tx.blocking_send(cmd).is_err() {
-                            eprintln!("[CLI] Orchestrator 已关闭");
-                            break;
-                        }
-                    }
-                    Ok(None) => {} // 空 / clear
-                    Err(msg) => eprintln!("{msg}"),
-                }
-            }
-        });
-
-        // ③ Core 主循环
+        // CLI 模式
+        pleiades::cli::spawn_stdout_subscriber(&event_bus);
+        pleiades::cli::spawn_stdin_repl(user_cmd_tx.clone());
         info!("进入 Orchestrator 主循环 (CLI 模式)");
         core.run().await;
-
     } else {
-        // ────────────────────────────────────────────────
-        // TUI 模式（原封不动）
-        // ────────────────────────────────────────────────
-
-        // 16. 启动 TUI
+        // TUI 模式
         let event_rx = event_bus.Subscribe();
         tokio::task::spawn_blocking(move || {
             TUI_Loop(event_rx, user_cmd_tx);
         });
 
-        // 17. Core 主循环
         info!("进入 Orchestrator 主循环");
         core.run().await;
     }

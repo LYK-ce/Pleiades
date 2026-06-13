@@ -45,6 +45,9 @@ pub mod event_bus;
 #[path = "TUI/mod.rs"]
 pub mod tui;
 
+#[path = "CLI/mod.rs"]
+pub mod cli;
+
 #[path = "VM/mod.rs"]
 pub mod vm;
 

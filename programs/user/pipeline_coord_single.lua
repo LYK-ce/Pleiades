@@ -59,25 +59,34 @@ function execute(params)
     caps.print("└──────────────────────────────────────────────┘")
     caps.print("")
 
-    -- 阶段 3: 构建链条
+    -- 阶段 3: 构建链条（动态分配层范围）
     caps.print("┌─ 阶段 3/4: 构建推理链条 ─────────────────────┐")
-    table.sort(peers, function(a, b) return a.layer_start < b.layer_start end)
 
-    local valid = true
-    for i = 1, #peers - 1 do
-        if peers[i].layer_end + 1 ~= peers[i + 1].layer_start then valid = false end
-    end
-    if peers[1].layer_start ~= 0 or peers[#peers].layer_end ~= total_layers - 1 then valid = false end
+    local my_id = caps.network.get_local_peer_id()
 
-    if not valid then
-        caps.print("│ ✗ 链条验证失败")
-        caps.print("└──────────────────────────────────────────────┘")
-        handle:release()
-        return
-    end
-    caps.print(string.format("│ ✓ 链条: %d 节点 (单卡模式)", #peers))
+    -- 按 peer_id 排序保证确定性
+    table.sort(peers, function(a, b) return a.peer_id < b.peer_id end)
+
+    -- 均匀分配 pipeline 层范围
+    local N = #peers
+    local pipeline_slots = total_layers
+    local layers_per_node = math.floor(pipeline_slots / N)
+    local remainder = pipeline_slots % N
+    local current_start = 0
+
     for i, p in ipairs(peers) do
-        caps.print(string.format("│   [%d] %s  → 层 [%d,%d]", i, p.name, p.layer_start, p.layer_end))
+        local count = layers_per_node
+        if i <= remainder then count = count + 1 end
+        p.layer_start = current_start
+        p.layer_end = current_start + count - 1
+        current_start = current_start + count
+    end
+
+    caps.print(string.format("│ 链条: %d 节点 (单卡模式, 自动分配)", N))
+    for i, p in ipairs(peers) do
+        local role = ""
+        if p.peer_id == my_id then role = " (本机)" end
+        caps.print(string.format("│   [%d] %s  → 层 [%d,%d]%s", i, p.name, p.layer_start, p.layer_end, role))
     end
     caps.print("└──────────────────────────────────────────────┘")
     caps.print("")

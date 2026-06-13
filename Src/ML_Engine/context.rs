@@ -627,7 +627,7 @@ impl MlSession {
         };
 
         // 2. 确定文件路径
-        let file_path = Path::new(".kvcache").join(file_id);
+        let file_path = crate::config::kvcache_dir().join(file_id);
 
         // 3. 序列化并写入
         Self::serialize_kv_to_file(
@@ -658,7 +658,7 @@ impl MlSession {
 
     /// 从 .kvcache/ 恢复 session
     pub fn offload_load(file_id: &str, device_str: &str) -> Result<MlSession, String> {
-        let file_path = Path::new(".kvcache").join(file_id);
+        let file_path = crate::config::kvcache_dir().join(file_id);
 
         // 1. 反序列化
         let (kvs, model_path, start, end, _device, rng_state, offset, eos_token_id, chat_template) =

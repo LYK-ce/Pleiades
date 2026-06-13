@@ -6,16 +6,36 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use toml_edit::DocumentMut;
 
 /// 编译时嵌入的默认配置文件内容
 const DEFAULT_CONFIG: &str = include_str!("config.toml");
 
 /// 默认配置目录名
-const CONFIG_DIR: &str = ".config";
+pub const CONFIG_DIR: &str = ".config";
 
 /// 默认配置文件名
 const CONFIG_FILE: &str = "config.toml";
+
+/// KV Cache offload 缓存目录（懒加载，只读一次 config.toml）
+static KVCACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 获取 kvcache 目录（首次调用读配置，之后返回缓存）
+pub fn kvcache_dir() -> &'static PathBuf {
+    KVCACHE_DIR.get_or_init(|| {
+        let config_path = Path::new(CONFIG_DIR).join(CONFIG_FILE);
+        match Read_Config(&config_path) {
+            Ok(config) => {
+                config.Storage.as_ref()
+                    .and_then(|s| s.kvcache_dir.as_deref())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(".kvcache"))
+            }
+            Err(_) => PathBuf::from(".kvcache"),
+        }
+    })
+}
 
 /// config.toml 根配置结构体
 #[derive(Debug, Deserialize)]
@@ -65,6 +85,8 @@ pub struct Storage_Config {
     pub workspace_dir: Option<String>,
     /// 存储配额（单位：GB），0 表示不限制
     pub quota_gb: Option<u64>,
+    /// KV Cache offload 缓存目录，默认 ".kvcache"
+    pub kvcache_dir: Option<String>,
 }
 
 /// [Session] 段配置
@@ -91,6 +113,35 @@ pub fn Get_Peer_Name(config: &Pleiades_Config) -> String {
 /// 持久化节点名称到 config.toml
 pub fn Set_Peer_Name(config_path: &Path, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     Update_Config(config_path, "Identity", "peer_name", name)
+}
+
+// ============================================================
+// Pleiades_Config 便捷方法
+// ============================================================
+
+impl Pleiades_Config {
+    /// 获取工作目录，默认 "Pleiades_Workspace"
+    pub fn workspace_dir(&self) -> PathBuf {
+        self.Storage.as_ref()
+            .and_then(|s| s.workspace_dir.as_deref())
+            .unwrap_or("Pleiades_Workspace")
+            .into()
+    }
+
+    /// 获取日志目录，默认 <workspace_dir>/Log
+    pub fn log_dir(&self, workspace_dir: &Path) -> PathBuf {
+        self.Log.as_ref()
+            .and_then(|l| l.log_file_path.as_deref())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace_dir.join("Log"))
+    }
+
+    /// 获取日志级别，默认 "info"
+    pub fn log_level(&self) -> &str {
+        self.Log.as_ref()
+            .and_then(|l| l.level.as_deref())
+            .unwrap_or("info")
+    }
 }
 
 /// 读取并解析 config.toml 配置文件
