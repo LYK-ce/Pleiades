@@ -11,6 +11,10 @@ use tokio::sync::RwLock;
 
 use super::capability::{StorageCapability, StorageError, ChecksumAlgorithm, FileEntry};
 use super::guard::{ReadGuard, WriteGuard};
+use crate::event_bus::{EventBus, Bus_Event};
+use crate::peer_management::{
+    Peer_Management_Capability, SupportedModel,
+};
 use crate::ml_engine::capability::analyze_model;
 
 /// 文件状态，内部用于管理锁和模型元信息
@@ -33,18 +37,21 @@ struct FileState {
 ///
 /// 职责：锁管理 + 路径解析 + 文件注册表 + 模型统一管理。
 /// 不封装 I/O，消费模块自行决定如何读写文件。
-#[derive(Debug)]
 pub struct StorageManager {
     base_dir: PathBuf,
     files: RwLock<HashMap<String, FileState>>,
+    peer_manager: Arc<dyn Peer_Management_Capability>,
+    event_bus: Arc<EventBus>,
 }
 
 impl StorageManager {
-    /// 新建存储管理器，扫描指定目录下的现有文件并建立索引。
-    /// 如果目录不存在，会创建它。
-    pub async fn New(base_dir: impl Into<PathBuf>) -> Result<Self, StorageError> {
+    /// 新建存储管理器
+    pub async fn New(
+        base_dir: impl Into<PathBuf>,
+        peer_manager: Arc<dyn Peer_Management_Capability>,
+        event_bus: Arc<EventBus>,
+    ) -> Result<Self, StorageError> {
         let base_dir = base_dir.into();
-        // 幂等创建目录
         fs::create_dir_all(&base_dir).await.map_err(|e| {
             StorageError::Io(format!("create_dir_all failed: {}", e))
         })?;
@@ -58,11 +65,9 @@ impl StorageManager {
         })? {
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
-            // 忽略隐藏文件（以 . 开头）
             if file_name_str.starts_with('.') {
                 continue;
             }
-            // 忽略子目录（只处理普通文件）
             let metadata = entry.metadata().await.map_err(|e| {
                 StorageError::Io(format!("metadata failed: {}", e))
             })?;
@@ -84,6 +89,8 @@ impl StorageManager {
         Ok(Self {
             base_dir,
             files: RwLock::new(files),
+            peer_manager,
+            event_bus,
         })
     }
 
@@ -188,6 +195,43 @@ impl StorageManager {
             num_layers: state.num_layers,
             layer_bitmap: state.layer_bitmap,
             architecture: state.architecture.clone(),
+        }
+    }
+
+    /// flush + 同步模型信息到 PeerManager + 通知 TUI + 广播给远程 peer
+    pub async fn flush_and_sync(&self) -> Result<(usize, usize), String> {
+        let (discovered, cleaned) = <Self as StorageCapability>::flush(self).await
+            .map_err(|e| format!("flush: {e}"))?;
+        self.sync_models_to_peer_manager().await;
+        Ok((discovered, cleaned))
+    }
+
+    /// 同步本地模型信息到 PeerManager + 通知 TUI
+    async fn sync_models_to_peer_manager(&self) {
+        if let Ok(entries) = <Self as StorageCapability>::list(self).await {
+            let models: Vec<_> = entries.iter().filter_map(|e| {
+                Some(SupportedModel {
+                    id: e.model_id?,
+                    file_name: e.file_name.clone(),
+                    layer_bitmap: e.layer_bitmap?,
+                })
+            }).collect();
+            if let Ok(local) = self.peer_manager.Get_Local_Peer().await {
+                let _ = self.peer_manager.Update_Supported_Models(&local.peer_id, models.clone()).await;
+                let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                    serde_json::json!({"file_name": m.file_name, "layer_range": m.layer_range()})
+                }).collect();
+                self.event_bus.Publish(Bus_Event::State {
+                    payload: serde_json::json!({
+                        "type": "peer_info_updated",
+                        "peer_id": local.peer_id.to_string(),
+                        "peer_name": local.name,
+                        "is_local": true,
+                        "models": models_display,
+                        "sessions": serde_json::json!([]),
+                    }).to_string(),
+                });
+            }
         }
     }
 }
@@ -494,6 +538,9 @@ impl StorageCapability for StorageManager {
             }
         }
 
+        // 同步模型信息到 PeerManager + 通知 TUI
+        self.sync_models_to_peer_manager().await;
+
         Ok((discovered, cleaned))
     }
 }
@@ -503,12 +550,24 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use tokio::time::{timeout, Duration};
+    use crate::event_bus::EventBus;
+    use crate::peer_management::{PeerManager, PeerHandle, Peer_Management_Capability};
+    use libp2p::PeerId;
+
+    /// 测试辅助：创建带 stub peer_manager 的 StorageManager
+    async fn new_for_test(base_dir: &Path) -> StorageManager {
+        let peer_mgr: Arc<dyn Peer_Management_Capability> = Arc::new(PeerHandle::new(
+            Arc::new(PeerManager::default())
+        ));
+        let eb = Arc::new(EventBus::New(1));
+        StorageManager::New(base_dir, peer_mgr, eb).await.unwrap()
+    }
 
     // --- 生命周期 ---
     #[tokio::test]
     async fn test_acquire_read_returns_valid_path_and_guard() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         // 先创建文件（通过 acquire_write 注册索引，然后手动写文件）
         let (path, _wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
@@ -525,7 +584,7 @@ mod tests {
     #[tokio::test]
     async fn test_acquire_write_returns_valid_path_and_guard() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         assert_eq!(wg.file_id(), "test.txt");
         assert!(path.ends_with("test.txt"));
@@ -539,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn test_acquire_write_creates_index_entry() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("new.txt").await.unwrap();
         // 索引中应存在（即使磁盘文件还没创建）
         tokio::fs::write(&path, b"").await.unwrap();
@@ -550,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_deletes_file_and_index() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
         drop(wg);
@@ -562,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_idempotent_on_missing() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         manager.remove("ghost.txt").await.unwrap();
     }
 
@@ -570,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_read_guards_concurrent() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
         drop(wg);
@@ -583,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_guard_blocks_read() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
         // 写锁存在时，acquire_read 应阻塞
@@ -597,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_guard_blocks_second_write() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (_path, wg1) = manager.acquire_write("test.txt").await.unwrap();
         let result = timeout(Duration::from_millis(100), manager.acquire_write("test.txt")).await;
         assert!(result.is_err());
@@ -609,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_returns_inuse_when_read_guard_alive() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
         drop(wg);
@@ -621,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_returns_inuse_when_write_guard_alive() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (_path, _wg) = manager.acquire_write("test.txt").await.unwrap();
         let err = manager.remove("test.txt").await.unwrap_err();
         assert!(matches!(err, StorageError::InUse(_)));
@@ -631,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_discover_on_acquire_read() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         // 外部创建文件
         let file_path = temp_dir.path().join("external.bin");
         tokio::fs::write(&file_path, b"data").await.unwrap();
@@ -646,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_discover_not_found() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let err = manager.acquire_read("nonexistent.txt").await.unwrap_err();
         assert!(matches!(err, StorageError::NotFound(_)));
     }
@@ -655,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn test_checksum_xxhash64() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.bin").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
@@ -666,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn test_checksum_sha256() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.bin").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
@@ -677,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn test_checksum_blake3() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.bin").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
@@ -689,7 +748,7 @@ mod tests {
     #[tokio::test]
     async fn test_reject_path_traversal() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let err = manager.acquire_read("invalid/path.txt").await.unwrap_err();
         assert!(matches!(err, StorageError::Io(_)));
     }
@@ -697,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn test_reject_hidden_file() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let err = manager.acquire_read(".hidden").await.unwrap_err();
         assert!(matches!(err, StorageError::Io(_)));
     }
@@ -705,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn test_reject_empty_file_id() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let err = manager.acquire_read("").await.unwrap_err();
         assert!(matches!(err, StorageError::NotFound(_)));
     }
@@ -714,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_externally_injected_file() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         tokio::fs::write(temp_dir.path().join("injected.bin"), b"data").await.unwrap();
         let list = manager.list().await.unwrap();
         assert!(!list.iter().any(|e| e.file_name == "injected.bin"));
@@ -725,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn test_exists_cleans_zombie_entry() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("zombie.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
         drop(wg);
@@ -740,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn test_checksum_realtime_no_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.bin").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
@@ -757,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_returns_file_entries() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
         let (path, wg) = manager.acquire_write("test.txt").await.unwrap();
         tokio::fs::write(&path, b"hello").await.unwrap();
         drop(wg);
@@ -773,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_discovers_externally_added_files() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         // 初始应无文件
         let list = manager.list().await.unwrap();
@@ -797,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_refreshes_file_size() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         // 通过 manager 写入文件
         let (path, wg) = manager.acquire_write("data.bin").await.unwrap();
@@ -821,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_cleans_zombie_entries() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         let (path, wg) = manager.acquire_write("victim.txt").await.unwrap();
         tokio::fs::write(&path, b"data").await.unwrap();
@@ -843,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_idempotent() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         tokio::fs::write(temp_dir.path().join("stable.bin"), vec![0u8; 500]).await.unwrap();
 
@@ -862,7 +921,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_ignores_hidden_files_and_directories() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         tokio::fs::write(temp_dir.path().join(".hidden"), b"secret").await.unwrap();
         tokio::fs::create_dir(temp_dir.path().join("subdir")).await.unwrap();
@@ -880,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_mixed_discover_and_clean() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = StorageManager::New(temp_dir.path()).await.unwrap();
+        let manager = new_for_test(temp_dir.path()).await;
 
         let (p1, wg1) = manager.acquire_write("keep.bin").await.unwrap();
         tokio::fs::write(&p1, b"keep").await.unwrap();

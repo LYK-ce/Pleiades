@@ -30,6 +30,7 @@ use super::event::{Bus_Event, NotifyLevel};
 /// ## 线程安全
 /// `broadcast::Sender` 本身是 `Send + Sync`，因此 `EventBus`
 /// 可以安全地用 `Arc` 包装在多线程环境中共享。
+#[derive(Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<Bus_Event>,
 }

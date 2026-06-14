@@ -264,25 +264,7 @@ impl Core {
                 tokio::spawn(async move {
                     let text = match caps.storage.flush().await {
                         Ok((added, removed)) => {
-                            // flush 成功后同步 supported_models 到 PeerManager
-                            if let Ok(entries) = caps.storage.list().await {
-                                let models: Vec<_> = entries
-                                    .iter()
-                                    .filter_map(|e| {
-                                        let id = e.model_id?;
-                                        let bitmap = e.layer_bitmap?;
-                                        Some(crate::peer_management::SupportedModel {
-                                            id,
-                                            file_name: e.file_name.clone(),
-                                            layer_bitmap: bitmap,
-                                        })
-                                    })
-                                    .collect();
-                                if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
-                                    let _ = caps.peer_manager.Update_Supported_Models(&local.peer_id, models).await;
-                                }
-                            }
-                            // 广播本地节点信息（Info → peers + EventBus → TUI）
+                            // flush 成功后广播本地节点信息
                             crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
                             format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
                         }

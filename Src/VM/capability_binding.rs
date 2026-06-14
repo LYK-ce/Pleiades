@@ -840,8 +840,13 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
         let storage: Arc<dyn StorageCapability> = Arc::new(
-            rt.block_on(crate::storage::StorageManager::New(temp_dir.path()))
-                .expect("StorageManager::New")
+            rt.block_on(crate::storage::StorageManager::New(
+                temp_dir.path(),
+                Arc::new(crate::peer_management::PeerHandle::new(
+                    Arc::new(crate::peer_management::PeerManager::default())
+                )),
+                Arc::new(crate::event_bus::EventBus::New(1)),
+            )).expect("StorageManager::New")
         );
 
         // 2. 在 tempdir 中创建文件 "hello.txt"
