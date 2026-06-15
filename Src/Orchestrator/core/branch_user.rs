@@ -29,7 +29,7 @@ struct HelpEntry {
 // Output 构造辅助
 // ============================================================
 
-fn cmd_output(text: impl Into<String>, completed: bool) -> String {
+pub(super) fn cmd_output(text: impl Into<String>, completed: bool) -> String {
     serde_json::json!({"type":"cmd_result","text":text.into(),"completed":completed}).to_string()
 }
 
@@ -262,17 +262,8 @@ impl Core {
             UserCommand::Flush => {
                 let caps = self.capabilities.clone();
                 tokio::spawn(async move {
-                    let text = match caps.storage.flush().await {
-                        Ok((added, removed)) => {
-                            // flush 成功后广播本地节点信息
-                            crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
-                            format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
-                        }
-                        Err(e) => format!("flush 失败: {}", e),
-                    };
-                    caps.event_bus.Publish(Bus_Event::Output {
-                        payload: cmd_output(text, true),
-                    });
+                    let text = Core::do_flush(&caps).await;
+                    caps.event_bus.Publish(Bus_Event::Output { payload: cmd_output(text, true) });
                 });
             }
 

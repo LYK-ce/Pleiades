@@ -122,22 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let core = Core::new(capabilities.clone(), user_cmd_rx, inbound_rx, net_event_rx);
     info!("Orchestrator Core 初始化完成");
 
-    // ══════════════════════════════════════════════════════
-    // Phase 5.5: 后台 flush + 同步 (Storage 内部完成)
-    // ══════════════════════════════════════════════════════
-    {
-        let storage = capabilities.storage.clone();
-        let caps = capabilities.clone();
-        tokio::spawn(async move {
-            if let Ok((added, _removed)) = storage.flush().await {
-                info!("启动后台 flush 完成: 新增 {} 个文件", added);
-                // 广播本地节点信息到所有已连接 peer
-                pleiades::network::broadcast_local_info(
-                    &*caps.peer_manager, &*caps.network, &caps.event_bus
-                ).await;
-            }
-        });
-    }
+    // 启动时后台 flush
+    Core::spawn_initial_flush(capabilities.clone());
 
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时

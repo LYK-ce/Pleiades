@@ -183,6 +183,36 @@ impl Core {
             handle.cancel.cancel();
         }
     }
+
+    // ─── Flush 管理 ────────────────────────────────────────
+
+    /// 执行 flush + 广播本地节点信息，返回结果文本
+    pub async fn do_flush(caps: &Capabilities) -> String {
+        match caps.storage.flush().await {
+            Ok((added, removed)) => {
+                crate::network::broadcast_local_info(
+                    &*caps.peer_manager, &*caps.network, &caps.event_bus
+                ).await;
+                format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
+            }
+            Err(e) => format!("flush 失败: {}", e),
+        }
+    }
+
+    /// 启动时后台触发初始 flush（fire-and-forget）
+    pub fn spawn_initial_flush(caps: Arc<Capabilities>) {
+        tokio::spawn(async move {
+            let text = Self::do_flush(&caps).await;
+            tracing::info!("初始 {}", text);
+            caps.event_bus.Publish(crate::event_bus::Bus_Event::Output {
+                payload: cmd_output(text, true),
+            });
+        });
+    }
+}
+
+fn cmd_output(text: impl Into<String>, completed: bool) -> String {
+    serde_json::json!({"type":"cmd_result","text":text.into(),"completed":completed}).to_string()
 }
 
 /// 生成唯一 ID
