@@ -31,7 +31,7 @@ pub struct Capabilities {
     /// 文件存储
     pub storage: Arc<dyn StorageCapability>,
     /// 节点管理
-    pub peer_manager: Box<dyn Peer_Management_Capability>,
+    pub peer_manager: Arc<dyn Peer_Management_Capability>,
     /// 事件总线
     pub event_bus: Arc<EventBus>,
     /// 本地张量流配对 Hub

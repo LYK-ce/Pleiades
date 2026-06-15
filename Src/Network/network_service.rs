@@ -127,7 +127,7 @@ pub struct Network_Service {
     /// 本地节点ID
     pub(crate) local_peer_id: PeerId,
     /// peer manager capability 持有的节点管理能力 trait object，我们通过它来管理节点信息表
-    pub(crate) peer_handle: Box<dyn Peer_Management_Capability>,
+    pub(crate) peer_handle: Arc<dyn Peer_Management_Capability>,
     /// 命令接收器（接收外部命令）
     pub(crate) cmd_rx: mpsc::Receiver<NodeCommand>,
     /// 配置
@@ -180,7 +180,7 @@ impl Network_Service {
     pub async fn Init(
         config: NetworkConfig,
         keypair: Keypair,
-        peer_handle: Box<dyn Peer_Management_Capability>,
+        peer_handle: Arc<dyn Peer_Management_Capability>,
         event_bus: Arc<EventBus>,
     ) -> Result<(
         Self,

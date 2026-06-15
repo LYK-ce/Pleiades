@@ -67,8 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = pleiades::config::Get_Peer_Name(&config);
-    let (peer_manager_arc, peer_capability_for_network) = create_peer_management(local_peer_id, peer_name);
-    let peer_capability_for_core: Box<dyn pleiades::peer_management::Peer_Management_Capability> = Box::new(peer_manager_arc.clone());
+    let peer_manager_arc = create_peer_management(local_peer_id, peer_name);
+    let peer_capability_for_network: Arc<dyn pleiades::peer_management::Peer_Management_Capability> = peer_manager_arc.clone();
+    let peer_capability_for_core = peer_manager_arc.clone();
 
     // Storage 持有 peer_manager + event_bus，flush 时自动同步
     let storage_peer_handle: Arc<dyn pleiades::peer_management::Peer_Management_Capability> =

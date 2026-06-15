@@ -170,40 +170,6 @@ impl Peer_Management_Capability for PeerManager {
     }
 }
 
-#[async_trait]
-impl Peer_Management_Capability for Arc<PeerManager> {
-    async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> {
-        self.as_ref().Get_All_Peers().await
-    }
-    async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error> {
-        self.as_ref().Get_Local_Peer().await
-    }
-    async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error> {
-        self.as_ref().Get_Peer_By_Name(name).await
-    }
-    async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<bool, Peer_Management_Error> {
-        self.as_ref().Upsert_Peer(peer_info).await
-    }
-    async fn Set_Local_Name(&self, name: &str) -> Result<(), Peer_Management_Error> {
-        self.as_ref().Set_Local_Name(name).await
-    }
-    async fn Remove_Peer(&self, peer_id: &PeerId) -> Result<PeerInfo, Peer_Management_Error> {
-        self.as_ref().Remove_Peer(peer_id).await
-    }
-    async fn Update_Profile(&self, peer_id: &PeerId, profile: PeerProfile) -> Result<(), Peer_Management_Error> {
-        self.as_ref().Update_Profile(peer_id, profile).await
-    }
-    async fn Update_Supported_Models(&self, peer_id: &PeerId, models: Vec<SupportedModel>) -> Result<(), Peer_Management_Error> {
-        self.as_ref().Update_Supported_Models(peer_id, models).await
-    }
-    async fn Update_Sessions(&self, peer_id: &PeerId, sessions: Vec<crate::peer_management::SessionSummary>) -> Result<(), Peer_Management_Error> {
-        self.as_ref().Update_Sessions(peer_id, sessions).await
-    }
-    async fn Clear(&self) -> Result<(), Peer_Management_Error> {
-        self.as_ref().Clear().await
-    }
-}
-
 impl Default for PeerManager {
     fn default() -> Self {
         Self::new(PeerId::random(), String::new())

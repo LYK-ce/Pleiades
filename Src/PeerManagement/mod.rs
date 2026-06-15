@@ -28,8 +28,6 @@ pub use capability::{Peer_Management_Capability, Peer_Management_Error};
 /// 返回 Arc<PeerManager>（可直接作为 trait object 使用）和
 /// Box<dyn Peer_Management_Capability>（供常规消费）。
 /// 本地节点自动创建并注册。
-pub fn create_peer_management(local_peer_id: PeerId, name: String) -> (std::sync::Arc<PeerManager>, Box<dyn Peer_Management_Capability>) {
-    let manager = std::sync::Arc::new(PeerManager::new(local_peer_id, name));
-    let cap: Box<dyn Peer_Management_Capability> = Box::new(std::sync::Arc::clone(&manager));
-    (manager, cap)
+pub fn create_peer_management(local_peer_id: PeerId, name: String) -> std::sync::Arc<PeerManager> {
+    std::sync::Arc::new(PeerManager::new(local_peer_id, name))
 }
