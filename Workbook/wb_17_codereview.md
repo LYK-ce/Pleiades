@@ -20,8 +20,9 @@
 ### 17.3 Config ✅
 - 删除: dead_code allow、Runtime_Config/Session_Config 结构体、quota_gb 字段、[Scheduler] 段、config.toml 文件
 - 修改: include_str! → 硬编码 DEFAULT_CONFIG、mod.rs Level 0、头注释格式
-- trait: Pleiades_Config 6段→4段 (Log/Network/Storage/Identity)
-- 测试: 双卡2节点通过
+- Config: Pleiades_Config 6段→4段 (Log/Network/Storage/Identity)
+- 新增: docs/design_doc/config_design.md
+- 测试: 环境4首次初始化 ✅、双卡2节点 ✅、三节点单卡 ✅
 
 ### 文件变更
 - Src/Config/config.rs: 去 dead_code、硬编码默认配置、删死结构体、头注释
