@@ -551,14 +551,12 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::{timeout, Duration};
     use crate::event_bus::EventBus;
-    use crate::peer_management::{PeerManager, PeerHandle, Peer_Management_Capability};
+    use crate::peer_management::{PeerManager, Peer_Management_Capability};
     use libp2p::PeerId;
 
     /// 测试辅助：创建带 stub peer_manager 的 StorageManager
     async fn new_for_test(base_dir: &Path) -> StorageManager {
-        let peer_mgr: Arc<dyn Peer_Management_Capability> = Arc::new(PeerHandle::new(
-            Arc::new(PeerManager::default())
-        ));
+        let peer_mgr: Arc<dyn Peer_Management_Capability> = Arc::new(PeerManager::default());
         let eb = Arc::new(EventBus::New(1));
         StorageManager::New(base_dir, peer_mgr, eb).await.unwrap()
     }

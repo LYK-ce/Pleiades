@@ -8,7 +8,7 @@
 //! 以及相关的错误类型 `Peer_Management_Error`。
 //!
 //! Orchestrator 和 Network 层通过此 trait 操作节点信息。
-//! 实现方为 PeerHandle（持有 Arc<PeerManager>）。
+//! 实现方为 Arc<PeerManager>。
 
 use async_trait::async_trait;
 use libp2p::PeerId;
@@ -26,7 +26,7 @@ pub enum Peer_Management_Error {
 /// 节点管理能力 trait
 ///
 /// Orchestrator 和 Network 层通过此 trait 操作节点信息。
-/// 实现方为 PeerHandle（持有 Arc<PeerManager>）。
+/// 实现方为 Arc<PeerManager>。
 #[async_trait]
 pub trait Peer_Management_Capability: Send + Sync {
     // ─── 查询操作 ──────────────────────────────

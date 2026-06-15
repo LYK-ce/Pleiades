@@ -14,13 +14,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use crate::event_bus::EventBus;
-    use crate::peer_management::{PeerManager, PeerHandle, Peer_Management_Capability};
+    use crate::peer_management::{PeerManager, Peer_Management_Capability};
     use std::sync::Arc;
 
     fn test_storage(base_dir: &std::path::Path) -> StorageManager {
-        let pm: Arc<dyn Peer_Management_Capability> = Arc::new(PeerHandle::new(
-            Arc::new(PeerManager::default())
-        ));
+        let pm: Arc<dyn Peer_Management_Capability> = Arc::new(PeerManager::default());
         let eb = Arc::new(EventBus::New(1));
         StorageManager::New(base_dir, pm, eb).await.unwrap()
     }

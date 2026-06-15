@@ -249,6 +249,27 @@ get_all_peers()  → 无过滤                  // 含本地
 
 ---
 
+### 13. PeerHandle 中间层应移除，PeerManager 直接 impl trait
+
+**位置**: `peer_handle.rs` 全部 + `capability.rs`
+
+当前架构与其他模块不一致：
+
+```
+EventBus:  EventBus 直接暴露方法（无 trait，无 handle）
+Storage:   StorageManager 直接 impl trait（无 handle）
+PeerManagement: PeerManager → PeerHandle → trait（多一层）
+```
+
+`PeerHandle` 的存在理由是将 `PeerManager` 的 `Option`/`bool` 返回值转换为 `Result`。应改为 `PeerManager` 内部直接返回 `Result`，删除整个 `peer_handle.rs`，与其他模块统一。
+
+**修复**: 
+1. `PeerManager` 方法返回 `Result` 而非 `Option`/`bool`
+2. 删除 `PeerHandle`
+3. `PeerManager` 直接 `impl Peer_Management_Capability`
+
+---
+
 ## 不予修改
 
 | 事项 | 理由 |

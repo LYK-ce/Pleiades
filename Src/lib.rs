@@ -90,7 +90,7 @@ pub use ml_engine::{analyze_model, split_model};
 
 // PeerManagement模块类型导出
 pub use peer_management::{
-    PeerInfo, SupportedModel, PeerProfile, PeerManager, PeerHandle, create_peer_management,
+    PeerInfo, SupportedModel, PeerProfile, PeerManager, create_peer_management,
 };
 pub use peer_management::{Peer_Management_Capability, Peer_Management_Error};
 

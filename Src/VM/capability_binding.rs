@@ -842,9 +842,7 @@ mod tests {
         let storage: Arc<dyn StorageCapability> = Arc::new(
             rt.block_on(crate::storage::StorageManager::New(
                 temp_dir.path(),
-                Arc::new(crate::peer_management::PeerHandle::new(
-                    Arc::new(crate::peer_management::PeerManager::default())
-                )),
+                Arc::new(crate::peer_management::PeerManager::default()),
                 Arc::new(crate::event_bus::EventBus::New(1)),
             )).expect("StorageManager::New")
         );
