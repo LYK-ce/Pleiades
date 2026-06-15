@@ -72,46 +72,6 @@ pub(crate) mod test_utils {
         async fn test_bandwidth(&self, _peer: libp2p::PeerId) -> Result<u64, Network_Error> { Ok(0) }
     }
 
-    // ─── PeerManager stub ──────────────────────────────────
-
-    pub struct StubPeerManager {
-        inner: crate::peer_management::PeerManager,
-    }
-
-    impl StubPeerManager {
-        pub fn new() -> Self {
-            Self { inner: crate::peer_management::PeerManager::new(libp2p::PeerId::random(), String::new()) }
-        }
-
-        /// 注入 mock 节点数据（可选 peer_id，若为 None 则随机生成）
-        pub async fn inject_peer(&self, peer_id: Option<libp2p::PeerId>, models: Vec<crate::peer_management::SupportedModel>) {
-            let id = peer_id.unwrap_or_else(libp2p::PeerId::random);
-            let mut info = crate::peer_management::PeerInfo::new(id, vec![]);
-            info.update_supported_models(models);
-            self.inner.upsert_peer(info).await;
-        }
-    }
-
-    #[async_trait]
-    impl Peer_Management_Capability for StubPeerManager {
-        async fn Get_All_Peers(&self) -> Result<Vec<PeerInfo>, Peer_Management_Error> { Ok(self.inner.get_all_peers().await) }
-        async fn Get_Local_Peer(&self) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_local_peer().await.ok_or_else(|| Peer_Management_Error::PeerNotFound("stub".to_string())) }
-        async fn Get_Peer_By_Name(&self, name: &str) -> Result<PeerInfo, Peer_Management_Error> { self.inner.get_peer_by_name(name).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(name.to_string())) }
-        async fn Upsert_Peer(&self, peer_info: PeerInfo) -> Result<bool, Peer_Management_Error> { Ok(self.inner.upsert_peer(peer_info).await) }
-        async fn Set_Local_Name(&self, name: &str) -> Result<(), Peer_Management_Error> { self.inner.set_local_name(name).await }
-        async fn Remove_Peer(&self, peer_id: &libp2p::PeerId) -> Result<PeerInfo, Peer_Management_Error> { self.inner.remove_peer(peer_id).await.ok_or_else(|| Peer_Management_Error::PeerNotFound(peer_id.to_string())) }
-        async fn Update_Profile(&self, peer_id: &libp2p::PeerId, profile: crate::peer_management::PeerProfile) -> Result<(), Peer_Management_Error> {
-            self.inner.update_profile(peer_id, profile).await
-        }
-        async fn Update_Supported_Models(&self, peer_id: &libp2p::PeerId, models: Vec<crate::peer_management::SupportedModel>) -> Result<(), Peer_Management_Error> {
-            self.inner.update_supported_models(peer_id, models).await
-        }
-        async fn Update_Sessions(&self, peer_id: &libp2p::PeerId, sessions: Vec<crate::peer_management::SessionSummary>) -> Result<(), Peer_Management_Error> {
-            self.inner.update_sessions(peer_id, sessions).await
-        }
-        async fn Clear(&self) -> Result<(), Peer_Management_Error> { self.inner.clear().await; Ok(()) }
-    }
-
     // ─── Storage stub ──────────────────────────────────────
 
     pub struct StubStorage;
