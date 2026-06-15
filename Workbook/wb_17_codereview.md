@@ -1,5 +1,20 @@
 # wb_17_codereview
 
+## 概述
+
+Task 17 对 Pleiades 全系统进行模块级 Code Review，目标：消除死代码、统一规范、精简接口。按模块层级自底向上推进：
+
+```
+Level 0: EventBus ✅ → PeerManagement ✅ → Config ✅
+Level 1: Storage → ...
+Level 2: Network → VM → ...
+Level 3: Orchestrator → TUI/CLI
+```
+
+每模块审查后更新设计文档（`docs/design_doc/`），并双卡/三卡测试验证。
+
+---
+
 ## 第二轮: 模块级 Code Review (2026-06-15)
 
 ### 17.1 EventBus ✅
