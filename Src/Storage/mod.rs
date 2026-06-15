@@ -17,7 +17,7 @@ mod tests {
     use crate::peer_management::{PeerManager, Peer_Management_Capability};
     use std::sync::Arc;
 
-    fn test_storage(base_dir: &std::path::Path) -> StorageManager {
+    async fn test_storage(base_dir: &std::path::Path) -> StorageManager {
         let pm: Arc<dyn Peer_Management_Capability> = Arc::new(PeerManager::default());
         let eb = Arc::new(EventBus::New(1));
         StorageManager::New(base_dir, pm, eb).await.unwrap()
@@ -26,7 +26,7 @@ mod tests {
     #[tokio::test]
     async fn test_module_imports_compile() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = test_storage(temp_dir.path());
+        let manager = test_storage(temp_dir.path()).await;
         let _cap: &dyn StorageCapability = &manager;
         let _err = StorageError::NotFound("test".to_string());
         let _algo = ChecksumAlgorithm::default();
@@ -38,7 +38,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_to_end_write_read_remove() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = test_storage(temp_dir.path());
+        let manager = test_storage(temp_dir.path()).await;
 
         let (write_path, write_guard) = manager.acquire_write("data.bin").await.unwrap();
         tokio::fs::write(&write_path, b"hello world").await.unwrap();
