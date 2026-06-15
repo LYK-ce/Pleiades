@@ -264,9 +264,12 @@ PeerManagement: PeerManager → PeerHandle → trait（多一层）
 `PeerHandle` 的存在理由是将 `PeerManager` 的 `Option`/`bool` 返回值转换为 `Result`。应改为 `PeerManager` 内部直接返回 `Result`，删除整个 `peer_handle.rs`，与其他模块统一。
 
 **修复**: 
-1. `PeerManager` 方法返回 `Result` 而非 `Option`/`bool`
-2. 删除 `PeerHandle`
+1. `PeerManager` 方法直接返回 `Result`
+2. 删除 `PeerHandle` + `StubPeerManager`
 3. `PeerManager` 直接 `impl Peer_Management_Capability`
+4. Network/Capabilities `Box<dyn>` → `Arc<dyn>`（PeerHandle 曾持有内部 Arc，删除后 Box 不再需要）
+
+> ✅ **已完成**（2026-06-15）。仅保留 `for PeerManager`（删 `for Arc<PeerManager>`），`Arc<dyn Capability>` 自动 deref 到 `&PeerManager`。
 
 ---
 

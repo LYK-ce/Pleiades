@@ -32,6 +32,7 @@ Level 3: Orchestrator → TUI/CLI
 - trait: 原17→现10方法 (Get_All_Peers/Get_Local_Peer/Get_Peer_By_Name/Upsert_Peer/Set_Local_Name/Remove_Peer/Update_Profile/Update_Supported_Models/Update_Sessions/Clear)
 - 📝 备忘: 5死trait方法 + bandwidth_mbps/memory_mb + is_timeout 之后需加回
 - 🔧 待修: 删除 PeerHandle，PeerManager 直接 impl trait（方案B统一架构）
+- 🔧 已完成: 删 PeerHandle、删 StubPeerManager、删 for Arc impl、Network/Capabilities Box<dyn>→Arc<dyn>、工厂简化
 
 ### 17.3 Config ✅
 - 删除: dead_code allow、Runtime_Config/Session_Config 结构体、quota_gb 字段、[Scheduler] 段、config.toml 文件
