@@ -55,7 +55,7 @@ pub mod vm;
 pub mod api;
 
 // Config模块类型导出
-pub use config::{Pleiades_Config, Log_Config, Network_Config, Runtime_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
+pub use config::{Pleiades_Config, Log_Config, Network_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 
 // Network模块类型导出
 pub use network::{NetworkConfig, Network_Service, NodeCommand, NodeHandle};

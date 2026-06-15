@@ -17,6 +17,17 @@
 - trait: 原17→现10方法 (Get_All_Peers/Get_Local_Peer/Get_Peer_By_Name/Upsert_Peer/Set_Local_Name/Remove_Peer/Update_Profile/Update_Supported_Models/Update_Sessions/Clear)
 - 📝 备忘: 5死trait方法 + bandwidth_mbps/memory_mb + is_timeout 之后需加回
 
+### 17.3 Config ✅
+- 删除: dead_code allow、Runtime_Config/Session_Config 结构体、quota_gb 字段、[Scheduler] 段、config.toml 文件
+- 修改: include_str! → 硬编码 DEFAULT_CONFIG、mod.rs Level 0、头注释格式
+- trait: Pleiades_Config 6段→4段 (Log/Network/Storage/Identity)
+- 测试: 双卡2节点通过
+
+### 文件变更
+- Src/Config/config.rs: 去 dead_code、硬编码默认配置、删死结构体、头注释
+- Src/Config/mod.rs: Level 0、去死 re-export、头注释
+- Src/Config/config.toml: 删除（内容合并到 config.rs）
+
 ### 文件变更
 - Src/PeerManagement/ (5文件): 大幅精简，trait 17→15方法，缩进/头注释统一
 - Src/Network/swarm_events.rs: Update_Peer_Name→Upsert_Peer
