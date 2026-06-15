@@ -113,6 +113,10 @@ Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
 }
 ```
 
+# 初始化
+
+Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理解项目整体架构、各模块职责、关键 API。
+
 ---
 
 # 分布式推理测试验证流程
