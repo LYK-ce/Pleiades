@@ -1,4 +1,33 @@
-# wb_17_codereview (2026-06-14)
+# wb_17_codereview
+
+## 第二轮: 模块级 Code Review (2026-06-15)
+
+### 17.1 EventBus ✅
+- 审查结论: 模块简单清晰，薄封装职责合理，无需架构改动
+- 修复: mod.rs 过期文档示例、Level 0 标注
+- 规范更新: instructions.md 头注释 Date → Created/Modified Date
+- 设计文档重写: docs/design_doc/event_bus_design.md
+
+### 17.2 PeerManagement ✅ (第二轮清理)
+- 删除: SupportedModel 4死方法、PeerProfile.layer_time/bandwidth_mbps/memory_mb、Get_Peers、Update_Peer_Name、PeerHandle.inner()
+  5死trait方法(Contains_Peer/Count/Is_Empty/Get_Peer/Cleanup_Timeout_Peers)、PeerInfo.set_name/is_timeout
+- 新增: PeerInfo::update_sessions
+- 改名: Update_Local_Sessions → Update_Sessions
+- 修改: Upsert_Peer 返 bool、upsert_peer 保留 name、PeerInfo 方法 pub(crate)
+- trait: 原17→现10方法 (Get_All_Peers/Get_Local_Peer/Get_Peer_By_Name/Upsert_Peer/Set_Local_Name/Remove_Peer/Update_Profile/Update_Supported_Models/Update_Sessions/Clear)
+- 📝 备忘: 5死trait方法 + bandwidth_mbps/memory_mb + is_timeout 之后需加回
+
+### 文件变更
+- Src/PeerManagement/ (5文件): 大幅精简，trait 17→15方法，缩进/头注释统一
+- Src/Network/swarm_events.rs: Update_Peer_Name→Upsert_Peer
+- Src/Network/command_handler.rs: Get_Peers→Get_All_Peers+filter
+- Src/Network/mod.rs: 注释更新
+- Src/Orchestrator/core/branch_user.rs: Update_Local_Sessions→Update_Sessions
+- Src/Orchestrator/mod.rs: StubPeerManager 同步
+
+---
+
+## 第一轮: 消除硬编码 (2026-06-14)
 
 ## 完成项
 - [x] 17.1-17.8 Code Review 子任务全部完成

@@ -3,7 +3,7 @@ Date: 2026-05-31
 
 # Task 13: Safetensor 支持实现
 
-> 状态：阶段 1 (Qwen3) 已完成 ✅ | 阶段 2 (DeepSeek V4 Flash) → 移至 Task 15 | 已合并 task14swaplayer
+> 状态：✅ 已完成并归档 (2026-06-15)。阶段 1 (Qwen3) 已完成，阶段 2 转入 Task 15。
 
 ---
 

@@ -12,7 +12,8 @@ agent必须严格遵守以下规则
 每一份代码文件必须在开头添加以下注释,注释规范应当严格对应当前语言：
 '''
 Presented by KeJi
-Date ： Current date
+Created Date ： YYYY-MM-DD
+Modified Date ： YYYY-MM-DD
 '''
 ## 命名规范
 1. 变量 采用lower snake case规范进行命名

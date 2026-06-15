@@ -1,8 +1,6 @@
 # Task 14: Offloading (Layer Swapping)
 
-> 状态：DeepSeek V3.2 适配中，首次推理已跑通
-> 创建日期：2026-06-01
-> 最后更新：2026-06-01 05:25 UTC
+> 状态：✅ 已完成并归档 (2026-06-15)。Offloading 核心 + DeepSeek V3.2 适配已完成。
 > 分支：task14swaplayer
 
 ## 背景

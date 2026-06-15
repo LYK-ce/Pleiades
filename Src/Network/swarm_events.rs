@@ -201,7 +201,9 @@ impl Network_Service {
                             let sessions_json = parts.get(2).copied().unwrap_or("[]");
 
                             if !name.is_empty() {
-                                let _ = self.peer_handle.Update_Peer_Name(&peer, name).await;
+                                let mut updated = crate::peer_management::PeerInfo::new(peer, vec![]);
+                                updated.name = name.to_string();
+                                let _ = self.peer_handle.Upsert_Peer(updated).await;
                             }
                             let models: Vec<crate::peer_management::SupportedModel> =
                                 serde_json::from_str(models_json).unwrap_or_default();
@@ -211,7 +213,7 @@ impl Network_Service {
                             let sessions: Vec<crate::peer_management::SessionSummary> =
                                 serde_json::from_str(sessions_json).unwrap_or_default();
                             if !sessions.is_empty() {
-                                let _ = self.peer_handle.Update_Local_Sessions(&peer, sessions.clone()).await;
+                                let _ = self.peer_handle.Update_Sessions(&peer, sessions.clone()).await;
                             }
 
                             // 通知 TUI

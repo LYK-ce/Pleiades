@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date : 2026-05-13
+//Created Date : 2026-05-13
+//Modified Date ： 2026-06-15
 
 //! 节点信息数据结构定义模块
 //!
@@ -11,8 +12,7 @@
 //! - `PeerInfo` — 节点完整信息（身份元信息 + PeerProfile + SupportedModel 列表）
 
 use libp2p::{Multiaddr, PeerId};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 节点持有的模型描述
 ///
@@ -49,52 +49,6 @@ fn deserialize_bitmap_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[u8;
 }
 
 impl SupportedModel {
-    /// 创建持有完整模型（全部层）的描述
-    pub fn full(id: u32, file_name: String) -> Self {
-        Self {
-            id,
-            file_name,
-            layer_bitmap: [0xFF; 32],
-        }
-    }
-
-    /// 创建持有模型分片的描述，仅指定层范围的位为 1
-    pub fn shard(id: u32, file_name: String, layer_start: usize, layer_end: usize) -> Self {
-        let mut bitmap = [0u8; 32];
-        for layer in layer_start..layer_end {
-            let byte_idx = layer / 8;
-            let bit_idx = layer % 8;
-            if byte_idx < 32 {
-                bitmap[byte_idx] |= 1 << bit_idx;
-            }
-        }
-        Self {
-            id,
-            file_name,
-            layer_bitmap: bitmap,
-        }
-    }
-
-    /// 检查是否持有指定层范围的全部层
-    pub fn has_layer_range(&self, start: usize, end: usize) -> bool {
-        for layer in start..end {
-            let byte_idx = layer / 8;
-            let bit_idx = layer % 8;
-            if byte_idx >= 32 || (self.layer_bitmap[byte_idx] & (1 << bit_idx)) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// 返回位图中为 1 的层数
-    pub fn layer_count(&self) -> usize {
-        self.layer_bitmap
-            .iter()
-            .map(|b| b.count_ones() as usize)
-            .sum()
-    }
-
     /// 将 layer_bitmap 解码为层范围字符串（如 "0-31" 或 "0-3,5,7-9"）
     pub fn layer_range(&self) -> String {
         let mut layers: Vec<usize> = Vec::new();
@@ -141,21 +95,12 @@ impl SupportedModel {
 pub struct PeerProfile {
     /// 最后 ping 延迟（毫秒）
     pub latency_ms: Option<u64>,
-    /// 带宽（Mbps）
-    pub bandwidth_mbps: Option<u64>,
-    /// 空闲内存（MB），随运行变化
-    pub memory_mb: Option<u64>,
-    /// 模型单层耗时（model_id → Duration）
-    pub layer_time: Option<HashMap<String, Duration>>,
 }
 
 impl Default for PeerProfile {
     fn default() -> Self {
         Self {
             latency_ms: None,
-            bandwidth_mbps: None,
-            memory_mb: None,
-            layer_time: None,
         }
     }
 }
@@ -236,37 +181,23 @@ impl PeerInfo {
         }
     }
 
-    /// 设置节点名称
-    pub fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
     /// Update Profile 更新性能画像，字段为 None 时跳过
-    pub fn update_profile(&mut self, profile: PeerProfile) {
+    pub(crate) fn update_profile(&mut self, profile: PeerProfile) {
         if let Some(v) = profile.latency_ms {
             self.profile.latency_ms = Some(v);
-        }
-        if let Some(v) = profile.bandwidth_mbps {
-            self.profile.bandwidth_mbps = Some(v);
-        }
-        if let Some(v) = profile.memory_mb {
-            self.profile.memory_mb = Some(v);
-        }
-        if let Some(v) = profile.layer_time {
-            self.profile.layer_time = Some(v);
         }
         self.last_active = Instant::now();
     }
 
     /// Update Supported Models 更新持有的模型列表
-    pub fn update_supported_models(&mut self, models: Vec<SupportedModel>) {
+    pub(crate) fn update_supported_models(&mut self, models: Vec<SupportedModel>) {
         self.supported_models = models;
         self.last_active = Instant::now();
     }
 
-    /// Is Timeout 检查节点是否超时
-    pub fn is_timeout(&self, timeout_secs: u64) -> bool {
-        let elapsed = self.last_active.elapsed().as_secs();
-        elapsed >= timeout_secs
+    /// Update Sessions 更新活跃会话列表
+    pub(crate) fn update_sessions(&mut self, sessions: Vec<SessionSummary>) {
+        self.sessions = sessions;
+        self.last_active = Instant::now();
     }
 }

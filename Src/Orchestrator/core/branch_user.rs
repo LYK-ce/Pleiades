@@ -125,7 +125,7 @@ impl Core {
                             peers.iter()
                                 .map(|p| {
                                     let name = p.display_name();
-                                    let mut line = format!("{} [mem={:?}MB latency={:?}ms]", name, p.profile.memory_mb, p.profile.latency_ms);
+                                    let mut line = format!("{} [latency={:?}ms]", name, p.profile.latency_ms);
                                     if !p.supported_models.is_empty() {
                                         line.push_str(&format!("\n  模型 ({}):", p.supported_models.len()));
                                         for m in &p.supported_models {
@@ -386,7 +386,7 @@ impl Core {
                                     total_slots: s.total_slots,
                                 }
                             }).collect();
-                        let _ = caps.peer_manager.Update_Local_Sessions(&local.peer_id, sessions).await;
+                        let _ = caps.peer_manager.Update_Sessions(&local.peer_id, sessions).await;
                     }
 
                     // 广播本地节点信息（Info → peers + EventBus → TUI）

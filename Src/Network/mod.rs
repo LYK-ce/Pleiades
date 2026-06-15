@@ -94,7 +94,7 @@ pub fn build_local_info_payload(local: &crate::peer_management::PeerInfo) -> Str
 /// 3. 向所有远程节点发送 `DataType::Info`
 /// 4. 通过 EventBus 发布 `peer_info_updated`（含 models + sessions）
 ///
-/// 调用方需先更新 PeerManager（如 `Update_Local_Sessions` / `Update_Supported_Models`），
+/// 调用方需先更新 PeerManager（如 `Update_Sessions` / `Update_Supported_Models`），
 /// 再调用本函数广播最新状态。
 pub async fn broadcast_local_info(
     peer_manager: &dyn crate::peer_management::Peer_Management_Capability,

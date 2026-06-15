@@ -1,18 +1,18 @@
- //Presented by KeJi
- //Date ： 2026-05-13
+//Presented by KeJi
+//Created Date ： 2026-05-13
+//Modified Date ： 2026-06-15
 
- //! 节点管理模块
- //!
- //! 该模块提供 Pleiades 网络中节点资源信息的管理功能。
- //!
- //! ## 核心定义
- //! PeerManager = 相关节点资源目录。存在即在线，存在即相关。
- //!
- //! ## 模块结构
- //! - `peer_info` - 节点信息数据结构定义（PeerInfo, SupportedModel, PeerProfile）
- //! - `peer_manager` - 核心管理组件（读写锁实现）
- //! - `peer_handle` - 对外调用接口（impl Peer_Management_Capability）
- //! - `capability` - Peer_Management_Capability trait 定义
+//! 节点管理模块
+//!
+//! 模组等级 Level 0 — 仅依赖 libp2p::PeerId、tokio::sync::RwLock，不调用任何其他项目模块。
+//!
+//! PeerManager = 集群节点内存目录。HashMap 中有记录即视为在线，超时未活跃则被清理。
+//!
+//! ## 模块结构
+//! - `peer_info` — 数据结构 (PeerInfo, SupportedModel, PeerProfile, SessionSummary)
+//! - `peer_manager` — 核心组件 (RwLock<HashMap<PeerId, PeerInfo>>)
+//! - `peer_handle` — impl Peer_Management_Capability (薄委托)
+//! - `capability` — trait 定义 ("头文件")
 
  // 声明子模块
  mod peer_info;
