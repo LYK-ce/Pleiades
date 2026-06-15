@@ -139,7 +139,7 @@ pub struct SessionSummary {
 
 ### PeerManager
 
-核心存储组件 + trait 实现。`RwLock<HashMap<PeerId, PeerInfo>>` 的薄封装，直接实现 `Peer_Management_Capability`（同时为 `Arc<PeerManager>` 也实现，支持 `Arc<dyn Capability>` 转换）。
+核心存储组件 + trait 实现。`RwLock<HashMap<PeerId, PeerInfo>>` 的薄封装，直接实现 `Peer_Management_Capability`（`PeerHandle` 已移除）。`Arc<PeerManager>` 自动 deref 到 `&PeerManager`，多组件通过 `Arc::clone` 共享。工厂 `create_peer_management()` 返回 `Arc<PeerManager>`。
 
 ```rust
 pub struct PeerManager {
@@ -151,7 +151,7 @@ pub struct PeerManager {
 
 ## 3. 模块方法
 
-对外的 `Peer_Management_Capability` trait（10 方法），由 `PeerManager` 和 `Arc<PeerManager>` 实现。
+对外的 `Peer_Management_Capability` trait（10 方法），由 `PeerManager` 实现。`Arc<PeerManager>` 通过 deref 自动支持。
 
 ### 查询
 
