@@ -58,11 +58,11 @@
 | 阶段 | 操作 |
 |------|------|
 | Phase 1 | `Ensure_Config()` + `Ensure_Identity()` → Ed25519 keypair |
-| Phase 2 | 初始化 tracing 日志 → `Log/pleiades.log` |
-| Phase 3 | 创建 EventBus, PeerManager, StorageManager |
+| Phase 2 | 初始化 tracing 日志 → `Log/pleiades.log.{timestamp}` |
+| Phase 3 | 创建 EventBus → PeerManager → StorageManager(持有 PeerManager + EventBus) |
 | Phase 4 | 构建 libp2p Swarm (TCP + Noise + Yamux + mDNS + Kademlia + Stream) |
 | Phase 5 | 组装 `Capabilities` → 创建 `Core` |
-| Phase 5.5 | 后台 `storage.flush()` + 同步 models 到 PeerManager |
+| Phase 5.5 | `Core::spawn_initial_flush()` 统一触发初始 flush（Storage 内部自动同步模型到 PeerManager） |
 | Phase 6 | spawn Network 事件循环 + TUI + `core.run()` 主循环 |
 
 ---
@@ -118,6 +118,8 @@ pub fn Ensure_Identity(dir: &Path) -> Keypair;           // Ed25519 密钥
 
 **这是文件访问的唯一入口！严禁绕过 Storage 直接使用 `std::fs` 或 `tokio::fs`。**
 
+**架构**: Storage 内部持有 `PeerManager` 和 `EventBus` 引用，`flush()` 触发时自动同步模型信息到 PeerManager 并通知 TUI。`UserCommand::Flush` 和初始 flush 统一由 `Core::do_flush()` 管理。
+
 ```rust
 #[async_trait]
 pub trait StorageCapability {
@@ -145,6 +147,7 @@ pub trait StorageCapability {
 - `file_id` 不能为空、不能含 `/`、`\`、`..`，不能以 `.` 开头
 - `ReadGuard` 共享读锁（多并发）；`WriteGuard` 排他写锁
 - `acquire_read` 支持惰性发现：磁盘文件不在索引 → 自动注册
+- **`flush()` 行为**: 扫描磁盘 → 刷新索引 → 自动同步 SupportedModel 到 PeerManager → 发 EventBus State 事件通知 TUI
 
 **FileEntry 结构**:
 ```rust
@@ -321,6 +324,11 @@ pub struct Capabilities {
     pub local_stream_hub: Arc<LocalStreamHub>,
 }
 ```
+
+**Flush 管理**:
+- `Core::spawn_initial_flush()` — 启动时后台触发初始 flush（fire-and-forget），main.rs 只需一行调用
+- `Core::do_flush()` — 执行 flush + 广播本地节点信息，返回结果文本。`UserCommand::Flush` 和初始 flush 均通过此方法
+- Storage 内部在 `flush()` 中自动调用 `sync_models_to_peer_manager()`，同步模型信息到 PeerManager 并通知 TUI
 
 ---
 
