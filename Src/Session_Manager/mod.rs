@@ -35,13 +35,13 @@ mod tests {
         struct StubStorage;
         #[async_trait::async_trait]
         impl StorageCapability for StubStorage {
-            async fn acquire_read(&self, _file_id: &str) -> Result<(std::path::PathBuf, ReadGuard), StorageError> { unimplemented!() }
-            async fn acquire_write(&self, _file_id: &str) -> Result<(std::path::PathBuf, WriteGuard), StorageError> { unimplemented!() }
-            async fn remove(&self, _file_id: &str) -> Result<(), StorageError> { unimplemented!() }
-            async fn exists(&self, _file_id: &str) -> Result<bool, StorageError> { unimplemented!() }
-            async fn list(&self) -> Result<Vec<FileEntry>, StorageError> { Ok(vec![]) }
-            async fn checksum(&self, _file_id: &str, _algo: Option<ChecksumAlgorithm>) -> Result<String, StorageError> { unimplemented!() }
-            async fn flush(&self) -> Result<(usize, usize), StorageError> { Ok((0, 0)) }
+            async fn Acquire_Read(&self, _file_id: &str) -> Result<(std::path::PathBuf, ReadGuard), StorageError> { unimplemented!() }
+            async fn Acquire_Write(&self, _file_id: &str) -> Result<(std::path::PathBuf, WriteGuard), StorageError> { unimplemented!() }
+            async fn Remove(&self, _file_id: &str) -> Result<(), StorageError> { unimplemented!() }
+            async fn Exists(&self, _file_id: &str) -> Result<bool, StorageError> { unimplemented!() }
+            async fn List(&self) -> Result<Vec<FileEntry>, StorageError> { Ok(vec![]) }
+            async fn Checksum(&self, _file_id: &str, _algo: Option<ChecksumAlgorithm>) -> Result<String, StorageError> { unimplemented!() }
+            async fn Flush(&self) -> Result<(usize, usize), StorageError> { Ok((0, 0)) }
         }
 
         let hub = Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new());

@@ -1,10 +1,25 @@
 //Presented by KeJi
-//Date ： 2026-05-14
+//Created Date ： 2026-05-14
+//Modified Date ： 2026-06-15
 
-pub use capability::{StorageCapability, StorageError, ChecksumAlgorithm, FileEntry};
+//! 统一存储管理模块
+//!
+//! 模组等级 Level 1 — 依赖 PeerManagement (L0)、EventBus (L0)、ML_Engine (L0)。
+//!
+//! StorageManager 是文件访问的唯一入口，严禁绕过 Storage 直接使用 std::fs 或 tokio::fs。
+//!
+//! ## 模块结构
+//! - `file_entry` — 数据结构 (FileEntry)
+//! - `capability`  — trait 定义 (StorageCapability)
+//! - `guard`       — 读写锁守卫 (ReadGuard / WriteGuard)
+//! - `storage_manager` — 核心组件 + trait 实现
+
+pub use capability::{StorageCapability, StorageError, ChecksumAlgorithm};
+pub use file_entry::FileEntry;
 pub use guard::{ReadGuard, WriteGuard};
 pub use storage_manager::StorageManager;
 
+mod file_entry;
 mod capability;
 mod guard;
 mod storage_manager;
@@ -40,17 +55,17 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = test_storage(temp_dir.path()).await;
 
-        let (write_path, write_guard) = manager.acquire_write("data.bin").await.unwrap();
+        let (write_path, write_guard) = manager.Acquire_Write("data.bin").await.unwrap();
         tokio::fs::write(&write_path, b"hello world").await.unwrap();
         drop(write_guard);
 
-        let (read_path, read_guard) = manager.acquire_read("data.bin").await.unwrap();
+        let (read_path, read_guard) = manager.Acquire_Read("data.bin").await.unwrap();
         let content = tokio::fs::read(&read_path).await.unwrap();
         assert_eq!(content, b"hello world");
         drop(read_guard);
 
-        manager.remove("data.bin").await.unwrap();
-        assert!(!manager.exists("data.bin").await.unwrap());
+        manager.Remove("data.bin").await.unwrap();
+        assert!(!manager.Exists("data.bin").await.unwrap());
         assert!(!temp_dir.path().join("data.bin").exists());
     }
 }

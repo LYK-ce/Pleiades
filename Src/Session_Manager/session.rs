@@ -66,7 +66,7 @@ impl Session {
 
         tokio::spawn(async move {
             // ── 1. 加载 tokenizer ──────────────────────────
-            let (path, _guard) = match storage.acquire_read(&model_path).await {
+            let (path, _guard) = match storage.Acquire_Read(&model_path).await {
                 Ok(p) => p,
                 Err(e) => {
                     event_bus.Publish(Bus_Event::Notify {

@@ -198,7 +198,7 @@ impl Core {
 
             // ─── 列出模型 ──────────────────────────────────
             UserCommand::List => {
-                let (text, json_entries) = match self.capabilities.storage.list().await {
+                let (text, json_entries) = match self.capabilities.storage.List().await {
                     Ok(entries) => {
                         if entries.is_empty() {
                             ("存储为空（无文件）".to_string(), vec![])

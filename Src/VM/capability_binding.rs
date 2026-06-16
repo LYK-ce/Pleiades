@@ -104,7 +104,7 @@ pub fn register_storage_caps(
     caps.set("storage_list", lua.create_async_function(move |lua, (): ()| {
         let s = s.clone();
         async move {
-            let entries = s.list().await
+            let entries = s.List().await
                 .map_err(|e| mlua::Error::runtime(format!("storage_list: {}", e)))?;
             let result = lua.create_table()?;
             for (i, entry) in entries.iter().enumerate() {
@@ -122,7 +122,7 @@ pub fn register_storage_caps(
     caps.set("storage_exists", lua.create_async_function(move |_, file_id: String| {
         let s = s.clone();
         async move {
-            s.exists(&file_id).await
+            s.Exists(&file_id).await
                 .map_err(|e| mlua::Error::runtime(format!("storage_exists: {}", e)))
         }
     })?)?;
@@ -132,7 +132,7 @@ pub fn register_storage_caps(
     caps.set("storage_acquire_read", lua.create_async_function(move |_, file_id: String| {
         let s = s.clone();
         async move {
-            s.acquire_read(&file_id).await
+            s.Acquire_Read(&file_id).await
                 .map(|(path, guard)| StorageReadHandle::new(path, guard))
                 .map_err(|e| mlua::Error::runtime(format!("storage_acquire_read: {}", e)))
         }
@@ -143,7 +143,7 @@ pub fn register_storage_caps(
     caps.set("storage_acquire_write", lua.create_async_function(move |_, file_id: String| {
         let s = s.clone();
         async move {
-            s.acquire_write(&file_id).await
+            s.Acquire_Write(&file_id).await
                 .map(|(path, guard)| StorageWriteHandle::new(path, guard))
                 .map_err(|e| mlua::Error::runtime(format!("storage_acquire_write: {}", e)))
         }
@@ -154,7 +154,7 @@ pub fn register_storage_caps(
     caps.set("storage_remove", lua.create_async_function(move |_, file_id: String| {
         let s = s.clone();
         async move {
-            s.remove(&file_id).await
+            s.Remove(&file_id).await
                 .map_err(|e| mlua::Error::runtime(format!("storage_remove: {}", e)))
         }
     })?)?;
@@ -170,7 +170,7 @@ pub fn register_storage_caps(
                 Some("xxhash64") | None => None,
                 _ => return Err(mlua::Error::runtime(format!("未知算法: {}", algo.unwrap()))),
             };
-            s.checksum(&file_id, algo).await
+            s.Checksum(&file_id, algo).await
                 .map_err(|e| mlua::Error::runtime(format!("storage_checksum: {}", e)))
         }
     })?)?;
@@ -180,7 +180,7 @@ pub fn register_storage_caps(
     caps.set("storage_flush", lua.create_async_function(move |lua, (): ()| {
         let s = s.clone();
         async move {
-            let (added, removed) = s.flush().await
+            let (added, removed) = s.Flush().await
                 .map_err(|e| mlua::Error::runtime(format!("storage_flush: {}", e)))?;
             let tbl = lua.create_table()?;
             tbl.set("added", added)?;
@@ -436,7 +436,7 @@ pub fn register_network_caps(
             // ── 1. 收集 Storage 中匹配 model_id 的文件 ──
             let storage_files: std::collections::HashMap<String, u32> = {
                 let mut map = std::collections::HashMap::new();
-                if let Ok(entries) = caps_st.list().await {
+                if let Ok(entries) = caps_st.List().await {
                     for e in entries {
                         if e.model_id == Some(model_id) {
                             map.insert(e.file_name, e.num_layers.unwrap_or(0));
@@ -485,7 +485,7 @@ pub fn register_network_caps(
 
             // ── 3. 补充 Storage 本地文件（未在 peer 条目中出现的） ──
             if let Ok(local) = caps_mp.peer_manager.Get_Local_Peer().await {
-                if let Ok(file_entries) = caps_st.list().await {
+                if let Ok(file_entries) = caps_st.List().await {
                     for fe in &file_entries {
                         let file_name = &fe.file_name;
                         if seen_files.contains(file_name) { continue; }
@@ -851,7 +851,7 @@ mod tests {
         std::fs::write(temp_dir.path().join("hello.txt"), b"hello world").expect("write file");
 
         // 3. flush 让 Storage 发现文件
-        rt.block_on(storage.flush()).expect("flush");
+        rt.block_on(storage.Flush()).expect("flush");
 
         // 4. 创建 Lua + 注册 storage caps
         let lua = LuaContext::new().expect("create lua");

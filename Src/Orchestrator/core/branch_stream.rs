@@ -32,7 +32,7 @@ impl Core {
                         }
                     };
 
-                    let (dest_path, _guard) = match caps.storage.acquire_write(&file_name).await {
+                    let (dest_path, _guard) = match caps.storage.Acquire_Write(&file_name).await {
                         Ok(p) => p,
                         Err(e) => {
                             tracing::error!("Storage acquire_write 失败: {}", e);

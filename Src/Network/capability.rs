@@ -173,7 +173,7 @@ pub trait Network_Capability: Send + Sync {
     /// if response.payload != b"ACCEPT" { return Err("rejected"); }
     ///
     /// // 2. 获取 Storage 读锁
-    /// let (path, _guard) = storage.acquire_read(file_id).await?;
+    /// let (path, _guard) = storage.Acquire_Read(file_id).await?;
     ///
     /// // 3. 打开文件流并发送纯数据
     /// let mut stream = network.open_file_stream(peer).await?;
@@ -211,7 +211,7 @@ pub trait Network_Capability: Send + Sync {
     /// # 用法（接收端完整流程）
     /// ```ignore
     /// // 1. 获取 Storage 写锁
-    /// let (dest_path, _guard) = storage.acquire_write(&file_name).await?;
+    /// let (dest_path, _guard) = storage.Acquire_Write(&file_name).await?;
     ///
     /// // 2. 从入站流接收文件数据
     /// network.receive_file_data(&mut stream, &dest_path, file_size).await?;

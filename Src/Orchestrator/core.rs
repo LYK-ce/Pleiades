@@ -188,7 +188,7 @@ impl Core {
 
     /// 执行 flush + 广播本地节点信息，返回结果文本
     pub async fn do_flush(caps: &Capabilities) -> String {
-        match caps.storage.flush().await {
+        match caps.storage.Flush().await {
             Ok((added, removed)) => {
                 crate::network::broadcast_local_info(
                     &*caps.peer_manager, &*caps.network, &caps.event_bus

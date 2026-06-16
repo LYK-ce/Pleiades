@@ -83,3 +83,29 @@ Level 3: Orchestrator → TUI/CLI
 - programs/user/pipeline_coord.lua: 动态层分配(coordinator 不参与)
 - programs/user/pipeline_coord_single.lua: 同上
 - Architecture/Pleiades_Architecture.md: 更新 Storage/Core/flush 文档
+
+### 17.4 Storage ✅ (2026-06-15)
+- FileState + FileEntry 合并为统一 FileEntry，lock 字段 pub(crate)
+- 新建 file_entry.rs（对齐 PeerManagement/peer_info.rs 模式）
+- 删除: FileState 结构体、Build_File_Entry 函数、flush_and_sync 函数（死代码）
+- 简化: list() = values().cloned().collect()
+- 头注释全部标准化: //Date → //Created/Modified Date
+- mod.rs 补全 Level 1 标注 + 依赖说明
+- 单元测试: 36/36 ✅
+- 双卡 2 节点 Qwen3-30B: Pipeline ✅, API ✅, 多轮对话 ✅
+- 单卡 3 节点 Qwen3-30B: Pipeline ✅ (B[0-24] C[25-49]), API ✅, 多轮对话 ✅
+
+### 文件变更
+- Src/Storage/file_entry.rs: 新建, 33 行
+- Src/Storage/capability.rs: -FileEntry 定义, +pub use re-export, 头注释修正
+- Src/Storage/storage_manager.rs: -FileState -Build_File_Entry -flush_and_sync, +file_entry import, state→entry 重命名
+- Src/Storage/mod.rs: +mod file_entry, +Level 1 文档, 头注释修正
+- Src/Storage/guard.rs: 头注释修正
+
+### 📝 待写入设计文档的要点
+- Lazy_Discover 只做最小注册（仅 size，模型字段全 None），不调 analyze_model
+  原因：analyze_model 会触发 GGUF→PGGUF 转换（读18GB+写hash+删旧文件），acquire_read 不应有这种重操作
+- 模型元信息由 flush() 统一填充（analyze_model），职责分离
+- Ensure_Entry 也不填元信息（size=0），写入方自己创建文件后由 flush 刷新
+- resolve_path = Validate_File_Id + Full_Path 合并，7 个 trait 方法 + Lazy_Discover + flush 统一使用
+- ChecksumAlgorithm 从 capability.rs 移入 file_entry.rs（纯数据类型，不属于 trait 定义）
