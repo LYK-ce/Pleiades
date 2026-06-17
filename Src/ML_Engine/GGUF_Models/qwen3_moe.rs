@@ -18,16 +18,20 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Embedding, Module};
-use candle_transformers::fused_moe::FusedMoeGGUF;
+use candle_nn::kv_cache::ConcatKvCache;
+use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use super::common::{Mlp_Weights, Rotary_Embedding};
 use super::qwen3::{
-    Attention_Weights, Mlp_Weights,
+    Attention_Weights,
 };
 
 type Result<T> = candle_core::Result<T>;
@@ -73,6 +77,98 @@ pub struct Qwen3MoE_Layer {
 }
 
 impl Qwen3MoE_Layer {
+    pub fn From_Extracted(
+        tensors: &mut HashMap<String, QTensor>,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        rms_norm_eps: f64,
+        rotary: Arc<Rotary_Embedding>,
+        layer_idx: usize,
+        is_moe: bool,
+        moe_cfg: &MoeCfg,
+        model_dtype: DType,
+    ) -> Result<Self> {
+        let prefix = format!("blk.{layer_idx}");
+
+        // 内联辅助函数（避免 borrow checker 问题）
+        fn Take_Qmatmul(tensors: &mut HashMap<String, QTensor>, key: &str) -> Result<QMatMul> {
+            let qt = tensors.remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {key}")))?;
+            QMatMul::from_weights(Arc::new(qt))
+        }
+        fn Take_Rmsnorm(tensors: &mut HashMap<String, QTensor>, key: &str, eps: f64) -> Result<RmsNorm> {
+            let qt = tensors.remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {key}")))?;
+            RmsNorm::from_qtensor(qt, eps)
+        }
+
+        // Attention（与 qwen3 的 From_Extracted 内联方式一致）
+        let q_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_q.weight"))?;
+        let k_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_k.weight"))?;
+        let v_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_v.weight"))?;
+        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
+        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
+        let k_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
+
+        let num_kv_groups = num_heads / num_kv_heads;
+        let kv_cache = ConcatKvCache::new(2);
+        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
+
+        let self_attn = Attention_Weights {
+            q_proj, k_proj, v_proj, o_proj,
+            q_norm, k_norm,
+            num_heads,
+            num_kv_heads: num_kv_heads,
+            num_kv_groups,
+            head_dim,
+            rotary_emb: rotary,
+            kv_cache,
+            span_attn,
+        };
+
+        // FFN — MoE 或 Dense
+        let mlp = if is_moe {
+            let gate_qt = tensors.remove(&format!("{prefix}.ffn_gate_inp.weight"))
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_inp.weight")))?;
+            let gate_ws = gate_qt.dequantize(&Device::Cpu)?.to_dtype(DType::F32)?;
+            let gate = candle_nn::Linear::new(gate_ws, None);
+
+            let gate_experts = Arc::new(
+                tensors.remove(&format!("{prefix}.ffn_gate_exps.weight"))
+                    .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_exps.weight")))?
+            );
+            let up_experts = Arc::new(
+                tensors.remove(&format!("{prefix}.ffn_up_exps.weight"))
+                    .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up_exps.weight")))?
+            );
+            let down_experts = Arc::new(
+                tensors.remove(&format!("{prefix}.ffn_down_exps.weight"))
+                    .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down_exps.weight")))?
+            );
+
+            let fused_moe = FusedMoeGGUF {
+                gate,
+                gate_experts,
+                up_experts,
+                down_experts,
+                act: candle_nn::Activation::Silu,
+                norm_topk_prob: moe_cfg.norm_topk_prob,
+                num_experts_per_tok: moe_cfg.num_experts_per_tok,
+                dtype: model_dtype,
+            };
+            MoeOrMlp::MoE(Arc::new(fused_moe))
+        } else {
+            let mlp = Mlp_Weights::New_From_Extracted(tensors, &prefix)?;
+            MoeOrMlp::Mlp(mlp)
+        };
+
+        let ln1 = Take_Rmsnorm(tensors, &format!("{prefix}.attn_norm.weight"), rms_norm_eps)?;
+        let ln2 = Take_Rmsnorm(tensors, &format!("{prefix}.ffn_norm.weight"), rms_norm_eps)?;
+
+        Ok(Self { self_attn, ln1, mlp, ln2 })
+    }
+
     pub fn Forward(
         &mut self,
         x: &Tensor,

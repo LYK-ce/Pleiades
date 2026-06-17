@@ -25,16 +25,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::gguf_model_manager::{GGUF_Analyze_And_Convert, GGUF_Analyze_From_Content, GGUF_Load_Layer, Model_Arch_Info};
-use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding, Attention_Weights, Mlp_Weights};
+use super::gguf_models::{Layer_Weights, Model_Weights, Rotary_Embedding, Mlp_Weights};
 #[cfg(feature = "deepseek")]
 use super::gguf_models::deepseek_v3::{DeepSeek_Model, DeepSeek_Layer, DeepSeek_Config};
 #[cfg(feature = "deepseek")]
 use super::gguf_models::deepseek_v4::DeepSeekV4Model;
 #[cfg(feature = "llama")]
 use super::gguf_models::llama::{Llama_Layer, Llama_Model};
-use super::gguf_models::qwen3_moe::{Qwen3MoE_Model, Qwen3MoE_Layer, MoeOrMlp};
-use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
-use candle_nn::Linear;
+use super::gguf_models::qwen3_moe::{Qwen3MoE_Model, Qwen3MoE_Layer};
+use candle_transformers::fused_moe::MoeCfg;
 
 // ============================================================
 // 数据结构定义
@@ -68,7 +67,7 @@ impl AnyModel {
 
     pub fn Clear_Kv_Cache(&mut self) {
         match self {
-            AnyModel::Qwen3(m) => m.clear_kv_cache(),
+            AnyModel::Qwen3(m) => m.Clear_Kv_Cache(),
             AnyModel::Qwen3Moe(m) => m.Clear_Kv_Cache(),
             #[cfg(feature = "deepseek")]
             AnyModel::DeepSeek(m) => m.Clear_Kv_Cache(),
@@ -271,36 +270,6 @@ fn MoE_Cfg_From_Metadata(
     })
 }
 
-/// 从已加载的 QTensors 中构造 Mlp_Weights
-fn Mlp_From_Tensors(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> anyhow::Result<Mlp_Weights> {
-    let gate_proj = {
-        let qt = tensors.remove(&format!("{prefix}.ffn_gate.weight"))
-            .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate.weight not found"))?;
-        QMatMul::from_weights(Arc::new(qt))
-            .map_err(|e| anyhow::anyhow!("{prefix}.ffn_gate.weight: {e}"))?
-    };
-    let up_proj = {
-        let qt = tensors.remove(&format!("{prefix}.ffn_up.weight"))
-            .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_up.weight not found"))?;
-        QMatMul::from_weights(Arc::new(qt))
-            .map_err(|e| anyhow::anyhow!("{prefix}.ffn_up.weight: {e}"))?
-    };
-    let down_proj = {
-        let qt = tensors.remove(&format!("{prefix}.ffn_down.weight"))
-            .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_down.weight not found"))?;
-        QMatMul::from_weights(Arc::new(qt))
-            .map_err(|e| anyhow::anyhow!("{prefix}.ffn_down.weight: {e}"))?
-    };
-
-    Ok(Mlp_Weights {
-        gate_proj,
-        up_proj,
-        down_proj,
-        act_fn: candle_nn::Activation::Silu,
-        span: tracing::span!(tracing::Level::TRACE, "mlp"),
-    })
-}
-
 /// 从 metadata 中读取模型 dtype
 fn Read_Model_Dtype(metadata: &std::collections::HashMap<String, gguf_file::Value>) -> DType {
     match metadata.get("general.dtype") {
@@ -493,86 +462,20 @@ pub fn GGUF_Load_Model(
         for i in block_start..=block_end {
             let mut lw = GGUF_Load_Layer(&content, &mut file, i, device)?;
             let blk_idx = i - 1;
-            let prefix = format!("blk.{blk_idx}");
-
-            // FFN: 判断该层是 MoE 还是 Dense
-            let mlp = if moe_cfg.num_experts > 0 {
-                // 加载 MoE 权重
-                let gate_qt = lw.tensors.remove(&format!("{prefix}.ffn_gate_inp.weight"))
-                    .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate_inp.weight not found"))?;
-                let gate_ws = gate_qt.dequantize(device)?.to_dtype(DType::F32)?;
-                let gate = Linear::new(gate_ws, None);
-
-                let gate_experts = Arc::new(
-                    lw.tensors.remove(&format!("{prefix}.ffn_gate_exps.weight"))
-                        .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_gate_exps.weight not found"))?
-                );
-                let up_experts = Arc::new(
-                    lw.tensors.remove(&format!("{prefix}.ffn_up_exps.weight"))
-                        .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_up_exps.weight not found"))?
-                );
-                let down_experts = Arc::new(
-                    lw.tensors.remove(&format!("{prefix}.ffn_down_exps.weight"))
-                        .ok_or_else(|| anyhow::anyhow!("{prefix}.ffn_down_exps.weight not found"))?
-                );
-
-                let fused_moe = FusedMoeGGUF {
-                    gate,
-                    gate_experts,
-                    up_experts,
-                    down_experts,
-                    act: candle_nn::Activation::Silu,
-                    norm_topk_prob: moe_cfg.norm_topk_prob,
-                    num_experts_per_tok: moe_cfg.num_experts_per_tok,
-                    dtype: model_dtype,
-                };
-                MoeOrMlp::MoE(Arc::new(fused_moe))
-            } else {
-                // Dense 层
-                let mlp = Mlp_From_Tensors(&mut lw.tensors, &prefix)?;
-                MoeOrMlp::Mlp(mlp)
-            };
-
-            // Attention: 从 tensors 内联构造
-            let attn = {
-                fn take_qmatmul(tensors: &mut HashMap<String, QTensor>, key: &str) -> anyhow::Result<QMatMul> {
-                    let qt = tensors.remove(key)
-                        .ok_or_else(|| anyhow::anyhow!("missing tensor: {key}"))?;
-                    QMatMul::from_weights(Arc::new(qt))
-                        .map_err(|e| anyhow::anyhow!("qmatmul {key}: {e}"))
-                }
-                let q_proj = take_qmatmul(&mut lw.tensors, &format!("{prefix}.attn_q.weight"))?;
-                let k_proj = take_qmatmul(&mut lw.tensors, &format!("{prefix}.attn_k.weight"))?;
-                let v_proj = take_qmatmul(&mut lw.tensors, &format!("{prefix}.attn_v.weight"))?;
-                let o_proj = take_qmatmul(&mut lw.tensors, &format!("{prefix}.attn_output.weight"))?;
-                let q_norm = take_rmsnorm(&mut lw.tensors, &format!("{prefix}.attn_q_norm.weight"), arch_info.rms_norm_eps)?;
-                let k_norm = take_rmsnorm(&mut lw.tensors, &format!("{prefix}.attn_k_norm.weight"), arch_info.rms_norm_eps)?;
-
-                Attention_Weights {
-                    q_proj, k_proj, v_proj, o_proj,
-                    q_norm, k_norm,
-                    num_heads: arch_info.head_count,
-                    num_kv_heads: arch_info.head_count_kv,
-                    num_kv_groups: arch_info.head_count / arch_info.head_count_kv,
-                    head_dim: arch_info.head_dim,
-                    rotary_emb: rotary.clone(),
-                    kv_cache: candle_nn::kv_cache::ConcatKvCache::new(2),
-                    span_attn: tracing::span!(tracing::Level::TRACE, "attn"),
-                }
-            };
-
-            // Norms
-            fn take_rmsnorm(tensors: &mut HashMap<String, QTensor>, key: &str, eps: f64) -> anyhow::Result<RmsNorm> {
-                let qt = tensors.remove(key)
-                    .ok_or_else(|| anyhow::anyhow!("missing tensor: {key}"))?;
-                RmsNorm::from_qtensor(qt, eps)
-                    .map_err(|e| anyhow::anyhow!("rmsnorm {key}: {e}"))
-            }
-
-            let ln1 = take_rmsnorm(&mut lw.tensors, &format!("{prefix}.attn_norm.weight"), arch_info.rms_norm_eps)?;
-            let ln2 = take_rmsnorm(&mut lw.tensors, &format!("{prefix}.ffn_norm.weight"), arch_info.rms_norm_eps)?;
-
-            layers.push(Qwen3MoE_Layer { self_attn: attn, ln1, mlp, ln2 });
+            let layer = Qwen3MoE_Layer::From_Extracted(
+                &mut lw.tensors,
+                arch_info.head_count,
+                arch_info.head_count_kv,
+                arch_info.head_dim,
+                arch_info.rms_norm_eps,
+                rotary.clone(),
+                blk_idx,
+                moe_cfg.num_experts > 0,
+                &moe_cfg,
+                model_dtype,
+            )
+            .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
+            layers.push(layer);
         }
 
         let (norm, lm_head): (Option<RmsNorm>, Option<QMatMul>) = if has_output_head {

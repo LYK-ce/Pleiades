@@ -4,7 +4,7 @@ Modified Date ： 2026-06-16
 
 # Task 17.5: ML_Engine Code Review
 
-> 状态：分层分析完成，待逐层审查
+> 状态：审查中 (Round 1 完成: device.rs ✅, GGUF_Models/common ✅, qwen3死代码清理 ✅, qwen3_moe统一 ✅)
 > 父任务：Task 17 (Code Review)
 
 ---
@@ -157,13 +157,12 @@ pub use gguf_models::{Rotary_Embedding, Mlp_Weights, ...};
 按层级自底向上：
 
 ```
-Round 1: device.rs + gguf_tensor.rs + lua_tensor.rs     (纯底层工具)
-Round 2: GGUF_Models/qwen3.rs                           (基础类型库)
-Round 3: GGUF_Models/llama + qwen3_moe + deepseek_v3   (复用层)
-Round 4: GGUF_Models/deepseek_v4/                       (独立子系统)
-Round 5: gguf_model_manager.rs                          (加载引擎)
-Round 6: gguf_model.rs + capability.rs                  (组装层)
-Round 7: context.rs                                     (会话层)
+Round 1: device.rs + common/ + qwen3死代码 + qwen3_moe统一  ✅
+Round 2: GGUF_Models/qwen3.rs (剩余: Attention/Layer/Model/Config)
+Round 3: gguf_tensor.rs + lua_tensor.rs
+Round 4: gguf_model_manager.rs
+Round 5: gguf_model.rs + capability.rs
+Round 6: context.rs
 ```
 
 ---

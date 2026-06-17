@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
-use super::qwen3::{Rotary_Embedding, Gguf, Mlp_Weights};
+use super::qwen3::{Rotary_Embedding, GGUF, Mlp_Weights};
 
 type Result<T> = candle_core::Result<T>;
 
@@ -113,7 +113,7 @@ pub struct MLA_Weights {
 
 impl MLA_Weights {
     pub fn New<R: Read + Seek>(
-        gg: &mut Gguf<R>,
+        gg: &mut GGUF_Reader<R>,
         n_heads: usize,
         q_lora_rank: usize,
         kv_lora_rank: usize,
@@ -420,7 +420,7 @@ impl std::fmt::Debug for DeepSeekMoE_Weights {
 
 impl DeepSeekMoE_Weights {
     pub fn New<R: Read + Seek>(
-        gg: &mut Gguf<R>,
+        gg: &mut GGUF_Reader<R>,
         n_routed_experts: usize,
         top_k: usize,
         routed_scaling_factor: f64,
@@ -570,9 +570,9 @@ pub struct DeepSeek_Layer {
 }
 
 impl DeepSeek_Layer {
-    /// 从 Gguf reader 加载
+    /// 从 GGUF reader 加载
     pub fn New<R: Read + Seek>(
-        gg: &mut Gguf<R>,
+        gg: &mut GGUF_Reader<R>,
         n_heads: usize,
         q_lora_rank: usize,
         kv_lora_rank: usize,
@@ -689,13 +689,13 @@ pub struct DeepSeek_Model {
 }
 
 impl DeepSeek_Model {
-    /// 从 Gguf reader 加载完整模型
-    pub fn From_Gguf<R: Read + Seek>(
+    /// 从 GGUF reader 加载完整模型
+    pub fn From_GGUF_Reader<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,
         device: &Device,
     ) -> Result<Self> {
-        let mut gg = Gguf::New(ct, reader, device.clone());
+        let mut gg = GGUF::New(ct, reader, device.clone());
 
         // 从 metadata 提取架构参数
         let architecture = match gg.Metadata().get("general.architecture") {

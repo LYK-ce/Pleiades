@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-05-16
+//Created Date ： 2026-05-16
+//Modified Date ： 2026-06-17
 
 //! ML_Engine模块 - ML推理引擎
 //!
@@ -33,7 +34,7 @@ pub use gguf_model_manager::{
     GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model, Resolve_Model_Path,
 };
 pub use gguf_models::{
-    Gguf, Rotary_Embedding, Mlp_Weights, Attention_Weights,
+    Rotary_Embedding, Mlp_Weights, Attention_Weights,
     Layer_Weights, Model_Weights, Qwen3_Config,
 };
 pub use gguf_model::{

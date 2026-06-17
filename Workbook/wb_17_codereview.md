@@ -134,3 +134,14 @@ Level 3: Orchestrator → TUI/CLI
 - DeepSeekV4 完全独立 (safetensors 分片, 不经过 gguf_model_manager)
 - 初步发现: 6 个问题 (无 trait/命名不统一/context.rs 过大等)
 - 审查计划: 7 轮, 自底向上
+
+### Round 1: device.rs ✅ + qwen3 公共基础设施提取 (2026-06-17)
+- device.rs: 头注释标准化 + Parse_Device_Str 命名修正
+- 创建 common/ 目录, 提取 GGUF_Reader (后删), Rotary_Embedding, Mlp_Weights
+- GGUF_Reader 确认为死代码, 删除; mlp.rs 的 New() → New_From_Extracted()
+- qwen3.rs: 删 ~120 行死代码 (New(gg) ×3 + From_GGUF_Reader)
+- qwen3_moe.rs: 新增 From_Extracted() (~90行), 消除 gguf_model.rs 中 ~85 行内联构造
+- gguf_model.rs: 清理 Mlp_From_Tensors + MoeOrMlp/FusedMoeGGUF/Linear import
+- DeepSeek/Llama: 用 #[cfg(feature)] 门控, 代码保留不编译
+- 函数命名: clear_kv_cache → Clear_Kv_Cache (消除重复)
+- 单元测试 15/15 + 双卡2节点 + 单卡3节点 全部通过

@@ -13,6 +13,7 @@
 //! - DeepSeek V4   (GGUF_Models/deepseek_v4/)
 //! - Llama 3.1     (GGUF_Models/llama.rs)
 
+pub mod common;
 pub mod qwen3;
 pub mod qwen3_moe;
 #[cfg(feature = "deepseek")]
@@ -22,8 +23,10 @@ pub mod deepseek_v4;
 #[cfg(feature = "llama")]
 pub mod llama;
 
-// 重新导出 Qwen3 相关类型，便于外部使用
+// 重新导出公共基础类型
+pub use common::{Rotary_Embedding, Mlp_Weights};
+// 重新导出 Qwen3 相关类型
 pub use qwen3::{
-    Gguf, Rotary_Embedding, Mlp_Weights, Attention_Weights,
+    Attention_Weights,
     Layer_Weights, Model_Weights, Qwen3_Config,
 };

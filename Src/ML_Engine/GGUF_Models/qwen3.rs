@@ -1,12 +1,11 @@
 //Presented by KeJi
-//Date : 2026-03-30
+//Created Date ： 2026-03-30
+//Modified Date ： 2026-06-17
 
-//! Local copy of quantized_qwen3 with public types for single-layer instantiation.
-//! Based on candle-transformers 0.9.2 quantized_qwen3.rs
+//! Qwen3 模型权重定义 (Attention + Layer + Model + Config)
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
-#![allow(dead_code)]
 
 use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Tensor};
@@ -15,163 +14,12 @@ use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
-use std::io::{Read, Seek};
 use std::sync::Arc;
+
+use super::common::{Rotary_Embedding, Mlp_Weights};
 
 type Result<T> = candle_core::Result<T>;
 
-// ============================================================
-// Gguf helper (public, copied from original)
-// ============================================================
-
-pub struct Gguf<R: Read + Seek> {
-    pub ct: gguf_file::Content,
-    pub reader: R,
-    pub device: Device,
-}
-
-impl<R: Read + Seek> Gguf<R> {
-    pub fn New(ct: gguf_file::Content, reader: R, device: Device) -> Self {
-        Self { ct, reader, device }
-    }
-
-    pub fn Qmatmul(&mut self, name: &str) -> Result<QMatMul> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        QMatMul::from_weights(ws.into())
-    }
-
-    pub fn Rms_Norm(&mut self, name: &str, eps: f64) -> Result<RmsNorm> {
-        let ws = self.ct.tensor(&mut self.reader, name, &self.device)?;
-        RmsNorm::from_qtensor(ws, eps)
-    }
-
-    pub fn Metadata(&self) -> &std::collections::HashMap<String, gguf_file::Value> {
-        &self.ct.metadata
-    }
-
-    pub fn Tensor(&mut self, name: &str) -> Result<QTensor> {
-        self.ct.tensor(&mut self.reader, name, &self.device)
-    }
-}
-
-// ============================================================
-// RotaryEmbedding (public, copied from original)
-// ============================================================
-
-#[derive(Debug, Clone)]
-pub struct Rotary_Embedding {
-    sin: Tensor,
-    cos: Tensor,
-}
-
-impl Rotary_Embedding {
-    pub fn New(
-        dtype: DType,
-        head_dim: usize,
-        max_position_embeddings: usize,
-        rope_theta: f64,
-        dev: &Device,
-    ) -> Result<Self> {
-        let dim = head_dim;
-        let max_seq_len = max_position_embeddings;
-        let inv_freq: Vec<_> = (0..dim)
-            .step_by(2)
-            .map(|i| 1f32 / rope_theta.powf(i as f64 / dim as f64) as f32)
-            .collect();
-        let inv_freq_len = inv_freq.len();
-        let inv_freq =
-            Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
-        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
-            .to_dtype(dtype)?
-            .reshape((max_seq_len, 1))?;
-        let freqs = t.matmul(&inv_freq)?;
-        Ok(Self {
-            sin: freqs.sin()?,
-            cos: freqs.cos()?,
-        })
-    }
-
-    /// Apply RoPE (q, k shape: B x H x L x D)
-    pub fn Apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
-        let (_, _, seq_len, _) = q.dims4()?;
-        let cos = self.cos.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
-        let sin = self.sin.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
-        Ok((q_embed, k_embed))
-    }
-}
-
-// ============================================================
-// MlpWeights (now public)
-// ============================================================
-
-#[derive(Debug, Clone)]
-pub struct Mlp_Weights {
-    pub gate_proj: QMatMul,
-    pub up_proj: QMatMul,
-    pub down_proj: QMatMul,
-    pub act_fn: Activation,
-    pub(crate) span: tracing::Span,
-}
-
-impl Mlp_Weights {
-    pub fn New<R: Read + Seek>(gg: &mut Gguf<R>, prefix: &str) -> Result<Self> {
-        let gate_proj = gg.Qmatmul(&format!("{prefix}.ffn_gate.weight"))?;
-        let up_proj = gg.Qmatmul(&format!("{prefix}.ffn_up.weight"))?;
-        let down_proj = gg.Qmatmul(&format!("{prefix}.ffn_down.weight"))?;
-        let act_fn = Activation::Silu;
-        let span = tracing::span!(tracing::Level::TRACE, "mlp");
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn,
-            span,
-        })
-    }
-
-    /// 从已提取的 QTensors 构建 Dense FFN（DeepSeek dense 层用）
-    pub fn New_Dense(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> Result<Self> {
-        let gate_proj = {
-            let qt = tensors.remove(&format!("{prefix}.ffn_gate.weight"))
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate.weight")))?;
-            QMatMul::from_weights(Arc::new(qt))
-                .map_err(|e| candle_core::Error::Msg(format!("ffn_gate: {e}")))?
-        };
-        let up_proj = {
-            let qt = tensors.remove(&format!("{prefix}.ffn_up.weight"))
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_up.weight")))?;
-            QMatMul::from_weights(Arc::new(qt))
-                .map_err(|e| candle_core::Error::Msg(format!("ffn_up: {e}")))?
-        };
-        let down_proj = {
-            let qt = tensors.remove(&format!("{prefix}.ffn_down.weight"))
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_down.weight")))?;
-            QMatMul::from_weights(Arc::new(qt))
-                .map_err(|e| candle_core::Error::Msg(format!("ffn_down: {e}")))?
-        };
-        Ok(Self {
-            gate_proj, up_proj, down_proj,
-            act_fn: Activation::Silu,
-            span: tracing::span!(tracing::Level::TRACE, "mlp"),
-        })
-    }
-
-}
-
-impl Module for Mlp_Weights {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
-        let gate = self.gate_proj.forward(x)?.apply(&self.act_fn)?;
-        let up = self.up_proj.forward(x)?;
-        let gated = (gate * up)?;
-        self.down_proj.forward(&gated)
-    }
-}
-
-// ============================================================
-// AttentionWeights (now public)
 // ============================================================
 
 #[derive(Debug, Clone)]
@@ -192,44 +40,6 @@ pub struct Attention_Weights {
 }
 
 impl Attention_Weights {
-    pub fn New<R: Read + Seek>(
-        gg: &mut Gguf<R>,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        rms_norm_eps: f64,
-        rotary_emb: Arc<Rotary_Embedding>,
-        prefix: &str,
-    ) -> Result<Self> {
-        let num_kv_groups = num_heads / num_kv_heads;
-
-        let q_proj = gg.Qmatmul(&format!("{prefix}.attn_q.weight"))?;
-        let k_proj = gg.Qmatmul(&format!("{prefix}.attn_k.weight"))?;
-        let v_proj = gg.Qmatmul(&format!("{prefix}.attn_v.weight"))?;
-        let o_proj = gg.Qmatmul(&format!("{prefix}.attn_output.weight"))?;
-
-        let q_norm = gg.Rms_Norm(&format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
-        let k_norm = gg.Rms_Norm(&format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
-
-        let kv_cache = ConcatKvCache::new(2);
-        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
-
-        Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            q_norm,
-            k_norm,
-            num_heads,
-            num_kv_heads,
-            num_kv_groups,
-            head_dim,
-            rotary_emb,
-            kv_cache,
-            span_attn,
-        })
-    }
 
     pub fn Forward(
         &mut self,
@@ -307,37 +117,7 @@ pub struct Layer_Weights {
 }
 
 impl Layer_Weights {
-    /// Load a single layer from GGUF using the Gguf reader
-    pub fn New<R: Read + Seek>(
-        gg: &mut Gguf<R>,
-        num_attention_heads: usize,
-        num_key_value_heads: usize,
-        head_dim: usize,
-        rms_norm_eps: f64,
-        rotary: Arc<Rotary_Embedding>,
-        layer_idx: usize,
-    ) -> Result<Self> {
-        let prefix = format!("blk.{layer_idx}");
-
-        let ln1 = gg.Rms_Norm(&format!("{prefix}.attn_norm.weight"), rms_norm_eps)?;
-        let ln2 = gg.Rms_Norm(&format!("{prefix}.ffn_norm.weight"), rms_norm_eps)?;
-        let self_attn = Attention_Weights::New(
-            gg,
-            num_attention_heads,
-            num_key_value_heads,
-            head_dim,
-            rms_norm_eps,
-            rotary,
-            &prefix,
-        )?;
-        let mlp = Mlp_Weights::New(gg, &prefix)?;
-        Ok(Self {
-            self_attn,
-            mlp,
-            ln1,
-            ln2,
-        })
-    }
+    /// Load a single layer from GGUF using the GGUF reader
 
     /// Build a single layer from extracted QTensors (from GGUF_Extract)
     pub fn From_Extracted(
@@ -466,79 +246,6 @@ pub struct Model_Weights {
 }
 
 impl Model_Weights {
-    pub fn From_Gguf<R: Read + Seek>(
-        ct: gguf_file::Content,
-        reader: &mut R,
-        device: &Device,
-    ) -> Result<Self> {
-        let mut gg = Gguf::New(ct, reader, device.clone());
-        let md_get = |s: &str| match gg.Metadata().get(s) {
-            None => candle_core::bail!("cannot find {s} in metadata"),
-            Some(v) => Ok(v),
-        };
-
-        let num_attention_heads = md_get("qwen3.attention.head_count")?.to_u32()? as usize;
-        let num_kv_heads = md_get("qwen3.attention.head_count_kv")?.to_u32()? as usize;
-        let head_dim = md_get("qwen3.attention.key_length")?.to_u32()? as usize;
-        let num_layers = md_get("qwen3.block_count")?.to_u32()? as usize;
-        let hidden_size = md_get("qwen3.embedding_length")?.to_u32()? as usize;
-        let max_position_embeddings = md_get("qwen3.context_length")?.to_u32()? as usize;
-        let rms_norm_eps =
-            md_get("qwen3.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
-        let rope_freq_base = md_get("qwen3.rope.freq_base")?.to_f32()? as f64;
-
-        let dtype = match gg.Metadata().get("general.dtype") {
-            Some(v) => match v.to_u32() {
-                Ok(0) => DType::F32,
-                Ok(1) => DType::F16,
-                _ => DType::F16,
-            },
-            None => DType::F16,
-        };
-
-        let embed_tensor = gg.Tensor("token_embd.weight")?;
-        let embed_tokens = Embedding::new(embed_tensor.dequantize(device)?, hidden_size);
-
-        let rotary = Arc::new(Rotary_Embedding::New(
-            dtype,
-            head_dim,
-            max_position_embeddings,
-            rope_freq_base,
-            device,
-        )?);
-
-        let mut layers = Vec::with_capacity(num_layers);
-        for i in 0..num_layers {
-            layers.push(Layer_Weights::New(
-                &mut gg,
-                num_attention_heads,
-                num_kv_heads,
-                head_dim,
-                rms_norm_eps,
-                rotary.clone(),
-                i,
-            )?);
-        }
-
-        let norm = gg.Rms_Norm("output_norm.weight", rms_norm_eps)?;
-        let lm_head_tensor = match gg.Tensor("output.weight") {
-            Ok(tensor) => tensor,
-            Err(_) => gg.Tensor("token_embd.weight")?,
-        };
-        let lm_head = QMatMul::from_weights(lm_head_tensor.into())?;
-        let span = tracing::span!(tracing::Level::TRACE, "model");
-        let span_output = tracing::span!(tracing::Level::TRACE, "output");
-        Ok(Self {
-            embed_tokens: Some(embed_tokens),
-            layers,
-            norm: Some(norm),
-            lm_head: Some(lm_head),
-            device: device.clone(),
-            dtype,
-            span,
-            span_output,
-        })
-    }
 
     fn Causal_Mask(
         &self,
