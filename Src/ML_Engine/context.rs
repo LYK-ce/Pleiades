@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use candle_core::{Device, Tensor, DType};
 
-use super::device::parse_device_str;
+use super::device::Parse_Device_Str;
 use super::gguf_model::{
     GGUF_Load_Model, GGUF_Model, GGUF_Model_Inference, GGUF_Unload_Model,
 };
@@ -115,7 +115,7 @@ impl MlSession {
     /// - `set_seed()` — 设置采样随机种子
     /// - `load_model()` — 加载模型填充空壳
     pub fn new(device: &str) -> Result<Self, String> {
-        let device = parse_device_str(device)?;
+        let device = Parse_Device_Str(device)?;
 
         // 默认种子基于系统时间，避免所有 session 使用相同随机序列
         let default_seed = std::time::SystemTime::now()
@@ -664,7 +664,7 @@ impl MlSession {
         let (kvs, model_path, start, end, _device, rng_state, offset, eos_token_id, chat_template) =
             Self::deserialize_kv_from_file(&file_path)?;
 
-        let target_device = parse_device_str(device_str)?;
+        let target_device = Parse_Device_Str(device_str)?;
 
         // 2. 加载模型权重
         let mut model = GGUF_Load_Model(start, end, &model_path, &target_device)

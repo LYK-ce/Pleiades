@@ -3,7 +3,18 @@ Date: 2026-06-09
 
 # Task 17: Code Review — 消除硬编码，统一配置管理
 
-> 状态：17.1~17.8 方案已确定，待实现
+> 状态：第二轮模块审查进行中 (4/9)
+
+---
+
+## 模块审查进度
+
+```
+Level 0: EventBus ✅ → PeerManagement ✅ → Config ✅ → ML_Engine (17.5)
+Level 1: Storage ✅ (17.4)
+Level 2: Network → VM
+Level 3: Orchestrator → TUI/CLI
+```
 
 ---
 

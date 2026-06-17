@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date : 2026-05-30
+//Created Date ： 2026-05-30
+//Modified Date ： 2026-06-17
 
 //! 设备解析 — 将字符串转换为 candle Device
 //!
@@ -13,7 +14,7 @@ use candle_core::Device;
 /// - "cpu"              → Device::Cpu
 /// - "cuda" / "cuda:0"  → Device::new_cuda(0)
 /// - "cuda:N"           → Device::new_cuda(N)
-pub fn parse_device_str(s: &str) -> Result<Device, String> {
+pub fn Parse_Device_Str(s: &str) -> Result<Device, String> {
     let s = s.trim().to_lowercase();
     match s.as_str() {
         "cpu" => Ok(Device::Cpu),
@@ -38,34 +39,34 @@ mod tests {
 
     #[test]
     fn test_cpu() {
-        let d = parse_device_str("cpu").unwrap();
+        let d = Parse_Device_Str("cpu").unwrap();
         assert!(d.is_cpu());
     }
 
     #[test]
     fn test_invalid() {
-        assert!(parse_device_str("tpu").is_err());
-        assert!(parse_device_str("cuda:abc").is_err());
+        assert!(Parse_Device_Str("tpu").is_err());
+        assert!(Parse_Device_Str("cuda:abc").is_err());
     }
 
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_default() {
-        let d = parse_device_str("cuda").unwrap();
+        let d = Parse_Device_Str("cuda").unwrap();
         assert!(!d.is_cpu());
     }
 
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_0() {
-        let d = parse_device_str("cuda:0").unwrap();
+        let d = Parse_Device_Str("cuda:0").unwrap();
         assert!(!d.is_cpu());
     }
 
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_named() {
-        let d = parse_device_str("cuda:1").unwrap();
+        let d = Parse_Device_Str("cuda:1").unwrap();
         assert!(!d.is_cpu());
     }
 }

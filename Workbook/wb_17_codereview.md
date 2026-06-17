@@ -107,5 +107,30 @@ Level 3: Orchestrator → TUI/CLI
   原因：analyze_model 会触发 GGUF→PGGUF 转换（读18GB+写hash+删旧文件），acquire_read 不应有这种重操作
 - 模型元信息由 flush() 统一填充（analyze_model），职责分离
 - Ensure_Entry 也不填元信息（size=0），写入方自己创建文件后由 flush 刷新
-- resolve_path = Validate_File_Id + Full_Path 合并，7 个 trait 方法 + Lazy_Discover + flush 统一使用
-- ChecksumAlgorithm 从 capability.rs 移入 file_entry.rs（纯数据类型，不属于 trait 定义）
+- Resolve_Path = Validate_File_Id + Full_Path 合并
+- ChecksumAlgorithm 从 capability.rs 移入 file_entry.rs
+- 函数统一 Pascal snake case (Acquire_Read, Hash_File 等)
+- WriteGuard on_drop 回调自动刷新 size
+- 设计文档已重写 (docs/design_doc/storage_design.md)
+
+### 第三轮: 追加 ML_Engine (2026-06-16)
+- 本轮追加 ML_Engine (Level 0) 到审查计划
+- 更新后的模块列表:
+  Level 0: EventBus ✅ → PeerManagement ✅ → Config ✅ → ML_Engine
+  Level 1: Storage ✅
+  Level 2: Network → VM
+  Level 3: Orchestrator → TUI/CLI
+
+- 设计文档已重写 (docs/design_doc/storage_design.md)
+
+### 17.5 ML_Engine 分层分析 (2026-06-16)
+- 模块规模: ~25 文件, ~7,800 行, Level 0
+- 三层架构:
+  底层: device.rs + gguf_tensor.rs + lua_tensor.rs + GGUF_Models/* + gguf_model_manager.rs
+  中层: gguf_model.rs (组装中枢) + capability.rs (异步封装) + context.rs (会话管理)
+  上层: mod.rs re-export ~30 符号 (MlSession, analyze_model, GGUF_Model 等)
+- qwen3.rs 是隐藏"标准库" (Rotary_Embedding/Mlp_Weights/Attention_Weights 被 llama/deepseek_v3 复用)
+- 无显式 Model trait, 通过 AnyModel 枚举 match dispatch
+- DeepSeekV4 完全独立 (safetensors 分片, 不经过 gguf_model_manager)
+- 初步发现: 6 个问题 (无 trait/命名不统一/context.rs 过大等)
+- 审查计划: 7 轮, 自底向上

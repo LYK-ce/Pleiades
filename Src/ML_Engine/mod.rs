@@ -43,4 +43,4 @@ pub use gguf_model::{
 
 pub use context::MlSession;
 pub use capability::{analyze_model, split_model};
-pub use device::parse_device_str;
+pub use device::Parse_Device_Str;

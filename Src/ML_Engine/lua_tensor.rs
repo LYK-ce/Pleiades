@@ -9,7 +9,7 @@
 use candle_core::{Device, Tensor};
 use std::ops::Deref;
 
-use super::device::parse_device_str;
+use super::device::Parse_Device_Str;
 
 /// Tensor 的 Lua 包装。
 ///
@@ -36,7 +36,7 @@ impl LuaTensor {
 
     /// 将 Tensor 迁移到指定设备（接受字符串）。
     pub fn to_device_str(&self, s: &str) -> Result<LuaTensor, String> {
-        let device = parse_device_str(s)?;
+        let device = Parse_Device_Str(s)?;
         self.0
             .to_device(&device)
             .map(LuaTensor)
@@ -136,11 +136,11 @@ pub fn bytes_to_tensor(data: &[u8], device: &Device) -> Result<Tensor, String> {
 
 // ─── Device 解析 ──────────────────────────────────────────
 //
-// parse_device_str() 已移至 Src/ML_Engine/device.rs，
-// 此处通过 use super::device::parse_device_str 引用。
+// Parse_Device_Str() 已移至 Src/ML_Engine/device.rs，
+// 此处通过 use super::device::Parse_Device_Str 引用。
 
 /// bytes_to_tensor 的字符串入口 — 供绑定层使用。
 pub fn bytes_to_tensor_str(data: &[u8], device_str: &str) -> Result<Tensor, String> {
-    let device = parse_device_str(device_str)?;
+    let device = Parse_Device_Str(device_str)?;
     bytes_to_tensor(data, &device)
 }
