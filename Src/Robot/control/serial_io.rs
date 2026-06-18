@@ -38,11 +38,17 @@ impl SerialIo {
         let port = Arc::new(Mutex::new(port));
         let state = Arc::new(RwLock::new(RobotState::default()));
 
-        // spawn 后台接收任务
+        // spawn 后台接收任务（独立线程，不受 Lua 脚本 runtime 影响）
         let rx_port = port.clone();
         let rx_state = state.clone();
-        tokio::spawn(async move {
-            Self::receive_loop(rx_port, rx_state).await;
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("receive_loop runtime");
+            rt.block_on(async move {
+                Self::receive_loop(rx_port, rx_state).await;
+            });
         });
 
         Ok(Self { port, state })
