@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pleiades 机器人遥控</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+}
+.container {
+    width: 400px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 24px;
+}
+h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
+
+/* 连接栏 */
+.conn-bar {
+    display: flex; gap: 8px; margin-bottom: 20px;
+    align-items: center;
+}
+.conn-bar input {
+    background: #0d1117; border: 1px solid #30363d;
+    color: #c9d1d9; padding: 8px 10px; border-radius: 6px;
+    font-size: 14px;
+}
+.conn-bar input.ip { flex: 2; }
+.conn-bar input.port { flex: 1; }
+.conn-bar button {
+    background: #238636; border: none; color: white;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer;
+    font-size: 14px; font-weight: 600;
+}
+.conn-bar button:hover { background: #2ea043; }
+.conn-bar button.disconnect { background: #da3633; }
+.conn-bar button.disconnect:hover { background: #f85149; }
+.status {
+    font-size: 12px; margin-bottom: 16px; text-align: center;
+}
+.status .dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 4px;
+}
+.dot.on { background: #3fb950; }
+.dot.off { background: #f85149; }
+
+/* 方向键 */
+.dpad {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr 1fr;
+    gap: 8px;
+    width: 240px; height: 240px;
+    margin: 0 auto 20px;
+}
+.btn {
+    background: #21262d; border: 2px solid #30363d;
+    border-radius: 10px; color: #c9d1d9;
+    font-size: 24px; font-weight: bold;
+    cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.1s, border-color 0.1s;
+    -webkit-tap-highlight-color: transparent;
+}
+.btn:active, .btn.pressed {
+    background: #1f6feb; border-color: #58a6ff; color: white;
+}
+.btn-w { grid-column: 2; grid-row: 1; }
+.btn-a { grid-column: 1; grid-row: 2; }
+.btn-s { grid-column: 2; grid-row: 2; }
+.btn-d { grid-column: 3; grid-row: 2; }
+.btn-stop { grid-column: 2; grid-row: 3; font-size: 14px; }
+
+/* 蜂鸣按钮 */
+.beep-row { text-align: center; margin-bottom: 16px; }
+.btn-beep {
+    background: #21262d; border: 1px solid #30363d;
+    color: #c9d1d9; padding: 8px 24px; border-radius: 6px;
+    cursor: pointer; font-size: 14px;
+}
+.btn-beep:hover { background: #30363d; }
+
+/* 遥测 */
+.telemetry {
+    background: #0d1117; border: 1px solid #30363d;
+    border-radius: 8px; padding: 12px; font-size: 13px;
+    line-height: 1.8;
+}
+.telemetry span { color: #8b949e; }
+.telemetry .val { color: #7ee787; margin-left: 4px; }
+
+/* 提示 */
+.hint {
+    font-size: 11px; color: #484f58; text-align: center; margin-top: 16px;
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🚗 Pleiades 机器人遥控</h1>
+
+    <div class="conn-bar">
+        <input class="ip" id="ip" type="text" value="192.168.4.1" placeholder="小车 IP">
+        <input class="port" id="port" type="number" value="9090" placeholder="端口">
+        <button id="connBtn" onclick="toggleConnect()">连接</button>
+    </div>
+
+    <div class="status">
+        <span id="statusDot" class="dot off"></span>
+        <span id="statusText">未连接</span>
+    </div>
+
+    <div class="dpad" id="dpad">
+        <button class="btn btn-w" id="btnW" onmousedown="press('forward')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('forward');event.preventDefault()" ontouchend="release()">W</button>
+        <button class="btn btn-a" id="btnA" onmousedown="press('spin_left')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('spin_left');event.preventDefault()" ontouchend="release()">A</button>
+        <button class="btn btn-s" id="btnS" onmousedown="press('backward')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('backward');event.preventDefault()" ontouchend="release()">S</button>
+        <button class="btn btn-d" id="btnD" onmousedown="press('spin_right')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('spin_right');event.preventDefault()" ontouchend="release()">D</button>
+        <button class="btn btn-stop" onclick="sendCmd('stop')">停</button>
+    </div>
+
+    <div class="beep-row">
+        <button class="btn-beep" onclick="sendCmd('beep',{ms:200})">🔊 蜂鸣</button>
+    </div>
+
+    <div class="telemetry" id="telemetry">
+        <div><span>速度:</span><span class="val" id="tvx">--</span> m/s</div>
+        <div><span>电池:</span><span class="val" id="tbat">--</span> V</div>
+        <div><span>姿态:</span><span class="val" id="tatt">--</span></div>
+        <div><span>编码器:</span><span class="val" id="tenc">--</span></div>
+    </div>
+
+    <div class="hint">W前进 / S后退 / A左旋 / D右旋<br>按住移动，松手即停 | 键盘和按钮均可操作</div>
+</div>
+
+<script>
+let ws = null;
+
+// ── 键盘事件 ──────────────────────────────────
+const keyMap = {
+    'w': 'forward',
+    'W': 'forward',
+    's': 'backward',
+    'S': 'backward',
+    'a': 'spin_left',
+    'A': 'spin_left',
+    'd': 'spin_right',
+    'D': 'spin_right',
+    'b': 'beep',
+    'B': 'beep',
+};
+const keyButtons = {
+    'w': 'btnW', 'W': 'btnW',
+    's': 'btnS', 'S': 'btnS',
+    'a': 'btnA', 'A': 'btnA',
+    'd': 'btnD', 'D': 'btnD',
+};
+
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const cmd = keyMap[e.key];
+    if (cmd) {
+        e.preventDefault();
+        if (cmd === 'beep') { sendCmd(cmd, {ms: 200}); return; }
+        press(cmd);
+    }
+});
+document.addEventListener('keyup', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (keyMap[e.key]) { e.preventDefault(); release(); }
+});
+
+// ── 连接 ──────────────────────────────────────
+function toggleConnect() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+    } else {
+        connect();
+    }
+}
+
+function connect() {
+    if (ws && ws.readyState === WebSocket.CONNECTING) return;
+    const ip = document.getElementById('ip').value.trim();
+    const port = document.getElementById('port').value.trim();
+    const url = 'ws://' + ip + ':' + port;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+        setStatus(true, '已连接');
+        document.getElementById('connBtn').textContent = '断开';
+        document.getElementById('connBtn').classList.add('disconnect');
+    };
+    ws.onclose = () => {
+        setStatus(false, '已断开');
+        document.getElementById('connBtn').textContent = '连接';
+        document.getElementById('connBtn').classList.remove('disconnect');
+        ws = null;
+    };
+    ws.onerror = () => setStatus(false, '连接错误');
+    ws.onmessage = (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'robot_telemetry' || data.vx !== undefined) {
+                updateTelemetry(data);
+            }
+        } catch (_) {}
+    };
+}
+
+function setStatus(on, text) {
+    document.getElementById('statusText').textContent = text;
+    const dot = document.getElementById('statusDot');
+    dot.className = 'dot ' + (on ? 'on' : 'off');
+}
+
+// ── 发送命令 ──────────────────────────────────
+function sendCmd(cmd, extra) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const msg = Object.assign({cmd: cmd}, extra || {});
+    ws.send(JSON.stringify(msg));
+}
+
+// ── 按钮交互 ──────────────────────────────────
+let activeCmd = null;
+
+function press(cmd) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (activeCmd === cmd) return; // 已在执行
+    activeCmd = cmd;
+    sendCmd(cmd);
+    highlightButton(cmd, true);
+}
+
+function release() {
+    if (!activeCmd) return;
+    sendCmd('stop');
+    highlightButton(activeCmd, false);
+    activeCmd = null;
+}
+
+function highlightButton(cmd, on) {
+    const id = keyButtons[cmd];
+    if (id) {
+        const btn = document.getElementById(id);
+        if (btn) btn.classList.toggle('pressed', on);
+    }
+}
+
+// ── 遥测 ──────────────────────────────────────
+function updateTelemetry(d) {
+    if (d.vx !== undefined) document.getElementById('tvx').textContent = d.vx.toFixed(2);
+    if (d.battery !== undefined) document.getElementById('tbat').textContent = d.battery.toFixed(1);
+    if (d.roll !== undefined) {
+        document.getElementById('tatt').textContent =
+            'R' + (d.roll * 57.3).toFixed(0) + '° ' +
+            'P' + (d.pitch * 57.3).toFixed(0) + '° ' +
+            'Y' + (d.yaw * 57.3).toFixed(0) + '°';
+    }
+    if (d.encoders) {
+        document.getElementById('tenc').textContent = d.encoders.join(', ');
+    }
+}
+</script>
+
+</body>
+</html>

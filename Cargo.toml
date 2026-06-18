@@ -99,3 +99,9 @@ twox-hash = "1.6"
 hex = "0.4"
 tempfile = "3.10"
 
+# 串口通信 (Robot 模块)
+tokio-serial = "5.5"
+
+# WebSocket (Robot 遥控)
+tokio-tungstenite = "0.24"
+

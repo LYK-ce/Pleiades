@@ -17,6 +17,8 @@ use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
+use crate::robot::control::capability::{Robot, RobotCapability};
+use crate::robot::control::types::{CarType, MotionState};
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
 // ============================================================
@@ -744,6 +746,331 @@ pub fn register_network_caps(
 
     caps.set("network", network)?;
     lua.globals().set("caps", caps)?;
+    Ok(())
+}
+
+// ============================================================
+// 注册 Robot 能力函数
+// ============================================================
+
+static ROBOT: std::sync::OnceLock<Arc<Robot>> = std::sync::OnceLock::new();
+
+/// 获取或初始化全局 Robot 实例
+fn get_robot() -> Arc<Robot> {
+    ROBOT.get_or_init(|| Arc::new(Robot::new())).clone()
+}
+
+/// 将 Robot 控制能力暴露给 Lua，注册 `robot` 全局表。
+pub fn register_robot_caps(lua: &Lua) -> mlua::Result<()> {
+    let robot = get_robot();
+    let robot_table = lua.create_table()?;
+
+    // ─── robot.open(port, baudrate, car_type) ──────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "open",
+            lua.create_async_function(move |_, (port, baudrate, car_type): (String, u32, u8)| {
+                let r = r.clone();
+                async move {
+                    let ct = CarType::from_u8(car_type)
+                        .ok_or_else(|| mlua::Error::runtime(format!("无效车型: {}", car_type)))?;
+                    r.open(&port, baudrate, ct).await
+                        .map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.close() ──────────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "close",
+            lua.create_async_function(move |_, (): ()| {
+                let r = r.clone();
+                async move {
+                    r.close().await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.is_open() ────────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "is_open",
+            lua.create_function(move |_, (): ()| {
+                Ok::<_, mlua::Error>(r.is_open())
+            })?,
+        )?;
+    }
+
+    // ─── robot.forward(speed) ───────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "forward",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.forward(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.backward(speed) ──────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "backward",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.backward(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.stop() ───────────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "stop",
+            lua.create_async_function(move |_, (): ()| {
+                let r = r.clone();
+                async move {
+                    r.stop().await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.left(speed) ──────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "left",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.left(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.right(speed) ─────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "right",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.right(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.spin_left(speed) ─────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "spin_left",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.spin_left(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.spin_right(speed) ────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "spin_right",
+            lua.create_async_function(move |_, speed: i16| {
+                let r = r.clone();
+                async move {
+                    r.spin_right(speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_car_run(state, speed) ────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_car_run",
+            lua.create_async_function(move |_, (state, speed): (u8, i16)| {
+                let r = r.clone();
+                async move {
+                    let s = MotionState::from_u8(state)
+                        .ok_or_else(|| mlua::Error::runtime(format!("无效运动状态: {}", state)))?;
+                    r.set_car_run(s, speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_motion(vx, vy, vz) ───────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_motion",
+            lua.create_async_function(move |_, (vx, vy, vz): (f32, f32, f32)| {
+                let r = r.clone();
+                async move {
+                    r.set_motion(vx, vy, vz).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_motor(m1, m2, m3, m4) ────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_motor",
+            lua.create_async_function(move |_, (m1, m2, m3, m4): (i8, i8, i8, i8)| {
+                let r = r.clone();
+                async move {
+                    r.set_motor(m1, m2, m3, m4).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.beep(duration_ms) ────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "beep",
+            lua.create_async_function(move |_, duration_ms: u16| {
+                let r = r.clone();
+                async move {
+                    r.beep(duration_ms).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_servo(id, angle) ─────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_servo",
+            lua.create_async_function(move |_, (id, angle): (u8, u8)| {
+                let r = r.clone();
+                async move {
+                    r.set_servo(id, angle).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_rgb(led_id, r, g, b) ─────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_rgb",
+            lua.create_async_function(move |_, (led_id, r_val, g, b): (u8, u8, u8, u8)| {
+                let r = r.clone();
+                async move {
+                    r.set_rgb(led_id, r_val, g, b).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.set_rgb_effect(effect, speed) ────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "set_rgb_effect",
+            lua.create_async_function(move |_, (effect, speed): (u8, u8)| {
+                let r = r.clone();
+                async move {
+                    r.set_rgb_effect(effect, speed).await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.reset_state() ────────────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "reset_state",
+            lua.create_async_function(move |_, (): ()| {
+                let r = r.clone();
+                async move {
+                    r.reset_state().await.map_err(|e| mlua::Error::runtime(e))
+                }
+            })?,
+        )?;
+    }
+
+    // ─── robot.get_state() → table ──────────────────────
+    {
+        let r = robot.clone();
+        robot_table.set(
+            "get_state",
+            lua.create_async_function(move |lua, (): ()| {
+                let r = r.clone();
+                async move {
+                    let state = r.get_state().await;
+                    let t = lua.create_table()?;
+                    t.set("vx", state.vx)?;
+                    t.set("vy", state.vy)?;
+                    t.set("vz", state.vz)?;
+                    t.set("battery", state.battery)?;
+
+                    let attitude = lua.create_table()?;
+                    attitude.set("roll", state.attitude.roll)?;
+                    attitude.set("pitch", state.attitude.pitch)?;
+                    attitude.set("yaw", state.attitude.yaw)?;
+                    t.set("attitude", attitude)?;
+
+                    let gyro = lua.create_table()?;
+                    gyro.set("gx", state.gyro.gx)?;
+                    gyro.set("gy", state.gyro.gy)?;
+                    gyro.set("gz", state.gyro.gz)?;
+                    t.set("gyro", gyro)?;
+
+                    let accel = lua.create_table()?;
+                    accel.set("ax", state.accel.ax)?;
+                    accel.set("ay", state.accel.ay)?;
+                    accel.set("az", state.accel.az)?;
+                    t.set("accel", accel)?;
+
+                    let mag = lua.create_table()?;
+                    mag.set("mx", state.mag.mx)?;
+                    mag.set("my", state.mag.my)?;
+                    mag.set("mz", state.mag.mz)?;
+                    t.set("mag", mag)?;
+
+                    let encoders = lua.create_table()?;
+                    for (i, &v) in state.encoders.iter().enumerate() {
+                        encoders.set(i + 1, v)?;
+                    }
+                    t.set("encoders", encoders)?;
+
+                    Ok(t)
+                }
+            })?,
+        )?;
+    }
+
+    lua.globals().set("robot", robot_table)?;
     Ok(())
 }
 

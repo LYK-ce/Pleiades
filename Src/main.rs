@@ -126,6 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动时后台 flush
     Core::spawn_initial_flush(capabilities.clone());
 
+    // Phase 5.6: 启动 Robot WebSocket 遥控服务器（独立线程）
+    pleiades::robot::server::spawn_robot_ws_server(9090, event_bus.clone());
+
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时
     // ══════════════════════════════════════════════════════
