@@ -31,6 +31,7 @@ impl SerialIo {
     /// 打开串口并启动后台接收任务。
     pub fn open(port_name: &str, baudrate: u32) -> Result<Self, String> {
         let port = tokio_serial::new(port_name, baudrate)
+            .timeout(std::time::Duration::from_millis(10))
             .open_native_async()
             .map_err(|e| format!("无法打开串口 {}: {}", port_name, e))?;
 
