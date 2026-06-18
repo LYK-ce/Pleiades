@@ -15,16 +15,9 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 
 use crate::event_bus::{Bus_Event, EventBus};
-use crate::robot::control::capability::{Robot, RobotCapability};
+use crate::robot::control::capability::RobotCapability;
 use crate::robot::control::types::RobotState;
-
-// 复用 capability_binding.rs 中的全局单例
-// 需要重新声明 get_robot，因为那个是 crate 私有的
-static ROBOT: std::sync::OnceLock<Arc<Robot>> = std::sync::OnceLock::new();
-
-fn get_robot() -> Arc<Robot> {
-    ROBOT.get_or_init(|| Arc::new(Robot::new())).clone()
-}
+use crate::robot::{get_robot, Robot};
 
 // ============================================================
 // 公开入口

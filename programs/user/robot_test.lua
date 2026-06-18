@@ -25,14 +25,18 @@ function execute(params)
 
     -- 1. 打开串口
     caps.print("[1/4] 打开串口 ...")
-    local ok, err = pcall(function()
-        return robot.open(port, 115200, car_type)
-    end)
-    if not ok then
-        caps.print(string.format("  ✗ 打开失败: %s", tostring(err)))
-        return
+    if robot.is_open() then
+        caps.print("  串口已打开，跳过")
+    else
+        local ok, err = pcall(function()
+            return robot.open(port, 115200, car_type)
+        end)
+        if not ok then
+            caps.print(string.format("  ✗ 打开失败: %s", tostring(err)))
+            return
+        end
+        caps.print("  ✓ 串口已打开")
     end
-    caps.print("  ✓ 串口已打开")
 
     -- 2. 前进
     caps.print(string.format("[2/4] 前进 (速度=%d) ...", speed))

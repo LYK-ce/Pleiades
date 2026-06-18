@@ -17,8 +17,9 @@ use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
-use crate::robot::control::capability::{Robot, RobotCapability};
+use crate::robot::control::capability::{RobotCapability};
 use crate::robot::control::types::{CarType, MotionState};
+use crate::robot::get_robot;
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
 // ============================================================
@@ -752,13 +753,6 @@ pub fn register_network_caps(
 // ============================================================
 // 注册 Robot 能力函数
 // ============================================================
-
-static ROBOT: std::sync::OnceLock<Arc<Robot>> = std::sync::OnceLock::new();
-
-/// 获取或初始化全局 Robot 实例
-fn get_robot() -> Arc<Robot> {
-    ROBOT.get_or_init(|| Arc::new(Robot::new())).clone()
-}
 
 /// 将 Robot 控制能力暴露给 Lua，注册 `robot` 全局表。
 pub fn register_robot_caps(lua: &Lua) -> mlua::Result<()> {

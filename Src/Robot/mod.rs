@@ -9,3 +9,15 @@
 
 pub mod control;
 pub mod server;
+
+use std::sync::Arc;
+
+pub use control::capability::Robot;
+
+/// 全局 Robot 单例（Lua 绑定和 WS 服务器共享同一个实例）
+static GLOBAL_ROBOT: std::sync::OnceLock<Arc<Robot>> = std::sync::OnceLock::new();
+
+/// 获取全局 Robot 实例
+pub fn get_robot() -> Arc<Robot> {
+    GLOBAL_ROBOT.get_or_init(|| Arc::new(Robot::new())).clone()
+}
