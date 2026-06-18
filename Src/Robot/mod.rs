@@ -13,11 +13,17 @@ pub mod server;
 use std::sync::Arc;
 
 pub use control::capability::Robot;
+pub use control::capability::RobotCapability;
 
-/// 全局 Robot 单例（Lua 绑定和 WS 服务器共享同一个实例）
+/// 全局 Robot 实例（由 main.rs 在启动时初始化）
 static GLOBAL_ROBOT: std::sync::OnceLock<Arc<Robot>> = std::sync::OnceLock::new();
+
+/// 初始化全局 Robot 实例（只在 main.rs 调用一次）
+pub fn init_robot(robot: Arc<Robot>) {
+    let _ = GLOBAL_ROBOT.set(robot);
+}
 
 /// 获取全局 Robot 实例
 pub fn get_robot() -> Arc<Robot> {
-    GLOBAL_ROBOT.get_or_init(|| Arc::new(Robot::new())).clone()
+    GLOBAL_ROBOT.get().expect("Robot 未初始化").clone()
 }

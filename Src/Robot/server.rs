@@ -42,17 +42,6 @@ pub fn spawn_robot_ws_server(port: u16, event_bus: Arc<EventBus>) {
         };
 
         rt.block_on(async {
-            // 初始化时自动打开串口
-            let robot = get_robot();
-            if !robot.is_open() {
-                tracing::info!("[Robot WS] 打开串口 /dev/myserial");
-                if let Err(e) = robot
-                    .open("/dev/myserial", 115200, crate::robot::control::types::CarType::X3Plus)
-                    .await
-                {
-                    tracing::error!("[Robot WS] 打开串口失败: {}", e);
-                }
-            }
             run_server(port, event_bus).await;
         });
     });

@@ -17,6 +17,8 @@ use pleiades::storage::StorageManager;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
+use pleiades::robot::control::types::CarType;
+use pleiades::robot::RobotCapability;
 use pleiades::tui::TUI_Loop;
 
 #[tokio::main]
@@ -126,7 +128,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动时后台 flush
     Core::spawn_initial_flush(capabilities.clone());
 
-    // Phase 5.6: 启动 Robot WebSocket 遥控服务器（独立线程）
+    // Phase 5.6: 初始化 Robot 并启动 WebSocket 遥控服务器
+    let robot = std::sync::Arc::new(pleiades::robot::Robot::new());
+    pleiades::robot::init_robot(robot.clone());
+    // 打开串口
+    if let Err(e) = robot
+        .open("/dev/myserial", 115200, CarType::X3Plus)
+        .await
+    {
+        tracing::warn!("打开串口失败: {}", e);
+    }
     pleiades::robot::server::spawn_robot_ws_server(9090, event_bus.clone());
 
     // ══════════════════════════════════════════════════════
