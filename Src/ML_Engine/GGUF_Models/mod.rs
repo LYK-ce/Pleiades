@@ -1,27 +1,22 @@
 //Presented by KeJi
 //Created Date ： 2026-03-30
-//Modified Date ： 2026-06-17
+//Modified Date ： 2026-07-03
 
 //! GGUF_Models 模块 - 统一管理所有支持的 GGUF 格式模型实现
 //!
-//! 当前支持的模型:
-//! - Qwen3: 通义千问3系列量化模型
-//! - Qwen3 MoE: Qwen3 MoE 变体
-//!
-//! 暂时移除（代码保留在磁盘，Review 完成后恢复）:
-//! - DeepSeek V3.2 (GGUF_Models/deepseek_v3.rs)
-//! - DeepSeek V4   (GGUF_Models/deepseek_v4/)
-//! - Llama 3.1     (GGUF_Models/llama.rs)
+//! 当前仅使用 Qwen3 / Qwen3MoE。
+//! DeepSeek / Llama 模块注释保留，待后续恢复。
 
 pub mod common;
 pub mod qwen3;
 pub mod qwen3_moe;
-#[cfg(feature = "deepseek")]
-pub mod deepseek_v3;
-#[cfg(feature = "deepseek")]
-pub mod deepseek_v4;
-#[cfg(feature = "llama")]
-pub mod llama;
+// DeepSeek / Llama — 注释保留，待后续恢复
+// #[cfg(feature = "deepseek")]
+// pub mod deepseek_v3;
+// #[cfg(feature = "deepseek")]
+// pub mod deepseek_v4;
+// #[cfg(feature = "llama")]
+// pub mod llama;
 
 // 重新导出公共基础类型
 pub use common::{Rotary_Embedding, Mlp_Weights};

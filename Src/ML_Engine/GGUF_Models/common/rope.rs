@@ -22,18 +22,16 @@ impl Rotary_Embedding {
         rope_theta: f64,
         dev: &Device,
     ) -> Result<Self> {
-        let dim = head_dim;
-        let max_seq_len = max_position_embeddings;
-        let inv_freq: Vec<_> = (0..dim)
+        let inv_freq: Vec<_> = (0..head_dim)
             .step_by(2)
-            .map(|i| 1f32 / rope_theta.powf(i as f64 / dim as f64) as f32)
+            .map(|i| 1f32 / rope_theta.powf(i as f64 / head_dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq =
             Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
-        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
+        let t = Tensor::arange(0u32, max_position_embeddings as u32, dev)?
             .to_dtype(dtype)?
-            .reshape((max_seq_len, 1))?;
+            .reshape((max_position_embeddings, 1))?;
         let freqs = t.matmul(&inv_freq)?;
         Ok(Self {
             sin: freqs.sin()?,

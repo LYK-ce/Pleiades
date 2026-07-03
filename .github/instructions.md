@@ -118,6 +118,12 @@ Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
 
 Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理解项目整体架构、各模块职责、关键 API。
 
+## 项目路径
+
+当前项目主目录：`/vepfs-mlp2/c20250205/240804016/Workspace/Pleiades`
+
+编译使用 `build.sh` 脚本（自动处理 GCC 版本兼容）。
+
 ---
 
 # 分布式推理测试验证流程
@@ -133,18 +139,28 @@ Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理�
 
 ## 步骤 0：编译 & 同步
 
+使用项目根目录下的 `build.sh` 脚本编译和部署：
+
 ```bash
-cd /root/code/Pleiades
-cargo build --release
+cd /vepfs-mlp2/c20250205/240804016/Workspace/Pleiades
 
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/1/
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/2/
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/3/
+# 仅编译
+./build.sh
 
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/1/programs/
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/2/programs/
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/3/programs/
+# 编译 + 部署到测试环境
+./build.sh deploy
+
+# 运行测试
+./build.sh test -p Pleiades --lib storage
+
+# 快速语法检查
+./build.sh check
+
+# 清理编译缓存
+./build.sh clean
 ```
+
+`build.sh` 自动处理 GCC 版本兼容问题（nvcc 不支持 GCC 13，脚本通过 PATH 注入 gcc-12 软链接解决）。
 
 ---
 

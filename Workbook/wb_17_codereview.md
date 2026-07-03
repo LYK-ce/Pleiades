@@ -145,3 +145,48 @@ Level 3: Orchestrator → TUI/CLI
 - DeepSeek/Llama: 用 #[cfg(feature)] 门控, 代码保留不编译
 - 函数命名: clear_kv_cache → Clear_Kv_Cache (消除重复)
 - 单元测试 15/15 + 双卡2节点 + 单卡3节点 全部通过
+
+### 项目搬迁到 GPFS (2026-07-01)
+- 从 /root/code/Pleiades 搬至 /vepfs-mlp2/c20250205/240804016/Workspace/Pleiades
+- 原因: 本地 overlay 磁盘仅 20G (83%), GPFS 有 639T 可用
+- 创建 build.sh 脚本, 自动处理 GCC 13 / nvcc 不兼容 (PATH 注入 gcc-12)
+- 编译速度: GPFS ~68s vs 本地 ~50s (可接受)
+- Orion + llama.cpp 同步搬迁, 本地空间 3.4G→5.7G
+- instructions.md 已更新项目路径和 build.sh 使用说明
+
+### 17.5 当前进度 (2026-07-03)
+- Round 1 ✅ (device.rs + common/ + qwen3死代码 + qwen3_moe统一)
+- Round 2 ⏸ 待开始 (qwen3.rs 剩余: Attention/Layer/Model/Config)
+- Round 3-6 待开始
+
+### Round 2a: common/ + 统一 Build_From_Extracted (2026-07-03)
+- rope.rs: 审查通过，无改动
+- mlp.rs → swiglu_mlp.rs: 文件改名（SwiGLU MLP）
+- Mlp_Weights::New_From_Extracted → Build_From_Extracted
+- qwen3.rs: Layer_Weights::From_Extracted → Build_From_Extracted
+  - 手动构造 MLP → Mlp_Weights::Build_From_Extracted（消除重复）
+  - 移除未用 Activation import
+- qwen3_moe.rs: Qwen3MoE_Layer::From_Extracted → Build_From_Extracted
+  - Mlp_Weights::New_From_Extracted → Build_From_Extracted
+- gguf_model.rs: 两处调用点同步改名
+- 📝 备忘: Mlp_Weights 结构体名后续需改名（SwiGLU_MLP_Weights），act_fn 字段始终 Silu 需处理
+- 📝 备忘: 升级 candle 0.11.0 后可用 #3598 的 enable_cuda_graph_htod_cache 机制，在 MlSession 层实现 warmup→capture→replay（非单个 MLP::forward 内），提升 decode 吞吐 ~10%
+- rope.rs: 删无意义的本地变量别名 (dim → head_dim, max_seq_len → max_position_embeddings)
+- 📝 备忘: 当前 Model_Weights::Forward 用 Option + if 判断 embed_tokens/norm/lm_head 是否存在。仅两类变体（完整/部分模型），够用。未来支持更多架构（DeepSeek MLA、不同输入输出组合、>5 种 stage）时应引入 `trait Stage { fn forward(...) }` 统一为 `Vec<Box<dyn Stage>>` 消除分支。当前性能无差异（分支可预测 vs vtable）。
+### Round 2b: qwen3.rs 审查完成 (2026-07-03)
+- Attention_Weights: 新增 Build_From_Extracted，消除两处内联构造重复
+- Layer_Weights: Build_From_Extracted 改为调用子组件 Build 方法；删除 Take_Qmatmul
+- Model_Weights: From_Dynamic → Build_Model；删除重复的 clear_kv_cache（死代码）
+- 清理孤儿注释、未用 import（Activation, ConcatKvCache）
+- Qwen3_Config: 审查通过，无改动
+### Round 2c: qwen3_moe.rs + mod.rs 审查完成 (2026-07-03)
+- qwen3_moe.rs: 头注释标准化（Date → Created/Modified），删除不必要的 #![allow(dead_code)]
+- mod.rs: 修正注释措辞（"暂时移除" → "条件编译（功能门控）"），更新日期
+- gguf_tensor.rs: 已删除（253行死代码，被 Network/Tensor_Stream/protocol.rs 替代，全项目无调用方）
+### gguf_model.rs 重构 (2026-07-03)
+- gguf_model.rs → gguf_model_legacy.rs（保留 DeepSeek/Llama 参考）
+- 新 gguf_model.rs（494行，-31%）：仅 Qwen3/Qwen3MoE
+  - 移除所有 #[cfg(feature)]、DeepSeek/Llama import、is_deepseek 分支
+  - 提取 Load_Output_Head、Build_GGUF_Model 共用函数
+  - LayerWithAttention trait 统一 extract/restore_kv_cache
+- GGUF_Models/mod.rs: 注释掉 deepseek_v3/deepseek_v4/llama 模块声明

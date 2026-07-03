@@ -24,7 +24,7 @@ pub struct Mlp_Weights {
 
 impl Mlp_Weights {
     /// 从已提取的 QTensors 构建 Dense FFN
-    pub fn New_From_Extracted(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> Result<Self> {
+    pub fn Build_From_Extracted(tensors: &mut HashMap<String, QTensor>, prefix: &str) -> Result<Self> {
         let gate_proj = {
             let qt = tensors.remove(&format!("{prefix}.ffn_gate.weight"))
                 .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate.weight")))?;

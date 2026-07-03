@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date : 2026-05-30
+//Created Date ： 2026-05-30
+//Modified Date ： 2026-07-03
 
 //! Qwen3 MoE 模型架构支持
 //!
@@ -16,12 +17,10 @@
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
-#![allow(dead_code)]
 
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Embedding, Module};
-use candle_nn::kv_cache::ConcatKvCache;
 use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
@@ -77,7 +76,7 @@ pub struct Qwen3MoE_Layer {
 }
 
 impl Qwen3MoE_Layer {
-    pub fn From_Extracted(
+    pub fn Build_From_Extracted(
         tensors: &mut HashMap<String, QTensor>,
         num_heads: usize,
         num_kv_heads: usize,
@@ -91,41 +90,23 @@ impl Qwen3MoE_Layer {
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
 
-        // 内联辅助函数（避免 borrow checker 问题）
-        fn Take_Qmatmul(tensors: &mut HashMap<String, QTensor>, key: &str) -> Result<QMatMul> {
-            let qt = tensors.remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {key}")))?;
-            QMatMul::from_weights(Arc::new(qt))
-        }
+        // 内联 RmsNorm 辅助函数
         fn Take_Rmsnorm(tensors: &mut HashMap<String, QTensor>, key: &str, eps: f64) -> Result<RmsNorm> {
             let qt = tensors.remove(key)
                 .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {key}")))?;
             RmsNorm::from_qtensor(qt, eps)
         }
 
-        // Attention（与 qwen3 的 From_Extracted 内联方式一致）
-        let q_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_q.weight"))?;
-        let k_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_k.weight"))?;
-        let v_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_v.weight"))?;
-        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
-        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
-        let k_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
-
-        let num_kv_groups = num_heads / num_kv_heads;
-        let kv_cache = ConcatKvCache::new(2);
-        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
-
-        let self_attn = Attention_Weights {
-            q_proj, k_proj, v_proj, o_proj,
-            q_norm, k_norm,
+        // Attention
+        let self_attn = Attention_Weights::Build_From_Extracted(
+            tensors,
             num_heads,
-            num_kv_heads: num_kv_heads,
-            num_kv_groups,
+            num_kv_heads,
             head_dim,
-            rotary_emb: rotary,
-            kv_cache,
-            span_attn,
-        };
+            rms_norm_eps,
+            rotary,
+            layer_idx,
+        )?;
 
         // FFN — MoE 或 Dense
         let mlp = if is_moe {
@@ -159,7 +140,7 @@ impl Qwen3MoE_Layer {
             };
             MoeOrMlp::MoE(Arc::new(fused_moe))
         } else {
-            let mlp = Mlp_Weights::New_From_Extracted(tensors, &prefix)?;
+            let mlp = Mlp_Weights::Build_From_Extracted(tensors, &prefix)?;
             MoeOrMlp::Mlp(mlp)
         };
 
@@ -206,7 +187,7 @@ pub struct Qwen3MoE_Model {
 }
 
 impl Qwen3MoE_Model {
-    pub fn From_Dynamic(
+    pub fn Build_Model(
         embed_tokens: Option<Embedding>,
         layers: Vec<Qwen3MoE_Layer>,
         norm: Option<RmsNorm>,

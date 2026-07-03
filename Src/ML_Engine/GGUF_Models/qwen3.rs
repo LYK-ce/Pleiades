@@ -9,7 +9,7 @@
 
 use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{kv_cache::ConcatKvCache, Activation, Embedding, Module};
+use candle_nn::{kv_cache::ConcatKvCache, Embedding, Module};
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
@@ -40,6 +40,67 @@ pub struct Attention_Weights {
 }
 
 impl Attention_Weights {
+
+    /// Build attention weights from extracted QTensors
+    pub fn Build_From_Extracted(
+        tensors: &mut HashMap<String, QTensor>,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        rms_norm_eps: f64,
+        rotary: Arc<Rotary_Embedding>,
+        layer_idx: usize,
+    ) -> Result<Self> {
+        let prefix = format!("blk.{layer_idx}");
+
+        fn Take_Qmatmul(
+            tensors: &mut HashMap<String, QTensor>,
+            key: &str,
+        ) -> Result<QMatMul> {
+            let qt = tensors
+                .remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+            QMatMul::from_weights(Arc::new(qt))
+        }
+
+        fn Take_Rmsnorm(
+            tensors: &mut HashMap<String, QTensor>,
+            key: &str,
+            eps: f64,
+        ) -> Result<RmsNorm> {
+            let qt = tensors
+                .remove(key)
+                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
+            RmsNorm::from_qtensor(qt, eps)
+        }
+
+        let q_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_q.weight"))?;
+        let k_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_k.weight"))?;
+        let v_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_v.weight"))?;
+        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
+        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
+        let k_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
+
+        let num_kv_groups = num_heads / num_kv_heads;
+        let kv_cache = ConcatKvCache::new(2);
+        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm,
+            k_norm,
+            num_heads,
+            num_kv_heads,
+            num_kv_groups,
+            head_dim,
+            rotary_emb: rotary,
+            kv_cache,
+            span_attn,
+        })
+    }
 
     pub fn Forward(
         &mut self,
@@ -117,10 +178,9 @@ pub struct Layer_Weights {
 }
 
 impl Layer_Weights {
-    /// Load a single layer from GGUF using the GGUF reader
 
-    /// Build a single layer from extracted QTensors (from GGUF_Extract)
-    pub fn From_Extracted(
+    /// Build a single layer from extracted QTensors
+    pub fn Build_From_Extracted(
         tensors: &mut HashMap<String, QTensor>,
         num_attention_heads: usize,
         num_key_value_heads: usize,
@@ -131,17 +191,7 @@ impl Layer_Weights {
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
 
-        // Inline helpers to avoid nested closure borrow issues
-        fn Take_Qmatmul(
-            tensors: &mut HashMap<String, QTensor>,
-            key: &str,
-        ) -> Result<QMatMul> {
-            let qt = tensors
-                .remove(key)
-                .ok_or_else(|| candle_core::Error::Msg(format!("missing tensor: {}", key)))?;
-            QMatMul::from_weights(Arc::new(qt))
-        }
-
+        // Inline RmsNorm helper
         fn Take_Rmsnorm(
             tensors: &mut HashMap<String, QTensor>,
             key: &str,
@@ -154,46 +204,18 @@ impl Layer_Weights {
         }
 
         // Attention
-        let q_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_q.weight"))?;
-        let k_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_k.weight"))?;
-        let v_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_v.weight"))?;
-        let o_proj = Take_Qmatmul(tensors, &format!("{prefix}.attn_output.weight"))?;
-        let q_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
-        let k_norm = Take_Rmsnorm(tensors, &format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
-
-        let num_kv_groups = num_attention_heads / num_key_value_heads;
-        let kv_cache = ConcatKvCache::new(2);
-        let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
-
-        let self_attn = Attention_Weights {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            q_norm,
-            k_norm,
-            num_heads: num_attention_heads,
-            num_kv_heads: num_key_value_heads,
-            num_kv_groups,
+        let self_attn = Attention_Weights::Build_From_Extracted(
+            tensors,
+            num_attention_heads,
+            num_key_value_heads,
             head_dim,
-            rotary_emb: rotary,
-            kv_cache,
-            span_attn,
-        };
+            rms_norm_eps,
+            rotary,
+            layer_idx,
+        )?;
 
         // MLP
-        let gate_proj = Take_Qmatmul(tensors, &format!("{prefix}.ffn_gate.weight"))?;
-        let up_proj = Take_Qmatmul(tensors, &format!("{prefix}.ffn_up.weight"))?;
-        let down_proj = Take_Qmatmul(tensors, &format!("{prefix}.ffn_down.weight"))?;
-        let span_mlp = tracing::span!(tracing::Level::TRACE, "mlp");
-
-        let mlp = Mlp_Weights {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: Activation::Silu,
-            span: span_mlp,
-        };
+        let mlp = Mlp_Weights::Build_From_Extracted(tensors, &prefix)?;
 
         // Norms
         let ln1 = Take_Rmsnorm(tensors, &format!("{prefix}.attn_norm.weight"), rms_norm_eps)?;
@@ -324,7 +346,7 @@ impl Model_Weights {
     ///
     /// - embed_tokens: 输入 embedding（部分模型可为 None）
     /// - norm / lm_head: 输出头（部分模型可为 None）
-    pub fn From_Dynamic(
+    pub fn Build_Model(
         embed_tokens: Option<Embedding>,
         layers: Vec<Layer_Weights>,
         norm: Option<RmsNorm>,
@@ -343,12 +365,6 @@ impl Model_Weights {
             dtype,
             span,
             span_output,
-        }
-    }
-
-    pub fn clear_kv_cache(&mut self) {
-        for layer in &mut self.layers {
-            layer.Clear_Kv_Cache();
         }
     }
 }
@@ -390,4 +406,3 @@ impl Qwen3_Config {
         })
     }
 }
-
