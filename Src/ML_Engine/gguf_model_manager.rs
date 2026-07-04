@@ -603,7 +603,7 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
     }
     let layer_bitmap = Build_Layer_Bitmap(&layer_tensors_map, arch_info.num_layers);
 
-    // 6. 流式写入 PGGUF (不加载全部 tensor 到内存)
+    // 6. 写入 PGGUF：加载全部 tensor → gguf_file::write()
     let pgguf_path = gguf_file_path.with_extension("pgguf");
     let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
     tracing::info!(
@@ -611,13 +611,45 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
         gguf_file_path.display(),
         file_size as f64 / 1e9
     );
-    streaming_write_pgguf(
-        &mut file,
-        &content,
-        &pgguf_path,
-        model_id,
-        &layer_bitmap,
-    )?;
+
+    let device = Device::Cpu;
+    let mut loaded_tensors: Vec<(String, QTensor)> = Vec::new();
+    for tensor_name in content.tensor_infos.keys() {
+        let qtensor = content
+            .tensor(&mut file, tensor_name, &device)
+            .map_err(|e| anyhow::anyhow!("Failed to load tensor '{}': {}", tensor_name, e))?;
+        loaded_tensors.push((tensor_name.clone(), qtensor));
+    }
+
+    let mut metadata_pairs: Vec<(String, gguf_file::Value)> = content
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    metadata_pairs.push((
+        "pleiades.model_id".to_string(),
+        gguf_file::Value::U32(model_id),
+    ));
+    metadata_pairs.push((
+        "pleiades.layer_bitmap".to_string(),
+        gguf_file::Value::String(Bitmap_To_Hex(&layer_bitmap)),
+    ));
+    metadata_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let metadata_refs: Vec<(&str, &gguf_file::Value)> = metadata_pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+    let tensor_refs: Vec<(&str, &QTensor)> = loaded_tensors
+        .iter()
+        .map(|(n, t)| (n.as_str(), t))
+        .collect();
+
+    let out_file = std::fs::File::create(&pgguf_path)?;
+    let mut writer = BufWriter::new(out_file);
+    gguf_file::write(&mut writer, &metadata_refs, &tensor_refs)
+        .map_err(|e| anyhow::anyhow!("Failed to write PGGUF file: {}", e))?;
+    drop(writer);
 
     let output_size = std::fs::metadata(&pgguf_path).map(|m| m.len()).unwrap_or(0);
     tracing::info!(
@@ -636,199 +668,6 @@ pub fn GGUF_Analyze_And_Convert(gguf_file_path: &Path) -> Result<(Model_Arch_Inf
     Ok((arch_info, pgguf_path))
 }
 
-/// 流式写入 PGGUF 文件: 头 + 元数据 (含新增 model_id/layer_bitmap) + 流式拷贝 tensor 数据
-fn streaming_write_pgguf(
-    reader: &mut (impl Read + Seek),
-    content: &gguf_file::Content,
-    pgguf_path: &Path,
-    model_id: u32,
-    layer_bitmap: &[u8; 32],
-) -> Result<()> {
-    use std::io::Write;
-
-    let out_file = std::fs::File::create(pgguf_path)?;
-    let mut w = BufWriter::new(out_file);
-
-    // Normalize metadata: U8/I8/U16/I16 → U32/I32
-    let mut metadata: Vec<(String, gguf_file::Value)> = content
-        .metadata
-        .iter()
-        .map(|(k, v)| {
-            let v = match v {
-                gguf_file::Value::U8(x) => gguf_file::Value::U32(*x as u32),
-                gguf_file::Value::I8(x) => gguf_file::Value::I32(*x as i32),
-                gguf_file::Value::U16(x) => gguf_file::Value::U32(*x as u32),
-                gguf_file::Value::I16(x) => gguf_file::Value::I32(*x as i32),
-                other => other.clone(),
-            };
-            (k.clone(), v)
-        })
-        .collect();
-    metadata.push(("pleiades.model_id".to_string(), gguf_file::Value::U32(model_id)));
-    metadata.push(("pleiades.layer_bitmap".to_string(), gguf_file::Value::String(Bitmap_To_Hex(layer_bitmap))));
-    metadata.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Sort tensor names for deterministic output
-    let mut tensor_names: Vec<&String> = content.tensor_infos.keys().collect();
-    tensor_names.sort();
-
-    // === Write GGUF Header ===
-    w.write_all(&0x46554747u32.to_le_bytes())?;  // magic "GGUF"
-    w.write_all(&2u32.to_le_bytes())?;            // version 2
-    w.write_all(&(tensor_names.len() as u64).to_le_bytes())?;
-    w.write_all(&(metadata.len() as u64).to_le_bytes())?;
-
-    // === Write Metadata ===
-    for (name, value) in &metadata {
-        write_gguf_string(&mut w, name)?;
-        w.write_all(&(value.value_type() as u32).to_le_bytes())?;
-        write_gguf_value(&mut w, value)?;
-    }
-
-    // === Write Tensor Infos (with recalculated offsets) ===
-    let mut tensor_sizes: Vec<usize> = Vec::with_capacity(tensor_names.len());
-    for name in &tensor_names {
-        let info = &content.tensor_infos[*name];
-        write_gguf_string(&mut w, name)?;
-        let dims = info.shape.dims();
-        w.write_all(&(dims.len() as u32).to_le_bytes())?;
-        for &dim in dims.iter().rev() {
-            w.write_all(&(dim as u64).to_le_bytes())?;
-        }
-        // GgmlDType to u32
-        let dtype_u32 = match info.ggml_dtype {
-            candle_core::quantized::GgmlDType::F32 => 0,
-            candle_core::quantized::GgmlDType::F16 => 1,
-            candle_core::quantized::GgmlDType::Q4_0 => 2,
-            candle_core::quantized::GgmlDType::Q4_1 => 3,
-            candle_core::quantized::GgmlDType::Q5_0 => 6,
-            candle_core::quantized::GgmlDType::Q5_1 => 7,
-            candle_core::quantized::GgmlDType::Q8_0 => 8,
-            candle_core::quantized::GgmlDType::Q8_1 => 9,
-            candle_core::quantized::GgmlDType::Q2K => 10,
-            candle_core::quantized::GgmlDType::Q3K => 11,
-            candle_core::quantized::GgmlDType::Q4K => 12,
-            candle_core::quantized::GgmlDType::Q5K => 13,
-            candle_core::quantized::GgmlDType::Q6K => 14,
-            _ => anyhow::bail!("unsupported ggml dtype: {:?}", info.ggml_dtype),
-        };
-        w.write_all(&(dtype_u32 as u32).to_le_bytes())?;
-
-        // Offset placeholder (filled below via seek)
-        let _offset_pos = w.stream_position()?;
-        w.write_all(&0u64.to_le_bytes())?;
-
-        let size_in_bytes = info.shape.elem_count() / info.ggml_dtype.block_size()
-            * info.ggml_dtype.type_size();
-        tensor_sizes.push(size_in_bytes);
-    }
-
-    // Pad to 32-byte alignment before tensor data
-    let pos = w.stream_position()? as usize;
-    let padding = (32 - (pos % 32)) % 32;
-    if padding > 0 {
-        w.write_all(&vec![0u8; padding])?;
-    }
-    let tensor_data_start = w.stream_position()?;
-
-    // === Now go back and fill in tensor offsets ===
-    let mut offset: u64 = 0;
-    let mut offset_positions: Vec<(u64, usize)> = Vec::with_capacity(tensor_names.len());
-    // Recalculate where each offset field is in the file
-    // Header: 24 bytes
-    let mut pos: u64 = 24;
-    for (name, value) in &metadata {
-        pos += 8 + name.len() as u64;  // string length + data
-        pos += 4; // value_type
-        pos += gguf_value_size(value);
-    }
-    for (i, name) in tensor_names.iter().enumerate() {
-        pos += 8 + name.len() as u64;  // string
-        let info = &content.tensor_infos[*name];
-        pos += 4; // n_dims
-        pos += (info.shape.dims().len() * 8) as u64; // dims
-        pos += 4; // dtype
-        // offset field is at pos
-        offset_positions.push((pos, tensor_sizes[i]));
-        pos += 8; // offset (u64)
-    }
-    // Add padding
-    let align_pad = (32 - (pos as usize % 32)) % 32;
-    pos += align_pad as u64;
-
-    for (off_pos, size) in &offset_positions {
-        w.seek(SeekFrom::Start(*off_pos))?;
-        w.write_all(&offset.to_le_bytes())?;
-        let pad = (32 - (size % 32)) % 32;
-        offset += (*size + pad) as u64;
-    }
-
-    // Seek to tensor data start
-    w.seek(SeekFrom::Start(tensor_data_start))?;
-
-    // === Stream tensor data from original file ===
-    reader.seek(SeekFrom::Start(content.tensor_data_offset))?;
-    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
-        w.write_all(&buf[..n])?;
-    }
-
-    drop(w);
-    Ok(())
-}
-
-/// Write a GGUF string: u64 length + bytes
-fn write_gguf_string(w: &mut impl std::io::Write, s: &str) -> std::io::Result<()> {
-    w.write_all(&(s.len() as u64).to_le_bytes())?;
-    w.write_all(s.as_bytes())
-}
-
-/// Get the binary size of a GGUF value (for offset calculation)
-fn gguf_value_size(value: &gguf_file::Value) -> u64 {
-    match value {
-        gguf_file::Value::U8(_) | gguf_file::Value::I8(_) | gguf_file::Value::Bool(_) => 1,
-        gguf_file::Value::U16(_) | gguf_file::Value::I16(_) => 2,
-        gguf_file::Value::U32(_) | gguf_file::Value::I32(_) | gguf_file::Value::F32(_) => 4,
-        gguf_file::Value::U64(_) | gguf_file::Value::I64(_) | gguf_file::Value::F64(_) => 8,
-        gguf_file::Value::String(s) => 8 + s.len() as u64,
-        gguf_file::Value::Array(arr) => {
-            let mut size = 12u64; // type(u32) + len(u64)
-            for elem in arr {
-                size += gguf_value_size(elem);
-            }
-            size
-        }
-    }
-}
-
-/// Write a GGUF value (mirrors candle's Value::write)
-fn write_gguf_value(w: &mut impl std::io::Write, value: &gguf_file::Value) -> std::io::Result<()> {
-    match value {
-        gguf_file::Value::U8(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::I8(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::U16(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::I16(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::U32(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::I32(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::U64(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::I64(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::F32(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::F64(v) => w.write_all(&v.to_le_bytes()),
-        gguf_file::Value::Bool(v) => w.write_all(&u8::from(*v).to_le_bytes()),
-        gguf_file::Value::String(v) => write_gguf_string(w, v.as_str()),
-        gguf_file::Value::Array(arr) => {
-            let vt = if arr.is_empty() { 4u32 } else { arr[0].value_type() as u32 };
-            w.write_all(&vt.to_le_bytes())?;
-            w.write_all(&(arr.len() as u64).to_le_bytes())?;
-            for elem in arr {
-                write_gguf_value(w, elem)?;
-            }
-            Ok(())
-        }
-    }
-}
 
 /// 根据模型名称在 workspace 中查找模型文件。
 ///

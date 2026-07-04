@@ -292,6 +292,78 @@ T3> quit
 
 ---
 
+## 测试 3：PGGUF 转换 + 单机推理测试
+
+### 目的
+
+验证 GGUF→PGGUF 自动转换功能正常，转换后的模型可以正常加载并完成单机推理。
+
+### 模型
+
+- `Qwen3-0.6B-Q8_0.gguf`（610MB），存放位置：`/vepfs-mlp2/c20250205/240804016/Test_Environment/`
+
+### 步骤
+
+1. 清理 workspace 中已有的 0.6B 模型文件：
+   ```bash
+   rm -f /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Pleiades_Workspace/Qwen3-0.6B*
+   ```
+
+2. 将模型拷贝到 workspace：
+   ```bash
+   cp /vepfs-mlp2/c20250205/240804016/Test_Environment/Qwen3-0.6B-Q8_0.gguf \
+      /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Pleiades_Workspace/
+   ```
+
+3. 启动 Pleiades（自动 flush 触发 GGUF→PGGUF 转换）：
+   ```bash
+   cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1 && ./Pleiades
+   ```
+
+4. 验证转换：TUI 面板应显示 `Qwen3-0.6B-Q8_0.pgguf [0-27]`，日志显示 `GGUF → PGGUF 转换完成`，且无 `analyze_model failed` 错误。
+
+5. 单机推理：
+   ```
+   session create Qwen3-0.6B-Q8_0.pgguf
+     → session_id = 1
+
+   session inference single_inf 1 Qwen3-0.6B-Q8_0.pgguf
+     → 等待 "ML Thread 就绪"
+
+   api 1
+     → API 启动在 http://127.0.0.1:{port}
+   ```
+
+6. Chat 验证：
+   ```bash
+   cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Tool/
+   python chat.py --url http://127.0.0.1:{port}
+   ```
+
+   ```
+   > 你好
+     ← 应返回正常回复，无错误
+   > /exit
+   ```
+
+7. 退出：
+   ```
+   T1> quit
+   ```
+
+### 验证要点
+
+| 验证项 | 测试 3 |
+|--------|:---:|
+| GGUF→PGGUF 自动转换 | ✓ |
+| 转换日志无 error | ✓ |
+| Tokenizer 加载成功 | ✓ |
+| 模型加载成功 | ✓ |
+| 单机推理正常 | ✓ |
+| quit 正常退出 | ✓ |
+
+---
+
 ## 验证要点
 
 | 验证项 | 测试 1 双卡 | 测试 2 单卡 |
