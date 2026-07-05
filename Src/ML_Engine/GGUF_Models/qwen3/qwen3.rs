@@ -16,7 +16,8 @@ use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::common::{Rotary_Embedding, Mlp_Weights};
+use super::super::common::{Rotary_Embedding, Mlp_Weights, Stage, Model, extract_kv_cache_from_stages, restore_kv_cache_to_stages};
+use crate::ml_engine::gguf_model_manager::{GGUF_Load_Layer, Model_Arch_Info};
 
 type Result<T> = candle_core::Result<T>;
 
@@ -228,23 +229,43 @@ impl Layer_Weights {
             ln2,
         })
     }
+}
 
-    pub fn Forward(
-        &mut self,
-        x: &Tensor,
-        mask: Option<&Tensor>,
-        offset: usize,
-    ) -> Result<Tensor> {
+
+/// Qwen3 Embedding 层
+pub struct Qwen3_Embedding_Stage(pub(crate) candle_nn::Embedding);
+impl Stage for Qwen3_Embedding_Stage {
+    fn forward(&mut self, x: &Tensor, _offset: usize, _mask: Option<&Tensor>) -> anyhow::Result<Tensor> {
+        self.0.forward(x).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// Qwen3 输出头（norm + lm_head）
+pub struct Qwen3_Output_Stage {
+    pub(crate) norm: RmsNorm,
+    pub(crate) lm_head: QMatMul,
+}
+impl Stage for Qwen3_Output_Stage {
+    fn forward(&mut self, x: &Tensor, _offset: usize, _mask: Option<&Tensor>) -> anyhow::Result<Tensor> {
+        let h = self.norm.forward(x).map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.lm_head.forward(&h).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+impl Stage for Layer_Weights {
+    fn forward(&mut self, x: &Tensor, offset: usize, mask: Option<&Tensor>) -> anyhow::Result<Tensor> {
         let h = self.ln1.forward(x)?;
         let h = self.self_attn.Forward(&h, mask, offset)?;
         let x = (x + h)?;
         let h2 = self.ln2.forward(&x)?;
         let h2 = h2.apply(&self.mlp)?;
-        x + h2
+        (x + h2).map_err(|e| anyhow::anyhow!("{e}"))
     }
-
-    pub fn Clear_Kv_Cache(&mut self) {
-        self.self_attn.Clear_Kv_Cache();
+    fn kv_cache(&self) -> Option<&candle_nn::kv_cache::ConcatKvCache> {
+        Some(&self.self_attn.kv_cache)
+    }
+    fn kv_cache_mut(&mut self) -> Option<&mut candle_nn::kv_cache::ConcatKvCache> {
+        Some(&mut self.self_attn.kv_cache)
     }
 }
 
@@ -252,15 +273,8 @@ impl Layer_Weights {
 // ModelWeights (public, full model - kept for reference)
 // ============================================================
 
-#[derive(Debug, Clone)]
 pub struct Model_Weights {
-    /// 输入 embedding（如果是部分模型不含输入头，则为 None）
-    pub embed_tokens: Option<Embedding>,
-    pub layers: Vec<Layer_Weights>,
-    /// Output RmsNorm（如果是部分模型不含输出头，则为 None）
-    pub norm: Option<RmsNorm>,
-    /// LM Head（如果是部分模型不含输出头，则为 None）
-    pub lm_head: Option<QMatMul>,
+    pub stages: Vec<Box<dyn Stage>>,
     pub device: Device,
     pub dtype: DType,
     span: tracing::Span,
@@ -296,23 +310,14 @@ impl Model_Weights {
         Tensor::from_slice(&mask, (b, 1, tgt, tgt + offset), &self.device)?
             .to_dtype(self.dtype)
     }
+}
 
-    /// Forward pass，支持完整模型和部分模型：
-    /// - 如果包含 embed_tokens：input 为 token IDs [batch, seq_len]，自动执行 embedding
-    /// - 如果不含 embed_tokens：input 为已嵌入的 hidden state [batch, seq_len, hidden_dim]
-    /// - 如果包含 norm + lm_head：返回 logits [batch, vocab_size]
-    /// - 如果不含 norm + lm_head：返回最后的 hidden state [batch, seq_len, hidden_dim]
-    pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
+impl Model for Model_Weights {
+    fn Forward(&mut self, input: &Tensor, offset: usize) -> anyhow::Result<Tensor> {
         let _enter = self.span.enter();
 
-        // 如果有 embedding，将 token IDs 转为 hidden state；否则直接使用输入的 hidden state
-        let mut h = if let Some(ref embed) = self.embed_tokens {
-            embed.forward(input)?
-        } else {
-            input.clone()
-        };
+        let mut h = self.stages[0].forward(input, offset, None)?;
 
-        // 获取 batch size 和 sequence length（从 hidden state 的前两维）
         let b = h.dim(0)?;
         let l = h.dim(1)?;
 
@@ -321,51 +326,72 @@ impl Model_Weights {
         } else {
             Some(self.Causal_Mask(b, l, offset, None)?)
         };
-        for layer in &mut self.layers {
-            h = layer.Forward(&h, causal_mask.as_ref(), offset)?;
+
+        for stage in &mut self.stages[1..] {
+            h = stage.forward(&h, offset, causal_mask.as_ref())?;
         }
 
-        // 如果有输出头，执行 norm → lm_head 返回 logits；否则返回 hidden state
-        if let (Some(ref norm), Some(ref lm_head)) = (&self.norm, &self.lm_head) {
-            let h = norm.forward(&h)?;
-            let _enter = self.span_output.enter();
-            let last_hidden = h.narrow(1, l - 1, 1)?;
-            lm_head.forward(&last_hidden)?.squeeze(1)
-        } else {
-            Ok(h)
+        Ok(h)
+    }
+
+    fn Clear_Kv_Cache(&mut self) {
+        for stage in &mut self.stages {
+            stage.clear_kv_cache();
         }
     }
 
-    pub fn Clear_Kv_Cache(&mut self) {
-        for layer in &mut self.layers {
-            layer.Clear_Kv_Cache();
-        }
+    fn extract_kv_cache(&self) -> std::result::Result<Vec<(Tensor, Tensor)>, String> {
+        extract_kv_cache_from_stages(&self.stages)
     }
 
-    /// 动态组装: 从预构建的组件创建模型（支持完整模型和部分模型）
-    ///
-    /// - embed_tokens: 输入 embedding（部分模型可为 None）
-    /// - norm / lm_head: 输出头（部分模型可为 None）
-    pub fn Build_Model(
-        embed_tokens: Option<Embedding>,
-        layers: Vec<Layer_Weights>,
-        norm: Option<RmsNorm>,
-        lm_head: Option<QMatMul>,
-        device: Device,
-        dtype: DType,
-    ) -> Self {
+    fn restore_kv_cache(&mut self, kvs: Vec<(Tensor, Tensor)>) -> std::result::Result<(), String> {
+        restore_kv_cache_to_stages(&mut self.stages, kvs)
+    }
+}
+
+impl Model_Weights {
+    /// 从 GGUF 文件加载所有层并组装为 stages
+    pub fn Load_Stages(
+        content: &gguf_file::Content,
+        file: &mut std::fs::File,
+        block_start: usize,
+        block_end: usize,
+        embed_tokens: Option<candle_nn::Embedding>,
+        output_head: Option<(RmsNorm, QMatMul)>,
+        arch_info: &Model_Arch_Info,
+        rotary: Arc<Rotary_Embedding>,
+        device: &Device,
+    ) -> anyhow::Result<Vec<Box<dyn Stage>>> {
+        let block_count = if block_start <= block_end { block_end - block_start + 1 } else { 0 };
+        let mut layers = Vec::with_capacity(block_count);
+        for i in block_start..=block_end {
+            let mut lw = GGUF_Load_Layer(content, file, i, device)?;
+            let blk_idx = i - 1;
+            let layer = Layer_Weights::Build_From_Extracted(
+                &mut lw.tensors,
+                arch_info.head_count,
+                arch_info.head_count_kv,
+                arch_info.head_dim,
+                arch_info.rms_norm_eps,
+                rotary.clone(),
+                blk_idx,
+            )
+            .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
+            layers.push(layer);
+        }
+
+        let mut stages: Vec<Box<dyn Stage>> = Vec::with_capacity(block_count + 2);
+        if let Some(e) = embed_tokens { stages.push(Box::new(Qwen3_Embedding_Stage(e))); }
+        for layer in layers { stages.push(Box::new(layer)); }
+        if let Some((n, h)) = output_head { stages.push(Box::new(Qwen3_Output_Stage { norm: n, lm_head: h })); }
+        Ok(stages)
+    }
+
+    /// 从预构建的 stages 创建模型
+    pub fn Build_Model(stages: Vec<Box<dyn Stage>>, device: Device, dtype: DType) -> Self {
         let span = tracing::span!(tracing::Level::TRACE, "model");
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
-        Self {
-            embed_tokens,
-            layers,
-            norm,
-            lm_head,
-            device,
-            dtype,
-            span,
-            span_output,
-        }
+        Self { stages, device, dtype, span, span_output }
     }
 }
 

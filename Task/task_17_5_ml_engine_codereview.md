@@ -171,3 +171,15 @@ Round 6: context.rs
 
 <!-- 在此区域写下评审意见 -->
 
+### 17.5 ML_Engine 审查完成 (2026-07-04)
+- Round 1: device.rs + common/ 提取 ✅
+- Round 2: qwen3.rs + qwen3_moe.rs + gguf_model.rs ✅
+- Round 3: gguf_tensor.rs 删除 ✅
+- Round 4: gguf_model_manager.rs PGGUF 转换修复 ✅
+- Round 5: gguf_model.rs 重构（Qwen3-only、trait Model、trait Stage）✅
+- Round 6: context.rs 待审查
+
+**测试验证:**
+- Test 1 (双卡流水线): 0.6B GPU ✅ — meow~ 多轮、/clear、quit
+- Test 2 (三卡单卡): 30B ✅
+- Test 3 (PGGUF 转换+单机): 0.6B ✅

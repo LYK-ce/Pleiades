@@ -77,8 +77,7 @@ pub use ml_engine::{
     GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model, Resolve_Model_Path,
 };
 pub use ml_engine::{
-    GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference,
-    GGUF_Encode, GGUF_Decode, Inference_Config,
+    GGUF_Model, GGUF_Load_Model, GGUF_Unload_Model, GGUF_Model_Inference, Model,
 };
 pub use ml_engine::MlSession;
 pub use ml_engine::context::Message;

@@ -10,6 +10,10 @@
 
 mod rope;
 mod swiglu_mlp;
+pub mod stage;
+pub mod model;
 
 pub use rope::Rotary_Embedding;
 pub use swiglu_mlp::Mlp_Weights;
+pub use stage::Stage;
+pub use model::{Model, extract_kv_cache_from_stages, restore_kv_cache_to_stages};

@@ -18,7 +18,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use candle_core::quantized::QTensor;
+use candle_core::quantized::{gguf_file, QTensor};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{Embedding, Module};
 use candle_transformers::fused_moe::{FusedMoeGGUF, MoeCfg};
@@ -28,10 +28,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use super::common::{Mlp_Weights, Rotary_Embedding};
-use super::qwen3::{
+use super::super::common::{Mlp_Weights, Rotary_Embedding, Stage, Model, extract_kv_cache_from_stages, restore_kv_cache_to_stages};
+use super::{
     Attention_Weights,
+    Qwen3_Embedding_Stage, Qwen3_Output_Stage,
 };
+use crate::ml_engine::gguf_model_manager::{GGUF_Load_Layer, Model_Arch_Info};
 
 type Result<T> = candle_core::Result<T>;
 
@@ -149,24 +151,23 @@ impl Qwen3MoE_Layer {
 
         Ok(Self { self_attn, ln1, mlp, ln2 })
     }
+}
 
-    pub fn Forward(
-        &mut self,
-        x: &Tensor,
-        mask: Option<&Tensor>,
-        offset: usize,
-        is_prefill: bool,
-    ) -> Result<Tensor> {
+impl Stage for Qwen3MoE_Layer {
+    fn forward(&mut self, x: &Tensor, offset: usize, mask: Option<&Tensor>) -> anyhow::Result<Tensor> {
+        let is_prefill = x.dims3().map(|(_, l, _)| l > 1).unwrap_or(false);
         let h = self.ln1.forward(x)?;
         let h = self.self_attn.Forward(&h, mask, offset)?;
         let x = (x + h)?;
         let h2 = self.ln2.forward(&x)?;
         let h2 = self.mlp.Forward(&h2, is_prefill)?;
-        x + h2
+        (x + h2).map_err(|e| anyhow::anyhow!("{e}"))
     }
-
-    pub fn Clear_Kv_Cache(&mut self) {
-        self.self_attn.Clear_Kv_Cache();
+    fn kv_cache(&self) -> Option<&candle_nn::kv_cache::ConcatKvCache> {
+        Some(&self.self_attn.kv_cache)
+    }
+    fn kv_cache_mut(&mut self) -> Option<&mut candle_nn::kv_cache::ConcatKvCache> {
+        Some(&mut self.self_attn.kv_cache)
     }
 }
 
@@ -174,12 +175,8 @@ impl Qwen3MoE_Layer {
 // Qwen3MoE_Model — 完整 MoE 模型
 // ============================================================
 
-#[derive(Debug, Clone)]
 pub struct Qwen3MoE_Model {
-    pub embed_tokens: Option<Embedding>,
-    pub layers: Vec<Qwen3MoE_Layer>,
-    pub norm: Option<RmsNorm>,
-    pub lm_head: Option<QMatMul>,
+    pub stages: Vec<Box<dyn Stage>>,
     pub device: Device,
     pub dtype: DType,
     span: tracing::Span,
@@ -187,20 +184,86 @@ pub struct Qwen3MoE_Model {
 }
 
 impl Qwen3MoE_Model {
-    pub fn Build_Model(
-        embed_tokens: Option<Embedding>,
-        layers: Vec<Qwen3MoE_Layer>,
-        norm: Option<RmsNorm>,
-        lm_head: Option<QMatMul>,
-        device: Device,
-        dtype: DType,
-    ) -> Self {
+    /// 从 GGUF metadata 提取 MoE 配置
+    pub fn MoE_Cfg_From_Metadata(
+        metadata: &HashMap<String, gguf_file::Value>,
+        arch: &str,
+        hidden_size: usize,
+    ) -> anyhow::Result<MoeCfg> {
+        let md_get_usize = |key: &str| -> anyhow::Result<usize> {
+            metadata
+                .get(key)
+                .ok_or_else(|| anyhow::anyhow!("missing metadata key: {key}"))
+                .and_then(|v| {
+                    v.to_u32()
+                        .map(|u| u as usize)
+                        .or_else(|_| v.to_u64().map(|u| u as usize))
+                        .map_err(|_| anyhow::anyhow!("cannot convert {key} to usize"))
+                })
+        };
+
+        let expert_count = md_get_usize(&format!("{arch}.expert_count")).unwrap_or(0);
+        let expert_used_count = md_get_usize(&format!("{arch}.expert_used_count")).unwrap_or(0);
+        let expert_feed_forward_length =
+            md_get_usize(&format!("{arch}.expert_feed_forward_length")).unwrap_or(0);
+
+        Ok(MoeCfg {
+            moe_intermediate_size: expert_feed_forward_length,
+            num_experts: expert_count,
+            norm_topk_prob: expert_used_count > 0,
+            num_experts_per_tok: expert_used_count.max(1),
+            hidden_size,
+            act: candle_nn::Activation::Silu,
+            decoder_sparse_step: None,
+        })
+    }
+
+    /// 从 GGUF 文件加载所有层并组装为 stages
+    pub fn Load_Stages(
+        content: &gguf_file::Content,
+        file: &mut std::fs::File,
+        block_start: usize,
+        block_end: usize,
+        embed_tokens: Option<candle_nn::Embedding>,
+        output_head: Option<(RmsNorm, QMatMul)>,
+        arch_info: &Model_Arch_Info,
+        rotary: Arc<Rotary_Embedding>,
+        moe_cfg: &MoeCfg,
+        model_dtype: DType,
+        device: &Device,
+    ) -> anyhow::Result<Vec<Box<dyn Stage>>> {
+        let block_count = if block_start <= block_end { block_end - block_start + 1 } else { 0 };
+        let mut layers = Vec::with_capacity(block_count);
+        for i in block_start..=block_end {
+            let mut lw = GGUF_Load_Layer(content, file, i, device)?;
+            let blk_idx = i - 1;
+            let layer = Qwen3MoE_Layer::Build_From_Extracted(
+                &mut lw.tensors,
+                arch_info.head_count,
+                arch_info.head_count_kv,
+                arch_info.head_dim,
+                arch_info.rms_norm_eps,
+                rotary.clone(),
+                blk_idx,
+                moe_cfg.num_experts > 0,
+                moe_cfg,
+                model_dtype,
+            )
+            .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
+            layers.push(layer);
+        }
+
+        let mut stages: Vec<Box<dyn Stage>> = Vec::with_capacity(block_count + 2);
+        if let Some(e) = embed_tokens { stages.push(Box::new(Qwen3_Embedding_Stage(e))); }
+        for layer in layers { stages.push(Box::new(layer)); }
+        if let Some((n, h)) = output_head { stages.push(Box::new(Qwen3_Output_Stage { norm: n, lm_head: h })); }
+        Ok(stages)
+    }
+
+    pub fn Build_Model(stages: Vec<Box<dyn Stage>>, device: Device, dtype: DType) -> Self {
         let span = tracing::span!(tracing::Level::TRACE, "model");
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
-        Self {
-            embed_tokens, layers, norm, lm_head,
-            device, dtype, span, span_output,
-        }
+        Self { stages, device, dtype, span, span_output }
     }
 
     fn Causal_Mask(
@@ -220,42 +283,36 @@ impl Qwen3MoE_Model {
         Tensor::from_slice(&mask, (b, 1, tgt, tgt + offset), &self.device)?
             .to_dtype(self.dtype)
     }
+}
 
-    pub fn Forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
+impl Model for Qwen3MoE_Model {
+    fn Forward(&mut self, input: &Tensor, offset: usize) -> anyhow::Result<Tensor> {
         let _enter = self.span.enter();
 
-        let mut h = if let Some(ref embed) = self.embed_tokens {
-            embed.forward(input)?
-        } else {
-            input.clone()
-        };
+        let mut h = self.stages[0].forward(input, offset, None)?;
 
         let b = h.dim(0)?;
         let l = h.dim(1)?;
-        let is_prefill = l > 1;
-        let causal_mask = if l == 1 {
-            None
-        } else {
-            Some(self.Causal_Mask(b, l, offset)?)
-        };
+        let causal_mask = if l == 1 { None } else { Some(self.Causal_Mask(b, l, offset)?) };
 
-        for layer in &mut self.layers {
-            h = layer.Forward(&h, causal_mask.as_ref(), offset, is_prefill)?;
+        for stage in &mut self.stages[1..] {
+            h = stage.forward(&h, offset, causal_mask.as_ref())?;
         }
 
-        if let (Some(ref norm), Some(ref lm_head)) = (&self.norm, &self.lm_head) {
-            let h = norm.forward(&h)?;
-            let _enter = self.span_output.enter();
-            let last_hidden = h.narrow(1, l - 1, 1)?;
-            lm_head.forward(&last_hidden)?.squeeze(1)
-        } else {
-            Ok(h)
+        Ok(h)
+    }
+
+    fn Clear_Kv_Cache(&mut self) {
+        for stage in &mut self.stages {
+            stage.clear_kv_cache();
         }
     }
 
-    pub fn Clear_Kv_Cache(&mut self) {
-        for layer in &mut self.layers {
-            layer.Clear_Kv_Cache();
-        }
+    fn extract_kv_cache(&self) -> std::result::Result<Vec<(Tensor, Tensor)>, String> {
+        extract_kv_cache_from_stages(&self.stages)
+    }
+
+    fn restore_kv_cache(&mut self, kvs: Vec<(Tensor, Tensor)>) -> std::result::Result<(), String> {
+        restore_kv_cache_to_stages(&mut self.stages, kvs)
     }
 }

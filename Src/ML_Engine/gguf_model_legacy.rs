@@ -37,7 +37,7 @@ use super::gguf_models::deepseek_v3::{DeepSeek_Model, DeepSeek_Layer, DeepSeek_C
 use super::gguf_models::deepseek_v4::DeepSeekV4Model;
 #[cfg(feature = "llama")]
 use super::gguf_models::llama::{Llama_Layer, Llama_Model};
-use super::gguf_models::qwen3_moe::{Qwen3MoE_Model, Qwen3MoE_Layer};
+use super::gguf_models::qwen3::{Qwen3MoE_Model, Qwen3MoE_Layer};
 use candle_transformers::fused_moe::MoeCfg;
 
 // ============================================================

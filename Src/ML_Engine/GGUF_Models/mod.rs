@@ -9,7 +9,6 @@
 
 pub mod common;
 pub mod qwen3;
-pub mod qwen3_moe;
 // DeepSeek / Llama — 注释保留，待后续恢复
 // #[cfg(feature = "deepseek")]
 // pub mod deepseek_v3;
@@ -23,5 +22,7 @@ pub use common::{Rotary_Embedding, Mlp_Weights};
 // 重新导出 Qwen3 相关类型
 pub use qwen3::{
     Attention_Weights,
-    Layer_Weights, Model_Weights, Qwen3_Config,
+    Layer_Weights, Model_Weights,
+    Qwen3_Config, Qwen3_Embedding_Stage, Qwen3_Output_Stage,
+    Qwen3MoE_Model, Qwen3MoE_Layer,
 };

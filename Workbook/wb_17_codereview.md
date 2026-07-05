@@ -190,3 +190,29 @@ Level 3: Orchestrator → TUI/CLI
   - 提取 Load_Output_Head、Build_GGUF_Model 共用函数
   - LayerWithAttention trait 统一 extract/restore_kv_cache
 - GGUF_Models/mod.rs: 注释掉 deepseek_v3/deepseek_v4/llama 模块声明
+
+### PGGUF 转换修复 + 死代码清理 (2026-07-04)
+- gguf_model_manager.rs: 删除 streaming_write_pgguf(~200行)及辅助函数，改回 gguf_file::write()
+  - 根本原因: 手写 GGUF 序列化与 candle 内部格式不兼容，导致 tensor offset 计算错误
+- gguf_model.rs: 删除 GGUF_Encode + GGUF_Decode（死代码，已被 context.rs apply_chat_template 替代）
+- lib.rs / mod.rs: 清理对应 re-export
+- instructions.md: 新增 Test 3（PGGUF 转换 + 单机推理测试，0.6B Q8_0）
+### gguf_model.rs 继续清理 (2026-07-04)
+- Inference_Config 已删除（唯一字段 eos_token 无消费者，实际路径通过 arch_info → context/session 直读）
+- GGUF_Model 精简 inference_config 字段
+- GGUF_Encode + GGUF_Decode 已删除（死代码，实际编码解码在 context.rs apply_chat_template）
+- gguf_model.rs 449行，审查通过，GGUF_Unload_Model 保留
+### AnyModel → trait Model (2026-07-04)
+- 删除 AnyModel enum + LayerWithAttention trait
+- 新增 pub trait Model: Send，统一 Qwen3/Qwen3MoE
+- Box<dyn Model + Send> 替代 enum dispatch
+- impl Model for Model_Weights / Qwen3MoE_Model（完全限定语法避免递归）
+- Test 3 全链路通过 ✅
+### trait Stage 重构 (2026-07-04)
+- 新增 common/stage.rs: trait Stage + Embedding_Stage + Output_Stage
+- Layer_Weights / Qwen3MoE_Layer impl Stage（kv_cache + clear_kv_cache）
+- Model_Weights / Qwen3MoE_Model: 替换 embed_tokens/layers/norm/lm_head → stages: Vec<Box<dyn Stage>>
+- Forward 改为遍历 stages，消除所有 Option if 判断
+- extract/restore_kv_cache 通过 Stage::kv_cache() 统一操作
+- Build_Model 接受 stages 而非独立组件
+- Test 3 全链路通过 ✅
