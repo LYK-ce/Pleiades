@@ -10,8 +10,8 @@ agent必须严格遵守以下规则
 
 具体范围：
 - `Src/Robot/` — STM32 串口协议、机器人控制、WebSocket 遥控
-- `Workbook_Orion/` — Robot 工作记录
-- `Task_Orion/` — Robot 任务文件
+- `Task/` — Robot 任务文件
+- `Workbook/` — Robot 工作记录
 - Robot 相关的 Lua 绑定（`Src/VM/capability_binding.rs` 中 robot 部分）
 - Robot 相关的测试脚本和工具（`programs/user/robot_test.lua`、`Tool/robot_control.html`）
 
@@ -27,7 +27,10 @@ agent必须严格遵守以下规则
 
 **`ML_review` 分支职责**：Pleiades 分布式推理系统的 Code Review 与完善（Task 17），包括全模块审查、重构、统一规范、消除死代码。
 
-**跨分支合并**：当 `ML_review` 的改动需要同步到 `Pleiades-Orion` 时，由人类手动触发 merge。合并时如 `instructions.md` 冲突，保留各自分支的版本。
+**跨分支合并**：当 `ML_review` 的改动需要同步到 `Pleiades-Orion` 时，由人类手动触发 merge。合并时以下文件/目录如冲突，保留各自分支的版本：
+- `.github/instructions.md` — 分支职责声明不同
+- `Task/` — 各自的任务文件，完全独立
+- `Workbook/` — 各自的工作记录，完全独立
 
 
 
