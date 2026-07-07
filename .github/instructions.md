@@ -4,6 +4,33 @@ agent必须严格遵守以下规则
 
 
 
+## ⚠️ 分支职责声明
+
+**当前分支 `Pleiades-Orion` 只负责 Robot（机器人控制）相关内容的开发。**
+
+具体范围：
+- `Src/Robot/` — STM32 串口协议、机器人控制、WebSocket 遥控
+- `Workbook_Orion/` — Robot 工作记录
+- `Task_Orion/` — Robot 任务文件
+- Robot 相关的 Lua 绑定（`Src/VM/capability_binding.rs` 中 robot 部分）
+- Robot 相关的测试脚本和工具（`programs/user/robot_test.lua`、`Tool/robot_control.html`）
+
+**禁止在 `Pleiades-Orion` 分支上修改以下内容**（这些由 `ML_review` 分支负责）：
+- ML_Engine 推理引擎
+- Network / P2P 网络
+- Orchestrator 任务编排
+- Storage 存储管理
+- Session_Manager 会话管理
+- PeerManagement 节点管理
+- Config / EventBus 基础设施
+- 分布式推理 Pipeline / 流水线逻辑
+
+**`ML_review` 分支职责**：Pleiades 分布式推理系统的 Code Review 与完善（Task 17），包括全模块审查、重构、统一规范、消除死代码。
+
+**跨分支合并**：当 `ML_review` 的改动需要同步到 `Pleiades-Orion` 时，由人类手动触发 merge。合并时如 `instructions.md` 冲突，保留各自分支的版本。
+
+
+
 # 思考模式
 1. agent必须用中文进行思考
 
