@@ -4,21 +4,20 @@
 
 //! 机器人 WebSocket 遥控服务器
 //!
-//! 接收 JSON 控制指令，通过 cmd_tx 发给 Robot。
-//! 遥测数据推送到 EventBus。
+//! 接收 JSON 控制指令 → 转发给 Robot。
+//! 10Hz 遥测推送给所有连接的客户端。
 
 use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
 
 use crate::event_bus::{Bus_Event, EventBus};
 use crate::robot::core::command::Command;
 use crate::robot::state::RobotState;
 
-/// 启动 WS 遥控服务（作为 tokio task，共享主 runtime）
 pub fn spawn_robot_ws_server(
     port: u16,
     event_bus: Arc<EventBus>,
@@ -46,9 +45,14 @@ async fn run_server(
     };
     tracing::info!("[Robot WS] 遥控服务器已启动: ws://{addr}");
 
-    let telemetry_bus = event_bus.clone();
+    // 遥测 broadcast（10Hz）
+    let (telemetry_tx, _) = broadcast::channel::<String>(16);
     let telemetry_state = state.clone();
-    tokio::spawn(async move { telemetry_loop(telemetry_bus, telemetry_state).await });
+    let telemetry_bus = event_bus.clone();
+    let telem_tx_clone = telemetry_tx.clone();
+    tokio::spawn(async move {
+        telemetry_loop(telemetry_bus, telemetry_state, telem_tx_clone).await;
+    });
 
     loop {
         match listener.accept().await {
@@ -62,8 +66,9 @@ async fn run_server(
                     }
                 };
                 let tx = cmd_tx.clone();
+                let telemetry_rx = telemetry_tx.subscribe();
                 tokio::spawn(async move {
-                    handle_connection(ws, tx, peer_addr.to_string()).await;
+                    handle_connection(ws, tx, telemetry_rx, peer_addr.to_string()).await;
                 });
             }
             Err(e) => tracing::error!("[Robot WS] accept 错误: {e}"),
@@ -74,12 +79,30 @@ async fn run_server(
 async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     cmd_tx: mpsc::Sender<Command>,
+    mut telemetry_rx: broadcast::Receiver<String>,
     peer: String,
 ) {
     let welcome = serde_json::json!({"type":"welcome","message":"Robot WS connected"});
     let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(welcome.to_string())).await;
 
-    while let Some(msg) = ws.next().await {
+    // 转发遥测到客户端
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let telemetry_handle = tokio::spawn(async move {
+        loop {
+            match telemetry_rx.recv().await {
+                Ok(json) => {
+                    if ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+    });
+
+    // 接收客户端命令
+    while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                 if let Some(cmd) = parse_command(&text) {
@@ -95,6 +118,7 @@ async fn handle_connection(
         }
     }
 
+    telemetry_handle.abort();
     let _ = cmd_tx.send(Command::Stop).await;
     tracing::info!("[Robot WS] {peer} 已断开，自动停车");
 }
@@ -117,9 +141,11 @@ fn parse_command(text: &str) -> Option<Command> {
 async fn telemetry_loop(
     event_bus: Arc<EventBus>,
     state: Arc<tokio::sync::RwLock<RobotState>>,
+    telemetry_tx: broadcast::Sender<String>,
 ) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100)); // 10Hz
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        interval.tick().await;
         let s = state.read().await;
         let payload = serde_json::json!({
             "type": "robot_telemetry",
@@ -130,6 +156,8 @@ async fn telemetry_loop(
             "yaw": s.attitude.yaw,
             "encoders": s.encoders,
         });
-        event_bus.Publish(Bus_Event::State { payload: payload.to_string() });
+        let json = payload.to_string();
+        event_bus.Publish(Bus_Event::State { payload: json.clone() });
+        let _ = telemetry_tx.send(json);
     }
 }
