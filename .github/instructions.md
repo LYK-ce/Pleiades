@@ -118,6 +118,12 @@ Network_Inbound_Event::FileStreamArrived { peer, mut stream } => {
 
 Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理解项目整体架构、各模块职责、关键 API。
 
+## 项目路径
+
+当前项目主目录：`/vepfs-mlp2/c20250205/240804016/Workspace/Pleiades`
+
+编译使用 `build.sh` 脚本（自动处理 GCC 版本兼容）。
+
 ---
 
 # 分布式推理测试验证流程
@@ -133,18 +139,28 @@ Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理�
 
 ## 步骤 0：编译 & 同步
 
+使用项目根目录下的 `build.sh` 脚本编译和部署：
+
 ```bash
-cd /root/code/Pleiades
-cargo build --release
+cd /vepfs-mlp2/c20250205/240804016/Workspace/Pleiades
 
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/1/
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/2/
-cp target/release/Pleiades /vepfs-mlp2/c20250205/240804016/Test_Environment/3/
+# 仅编译
+./build.sh
 
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/1/programs/
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/2/programs/
-cp -r programs/* /vepfs-mlp2/c20250205/240804016/Test_Environment/3/programs/
+# 编译 + 部署到测试环境
+./build.sh deploy
+
+# 运行测试
+./build.sh test -p Pleiades --lib storage
+
+# 快速语法检查
+./build.sh check
+
+# 清理编译缓存
+./build.sh clean
 ```
+
+`build.sh` 自动处理 GCC 版本兼容问题（nvcc 不支持 GCC 13，脚本通过 PATH 注入 gcc-12 软链接解决）。
 
 ---
 
@@ -273,6 +289,78 @@ T1> quit
 T2> quit
 T3> quit
 ```
+
+---
+
+## 测试 3：PGGUF 转换 + 单机推理测试
+
+### 目的
+
+验证 GGUF→PGGUF 自动转换功能正常，转换后的模型可以正常加载并完成单机推理。
+
+### 模型
+
+- `Qwen3-0.6B-Q8_0.gguf`（610MB），存放位置：`/vepfs-mlp2/c20250205/240804016/Test_Environment/`
+
+### 步骤
+
+1. 清理 workspace 中已有的 0.6B 模型文件：
+   ```bash
+   rm -f /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Pleiades_Workspace/Qwen3-0.6B*
+   ```
+
+2. 将模型拷贝到 workspace：
+   ```bash
+   cp /vepfs-mlp2/c20250205/240804016/Test_Environment/Qwen3-0.6B-Q8_0.gguf \
+      /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Pleiades_Workspace/
+   ```
+
+3. 启动 Pleiades（自动 flush 触发 GGUF→PGGUF 转换）：
+   ```bash
+   cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1 && ./Pleiades
+   ```
+
+4. 验证转换：TUI 面板应显示 `Qwen3-0.6B-Q8_0.pgguf [0-27]`，日志显示 `GGUF → PGGUF 转换完成`，且无 `analyze_model failed` 错误。
+
+5. 单机推理：
+   ```
+   session create Qwen3-0.6B-Q8_0.pgguf
+     → session_id = 1
+
+   session inference single_inf 1 Qwen3-0.6B-Q8_0.pgguf
+     → 等待 "ML Thread 就绪"
+
+   api 1
+     → API 启动在 http://127.0.0.1:{port}
+   ```
+
+6. Chat 验证：
+   ```bash
+   cd /vepfs-mlp2/c20250205/240804016/Test_Environment/1/Tool/
+   python chat.py --url http://127.0.0.1:{port}
+   ```
+
+   ```
+   > 你好
+     ← 应返回正常回复，无错误
+   > /exit
+   ```
+
+7. 退出：
+   ```
+   T1> quit
+   ```
+
+### 验证要点
+
+| 验证项 | 测试 3 |
+|--------|:---:|
+| GGUF→PGGUF 自动转换 | ✓ |
+| 转换日志无 error | ✓ |
+| Tokenizer 加载成功 | ✓ |
+| 模型加载成功 | ✓ |
+| 单机推理正常 | ✓ |
+| quit 正常退出 | ✓ |
 
 ---
 

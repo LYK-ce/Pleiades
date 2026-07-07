@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::capability::SessionRequest;
 use super::slot::{Slot, SlotState};
 use crate::event_bus::{Bus_Event, EventBus, NotifyLevel};
-use crate::ml_engine::context::MlSession;
+use crate::ml_engine::context::MlContext;
 use crate::ml_engine::lua_tensor::{bytes_to_tensor, tensor_to_bytes};
 use crate::storage::StorageCapability;
 use tokio::sync::mpsc;
@@ -77,7 +77,7 @@ impl Session {
                 }
             };
 
-            let mut ml = match MlSession::new("cpu") {
+            let mut ml = match MlContext::new("cpu") {
                 Ok(s) => s,
                 Err(e) => {
                     event_bus.Publish(Bus_Event::Notify {
@@ -156,7 +156,7 @@ impl Session {
                             let rendered = ml.apply_chat_template(&messages);
                             tracing::info!("Session {} rendered template:\n{}", session_id, rendered);
                         }
-                        let token_ids = match ml.encode_messages(&messages) {
+                        let token_ids = match ml.encode(&messages) {
                             Ok(ids) => ids,
                             Err(e) => {
                                 event_bus.Publish(Bus_Event::Notify {

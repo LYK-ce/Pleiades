@@ -6,10 +6,14 @@
 //!
 //! 包含被多个模型实现共享的基础类型：
 //! - Rotary_Embedding: Rotary Position Embedding
-//! - Mlp_Weights: 标准 SiLU-gated MLP
+//! - Mlp_Weights: SwiGLU MLP（SiLU-gated）
 
 mod rope;
-mod mlp;
+mod swiglu_mlp;
+pub mod stage;
+pub mod model;
 
 pub use rope::Rotary_Embedding;
-pub use mlp::Mlp_Weights;
+pub use swiglu_mlp::Mlp_Weights;
+pub use stage::Stage;
+pub use model::{Model, extract_kv_cache_from_stages, restore_kv_cache_to_stages};

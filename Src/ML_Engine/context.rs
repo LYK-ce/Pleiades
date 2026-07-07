@@ -3,7 +3,7 @@
 
 //! ML Engine 能力层
 //!
-//! 通过 `MlSession` userdata 暴露给 Lua，类似 Python class：
+//! 通过 `MlContext` userdata 暴露给 Lua，类似 Python class：
 //!
 //! ```lua
 //! local sess = ml.new("cpu")
@@ -39,7 +39,7 @@ pub struct Message {
 }
 
 // ============================================================
-// MlSession — 对外句柄 (Lua userdata)
+// MlContext — 推理会话 (Lua userdata)
 // ============================================================
 
 /// 推理会话。空壳构造 + 按需加载模型。
@@ -64,15 +64,7 @@ pub struct Message {
 ///    │ model = None     │  ← 回到空壳
 ///    └─────────────────┘
 /// ```
-pub struct MlSession {
-    ctx: MlContext,
-}
-
-// ============================================================
-// MlContext — 内部状态（外部不可见）
-// ============================================================
-
-struct MlContext {
+pub struct MlContext {
     /// 模型权重（None = 空壳状态）
     model: Option<GGUF_Model>,
     /// tokenizer，独立加载（None = 未加载）
@@ -100,13 +92,13 @@ struct MlContext {
 }
 
 // ============================================================
-// MlSession — Rust 侧公开方法
+// MlContext — Rust 侧公开方法
 // ============================================================
 
-impl MlSession {
+impl MlContext {
     // ─── 构造 / 析构 ───────────────────────────────────────
 
-    /// 创建空壳 MlSession（不加载模型）。
+    /// 创建空壳 MlContext（不加载模型）。
     ///
     /// 空壳状态下可用方法：
     /// - `tensorize()` — 纯数据转换，仅需 device
@@ -124,19 +116,17 @@ impl MlSession {
             .unwrap_or(299792458);
 
         Ok(Self {
-            ctx: MlContext {
-                model: None,
-                tokenizer: None,
-                offset: 0,
-                rng_state: default_seed,
-                eos_token_id: 151645, // Qwen3 默认 EOS
-                chat_template: None,
-                device,
-                offloaded_kv: None,
-                offloaded_model_path: None,
-                offloaded_layer_start: 0,
-                offloaded_layer_end: 0,
-            },
+            model: None,
+            tokenizer: None,
+            offset: 0,
+            rng_state: default_seed,
+            eos_token_id: 151645,
+            chat_template: None,
+            device,
+            offloaded_kv: None,
+            offloaded_model_path: None,
+            offloaded_layer_start: 0,
+            offloaded_layer_end: 0,
         })
     }
 
@@ -147,21 +137,21 @@ impl MlSession {
     /// 避免因路径无效导致旧模型丢失。
     pub fn load_model(&mut self, path: &Path, start: usize, end: usize) -> Result<(), String> {
         // 先尝试加载新模型（失败则保留旧模型不动）
-        let model = GGUF_Load_Model(start, end, path, &self.ctx.device)
+        let model = GGUF_Load_Model(start, end, path, &self.device)
             .map_err(|e| format!("Failed to load model: {e}"))?;
 
         // 新模型加载成功 → 安全卸载旧模型
-        if let Some(old) = self.ctx.model.take() {
+        if let Some(old) = self.model.take() {
             GGUF_Unload_Model(old);
         }
 
-        self.ctx.model = Some(model);
-        self.ctx.offset = 0;
+        self.model = Some(model);
+        self.offset = 0;
 
         // 保存实际加载范围，供 offload 使用
-        self.ctx.offloaded_model_path = Some(path.to_path_buf());
-        self.ctx.offloaded_layer_start = start;
-        self.ctx.offloaded_layer_end = end;
+        self.offloaded_model_path = Some(path.to_path_buf());
+        self.offloaded_layer_start = start;
+        self.offloaded_layer_end = end;
 
         Ok(())
     }
@@ -174,13 +164,17 @@ impl MlSession {
         let tokenizer = shimmytok::Tokenizer::from_gguf_file(path)
             .map_err(|e| format!("Failed to load tokenizer from {}: {}", path.display(), e))?;
 
-        // 同时从文件中解析 eos_token_id
-        let arch_info = super::gguf_model_manager::GGUF_Analyze(path)
-            .map_err(|e| format!("Failed to analyze model for eos token: {}", e))?;
-        self.ctx.eos_token_id = arch_info.eos_token_id;
-        self.ctx.chat_template = arch_info.chat_template.clone();
+        // 从文件中解析 eos_token_id + chat_template
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to open for metadata: {e}"))?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .map_err(|e| format!("Failed to read GGUF content: {e}"))?;
+        let arch_info = super::gguf_model_manager::GGUF_Analyze_From_Content(&content)
+            .map_err(|e| format!("Failed to analyze model: {e}"))?;
+        self.eos_token_id = arch_info.eos_token_id;
+        self.chat_template = arch_info.chat_template.clone();
 
-        self.ctx.tokenizer = Some(tokenizer);
+        self.tokenizer = Some(tokenizer);
         Ok(())
     }
 
@@ -188,46 +182,31 @@ impl MlSession {
     ///
     /// 同时清除模型权重和 tokenizer。不消耗 self，session 可重复 load_model / load_tokenizer。
     pub fn unload(&mut self) {
-        if let Some(model) = self.ctx.model.take() {
+        if let Some(model) = self.model.take() {
             GGUF_Unload_Model(model);
         }
-        self.ctx.tokenizer = None;
-        self.ctx.offset = 0;
-        self.ctx.eos_token_id = 151645;
+        self.tokenizer = None;
+        self.offset = 0;
+        self.eos_token_id = 151645;
     }
 
     /// 检查模型是否已加载。
     pub fn has_model(&self) -> bool {
-        self.ctx.model.is_some()
+        self.model.is_some()
     }
 
     // ─── 编解码 ────────────────────────────────────────────
-
-    /// 已废弃：使用 `encode_messages()` 替代。
-    #[deprecated(note = "use encode_messages() instead")]
-    pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        let tokenizer = self
-            .ctx
-            .tokenizer
-            .as_ref()
-            .ok_or("encode: no tokenizer loaded. Call load_tokenizer() first.")?;
-        let format_prompt = format!("<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n");
-        let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
-        tokenizer
-            .encode_with_options(&format_prompt, &opts)
-            .map_err(|e| format!("Encode failed: {e}"))
-    }
 
     /// 使用 chat template 编码 messages 数组。
     ///
     /// 若有 chat_template → apply_template → tokenize。
     /// 若无 → fallback 为当前硬编码 Qwen3 格式（仅支持最后一轮 user）。
-    pub fn encode_messages(&self, messages: &[Message]) -> Result<Vec<u32>, String> {
+    pub fn encode(&self, messages: &[Message]) -> Result<Vec<u32>, String> {
         let tokenizer = self
-            .ctx
+            
             .tokenizer
             .as_ref()
-            .ok_or("encode_messages: no tokenizer loaded.")?;
+            .ok_or("encode: no tokenizer loaded.")?;
 
         let prompt = self.apply_chat_template(messages);
         let opts = shimmytok::EncodeOptions::with_parse_special(true, true);
@@ -242,7 +221,7 @@ impl MlSession {
     /// 通过 minijinja 渲染。若无模板则 fallback 为硬编码 Qwen3 格式。
     pub fn apply_chat_template(&self, messages: &[Message]) -> String {
         // 1. 优先使用 GGUF metadata 中的 chat_template
-        if let Some(ref tmpl_str) = self.ctx.chat_template {
+        if let Some(ref tmpl_str) = self.chat_template {
             match Self::render_with_minijinja(tmpl_str, messages) {
                 Ok(result) => return result,
                 Err(e) => tracing::warn!("chat_template render failed, fallback to qwen3: {}", e),
@@ -252,94 +231,9 @@ impl MlSession {
         Self::fallback_qwen3_template(messages)
     }
 
-    /// 将 Python 风格的字符串方法调用改写为 minijinja 过滤器语法。
-    /// 参考: Crane (https://github.com/lucasjinreal/Crane)
-    fn rewrite_python_str_methods(template: &str) -> String {
-        let template = Self::rewrite_split_index(template);
-        const METHODS: &[&str] = &["startswith", "endswith", "split", "lstrip", "rstrip", "strip"];
-        let mut out = template.to_string();
-        for method in METHODS {
-            let pat = format!(".{}(", method);
-            let repl = format!(" | {}(", method);
-            out = out.replace(&pat, &repl);
-        }
-        out
-    }
-
-    /// 将 .split(X)[0] → | split(X) | first, .split(X)[-1] → | split(X) | last
-    fn rewrite_split_index(template: &str) -> String {
-        let mut out = String::with_capacity(template.len());
-        let bytes = template.as_bytes();
-        let len = bytes.len();
-        let mut i = 0;
-        while i < len {
-            // 查找 .split(
-            let suffix = b".split(";
-            if let Some(pos) = bytes[i..].windows(suffix.len()).position(|w| w == suffix) {
-                let abs = i + pos;
-                out.push_str(&template[i..abs]);
-                // 找到匹配的 )
-                let after_dot_split = abs + suffix.len();
-                if let Some(end) = Self::find_matching_paren(&template[after_dot_split..]) {
-                    let split_args_end = after_dot_split + end + 1; // past the )
-                    // 检查后面是否有 [0] 或 [-1]
-                    let rest = &template[split_args_end..];
-                    if rest.starts_with("[0]") {
-                        out.push_str(" | split(");
-                        out.push_str(&template[after_dot_split..split_args_end]);
-                        out.push_str(" | first");
-                        i = split_args_end + 3; // skip [0]
-                    } else if rest.starts_with("[-1]") {
-                        out.push_str(" | split(");
-                        out.push_str(&template[after_dot_split..split_args_end]);
-                        out.push_str(" | last");
-                        i = split_args_end + 4; // skip [-1]
-                    } else {
-                        // 不处理的索引，原样保留
-                        out.push_str(&template[abs..split_args_end]);
-                        out.push_str(&rest[..rest.chars().next().map_or(0, |c| c.len_utf8())]);
-                        i = split_args_end + rest.chars().next().map_or(0, |c| c.len_utf8());
-                    }
-                } else {
-                    out.push_str(&template[abs..]);
-                    i = len;
-                }
-            } else {
-                out.push_str(&template[i..]);
-                break;
-            }
-        }
-        out
-    }
-
-    /// 找到匹配的 ) 位置（处理嵌套括号和引号）
-    fn find_matching_paren(s: &str) -> Option<usize> {
-        let mut depth = 1usize;
-        let mut in_single = false;
-        let mut in_double = false;
-        for (i, c) in s.char_indices() {
-            match c {
-                '\'' if !in_double => in_single = !in_single,
-                '"' if !in_single => in_double = !in_double,
-                '(' if !in_single && !in_double => depth += 1,
-                ')' if !in_single && !in_double => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
 
     /// minijinja 渲染 chat_template
     fn render_with_minijinja(tmpl_str: &str, messages: &[Message]) -> Result<String, String> {
-        // 将 Python 风格的方法调用改写为 minijinja 过滤器语法
-        // 参考: Crane (https://github.com/lucasjinreal/Crane)
-        let tmpl_str = Self::rewrite_python_str_methods(tmpl_str);
-
         let mut env = minijinja::Environment::new();
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
 
@@ -409,11 +303,11 @@ impl MlSession {
 
     pub fn decode(&self, token_id: u32) -> Result<String, String> {
         let tokenizer = self
-            .ctx
+            
             .tokenizer
             .as_ref()
             .ok_or("decode: no tokenizer loaded. Call load_tokenizer() first.")?;
-        let eos = self.ctx.eos_token_id;
+        let eos = self.eos_token_id;
         let tokens: &[u32] = if token_id == eos { &[] } else { std::slice::from_ref(&token_id) };
         tokenizer
             .decode(tokens, true)
@@ -429,30 +323,30 @@ impl MlSession {
         if token_ids.is_empty() {
             return Err("tensorize: token_ids is empty".into());
         }
-        Tensor::new(token_ids, &self.ctx.device)
+        Tensor::new(token_ids, &self.device)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| format!("Tensorize failed: {e}"))
     }
 
     pub fn forward(&mut self, tensor: &Tensor, offset: Option<usize>) -> Result<Tensor, String> {
         let model = self
-            .ctx
+            
             .model
             .as_mut()
             .ok_or("forward: no model loaded. Call load_model() first.")?;
-        let off = offset.unwrap_or(self.ctx.offset);
+        let off = offset.unwrap_or(self.offset);
         let seq_len = tensor.dims().get(1).copied().unwrap_or(1);
 
         let output =
             GGUF_Model_Inference(model, tensor, off).map_err(|e| format!("Forward failed: {e}"))?;
 
-        self.ctx
+        self
             .device
             .synchronize()
             .map_err(|e| format!("Device sync failed: {e}"))?;
 
         if offset.is_none() {
-            self.ctx.offset += seq_len;
+            self.offset += seq_len;
         }
 
         Ok(output)
@@ -481,13 +375,13 @@ impl MlSession {
                 .to_vec1::<f32>()
                 .map_err(|e| format!("probs → vec failed: {e}"))?;
 
-            self.ctx.rng_state = self
-                .ctx
+            self.rng_state = self
+                
                 .rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             // f64 避免 u32::MAX 超出 f32 精确表示范围导致的分布偏差
-            let random = (self.ctx.rng_state >> 33) as f64 / (u32::MAX as f64);
+            let random = (self.rng_state >> 33) as f64 / (u32::MAX as f64);
 
             let mut cumulative = 0.0f64;
             let mut chosen = (probs_vec.len() - 1) as u32;
@@ -508,16 +402,16 @@ impl MlSession {
 
     /// 返回 EOS token ID。空壳时返回默认值 151645。
     pub fn get_eos(&self) -> u32 {
-        self.ctx.eos_token_id
+        self.eos_token_id
     }
 
     pub fn get_offset(&self) -> usize {
-        self.ctx.offset
+        self.offset
     }
 
     /// 清除 KV Cache（每轮对话开始前调用）
     pub fn reset_kv_cache(&mut self) {
-        if let Some(ref mut model) = self.ctx.model {
+        if let Some(ref mut model) = self.model {
             super::gguf_model::GGUF_Model_Clear_KV_Cache(model);
         }
     }
@@ -529,18 +423,18 @@ impl MlSession {
     /// 用于 temperature > 0 时的 multinomial 采样。设置相同种子可复现推理结果。
     /// 空壳状态下也可调用——种子独立于模型加载。
     pub fn set_seed(&mut self, seed: u64) {
-        self.ctx.rng_state = seed;
+        self.rng_state = seed;
     }
 
     // ─── Offloading ────────────────────────────────────────
 
     /// 将模型从 GPU 卸下：提取 KV → 移到 CPU → 释放模型 → 挂起
     pub fn offload_to_cpu(&mut self) -> Result<(), String> {
-        let model = self.ctx.model.as_ref()
+        let model = self.model.as_ref()
             .ok_or("offload_to_cpu: no model loaded")?;
 
         // 验证 reload 信息已在 load_model 时保存
-        if self.ctx.offloaded_model_path.is_none() {
+        if self.offloaded_model_path.is_none() {
             return Err("offload_to_cpu: missing model path (call load_model first)".into());
         }
 
@@ -559,39 +453,39 @@ impl MlSession {
             .collect::<Result<_, String>>()?;
 
         // 3. 释放 GPU 模型
-        if let Some(old) = self.ctx.model.take() {
+        if let Some(old) = self.model.take() {
             GGUF_Unload_Model(old);
         }
 
         // 4. 保存挂起状态（reload 信息已在 load_model 时保存）
-        self.ctx.offloaded_kv = Some(kvs_cpu);
+        self.offloaded_kv = Some(kvs_cpu);
 
         Ok(())
     }
 
     /// 将模型恢复到 GPU：reload 权重 → KV 移回 GPU → 恢复 KV Cache
     pub fn offload_to_cuda(&mut self) -> Result<(), String> {
-        if self.ctx.model.is_some() {
+        if self.model.is_some() {
             return Err("offload_to_cuda: model is already loaded".into());
         }
 
-        let kvs = self.ctx.offloaded_kv.take()
+        let kvs = self.offloaded_kv.take()
             .ok_or("offload_to_cuda: no offloaded KV cache")?;
-        let model_path = self.ctx.offloaded_model_path.clone()
+        let model_path = self.offloaded_model_path.clone()
             .ok_or("offload_to_cuda: no offloaded model path")?;
-        let start = self.ctx.offloaded_layer_start;
-        let end = self.ctx.offloaded_layer_end;
+        let start = self.offloaded_layer_start;
+        let end = self.offloaded_layer_end;
 
         // 1. 在目标 device 上重建权重
-        let mut model = GGUF_Load_Model(start, end, &model_path, &self.ctx.device)
+        let mut model = GGUF_Load_Model(start, end, &model_path, &self.device)
             .map_err(|e| format!("offload_to_cuda: reload model failed: {e}"))?;
 
         // 2. 将 KV 移回目标 device 并恢复
         let kvs_device: Vec<(Tensor, Tensor)> = kvs.into_iter()
             .map(|(k, v)| {
-                let k_dev = k.to_device(&self.ctx.device)
+                let k_dev = k.to_device(&self.device)
                     .map_err(|e| format!("k to_device gpu: {e}"))?;
-                let v_dev = v.to_device(&self.ctx.device)
+                let v_dev = v.to_device(&self.device)
                     .map_err(|e| format!("v to_device gpu: {e}"))?;
                 Ok((k_dev, v_dev))
             })
@@ -599,19 +493,19 @@ impl MlSession {
 
         model.model.restore_kv_cache(kvs_device)?;
 
-        self.ctx.model = Some(model);
+        self.model = Some(model);
         // 重新保存 reload 信息，供下一轮 offload_to_cpu 使用
-        self.ctx.offloaded_model_path = Some(model_path);
+        self.offloaded_model_path = Some(model_path);
         Ok(())
     }
 
     /// 将 KV Cache 保存到 .kvcache/ 目录，并释放模型
     pub fn offload_save(&mut self, file_id: &str) -> Result<(), String> {
         // 1. 获取 KV（从模型或已 offload 状态）
-        let kvs = if let Some(ref kvs) = self.ctx.offloaded_kv {
+        let kvs = if let Some(ref kvs) = self.offloaded_kv {
             kvs.clone()
         } else {
-            let model = self.ctx.model.as_ref()
+            let model = self.model.as_ref()
                 .ok_or("offload_save: no model loaded and no offloaded KV")?;
 
             let kvs_raw = model.model.extract_kv_cache()?;
@@ -633,31 +527,31 @@ impl MlSession {
         Self::serialize_kv_to_file(
             &file_path,
             &kvs,
-            self.ctx.offloaded_model_path.as_ref()
+            self.offloaded_model_path.as_ref()
                 .ok_or("offload_save: missing model path")?,
-            self.ctx.offloaded_layer_start,
-            self.ctx.offloaded_layer_end,
-            &self.ctx.device,
-            self.ctx.rng_state,
-            self.ctx.offset,
-            self.ctx.eos_token_id,
-            self.ctx.chat_template.as_deref(),
+            self.offloaded_layer_start,
+            self.offloaded_layer_end,
+            &self.device,
+            self.rng_state,
+            self.offset,
+            self.eos_token_id,
+            self.chat_template.as_deref(),
         )?;
 
         // 4. 释放模型（如果还在）
-        if self.ctx.model.is_some() {
-            if let Some(old) = self.ctx.model.take() {
+        if self.model.is_some() {
+            if let Some(old) = self.model.take() {
                 GGUF_Unload_Model(old);
             }
             // KV 保留在 CPU
-            self.ctx.offloaded_kv = Some(kvs);
+            self.offloaded_kv = Some(kvs);
         }
 
         Ok(())
     }
 
     /// 从 .kvcache/ 恢复 session
-    pub fn offload_load(file_id: &str, device_str: &str) -> Result<MlSession, String> {
+    pub fn offload_load(file_id: &str, device_str: &str) -> Result<MlContext, String> {
         let file_path = crate::config::kvcache_dir().join(file_id);
 
         // 1. 反序列化
@@ -683,7 +577,7 @@ impl MlSession {
 
         model.model.restore_kv_cache(kvs_device)?;
 
-        // 4. 组装 MlSession
+        // 4. 组装 MlContext
         let ctx = MlContext {
             model: Some(model),
             tokenizer: None,
@@ -698,7 +592,7 @@ impl MlSession {
             offloaded_layer_end: 0,
         };
 
-        Ok(MlSession { ctx })
+        Ok(ctx)
     }
 
     // ─── 序列化/反序列化 ──────────────────────────────────
@@ -923,7 +817,7 @@ impl MlSession {
 // mlua UserData 注册
 // ============================================================
 
-impl mlua::UserData for MlSession {
+impl mlua::UserData for MlContext {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // ─── 生命周期 ──────────────────────────────────────
         methods.add_method_mut(
@@ -958,7 +852,7 @@ impl mlua::UserData for MlSession {
         // ─── 编解码 ────────────────────────────────────────
         methods.add_method("encode", |_, sess, text: String| {
             let messages = vec![Message { role: "user".into(), content: text }];
-            sess.encode_messages(&messages).map_err(|e| mlua::Error::runtime(e))
+            sess.encode(&messages).map_err(|e| mlua::Error::runtime(e))
         });
 
         methods.add_method("decode", |_, sess, token_id: u32| {
@@ -1044,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_new_creates_empty_session() {
-        let sess = MlSession::new("cpu").expect("create empty session");
+        let sess = MlContext::new("cpu").expect("create empty session");
         assert!(!sess.has_model());
         assert_eq!(sess.get_eos(), 151645);
         assert_eq!(sess.get_offset(), 0);
@@ -1052,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_tensorize_without_model() {
-        let sess = MlSession::new("cpu").expect("create empty session");
+        let sess = MlContext::new("cpu").expect("create empty session");
         let t = sess.tensorize(&[1, 2, 3, 4, 5]).expect("tensorize");
         let dims = t.dims();
         assert_eq!(dims.len(), 2);
@@ -1062,7 +956,7 @@ mod tests {
 
     #[test]
     fn test_tensorize_empty_input_errors() {
-        let sess = MlSession::new("cpu").expect("create empty session");
+        let sess = MlContext::new("cpu").expect("create empty session");
         let result = sess.tensorize(&[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
@@ -1070,15 +964,15 @@ mod tests {
 
     #[test]
     fn test_encode_without_tokenizer_errors() {
-        let sess = MlSession::new("cpu").expect("create empty session");
-        let result = sess.encode("hello");
+        let sess = MlContext::new("cpu").expect("create empty session");
+        let result = sess.encode(&[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no tokenizer"));
     }
 
     #[test]
     fn test_decode_without_tokenizer_errors() {
-        let sess = MlSession::new("cpu").expect("create empty session");
+        let sess = MlContext::new("cpu").expect("create empty session");
         let result = sess.decode(123);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no tokenizer"));
@@ -1086,7 +980,7 @@ mod tests {
 
     #[test]
     fn test_forward_without_model_errors() {
-        let mut sess = MlSession::new("cpu").expect("create empty session");
+        let mut sess = MlContext::new("cpu").expect("create empty session");
         let t = sess.tensorize(&[1, 2, 3]).expect("tensorize");
         let result = sess.forward(&t, Some(0));
         assert!(result.is_err());
@@ -1095,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_unload_on_empty_session_is_noop() {
-        let mut sess = MlSession::new("cpu").expect("create empty session");
+        let mut sess = MlContext::new("cpu").expect("create empty session");
         sess.unload(); // 不应 panic
         assert!(!sess.has_model());
     }
@@ -1104,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_unload_returns_to_empty_state() {
-        let mut sess = MlSession::new("cpu").expect("create empty session");
+        let mut sess = MlContext::new("cpu").expect("create empty session");
         // 无法真正 load（需要 GGUF 文件），但 unload 应安全
         sess.unload();
         assert_eq!(sess.get_eos(), 151645);

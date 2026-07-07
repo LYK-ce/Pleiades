@@ -21,7 +21,7 @@
 #![allow(non_snake_case)]
 
 use std::path::PathBuf;
-use pleiades::MlSession;
+use pleiades::MlContext;
 
 /// 查找测试模型路径
 fn test_model_path() -> PathBuf {
@@ -107,7 +107,7 @@ fn t13_l3_inference() {
     println!();
 
     // 1. 创建 session
-    let mut sess = MlSession::new("cpu").expect("MlSession::new failed");
+    let mut sess = MlContext::new("cpu").expect("MlContext::new failed");
 
     // 2. 加载模型
     println!("[1/4] Loading model…");
@@ -127,7 +127,7 @@ fn t13_l3_inference() {
         role: "user".to_string(),
         content: input_text.to_string(),
     }];
-    let token_ids = sess.encode_messages(&messages).expect("encode_messages failed");
+    let token_ids = sess.encode(&messages).expect("encode failed");
     println!("[3/4] Encoding: \"{}\" → {} tokens (chat_template)", input_text, token_ids.len());
 
     let input_tensor = sess.tensorize(&token_ids).expect("tensorize failed");
