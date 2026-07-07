@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::serial::port;
 use super::super::types::CarType;
 use crate::robot::state::RobotState;
-use tracing::{debug, info};
+use tracing::info;
 
 // ============================================================
 // 运动状态（FUNC_CAR_RUN 协议专属）
@@ -229,7 +229,7 @@ impl STM32Device {
         let cmd_tx = port::spawn_port(
             port, baudrate, 512,
             move |bytes| {
-                debug!("[STM32 RX] raw: {:02X?}", bytes);
+                info!("[STM32 RX] raw: {:02X?}", bytes);
                 for &byte in bytes {
                     if let Some((func, data)) = feed_state_machine(&mut sm, byte) {
                         info!("[STM32] 解析帧 func=0x{func:02X}, data={:02X?}", data);
