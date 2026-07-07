@@ -7,39 +7,72 @@
 
 实现 `Robot` — 长期运行的 tokio task，作为整个机器人系统的中枢。
 
-## 定位
+## 结构
 
-Robot 不是薄 Adapter，而是**自主智能体**：
-
-```
-决策层
-  │   robot.go_to(10.0, 20.0)       ← 只需说目标
-  ▼
-┌─────────────────────────────────────────┐
-│  Robot（长期 tokio task）                 │
-│                                         │
-│  select! {                              │
-│    命令: go_to(x,y)                     │
-│      → 路径规划 → while 还没到           │
-│        → stm32.forward(50)              │
-│        → if lidar.detect_obstacle()     │
-│          → 绕障                         │
-│                                         │
-│    事件: 传感器状态更新                   │
-│    事件: 低电量 → 自动回充               │
-│  }                                      │
-└─────────────────────────────────────────┘
-  │  持有
-  ▼
-  STM32 / LiDAR / Camera ...
+```rust
+pub struct Robot {
+    cmd_tx: mpsc::Sender<Command>,       // 对外：统一命令输入
+    state: Arc<RwLock<RobotState>>,      // 对外：全局状态
+    cancel: CancellationToken,           // 内部：优雅退出
+}
 ```
 
 ## 职责
 
-1. 持有所有 Device，管理其生命周期（启动/关闭）
-2. 内部 select! 聚合命令和传感器事件
-3. 执行自主行为（导航、避障、回充等）
-4. 对外提供统一 API（`go_to`, `stop`, `get_state` 等）
+1. **启动时**：spawn 各 Device 的 tokio task（TX + RX），启动 WS 服务
+2. **运行时**：select! 接收统一命令 → 调度到对应 Device
+3. **状态**：Device 的 rx_loop 直接写 `RobotState`，Robot 和外部都能读
+
+```rust
+impl Robot {
+    pub fn launch(port: &str, baud: u32, car_type: CarType) -> Self {
+        // 创建共享状态（Device 的 rx_loop 会直接写）
+        let state = Arc::new(RwLock::new(RobotState::default()));
+
+        // spawn STM32
+        let stm32 = STM32Device::spawn(port, baud, car_type, state.clone());
+        // ..未来 spawn LiDAR, Camera, ..
+
+        // 命令通道
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        // 主循环
+        tokio::spawn(async move {
+            loop {
+                select! {
+                    cmd = cmd_rx.recv() => dispatch(cmd, &stm32).await;
+                    _ = tick => { /* 状态监控 */ }
+                    _ = cancel.cancelled() => break;
+                }
+            }
+        });
+
+        Self { cmd_tx, state, cancel }
+    }
+
+    // 对外 API：发命令
+    pub async fn forward(&self, speed: i16) { self.cmd_tx.send(Command::Forward(speed)).await; }
+    pub async fn stop(&self) { self.cmd_tx.send(Command::Stop).await; }
+    // 对外 API：读状态
+    pub async fn get_state(&self) -> RobotState { self.state.read().await.clone(); }
+}
+
+enum Command {
+    Forward(i16),
+    Backward(i16),
+    Stop,
+    GoTo(f32, f32),
+    // ...
+}
+```
+
+## 集成
+
+```rust
+// main_robot.rs
+let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus);
+robot.forward(50).await;
+```
 
 ## 人类评审
 
