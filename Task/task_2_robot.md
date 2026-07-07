@@ -13,7 +13,7 @@
 Src/Robot/
 ├── mod.rs         ← 模块入口 + 全局单例 + public export
 ├── state.rs       ← RobotState 等全局状态类型
-├── server.rs      ← WebSocket 遥控服务
+├── websocket.rs   ← WebSocket 遥控服务
 ├── core/          ← Robot 核心
 │   ├── mod.rs
 │   ├── command.rs ← Command 枚举

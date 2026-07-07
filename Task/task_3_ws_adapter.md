@@ -10,8 +10,7 @@ WebSocket 遥控服务，作为 Robot 的上层命令源。
 ## 文件结构
 
 ```
-Src/Robot/websocket/
-└── mod.rs         ← 入口 + 所有逻辑
+Src/Robot/websocket.rs
 ```
 
 ## 设计
