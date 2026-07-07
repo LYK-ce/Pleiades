@@ -17,9 +17,36 @@ pub struct Robot {
 }
 ```
 
+## 启动流程
+
+`Robot::launch()` 依次完成以下初始化：
+
+```
+1. 创建共享状态
+   state = Arc::new(RwLock::new(RobotState::default()))
+
+2. spawn 各 Device（每个 Device 内部启动 TX + RX tokio task）
+   stm32 = STM32Device::spawn(port, baud, car_type, state.clone())
+       └── 内部: tokio::spawn( tx_loop ) ← 写串口
+                 tokio::spawn( rx_loop ) ← 读串口 → 写 state
+   lidar = LidarDevice::spawn(...)   // 未来
+   camera = CameraDevice::spawn(...) // 未来
+
+3. 启动 WebSocket 遥控服务
+   spawn_robot_ws_server(9090, event_bus)
+
+4. 创建命令通道 + spawn 主循环
+   (cmd_tx, cmd_rx) = mpsc::channel(32)
+   tokio::spawn( main_loop )
+
+5. 返回 Robot { cmd_tx, state, cancel }
+```
+
+Robot 退出时调 `cancel` → 所有 task（主循环、各 Device 的 TX/RX）优雅退出。
+
 ## 职责
 
-1. **启动时**：spawn 各 Device 的 tokio task（TX + RX），启动 WS 服务
+1. **启动时**：创建全局状态，spawn 各 Device 的 TX/RX tokio task，启动 WS 服务，spawn 主循环
 2. **运行时**：select! 接收统一命令 → 调度到对应 Device
 3. **状态**：Device 的 rx_loop 直接写 `RobotState`，Robot 和外部都能读
 
