@@ -21,7 +21,7 @@ use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 /// 组件能力容器。
 ///
 /// ML Engine 不在其中：
-/// - 推理方法 (`load_model`/`forward`/`sample`/...) 是 `MlSession` 的方法 (`&mut self`)，
+/// - 推理方法 (`load_model`/`forward`/`sample`/...) 是 `MlContext` 的方法 (`&mut self`)，
 ///   不适合 trait object。由未来 Lua 层通过 `mlua::UserData` 调用。
 /// - 分析/切分 (`analyze_model`/`split_model`) 是独立 async 函数，
 ///   Orchestrator 直接 `use crate::ml_engine::{analyze_model, split_model}` 调用。

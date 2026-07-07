@@ -10,7 +10,7 @@ use std::sync::Arc;
 use mlua::Lua;
 use libp2p::PeerId;
 use crate::storage::StorageCapability;
-use crate::ml_engine::{MlSession, capability};
+use crate::ml_engine::{MlContext, capability};
 use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor_str, tensor_to_bytes};
 use crate::vm::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
@@ -200,9 +200,9 @@ pub fn register_storage_caps(
 /// 将 ML Engine 能力暴露给 Lua。
 ///
 /// 注册 `ml` 函数表：
-/// - `ml.new(device)` → 返回 MlSession userdata（空壳）
+/// - `ml.new(device)` → 返回 MlContext userdata（空壳）
 ///
-/// MlSession userdata 自带方法（已在 context.rs 注册）：
+/// MlContext userdata 自带方法（已在 context.rs 注册）：
 /// - `sess:has_model()` → bool
 /// - `sess:get_eos()` → u32
 /// - `sess:get_offset()` → usize
@@ -216,7 +216,7 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     ml.set(
         "new",
         lua.create_function(|_, device: String| {
-            MlSession::new(&device)
+            MlContext::new(&device)
                 .map_err(|e| mlua::Error::runtime(e))
         })?,
     )?;
@@ -283,7 +283,7 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
     ml.set(
         "offload_load",
         lua.create_function(|_, (file_id, device): (String, String)| {
-            MlSession::offload_load(&file_id, &device)
+            MlContext::offload_load(&file_id, &device)
                 .map_err(|e| mlua::Error::runtime(e))
         })?,
     )?;

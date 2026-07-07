@@ -25,7 +25,7 @@ pub mod gguf_models;
 
 pub use gguf_model_manager::{
     Model_Arch_Info, Layer_Info, Tensor_Detail, GGUF_Layer_Weights,
-    GGUF_Analyze, GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model, Resolve_Model_Path,
+    GGUF_Analyze_From_Content, GGUF_Analyze_And_Convert, GGUF_Load_Layer, GGUF_Split_Model, Resolve_Model_Path,
 };
 pub use gguf_models::{
     Rotary_Embedding, Mlp_Weights, Attention_Weights,
@@ -36,6 +36,6 @@ pub use gguf_model::{
 };
 pub use gguf_models::common::model::Model;
 
-pub use context::MlSession;
+pub use context::MlContext;
 pub use capability::{analyze_model, split_model};
 pub use device::Parse_Device_Str;
