@@ -17,8 +17,7 @@ use pleiades::storage::StorageManager;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
-use pleiades::robot::STM32Device;
-use pleiades::robot::CarType;
+use pleiades::robot::{CarType, Robot};
 use pleiades::tui::TUI_Loop;
 
 #[tokio::main]
@@ -129,13 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Core::spawn_initial_flush(capabilities.clone());
 
     // Phase 5.6: 初始化 Robot 并启动 WebSocket 遥控服务器
-    let stm32 = Arc::new(STM32Device::spawn("/dev/myserial", 115200, CarType::X3Plus)
+    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus)
         .unwrap_or_else(|e| {
-            tracing::warn!("STM32 设备启动失败: {e}");
-            STM32Device::spawn("/dev/null", 9600, CarType::X3Plus).unwrap() // fallback，不会正常工作
-        }));
-    pleiades::robot::init_stm32(stm32);
-    pleiades::robot::server::spawn_robot_ws_server(9090, event_bus.clone());
+            tracing::warn!("Robot 启动失败: {e}");
+            Robot::launch("/dev/null", 9600, CarType::X3Plus).unwrap()
+        });
+    pleiades::robot::server::spawn_robot_ws_server(
+        9090, event_bus.clone(), robot.cmd_tx.clone(), robot.state.clone(),
+    );
 
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时

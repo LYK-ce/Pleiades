@@ -5,7 +5,7 @@
 //! 机器人 WebSocket 遥控服务器
 //!
 //! 独立线程运行，监听 TCP 端口，接收 JSON 控制指令，
-//! 直接调用 STM32Device API。
+//! 通过 Robot 的 cmd_tx 通道发送命令。
 
 use std::sync::Arc;
 use std::thread;
@@ -13,13 +13,19 @@ use std::thread;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::accept_async;
 
 use crate::event_bus::{Bus_Event, EventBus};
+use crate::robot::core::command::Command;
 use crate::robot::state::RobotState;
-use crate::robot::get_stm32;
 
-pub fn spawn_robot_ws_server(port: u16, event_bus: Arc<EventBus>) {
+pub fn spawn_robot_ws_server(
+    port: u16,
+    event_bus: Arc<EventBus>,
+    cmd_tx: mpsc::Sender<Command>,
+    state: Arc<tokio::sync::RwLock<RobotState>>,
+) {
     thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all().build()
@@ -30,11 +36,16 @@ pub fn spawn_robot_ws_server(port: u16, event_bus: Arc<EventBus>) {
                 return;
             }
         };
-        rt.block_on(async { run_server(port, event_bus).await });
+        rt.block_on(async { run_server(port, event_bus, cmd_tx, state).await });
     });
 }
 
-async fn run_server(port: u16, event_bus: Arc<EventBus>) {
+async fn run_server(
+    port: u16,
+    event_bus: Arc<EventBus>,
+    cmd_tx: mpsc::Sender<Command>,
+    state: Arc<tokio::sync::RwLock<RobotState>>,
+) {
     let addr = format!("0.0.0.0:{port}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -46,7 +57,8 @@ async fn run_server(port: u16, event_bus: Arc<EventBus>) {
     tracing::info!("[Robot WS] 遥控服务器已启动: ws://{addr}");
 
     let telemetry_bus = event_bus.clone();
-    tokio::spawn(async move { telemetry_loop(telemetry_bus).await });
+    let telemetry_state = state.clone();
+    tokio::spawn(async move { telemetry_loop(telemetry_bus, telemetry_state).await });
 
     loop {
         match listener.accept().await {
@@ -59,8 +71,9 @@ async fn run_server(port: u16, event_bus: Arc<EventBus>) {
                         continue;
                     }
                 };
+                let tx = cmd_tx.clone();
                 tokio::spawn(async move {
-                    handle_connection(ws, peer_addr.to_string()).await;
+                    handle_connection(ws, tx, peer_addr.to_string()).await;
                 });
             }
             Err(e) => tracing::error!("[Robot WS] accept 错误: {e}"),
@@ -70,6 +83,7 @@ async fn run_server(port: u16, event_bus: Arc<EventBus>) {
 
 async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    cmd_tx: mpsc::Sender<Command>,
     peer: String,
 ) {
     let welcome = serde_json::json!({"type":"welcome","message":"Robot WS connected"});
@@ -78,7 +92,9 @@ async fn handle_connection(
     while let Some(msg) = ws.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                handle_command(&text).await;
+                if let Some(cmd) = parse_command(&text) {
+                    let _ = cmd_tx.send(cmd).await;
+                }
             }
             Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
@@ -90,58 +106,40 @@ async fn handle_connection(
     }
 
     // 断开自动停车
-    if let Some(dev) = get_stm32() {
-        let _ = dev.stop().await;
-    }
+    let _ = cmd_tx.send(Command::Stop).await;
     tracing::info!("[Robot WS] {peer} 已断开，自动停车");
 }
 
-async fn handle_command(text: &str) {
-    let v: Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => { tracing::warn!("[Robot WS] JSON 解析失败: {e}"); return; }
-    };
-    let cmd = match v["cmd"].as_str() {
-        Some(c) => c,
-        None => { tracing::warn!("[Robot WS] 缺少 cmd 字段"); return; }
-    };
-
-    let dev = match get_stm32() {
-        Some(d) => d,
-        None => { tracing::warn!("[Robot WS] STM32 设备未初始化"); return; }
-    };
-
+fn parse_command(text: &str) -> Option<Command> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let cmd = v["cmd"].as_str()?;
     let speed = v["speed"].as_i64().unwrap_or(50) as i16;
-    let result = match cmd {
-        "forward" => dev.forward(speed).await,
-        "backward" => dev.backward(speed).await,
-        "spin_left" | "left" => dev.spin_left(speed).await,
-        "spin_right" | "right" => dev.spin_right(speed).await,
-        "stop" => dev.stop().await,
-        "beep" => {
-            let ms = v["ms"].as_u64().unwrap_or(200) as u16;
-            dev.beep(ms).await
-        }
-        _ => { tracing::warn!("[Robot WS] 未知命令: {cmd}"); return; }
-    };
-    if let Err(e) = result {
-        tracing::warn!("[Robot WS] 命令 {cmd} 失败: {e}");
+    match cmd {
+        "forward"    => Some(Command::Forward(speed)),
+        "backward"   => Some(Command::Backward(speed)),
+        "spin_left" | "left"   => Some(Command::SpinLeft(speed)),
+        "spin_right" | "right" => Some(Command::SpinRight(speed)),
+        "stop"       => Some(Command::Stop),
+        "beep"       => Some(Command::Beep(v["ms"].as_u64().unwrap_or(200) as u16)),
+        _ => { tracing::warn!("[Robot WS] 未知命令: {cmd}"); None }
     }
 }
 
-async fn telemetry_loop(event_bus: Arc<EventBus>) {
+async fn telemetry_loop(
+    event_bus: Arc<EventBus>,
+    state: Arc<tokio::sync::RwLock<RobotState>>,
+) {
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let Some(dev) = get_stm32() else { continue };
-        let state = dev.get_state().await;
+        let s = state.read().await;
         let payload = serde_json::json!({
             "type": "robot_telemetry",
-            "vx": state.vx, "vy": state.vy, "vz": state.vz,
-            "battery": state.battery,
-            "roll": state.attitude.roll,
-            "pitch": state.attitude.pitch,
-            "yaw": state.attitude.yaw,
-            "encoders": state.encoders,
+            "vx": s.vx, "vy": s.vy, "vz": s.vz,
+            "battery": s.battery,
+            "roll": s.attitude.roll,
+            "pitch": s.attitude.pitch,
+            "yaw": s.attitude.yaw,
+            "encoders": s.encoders,
         });
         event_bus.Publish(Bus_Event::State { payload: payload.to_string() });
     }

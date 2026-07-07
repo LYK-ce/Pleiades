@@ -219,10 +219,8 @@ pub struct STM32Device {
 }
 
 impl STM32Device {
-    pub fn spawn(port: &str, baudrate: u32, car_type: CarType) -> Result<Self, String> {
+    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>) -> Result<Self, String> {
         let cancel = CancellationToken::new();
-        let state = Arc::new(RwLock::new(RobotState::default()));
-
         let state_clone = state.clone();
         let mut sm: RxState = RxState::Head;
         let mut local_state = RobotState::default();
