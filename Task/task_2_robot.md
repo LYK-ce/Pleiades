@@ -12,10 +12,12 @@
 ```
 Src/Robot/
 ├── mod.rs         ← 模块入口 + 全局单例 + public export
-├── command.rs     ← Command 枚举定义
 ├── state.rs       ← RobotState 等全局状态类型
-├── robot.rs       ← Robot::launch() + 主 select! 循环
 ├── server.rs      ← WebSocket 遥控服务
+├── core/          ← Robot 核心
+│   ├── mod.rs
+│   ├── command.rs ← Command 枚举
+│   └── robot.rs   ← Robot::launch() + 主 select! 循环
 └── control/
     ├── types.rs   ← CarType
     ├── serial/
@@ -24,7 +26,7 @@ Src/Robot/
         └── stm32.rs
 ```
 
-## 命令定义 (`command.rs`)
+## 命令定义 (`core/command.rs`)
 
 ```rust
 pub enum Command {
