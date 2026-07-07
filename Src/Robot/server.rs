@@ -4,12 +4,10 @@
 
 //! 机器人 WebSocket 遥控服务器
 //!
-//! 独立线程运行，监听 TCP 端口，接收 JSON 控制指令，
-//! 通过 Robot 的 cmd_tx 通道发送命令。
+//! 接收 JSON 控制指令，通过 cmd_tx 发给 Robot。
+//! 遥测数据推送到 EventBus。
 
 use std::sync::Arc;
-use std::thread;
-
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -20,23 +18,15 @@ use crate::event_bus::{Bus_Event, EventBus};
 use crate::robot::core::command::Command;
 use crate::robot::state::RobotState;
 
+/// 启动 WS 遥控服务（作为 tokio task，共享主 runtime）
 pub fn spawn_robot_ws_server(
     port: u16,
     event_bus: Arc<EventBus>,
     cmd_tx: mpsc::Sender<Command>,
     state: Arc<tokio::sync::RwLock<RobotState>>,
 ) {
-    thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all().build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!("[Robot WS] 创建 runtime 失败: {e}");
-                return;
-            }
-        };
-        rt.block_on(async { run_server(port, event_bus, cmd_tx, state).await });
+    tokio::spawn(async move {
+        run_server(port, event_bus, cmd_tx, state).await;
     });
 }
 
@@ -105,7 +95,6 @@ async fn handle_connection(
         }
     }
 
-    // 断开自动停车
     let _ = cmd_tx.send(Command::Stop).await;
     tracing::info!("[Robot WS] {peer} 已断开，自动停车");
 }
