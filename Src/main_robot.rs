@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let event_bus = Arc::new(pleiades::event_bus::EventBus::New(64));
-    pleiades::robot::server::spawn_robot_ws_server(
+    pleiades::robot::websocket::spawn_robot_ws_server(
         9090, event_bus, robot.cmd_tx.clone(), robot.state.clone(),
     );
 

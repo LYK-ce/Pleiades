@@ -1,33 +1,49 @@
-# Task 3: WebSocket 适配
+# Task 3: WebSocket
 
-> 状态：待开始
+> 状态：设计完成
 > 创建日期：2026-07-07
 
 ## 目标
 
-将 WebSocket 遥控服务适配到 Robot 架构，作为上层命令源。
+WebSocket 遥控服务，作为 Robot 的上层命令源。
 
-## 背景
-
-当前 WS 服务通过命令行参数方式接收 `cmd_tx` + `state`，已经能和 Robot 对接：
+## 文件结构
 
 ```
-WS 客户端
-  │  JSON: {"cmd":"forward","speed":50}
-  ▼
-parse_command() → Command::Forward(50) → cmd_tx.send()
-                                          │
-                                          ▼
-                                    Robot (select!)
+Src/Robot/websocket/
+└── mod.rs         ← 入口 + 所有逻辑
 ```
 
-电报方面直接读 `Robot.state`。WS 服务运行在独立线程 + 独立 tokio runtime。
+## 设计
 
-## 待讨论
+### 集成方式
 
-- WS 独立线程 + runtime 是否合理？
-- 是否需要双向通信（WS 主动推送传感器数据给客户端）？
-- 与 Robot 的生命周期协调（谁先退出、如何通知）？
+```
+main.rs
+  │
+  ├── Robot::launch()
+  └── websocket::spawn(port, event_bus, robot.cmd_tx, robot.state)
+        │
+        └── tokio::spawn → run_server()
+              ├── accept 循环 → handle_connection
+              │     └── JSON → Command → cmd_tx.send()
+              └── telemetry_loop → state.read() → EventBus
+```
+
+### 关键决策
+
+| 决策 | 说明 |
+|------|------|
+| tokio::spawn | 共享主 runtime，不再独立线程 |
+| cmd_tx | JSON 命令 → Command 枚举 → Robot 主循环 |
+| state | 直接读，200ms 定时推 EventBus |
+| 断开 | 自动发送 Command::Stop |
+| 单向 | 目前只收命令，不回推传感器数据给客户端 |
+
+## 待实现
+
+- 双向通信：传感器数据推送给 WS 客户端
+- 协议约定：server → client 消息格式
 
 ## 人类评审
 

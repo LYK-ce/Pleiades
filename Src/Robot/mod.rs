@@ -6,13 +6,13 @@
 //!
 //! - core/：Robot 核心（主循环、命令）
 //! - state.rs：全局状态
-//! - server.rs：WebSocket 遥控服务
+//! - websocket/：WebSocket 遥控服务
 //! - control/：底层设备驱动
 
 pub mod core;
 pub mod state;
 pub mod control;
-pub mod server;
+pub mod websocket;
 
 pub use core::command::Command;
 pub use core::robot::Robot;

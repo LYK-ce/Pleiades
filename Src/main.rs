@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Robot 启动失败: {e}");
             Robot::launch("/dev/null", 9600, CarType::X3Plus).unwrap()
         });
-    pleiades::robot::server::spawn_robot_ws_server(
+    pleiades::robot::websocket::spawn_robot_ws_server(
         9090, event_bus.clone(), robot.cmd_tx.clone(), robot.state.clone(),
     );
 
