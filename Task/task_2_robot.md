@@ -7,6 +7,37 @@
 
 实现 `Robot` — 长期运行的 tokio task，作为整个机器人系统的中枢。
 
+## 文件结构
+
+```
+Src/Robot/
+├── mod.rs         ← 模块入口 + 全局单例 + public export
+├── command.rs     ← Command 枚举定义
+├── state.rs       ← RobotState 等全局状态类型
+├── robot.rs       ← Robot::launch() + 主 select! 循环
+├── server.rs      ← WebSocket 遥控服务
+└── control/
+    ├── types.rs   ← CarType
+    ├── serial/
+    │   └── port.rs
+    └── device/
+        └── stm32.rs
+```
+
+## 命令定义 (`command.rs`)
+
+```rust
+pub enum Command {
+    Forward(i16),
+    Backward(i16),
+    SpinLeft(i16),
+    SpinRight(i16),
+    Stop,
+    Beep(u16),
+    // 未来：GoTo(f32, f32), Patrol, Explore, ...
+}
+```
+
 ## 结构
 
 ```rust
@@ -16,6 +47,8 @@ pub struct Robot {
     cancel: CancellationToken,           // 内部：优雅退出
 }
 ```
+
+命令定义独立于 Robot，便于后续扩展——加命令只需改 `command.rs`。
 
 ## 启动流程
 
@@ -32,10 +65,7 @@ pub struct Robot {
    lidar = LidarDevice::spawn(...)   // 未来
    camera = CameraDevice::spawn(...) // 未来
 
-3. 启动 WebSocket 遥控服务
-   spawn_robot_ws_server(9090, event_bus)
-
-4. 创建命令通道 + spawn 主循环
+3. 创建命令通道 + spawn 主循环
    (cmd_tx, cmd_rx) = mpsc::channel(32)
    tokio::spawn( main_loop )
 
@@ -83,21 +113,23 @@ impl Robot {
     // 对外 API：读状态
     pub async fn get_state(&self) -> RobotState { self.state.read().await.clone(); }
 }
-
-enum Command {
-    Forward(i16),
-    Backward(i16),
-    Stop,
-    GoTo(f32, f32),
-    // ...
-}
 ```
 
 ## 集成
 
+```
+main.rs / main_robot.rs
+  │
+  ├── Robot::launch()           ← 核心
+  ├── spawn_ws_server()         ← 上层命令源 (→ cmd_tx)
+  ├── [Lua 绑定]                ← 上层命令源 (→ cmd_tx)
+  └── [LLM Agent]               ← 上层命令源 (→ cmd_tx)
+```
+
 ```rust
 // main_robot.rs
 let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus);
+spawn_robot_ws_server(9090, event_bus, robot.cmd_tx.clone());
 robot.forward(50).await;
 ```
 
