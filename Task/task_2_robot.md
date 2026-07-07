@@ -5,7 +5,7 @@
 
 ## 目标
 
-实现 `RobotActor` — 长期运行的 tokio task，作为整个机器人系统的中枢。
+实现 `Robot` — 长期运行的 tokio task，作为整个机器人系统的中枢。
 
 ## 定位
 
@@ -16,7 +16,7 @@ Robot 不是薄 Adapter，而是**自主智能体**：
   │   robot.go_to(10.0, 20.0)       ← 只需说目标
   ▼
 ┌─────────────────────────────────────────┐
-│  RobotActor（长期 tokio task）            │
+│  Robot（长期 tokio task）                 │
 │                                         │
 │  select! {                              │
 │    命令: go_to(x,y)                     │
