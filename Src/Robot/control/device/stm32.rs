@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::serial::port;
 use super::super::types::CarType;
 use crate::robot::state::RobotState;
+use tracing::{debug, info};
 
 // ============================================================
 // 运动状态（FUNC_CAR_RUN 协议专属）
@@ -228,13 +229,17 @@ impl STM32Device {
         let cmd_tx = port::spawn_port(
             port, baudrate, 512,
             move |bytes| {
+                debug!("[STM32 RX] raw: {:02X?}", bytes);
                 for &byte in bytes {
                     if let Some((func, data)) = feed_state_machine(&mut sm, byte) {
+                        info!("[STM32] 解析帧 func=0x{func:02X}, data={:02X?}", data);
                         update_state(&mut local_state, func, &data);
                     }
                 }
                 // 有更新时写回共享缓存
                 let s = local_state.clone();
+                info!("[STM32] 状态更新: vx={:.3}, vy={:.3}, vz={:.3}, bat={:.2}V, roll={:.3}, pitch={:.3}, yaw={:.3}, enc={:?}",
+                    s.vx, s.vy, s.vz, s.battery, s.attitude.roll, s.attitude.pitch, s.attitude.yaw, s.encoders);
                 let state = state_clone.clone();
                 tokio::spawn(async move { *state.write().await = s; });
             },
