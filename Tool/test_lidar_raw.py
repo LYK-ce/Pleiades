@@ -45,12 +45,12 @@ print("\n[INFO] 解析数据包...")
 packets = 0
 points_total = 0
 while packets < 10:
-    # 找 55 AA
+    # 找 AA 55 (HEAD=0x55AA 的小端字节)
     while True:
         b = ser.read(1)
-        if b and b[0] == 0x55:
+        if b and b[0] == 0xAA:
             b2 = ser.read(1)
-            if b2 and b2[0] == 0xAA:
+            if b2 and b2[0] == 0x55:
                 break
     hdr = ser.read(8)
     if len(hdr) < 8: continue

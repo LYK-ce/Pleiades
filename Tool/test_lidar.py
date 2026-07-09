@@ -53,12 +53,12 @@ def main():
         global latest_scan
         circ_pts = []
         while True:
-            # 找 55 AA
+            # 找 AA 55 (HEAD=0x55AA 小端)
             while True:
                 b = ser.read(1)
-                if b and b[0] == 0x55:
+                if b and b[0] == 0xAA:
                     b2 = ser.read(1)
-                    if b2 and b2[0] == 0xAA:
+                    if b2 and b2[0] == 0x55:
                         break
             # 读包头
             hdr = ser.read(8)
