@@ -79,7 +79,9 @@ def read_response_header(ser):
     # 读 5A
     b = ser.read(1)
     if not b or b[0] != 0x5A:
-        print(f"[WARN] 应答头第二字节不是 5A: {b.hex() if b else 'timeout'}")
+        got = b.hex() if b else 'timeout'
+        print(f"[WARN] 应答头第二字节不是 5A: {got}, 清空缓冲区重试...")
+        ser.reset_input_buffer()
         return None
 
     # 读 4 字节 size+subtype
@@ -103,10 +105,15 @@ def read_response_header(ser):
 
 def read_device_info(ser):
     """发送获取设备信息命令并解析"""
-    send_cmd(ser, CMD_DEVICE_INFO)
-    result = read_response_header(ser)
-    if result is None:
-        print("[ERROR] 未收到设备信息应答")
+    for attempt in range(3):
+        send_cmd(ser, CMD_DEVICE_INFO)
+        time.sleep(0.1)
+        result = read_response_header(ser)
+        if result is not None:
+            break
+        print(f"[WARN] 设备信息查询第 {attempt+1} 次失败，重试...")
+    else:
+        print("[ERROR] 设备信息查询失败 (重试3次)")
         return
     size, subtype, resp_type = result
     if resp_type != RESP_TYPE_DEVICE_INFO:
@@ -297,6 +304,14 @@ def main():
     except Exception as e:
         print(f"[ERROR] 无法打开串口: {e}")
         return 1
+
+    # 先强制停止（避免雷达处于扫描状态干扰后续命令）
+    print("[INFO] 发送强制停止...")
+    send_cmd(ser, 0x00)  # 强制停止
+    time.sleep(0.5)
+    # 清空缓冲区
+    ser.reset_input_buffer()
+    print("[INFO] 缓冲区已清空")
 
     # 查询设备信息
     read_device_info(ser)
