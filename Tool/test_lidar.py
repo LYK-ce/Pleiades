@@ -80,7 +80,8 @@ def main():
                 a_deg = a_q64 / 64.0
                 raw = struct.unpack('<H', nodes[i*2:i*2+2])[0]
                 d_mm = (raw & 0xFFFC) / 4.0
-                if d_mm > 0:
+                quality = raw & 0x0003
+                if quality == 0 and 0 < d_mm < 6000:  # quality=正常, 0~6m
                     a_rad = np.radians(a_deg)
                     circ_pts.append((d_mm / 1000.0 * np.cos(a_rad),
                                      d_mm / 1000.0 * np.sin(a_rad)))
