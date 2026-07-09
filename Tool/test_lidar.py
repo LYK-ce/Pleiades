@@ -177,7 +177,7 @@ def parse_scan_packet(data, count):
             raw = struct.unpack('<H', data[10 + i * 2: 12 + i * 2])[0]
             dist_mm = (raw & 0xFFFC) / 4.0
             quality = raw & 0x0003
-            if quality == 0 and dist_mm > 0:
+            if dist_mm > 0:
                 points.append((angle_deg, dist_mm / 1000.0))
 
     return points, (ct & 0x01) == 1  # is_circle_start
@@ -216,6 +216,7 @@ def scan_loop(ser):
 
     circle_count = 0
     points_this_circle = []
+    packet_count = 0
     start_time = time.time()
 
     try:
@@ -247,6 +248,14 @@ def scan_loop(ser):
             full_packet = b'\x55\xAA' + header + node_data
             points, is_circle_start = parse_scan_packet(full_packet, count)
             points_this_circle.extend(points)
+            packet_count += 1
+
+            # 前 10 个包打印调试信息
+            if packet_count <= 10:
+                print(f"[DEBUG] 包#{packet_count}: CT=0x{ct:02X}, pts={count}, "
+                      f"firstAngle={first_angle}({first_angle/64:.1f}deg), "
+                      f"lastAngle={last_angle}({last_angle/64:.1f}deg), "
+                      f"parsed={len(points)}, circle_start={is_circle_start}")
 
             if is_circle_start and points_this_circle:
                 circle_count += 1
@@ -323,12 +332,12 @@ def run_visualization():
     ax.set_ylim(-6, 6)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_title("YDLIDAR Tmini — 实时点云")
+    ax.set_title("YDLIDAR Tmini — Realtime Point Cloud")
     ax.grid(True)
     ax.set_aspect('equal')
 
     # 机器人位置（原点）
-    (robot_dot,) = ax.plot([0], [0], 'ro', markersize=10, label='Robot')
+    (robot_dot,) = ax.plot([0], [0], 'ro', markersize=10, label='Robot (origin)')
     (scatter,) = ax.plot([], [], 'g.', markersize=1, alpha=0.6)
     ax.legend()
 
