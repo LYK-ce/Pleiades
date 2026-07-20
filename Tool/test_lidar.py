@@ -174,8 +174,8 @@ def parse_node_from_buffer(st):
 
     qual = raw & 0x0003
     dist = raw & 0xFFFC
-    # 零位包: cnt==1 且 CT&0x01==1 (和协议文档一致)
-    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0)
+    # 零位包: cnt==1 且 CT&0x01==1 且校验和正确
+    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0) and st.CheckSumResult
 
     angle_q64 = st.FirstSampleAngle + st.IntervalSampleAngle * st.nodeIndex
     angle_deg = angle_q64 / 64.0
@@ -208,7 +208,7 @@ def wait_package(st, ser, timeout_s=1.0):
             return None
         if not parse_response_scan_data(st, ser, timeout_s):
             return None
-        # 校验
+        # 校验——跳过校验和不匹配的假包
         if st.CheckSumCal != st.CheckSum:
             st.CheckSumResult = False
         else:
