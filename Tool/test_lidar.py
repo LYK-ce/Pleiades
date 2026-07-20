@@ -260,6 +260,7 @@ def cache_scan_data(st, ser):
 
             # 零位包检测圈边界
             if is_sync and circ_pts:
+                print(f"[SCAN] 一圈 {len(circ_pts)} 点")
                 with lock:
                     latest_scan = circ_pts[:]
                 circ_pts = []
