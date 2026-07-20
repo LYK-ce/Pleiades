@@ -242,9 +242,9 @@ def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
 # cacheScanData (L613) — 后台线程
 # ═══════════════════════════════════════════
 def cache_scan_data(st, ser):
-    """后台线程：严格按 C++ cacheScanData (L613)"""
+    """后台线程：累积节点，按 ascendScanData 逻辑找零位输出完整一圈"""
     global latest_scan
-    local_scan = []  # node_info 数组，从 sync 节点开始累积
+    all_nodes = []  # 跨多包累积所有节点
 
     while True:
         nodes = wait_scan_data(st, ser, max_nodes=2000, timeout_s=2.0)
@@ -252,24 +252,42 @@ def cache_scan_data(st, ser):
             continue
 
         for angle_deg, dist_m, qual, is_sync in nodes:
-            # C++: if (local_buf[pos].sync & LIDAR_RESP_SYNCBIT)
-            if is_sync:
-                # C++: if (local_scan[0].sync & LIDAR_RESP_SYNCBIT)
-                if local_scan and local_scan[0][3]:  # 第一个节点也是 sync
-                    # 输出完整一圈
-                    circle = []
-                    for a, d, q, _ in local_scan:
-                        if 0 < d < 5.0:
-                            circle.append((a, d))
-                    if circle:
-                        with lock:
-                            latest_scan = circle
-                # 重置，新一圈从当前 sync 节点开始
-                local_scan = []
+            all_nodes.append((angle_deg, dist_m, qual, is_sync))
 
-            local_scan.append((angle_deg, dist_m, qual, is_sync))
-            if len(local_scan) > 4096:
-                local_scan.pop(0)
+        # 500+ 节点来做一个 ascendScanData 式的零位检测
+        if len(all_nodes) < 500:
+            continue
+
+        # ascendScanData: 找到角度跳变点（从大变小的位置）作为零位
+        circle = ascend_scan_data(all_nodes)
+        if circle:
+            with lock:
+                latest_scan = circle
+            # 保留零位之后的点给下一轮
+            # 简单做法：清空重新累积
+            all_nodes = all_nodes[-100:]  # 保留最后一点避免漏点
+
+
+def ascend_scan_data(nodes):
+    """ascendScanData (L1474): 角度排序 + 零位旋转"""
+    # 过滤有效点
+    valid = [(a, d) for a, d, q, _ in nodes if 0 < d < 5.0]
+    if len(valid) < 100:
+        return None
+
+    # 按角度排序
+    valid.sort(key=lambda x: x[0])
+
+    # 找零位：角度跳变（前一个角度 > 后一个角度 + 180）
+    zero_pos = 0
+    for i in range(1, len(valid)):
+        if valid[i-1][0] - valid[i][0] > 180:
+            zero_pos = i
+            break
+
+    # 旋转：零位 → 结尾 + 开头 → 零位
+    rotated = valid[zero_pos:] + valid[:zero_pos]
+    return rotated
 
 
 # ═══════════════════════════════════════════
