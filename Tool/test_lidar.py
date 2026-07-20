@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-YDLIDAR Tmini 最小测试脚本
+YDLIDAR Tmini 测试脚本 — 严格参考 C++ YDlidarDriver 实现
 
-跳过设备信息/健康查询，直接打开串口开始扫描。
 依赖: pip install pyserial matplotlib numpy
 用法: python3 test_lidar.py [/dev/rplidar]
 """
@@ -13,91 +12,237 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+# ── 配置 ────────────────────────────────────
 PORT = sys.argv[1] if len(sys.argv) > 1 else "/dev/rplidar"
 BAUD = 230400
 
-latest_scan = []  # 最新一圈的 (x, y)
+# ── 协议常量 (ydlidar_protocol.h) ───────────
+PH  = 0x55AA  # 包头值
+PH1 = 0xAA    # AA 55 = 0x55AA 小端
+PH2 = 0x55
+
+CT_Normal    = 0
+CT_RingStart = 1
+
+LIDAR_CMD_SYNC_BYTE    = 0xA5
+LIDAR_CMD_SCAN         = 0x60
+LIDAR_CMD_FORCE_STOP   = 0x00
+LIDAR_CMD_STOP         = 0x65
+
+LIDAR_ANS_SYNC_BYTE1   = 0xA5
+LIDAR_ANS_SYNC_BYTE2   = 0x5A
+LIDAR_ANS_TYPE_MEASUREMENT = 0x81
+
+NODE_SYNC   = 1
+NODE_UNSYNC = 2
+TRI_PACKHEADSIZE = 10
+TRI_PACKMAXNODES = 80
+
+# ── 全局 ─────────────────────────────────────
+latest_scan = []
 lock = threading.Lock()
 
 
+# ============================================================
+# 命令行交互 (from YDlidarDriver::sendCommand)
+# ============================================================
+def send_cmd(ser, cmd):
+    """发送 2 字节命令"""
+    ser.write(bytes([LIDAR_CMD_SYNC_BYTE, cmd]))
+    print(f"[CMD] A5 {cmd:02X}")
+
+
+# ============================================================
+# 应答头 (from YDlidarDriver::waitResponseHeader)
+# ============================================================
+def wait_response_header(ser, timeout_ms=1000):
+    """等待 A5 5A 应答头，返回 type 或 None"""
+    start = time.time()
+    buf = bytearray()
+    while (time.time() - start) * 1000 < timeout_ms:
+        b = ser.read(1)
+        if not b:
+            continue
+        buf.append(b[0])
+        if len(buf) < 7:
+            continue
+        # 从后往前检查
+        if buf[-7] == LIDAR_ANS_SYNC_BYTE1 and buf[-6] == LIDAR_ANS_SYNC_BYTE2:
+            size_and_sub = struct.unpack('<I', bytes(buf[-4:]))[0]
+            resp_type = buf[-1]
+            size = size_and_sub & 0x3FFFFFFF
+            print(f"[RESP] type=0x{resp_type:02X} size={size}")
+            return resp_type
+    return None
+
+
+# ============================================================
+# 解析一个包 (from YDlidarDriver::waitPackage)
+# ============================================================
+class ScanParser:
+    """解析扫描数据包，逐点输出 node_info"""
+    def __init__(self):
+        self.package_index = 0
+        self.recv_pos = 0
+        self.package_remain = 0
+        self.pkg = bytearray(TRI_PACKHEADSIZE + TRI_PACKMAXNODES * 2)
+
+    def feed_byte(self, b):
+        """喂一个字节，返回 (angle_q64, dist_mm, is_sync) 或 None"""
+        # 找包头 AA 55
+        if self.recv_pos == 0:
+            if b == PH1:
+                self.pkg[0] = b
+                self.recv_pos = 1
+            return None
+        if self.recv_pos == 1:
+            if b == PH2:
+                self.pkg[1] = b
+                self.recv_pos = 2
+                self.package_remain = TRI_PACKHEADSIZE - 2
+            else:
+                self.pkg[0] = b
+                self.recv_pos = 1 if b == PH1 else 0
+            return None
+
+        # 收包头
+        if self.recv_pos >= 2 and self.package_remain > 0:
+            self.pkg[self.recv_pos] = b
+            self.recv_pos += 1
+            self.package_remain -= 1
+            if self.package_remain > 0:
+                return None
+
+        # 包头收完，解析
+        if self.recv_pos >= TRI_PACKHEADSIZE - 1 and self.package_remain == 0:
+            # 解析 count
+            ct = self.pkg[2]
+            count = self.pkg[3]
+            if count == 0 or count > TRI_PACKMAXNODES:
+                self.recv_pos = 0
+                return None
+
+            first_angle = struct.unpack('<H', bytes(self.pkg[4:6]))[0]
+            last_angle  = struct.unpack('<H', bytes(self.pkg[6:8]))[0]
+            # cs = struct.unpack('<H', bytes(self.pkg[8:10]))[0]
+
+            self.node_count = count
+            self.node_first_angle = first_angle
+            self.node_last_angle  = last_angle
+            self.node_ct = ct
+            self.node_index = 0
+            self.nodes_pos = TRI_PACKHEADSIZE
+
+            # 需要收 count * 2 字节距离数据
+            self.package_remain = count * 2
+            self.node_buf = bytearray(self.package_remain)
+            self.node_buf_pos = 0
+            self.recv_pos += 1
+
+        # 收距离数据
+        if self.recv_pos > TRI_PACKHEADSIZE and self.package_remain > 0:
+            self.node_buf[self.node_buf_pos] = b
+            self.node_buf_pos += 1
+            self.package_remain -= 1
+            self.recv_pos += 1
+            if self.package_remain > 0:
+                return None
+
+            # 所有数据收完，开始逐点输出
+            count = self.node_count
+            first = self.node_first_angle
+            last  = self.node_last_angle
+            is_sync = (self.node_ct & CT_RingStart) != 0
+
+            # 计算角度间隔
+            interval = 0.0
+            if count > 1:
+                interval = (last - first) / (count - 1)
+
+            results = []
+            for i in range(count):
+                angle_q64 = first + interval * i
+                raw = struct.unpack('<H', bytes(self.node_buf[i*2:i*2+2]))[0]
+                results.append((angle_q64, raw, is_sync and i == 0))
+
+            self.recv_pos = 0  # 准备收下一个包
+            return results
+
+        self.recv_pos += 1
+        return None
+
+
+# ============================================================
+# 主函数
+# ============================================================
 def main():
     print(f"[INFO] 打开串口: {PORT}, {BAUD}")
     ser = serial.Serial(PORT, BAUD, timeout=0.5)
 
-    # 直接开始扫描
-    print("[INFO] 发送 A5 60 (开始扫描)")
-    ser.write(bytes([0xA5, 0x60]))
+    # DTR 拉高 — 电机转 (from startMotor)
+    print("[INFO] DTR=True (电机启动)")
+    ser.setDTR(True)
+    time.sleep(0.3)
+
+    # 强制停止 (from stopScan)
+    print("[INFO] 发送强制停止")
+    send_cmd(ser, LIDAR_CMD_FORCE_STOP)
+    time.sleep(0.05)
+    send_cmd(ser, LIDAR_CMD_STOP)
     time.sleep(0.1)
 
-    # 读应答头
-    buf = b""
-    while True:
-        b = ser.read(1)
-        if not b:
-            continue
-        buf += b
-        # 找 A5 5A ?????? 81
-        if len(buf) >= 7 and buf[-7] == 0xA5 and buf[-6] == 0x5A:
-            size_and_sub = struct.unpack('<I', buf[-4:-1] + bytes([0]))[0]
-            resp_type = buf[-1]
-            print(f"[INFO] 应答头: type=0x{resp_type:02X}, size={size_and_sub & 0x3FFFFFFF}")
-            if resp_type == 0x81:
-                break
-            buf = b""
+    # 清缓冲 (from flushSerial)
+    ser.reset_input_buffer()
+
+    # 开始扫描 (from startScan)
+    print("[INFO] 发送 A5 60 (开始扫描)")
+    send_cmd(ser, LIDAR_CMD_SCAN)
+
+    # 等应答头
+    typ = wait_response_header(ser, 2000)
+    if typ != LIDAR_ANS_TYPE_MEASUREMENT:
+        print(f"[ERROR] 应答头 type 不是 0x81: 0x{typ:02X}" if typ else "[ERROR] 未收到应答头")
+        ser.close()
+        return
 
     print("[INFO] 开始接收扫描数据...")
-    print("[INFO] 按 Ctrl+C 退出")
 
-    # 扫描线程
-    def scan():
+    # ── 扫描线程 (from cacheScanData) ──
+    def scan_loop():
         global latest_scan
+        parser = ScanParser()
         circ_pts = []
-        prev_angle = -1  # 上一个包的 lastAngle
         while True:
-            # 找 AA 55 (HEAD=0x55AA 小端)
-            while True:
-                b = ser.read(1)
-                if b and b[0] == 0xAA:
-                    b2 = ser.read(1)
-                    if b2 and b2[0] == 0x55:
-                        break
-            # 读包头
-            hdr = ser.read(8)
-            if len(hdr) < 8:
+            b = ser.read(1)
+            if not b:
                 continue
-            ct, cnt = hdr[0], hdr[1]
-            if cnt == 0 or cnt > 200:
+            result = parser.feed_byte(b[0])
+            if result is None:
                 continue
-            first = struct.unpack('<H', hdr[2:4])[0]
-            last = struct.unpack('<H', hdr[4:6])[0]
-            # 读距离
-            nodes = ser.read(cnt * 2)
-            if len(nodes) < cnt * 2:
-                continue
-            # 解析点
-            interval = (last - first) / max(cnt - 1, 1)
-            for i in range(cnt):
-                a_q64 = first + interval * i
-                a_deg = a_q64 / 64.0
-                raw = struct.unpack('<H', nodes[i*2:i*2+2])[0]
-                d_mm = (raw & 0xFFFC) / 4.0
-                quality = raw & 0x0003
-                if quality == 0 and 0 < d_mm < 6000:  # quality=正常, 0~6m
-                    a_rad = np.radians(a_deg)
-                    circ_pts.append((d_mm / 1000.0 * np.cos(a_rad),
-                                     d_mm / 1000.0 * np.sin(a_rad)))
-            if prev_angle >= 0 and first < prev_angle and circ_pts:
-                # 角度回绕 → 新一圈开始
-                print(f"[SCAN] 一圈完成: {len(circ_pts)} 点")
+
+            for angle_q64, raw, is_sync in result:
+                if raw == 0:
+                    continue
+                qual = raw & 0x0003
+                dist = raw & 0xFFFC
+                if qual != 0:
+                    continue
+                dist_m = dist / 4000.0
+                if dist_m > 6.0:
+                    continue
+                angle_rad = np.radians(angle_q64 / 64.0)
+                circ_pts.append((dist_m * np.cos(angle_rad),
+                                 dist_m * np.sin(angle_rad)))
+
+            if is_sync and circ_pts:
                 with lock:
                     latest_scan = circ_pts
                 circ_pts = []
-            prev_angle = last
 
-    t = threading.Thread(target=scan, daemon=True)
+    t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
 
-    # matplotlib
+    # ── matplotlib 可视化 ──
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_xlim(-6, 6); ax.set_ylim(-6, 6)
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
@@ -115,6 +260,11 @@ def main():
 
     ani = FuncAnimation(fig, update, interval=100, blit=True, cache_frame_data=False)
     plt.show()
+
+    # 清理
+    print("[INFO] 停止")
+    send_cmd(ser, LIDAR_CMD_STOP)
+    ser.setDTR(False)
     ser.close()
 
 
