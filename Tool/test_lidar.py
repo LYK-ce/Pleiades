@@ -252,7 +252,10 @@ def cache_scan_data(st, ser):
             continue
 
         for angle_deg, dist_m, qual, is_sync in nodes:
-            if 0 < dist_m < 5.0:
+            # SDK 过滤: 阳光噪点(3), 玻璃噪点(2), 距离范围
+            if qual >= 2:
+                continue
+            if 0.05 < dist_m < 5.0:
                 circ_pts.append((angle_deg, dist_m))
 
             # 零位包检测圈边界
