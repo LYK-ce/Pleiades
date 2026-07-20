@@ -198,12 +198,14 @@ def main():
     print("[INFO] 发送 A5 60 (开始扫描)")
     send_cmd(ser, LIDAR_CMD_SCAN)
 
-    # 等应答头
-    typ = wait_response_header(ser, 2000)
-    if typ != LIDAR_ANS_TYPE_MEASUREMENT:
-        print(f"[ERROR] 应答头 type 不是 0x81: 0x{typ:02X}" if typ else "[ERROR] 未收到应答头")
-        ser.close()
-        return
+    # 等应答头（最多 3 秒，超时就跳过直接收数据）
+    typ = wait_response_header(ser, 3000)
+    if typ == LIDAR_ANS_TYPE_MEASUREMENT:
+        print("[INFO] 收到扫描应答")
+    elif typ is not None:
+        print(f"[WARN] 应答头 type=0x{typ:02X}，尝试继续...")
+    else:
+        print("[WARN] 超时未收到应答头，直接开始接收...")
 
     print("[INFO] 开始接收扫描数据...")
 
@@ -212,14 +214,21 @@ def main():
         global latest_scan
         parser = ScanParser()
         circ_pts = []
+        byte_count = 0
+        pkt_count = 0
+        circle_count = 0
         while True:
             b = ser.read(1)
             if not b:
                 continue
+            byte_count += 1
+            if byte_count % 10000 == 0:
+                print(f"[INFO] 已收 {byte_count} 字节, {pkt_count} 包, {circle_count} 圈")
             result = parser.feed_byte(b[0])
             if result is None:
                 continue
 
+            pkt_count += 1
             for angle_q64, raw, is_sync in result:
                 if raw == 0:
                     continue
@@ -235,6 +244,7 @@ def main():
                                  dist_m * np.sin(angle_rad)))
 
             if is_sync and circ_pts:
+                circle_count += 1
                 with lock:
                     latest_scan = circ_pts
                 circ_pts = []
