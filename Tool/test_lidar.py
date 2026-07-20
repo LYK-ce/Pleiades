@@ -297,9 +297,8 @@ def main():
     ser = serial.Serial(PORT, BAUD, timeout=5)
     print(f"[INFO] 打开 {PORT}")
 
-    # startMotor
-    ser.setDTR(True)
-    time.sleep(0.3)
+    # Tmini 电机不由 DTR 控制（tmini_test.cpp: MotorDtrCtrl=false）
+    # ser.setDTR(True)  ← 不设！
 
     # stopScan: 强制停止 + 停止
     ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_FSTOP]))
@@ -343,7 +342,6 @@ def main():
     plt.show()
 
     ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_STOP]))
-    ser.setDTR(False)
     ser.close()
 
 
