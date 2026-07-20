@@ -174,7 +174,8 @@ def parse_node_from_buffer(st):
 
     qual = raw & 0x0003
     dist = raw & 0xFFFC
-    is_sync = ((st.ct & 0x01) != 0) and (st.nodeIndex == 0)
+    # 零位包: cnt==1 且 CT&0x01==1 (和协议文档一致)
+    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0)
 
     angle_q64 = st.FirstSampleAngle + st.IntervalSampleAngle * st.nodeIndex
     angle_deg = angle_q64 / 64.0
@@ -260,7 +261,7 @@ def cache_scan_data(st, ser):
 
             # 零位包检测圈边界
             if is_sync and circ_pts:
-                print(f"[SCAN] 一圈 {len(circ_pts)} 点")
+                print(f"[SCAN] 一圈 {len(circ_pts)} 点 (CT=0x{st.ct:02X})")
                 with lock:
                     latest_scan = circ_pts[:]
                 circ_pts = []
