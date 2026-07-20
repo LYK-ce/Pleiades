@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YDLIDAR Tmini 测试 — 严格参考 C++ YDlidarDriver::waitPackage 逻辑
+YDLIDAR Tmini 测试 — 严格按 C++ YDlidarDriver 逐函数翻译
 用法: python3 test_lidar.py [/dev/rplidar]
 """
 
@@ -13,130 +13,295 @@ from matplotlib.animation import FuncAnimation
 PORT = sys.argv[1] if len(sys.argv) > 1 else "/dev/rplidar"
 BAUD = 230400
 
-# 协议常量 (ydlidar_protocol.h)
-PH1 = 0xAA
-PH2 = 0x55
-LIDAR_CMD_SYNC_BYTE = 0xA5
-LIDAR_CMD_SCAN       = 0x60
-LIDAR_CMD_FORCE_STOP = 0x00
-LIDAR_CMD_STOP       = 0x65
-LIDAR_ANS_SYNC_BYTE1 = 0xA5
-LIDAR_ANS_SYNC_BYTE2 = 0x5A
+# ── 协议常量 (ydlidar_protocol.h) ──────
+PH1, PH2 = 0xAA, 0x55       # 包头 0x55AA 小端
+LIDAR_CMD_SYNC  = 0xA5
+LIDAR_CMD_SCAN  = 0x60
+LIDAR_CMD_STOP  = 0x65
+LIDAR_CMD_FSTOP = 0x00
+LIDAR_RESP_CHECKBIT = 0x01
+TRI_PACKHEADSIZE = 10
+TRI_PACKMAXNODES = 80
 
 latest_scan = []
 lock = threading.Lock()
 
 
-def send_cmd(ser, cmd):
-    ser.write(bytes([LIDAR_CMD_SYNC_BYTE, cmd]))
-    print(f"[CMD] A5 {cmd:02X}")
+# ═══════════════════════════════════════════
+# 对应 C++: YDlidarDriver 成员变量
+# ═══════════════════════════════════════════
+class State:
+    def __init__(self):
+        self.nodeIndex = 0           # 当前包内取到第几个点
+        self.package_Sample_Num = 0  # 当前包的点数 (count)
+        self.FirstSampleAngle = 0    # >>1 后，单位 1/64°
+        self.LastSampleAngle = 0     # >>1 后
+        self.IntervalSampleAngle = 0.0
+        self.IntervalSampleAngle_LastPackage = 0.0
+        self.CheckSum = 0
+        self.CheckSumCal = 0
+        self.CheckSumResult = True
+        self.ct = 0                  # CT 原始值
+        self.has_package_error = False
+        # 缓存整个包的距离数据
+        self.nodes = [0] * TRI_PACKMAXNODES   # uint16 数组
+        self.package_index = 0
 
 
+# ═══════════════════════════════════════════
+# parseResponseHeader (L786)
+# ═══════════════════════════════════════════
+def parse_response_header(st, ser, timeout_s=1.0):
+    """读 10 字节包头，返回 True 表示成功"""
+    import time as _time
+    start = _time.time()
+    recvPos = 0
+    pkg = bytearray(TRI_PACKHEADSIZE)
+    st.CheckSumCal = 0
+
+    while (_time.time() - start) < timeout_s:
+        # 找 AA 55
+        b = ser.read(1)
+        if not b:
+            continue
+        byte = b[0]
+
+        if recvPos == 0:
+            if byte == PH1:
+                pkg[0] = byte
+                recvPos = 1
+            continue
+
+        if recvPos == 1:
+            st.CheckSumCal = 0x55AA
+            if byte == PH2:
+                pkg[1] = byte
+                recvPos = 2
+            elif byte == PH1:  # 连续 AA，保持
+                continue
+            else:
+                recvPos = 0
+            continue
+
+        # recvPos >= 2: 读剩余 8 字节
+        pkg[recvPos] = byte
+
+        if recvPos == 2:  # CT
+            st.ct = byte
+        elif recvPos == 3:  # count
+            st.package_Sample_Num = byte
+        elif recvPos == 4:  # firstAngle low
+            if byte & LIDAR_RESP_CHECKBIT:
+                st.FirstSampleAngle = byte
+            else:
+                st.has_package_error = True
+                recvPos = 0
+                continue
+        elif recvPos == 5:  # firstAngle high
+            st.FirstSampleAngle += byte * 0x100
+            st.CheckSumCal ^= st.FirstSampleAngle
+            st.FirstSampleAngle >>= 1  # ← 关键！右移1位
+        elif recvPos == 6:  # lastAngle low
+            if byte & LIDAR_RESP_CHECKBIT:
+                st.LastSampleAngle = byte
+            else:
+                st.has_package_error = True
+                recvPos = 0
+                continue
+        elif recvPos == 7:  # lastAngle high
+            st.LastSampleAngle = byte * 0x100 + st.LastSampleAngle
+            st.LastSampleAngle >>= 1  # ← 关键！右移1位
+
+            # 计算角度间隔
+            cnt = st.package_Sample_Num
+            if cnt == 1:
+                st.IntervalSampleAngle = 0.0
+            elif st.LastSampleAngle < st.FirstSampleAngle:
+                if st.FirstSampleAngle > 270 * 64 and st.LastSampleAngle < 90 * 64:
+                    st.IntervalSampleAngle = (360 * 64 + st.LastSampleAngle - st.FirstSampleAngle) / (cnt - 1)
+                    st.IntervalSampleAngle_LastPackage = st.IntervalSampleAngle
+                else:
+                    st.IntervalSampleAngle = st.IntervalSampleAngle_LastPackage
+            else:
+                st.IntervalSampleAngle = (st.LastSampleAngle - st.FirstSampleAngle) / (cnt - 1)
+                st.IntervalSampleAngle_LastPackage = st.IntervalSampleAngle
+        elif recvPos == 8:
+            st.CheckSum = byte
+        elif recvPos == 9:
+            st.CheckSum += byte * 0x100
+
+        recvPos += 1
+        if recvPos == TRI_PACKHEADSIZE:
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════
+# parseResponseScanData (L1012)
+# ═══════════════════════════════════════════
+def parse_response_scan_data(st, ser, timeout_s=1.0):
+    """读 count×2 字节距离数据"""
+    import time as _time
+    start = _time.time()
+    recvPos = 0
+    need = st.package_Sample_Num * 2
+
+    while (_time.time() - start) < timeout_s:
+        b = ser.read(1)
+        if not b:
+            continue
+        byte = b[0]
+
+        node_buf_idx = recvPos // 2
+        if recvPos % 2 == 0:
+            st.nodes[node_buf_idx] = byte
+        else:
+            st.nodes[node_buf_idx] += byte * 0x100
+            st.CheckSumCal ^= st.nodes[node_buf_idx]
+
+        recvPos += 1
+        if recvPos >= need:
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════
+# parseNodeFromeBuffer (L1252)
+# ═══════════════════════════════════════════
+def parse_node_from_buffer(st):
+    """从缓存中取 nodeIndex 指向的点，返回 (angle_deg, dist_m, qual, is_sync)"""
+    raw = st.nodes[st.nodeIndex]
+
+    qual = raw & 0x0003
+    dist = raw & 0xFFFC
+    is_sync = ((st.ct & 0x01) != 0) and (st.nodeIndex == 0)
+
+    angle_q64 = st.FirstSampleAngle + st.IntervalSampleAngle * st.nodeIndex
+    angle_deg = angle_q64 / 64.0
+
+    # 处理角度溢出
+    if angle_deg >= 360:
+        angle_deg -= 360
+
+    dist_m = dist / 4000.0  # 1/4mm → m
+
+    st.nodeIndex += 1
+    return angle_deg, dist_m, qual, is_sync
+
+
+# ═══════════════════════════════════════════
+# waitPackage (L1137)
+# ═══════════════════════════════════════════
+def wait_package(st, ser, timeout_s=1.0):
+    """解析一个包（如需），返回包内第 nodeIndex 个点"""
+    if st.nodeIndex >= st.package_Sample_Num:
+        st.nodeIndex = 0
+
+    if st.nodeIndex == 0:
+        if not parse_response_header(st, ser, timeout_s):
+            return None
+        cnt = st.package_Sample_Num
+        # 合理性检查
+        if cnt == 0 or cnt > TRI_PACKMAXNODES:
+            st.nodeIndex = 0
+            return None
+        if not parse_response_scan_data(st, ser, timeout_s):
+            return None
+        # 校验
+        if st.CheckSumCal != st.CheckSum:
+            st.CheckSumResult = False
+        else:
+            st.CheckSumResult = True
+
+    return parse_node_from_buffer(st)
+
+
+# ═══════════════════════════════════════════
+# waitScanData (L1383)
+# ═══════════════════════════════════════════
+def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
+    """收集一圈点，返回到 sync 节点为止的列表"""
+    import time as _time
+    nodes_list = []
+    start = _time.time()
+
+    while len(nodes_list) < max_nodes and (_time.time() - start) < timeout_s:
+        result = wait_package(st, ser, timeout_s)
+        if result is None:
+            continue
+        angle_deg, dist_m, qual, is_sync = result
+        nodes_list.append((angle_deg, dist_m, qual, is_sync))
+
+        if is_sync and len(nodes_list) > 1:
+            break
+
+    return nodes_list
+
+
+# ═══════════════════════════════════════════
+# cacheScanData (L613) — 后台线程
+# ═══════════════════════════════════════════
+def cache_scan_data(st, ser):
+    """后台线程：持续收集数据，聚合成圈，更新 latest_scan"""
+    global latest_scan
+    local_scan = []
+
+    while True:
+        nodes = wait_scan_data(st, ser, max_nodes=2000, timeout_s=2.0)
+        if not nodes:
+            continue
+
+        # 处理一圈的点
+        has_sync = any(n[3] for n in nodes)
+        if has_sync:
+            # 找到 sync 节点的位置
+            sync_idx = next(i for i, n in enumerate(nodes) if n[3])
+            # 这一圈 = sync 之前的点 + 从 sync 开始的新一圈
+            circle = []
+            for i in range(len(nodes)):
+                a, d, q, _ = nodes[i]
+                if q == 0 and 0 < d < 6.0:
+                    circle.append((a, d))
+            if circle:
+                with lock:
+                    latest_scan = circle
+            local_scan = nodes[sync_idx:]  # 保留下一个圈的开头
+        else:
+            local_scan.extend(nodes)
+
+
+# ═══════════════════════════════════════════
+# main
+# ═══════════════════════════════════════════
 def main():
-    ser = serial.Serial(PORT, BAUD, timeout=0.5)
+    ser = serial.Serial(PORT, BAUD, timeout=5)
     print(f"[INFO] 打开 {PORT}")
 
+    # startMotor
     ser.setDTR(True)
     time.sleep(0.3)
 
-    send_cmd(ser, LIDAR_CMD_FORCE_STOP)
+    # stopScan: 强制停止 + 停止
+    ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_FSTOP]))
     time.sleep(0.05)
-    send_cmd(ser, LIDAR_CMD_STOP)
+    ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_STOP]))
     time.sleep(0.1)
     ser.reset_input_buffer()
 
-    send_cmd(ser, LIDAR_CMD_SCAN)
+    # startScan: 发送扫描命令
+    print("[CMD] A5 60")
+    ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_SCAN]))
 
-    # 跳过应答头，直接找数据
-    print("[INFO] 等待扫描数据...")
-    raw_start = time.time()
-    raw_buf = bytearray()
-    # 先在终端看看来了什么字节 (from raw debug approach)
-    while time.time() - raw_start < 2:
-        b = ser.read(1)
-        if b:
-            raw_buf.append(b[0])
-    if raw_buf:
-        print(f"[RAW] 前2秒收到 {len(raw_buf)} 字节:")
-        for i in range(0, min(100, len(raw_buf)), 20):
-            line = raw_buf[i:i+20]
-            hx = ' '.join(f'{b:02X}' for b in line)
-            asc = ''.join(chr(b) if 32<=b<127 else '.' for b in line)
-            print(f"  {i:04X}: {hx:<58s} {asc}")
+    # 跳过应答头，直接开始 (C++ 里有 waitResponseHeader，这里简化)
+    time.sleep(0.5)
 
-    # ──── 数据接收线程 ────
-    def scan_loop():
-        global latest_scan
-        buf = bytearray()
-        circ_pts = []
-        prev_last = -1
-        pkt_cnt = 0
+    st = State()
+    print("[INFO] 开始扫描...")
 
-        while True:
-            # 收一批字节
-            chunk = ser.read(512)
-            if not chunk:
-                continue
-            buf.extend(chunk)
-            if len(buf) > 8192:
-                buf = buf[-4096:]  # 防内存溢出
-
-            # 在缓冲区里找 AA 55
-            pos = 0
-            while pos < len(buf) - 1:
-                if buf[pos] != PH1 or buf[pos+1] != PH2:
-                    pos += 1
-                    continue
-
-                # 需要 10 字节包头 + 至少 2 字节数据
-                if pos + 12 > len(buf):
-                    break
-
-                ct    = buf[pos+2]
-                cnt   = buf[pos+3]
-                first = struct.unpack('<H', bytes(buf[pos+4:pos+6]))[0]
-                last  = struct.unpack('<H', bytes(buf[pos+6:pos+8]))[0]
-                # cs    = struct.unpack('<H', bytes(buf[pos+8:pos+10]))[0]
-
-                if cnt == 0 or cnt > 80:
-                    pos += 1
-                    continue
-
-                data_start = pos + 10
-                data_end   = data_start + cnt * 2
-                if data_end > len(buf):
-                    break
-
-                pkt_cnt += 1
-                node_data = buf[data_start:data_end]
-                interval = (last - first) / max(cnt - 1, 1)
-
-                for i in range(cnt):
-                    angle_q64 = first + interval * i
-                    raw = struct.unpack('<H', node_data[i*2:i*2+2])[0]
-                    qual = raw & 0x0003
-                    dist = (raw & 0xFFFC) / 4000.0
-                    if qual == 0 and 0 < dist < 6.0:
-                        a = np.radians(angle_q64 / 64.0)
-                        circ_pts.append((dist * np.cos(a), dist * np.sin(a)))
-
-                # 圈检测：角度回绕
-                if prev_last >= 0 and first < prev_last and circ_pts:
-                    with lock:
-                        latest_scan = circ_pts
-                    circ_pts = []
-                prev_last = last
-
-                pos = data_end
-                if pos > 2048:
-                    buf = buf[pos:]
-                    pos = 0
-                    break
-
-    t = threading.Thread(target=scan_loop, daemon=True)
+    t = threading.Thread(target=cache_scan_data, args=(st, ser), daemon=True)
     t.start()
 
-    # ──── matplotlib ────
+    # ── matplotlib ──
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_xlim(-6, 6); ax.set_ylim(-6, 6)
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
@@ -149,13 +314,15 @@ def main():
         with lock:
             pts = latest_scan[:] if latest_scan else []
         if pts:
-            sc.set_data([p[0] for p in pts], [p[1] for p in pts])
+            xs = [d * np.cos(np.radians(a)) for a, d, in pts]
+            ys = [d * np.sin(np.radians(a)) for a, d, in pts]
+            sc.set_data(xs, ys)
         return sc,
 
     ani = FuncAnimation(fig, update, interval=100, blit=False, cache_frame_data=False)
     plt.show()
 
-    send_cmd(ser, LIDAR_CMD_STOP)
+    ser.write(bytes([LIDAR_CMD_SYNC, LIDAR_CMD_STOP]))
     ser.setDTR(False)
     ser.close()
 
