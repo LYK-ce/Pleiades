@@ -242,32 +242,34 @@ def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
 # cacheScanData (L613) — 后台线程
 # ═══════════════════════════════════════════
 def cache_scan_data(st, ser):
-    """后台线程：持续收集数据，聚合成圈，更新 latest_scan"""
+    """后台线程：严格按 C++ cacheScanData (L613)"""
     global latest_scan
-    local_scan = []
+    local_scan = []  # node_info 数组，从 sync 节点开始累积
 
     while True:
         nodes = wait_scan_data(st, ser, max_nodes=2000, timeout_s=2.0)
         if not nodes:
             continue
 
-        # 处理一圈的点
-        has_sync = any(n[3] for n in nodes)
-        if has_sync:
-            # 找到 sync 节点的位置
-            sync_idx = next(i for i, n in enumerate(nodes) if n[3])
-            # 这一圈 = sync 之前的点 + 从 sync 开始的新一圈
-            circle = []
-            for i in range(len(nodes)):
-                a, d, q, _ = nodes[i]
-                if q == 0 and 0 < d < 5.0:
-                    circle.append((a, d))
-            if circle:
-                with lock:
-                    latest_scan = circle
-            local_scan = nodes[sync_idx:]  # 保留下一个圈的开头
-        else:
-            local_scan.extend(nodes)
+        for angle_deg, dist_m, qual, is_sync in nodes:
+            # C++: if (local_buf[pos].sync & LIDAR_RESP_SYNCBIT)
+            if is_sync:
+                # C++: if (local_scan[0].sync & LIDAR_RESP_SYNCBIT)
+                if local_scan and local_scan[0][3]:  # 第一个节点也是 sync
+                    # 输出完整一圈
+                    circle = []
+                    for a, d, q, _ in local_scan:
+                        if q == 0 and 0 < d < 5.0:
+                            circle.append((a, d))
+                    if circle:
+                        with lock:
+                            latest_scan = circle
+                # 重置，新一圈从当前 sync 节点开始
+                local_scan = []
+
+            local_scan.append((angle_deg, dist_m, qual, is_sync))
+            if len(local_scan) > 4096:
+                local_scan.pop(0)
 
 
 # ═══════════════════════════════════════════
