@@ -259,7 +259,7 @@ def cache_scan_data(st, ser):
                     # 输出完整一圈
                     circle = []
                     for a, d, q, _ in local_scan:
-                        if q == 0 and 0 < d < 5.0:
+                        if 0 < d < 5.0:
                             circle.append((a, d))
                     if circle:
                         with lock:
