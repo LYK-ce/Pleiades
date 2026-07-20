@@ -88,6 +88,7 @@ def main():
                                      d_mm / 1000.0 * np.sin(a_rad)))
             if prev_angle >= 0 and first < prev_angle and circ_pts:
                 # 角度回绕 → 新一圈开始
+                print(f"[SCAN] 一圈完成: {len(circ_pts)} 点")
                 with lock:
                     latest_scan = circ_pts
                 circ_pts = []
