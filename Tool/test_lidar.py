@@ -49,6 +49,20 @@ def main():
 
     # 跳过应答头，直接找数据
     print("[INFO] 等待扫描数据...")
+    raw_start = time.time()
+    raw_buf = bytearray()
+    # 先在终端看看来了什么字节 (from raw debug approach)
+    while time.time() - raw_start < 2:
+        b = ser.read(1)
+        if b:
+            raw_buf.append(b[0])
+    if raw_buf:
+        print(f"[RAW] 前2秒收到 {len(raw_buf)} 字节:")
+        for i in range(0, min(100, len(raw_buf)), 20):
+            line = raw_buf[i:i+20]
+            hx = ' '.join(f'{b:02X}' for b in line)
+            asc = ''.join(chr(b) if 32<=b<127 else '.' for b in line)
+            print(f"  {i:04X}: {hx:<58s} {asc}")
 
     # ──── 数据接收线程 ────
     def scan_loop():
@@ -138,7 +152,7 @@ def main():
             sc.set_data([p[0] for p in pts], [p[1] for p in pts])
         return sc,
 
-    FuncAnimation(fig, update, interval=100, blit=True, cache_frame_data=False)
+    ani = FuncAnimation(fig, update, interval=100, blit=True, cache_frame_data=False)
     plt.show()
 
     send_cmd(ser, LIDAR_CMD_STOP)
