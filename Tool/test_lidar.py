@@ -52,6 +52,7 @@ def main():
     def scan():
         global latest_scan
         circ_pts = []
+        prev_angle = -1  # 上一个包的 lastAngle
         while True:
             # 找 AA 55 (HEAD=0x55AA 小端)
             while True:
@@ -85,10 +86,12 @@ def main():
                     a_rad = np.radians(a_deg)
                     circ_pts.append((d_mm / 1000.0 * np.cos(a_rad),
                                      d_mm / 1000.0 * np.sin(a_rad)))
-            if ct & 0x01 and circ_pts:
+            if prev_angle >= 0 and first < prev_angle and circ_pts:
+                # 角度回绕 → 新一圈开始
                 with lock:
                     latest_scan = circ_pts
                 circ_pts = []
+            prev_angle = last
 
     t = threading.Thread(target=scan, daemon=True)
     t.start()
