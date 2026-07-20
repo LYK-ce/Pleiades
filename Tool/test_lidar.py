@@ -242,52 +242,24 @@ def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
 # cacheScanData (L613) — 后台线程
 # ═══════════════════════════════════════════
 def cache_scan_data(st, ser):
-    """后台线程：累积节点，按 ascendScanData 逻辑找零位输出完整一圈"""
+    """后台线程：用 CT 零位包检测圈边界"""
     global latest_scan
-    all_nodes = []  # 跨多包累积所有节点
+    circ_pts = []
 
     while True:
-        nodes = wait_scan_data(st, ser, max_nodes=2000, timeout_s=2.0)
+        nodes = wait_scan_data(st, ser, max_nodes=5000, timeout_s=3.0)
         if not nodes:
             continue
 
         for angle_deg, dist_m, qual, is_sync in nodes:
-            all_nodes.append((angle_deg, dist_m, qual, is_sync))
+            if 0 < dist_m < 5.0:
+                circ_pts.append((angle_deg, dist_m))
 
-        # 500+ 节点来做一个 ascendScanData 式的零位检测
-        if len(all_nodes) < 500:
-            continue
-
-        # ascendScanData: 找到角度跳变点（从大变小的位置）作为零位
-        circle = ascend_scan_data(all_nodes)
-        if circle:
-            with lock:
-                latest_scan = circle
-            # 保留零位之后的点给下一轮
-            # 简单做法：清空重新累积
-            all_nodes = all_nodes[-100:]  # 保留最后一点避免漏点
-
-
-def ascend_scan_data(nodes):
-    """ascendScanData (L1474): 角度排序 + 零位旋转"""
-    # 过滤有效点
-    valid = [(a, d) for a, d, q, _ in nodes if 0 < d < 5.0]
-    if len(valid) < 100:
-        return None
-
-    # 按角度排序
-    valid.sort(key=lambda x: x[0])
-
-    # 找零位：角度跳变（前一个角度 > 后一个角度 + 180）
-    zero_pos = 0
-    for i in range(1, len(valid)):
-        if valid[i-1][0] - valid[i][0] > 180:
-            zero_pos = i
-            break
-
-    # 旋转：零位 → 结尾 + 开头 → 零位
-    rotated = valid[zero_pos:] + valid[:zero_pos]
-    return rotated
+            # 零位包检测圈边界
+            if is_sync and circ_pts:
+                with lock:
+                    latest_scan = circ_pts[:]
+                circ_pts = []
 
 
 # ═══════════════════════════════════════════
