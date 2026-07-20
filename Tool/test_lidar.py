@@ -43,8 +43,8 @@ class State:
         self.CheckSumResult = True
         self.ct = 0                  # CT 原始值
         self.has_package_error = False
-        # 缓存整个包的距离数据
-        self.nodes = [0] * TRI_PACKMAXNODES   # uint16 数组
+        self._raw_samples = bytearray()       # 临时原始字节
+        self._parsed_nodes = []               # [(intensity, dist, is_flag), ...]
         self.package_index = 0
 
 
@@ -60,7 +60,6 @@ def parse_response_header(st, ser, timeout_s=1.0):
     st.CheckSumCal = 0
 
     while (_time.time() - start) < timeout_s:
-        # 找 AA 55
         b = ser.read(1)
         if not b:
             continue
@@ -73,10 +72,11 @@ def parse_response_header(st, ser, timeout_s=1.0):
             continue
 
         if recvPos == 1:
-            st.CheckSumCal = 0x55AA
             if byte == PH2:
                 pkg[1] = byte
                 recvPos = 2
+                # C++: 校验和从 "PH" (0x55AA) 开始
+                st.CheckSumCal = 0x55AA
             elif byte == PH1:  # 连续 AA，保持
                 continue
             else:
@@ -88,8 +88,10 @@ def parse_response_header(st, ser, timeout_s=1.0):
 
         if recvPos == 2:  # CT
             st.ct = byte
-        elif recvPos == 3:  # count
+        elif recvPos == 3:  # count (LSN)
             st.package_Sample_Num = byte
+            # C++: 校验和 XOR CT|LSN 字
+            st.CheckSumCal ^= (byte << 8) | st.ct
         elif recvPos == 4:  # firstAngle low
             if byte & LIDAR_RESP_CHECKBIT:
                 st.FirstSampleAngle = byte
@@ -98,9 +100,10 @@ def parse_response_header(st, ser, timeout_s=1.0):
                 recvPos = 0
                 continue
         elif recvPos == 5:  # firstAngle high
-            st.FirstSampleAngle += byte * 0x100
-            st.CheckSumCal ^= st.FirstSampleAngle
-            st.FirstSampleAngle >>= 1  # ← 关键！右移1位
+            # C++: 校验和 XOR 原始 FSA (移位前)
+            fsa_raw = (byte << 8) | st.FirstSampleAngle
+            st.CheckSumCal ^= fsa_raw
+            st.FirstSampleAngle = fsa_raw >> 1  # ← 移位到后面做
         elif recvPos == 6:  # lastAngle low
             if byte & LIDAR_RESP_CHECKBIT:
                 st.LastSampleAngle = byte
@@ -109,8 +112,10 @@ def parse_response_header(st, ser, timeout_s=1.0):
                 recvPos = 0
                 continue
         elif recvPos == 7:  # lastAngle high
-            st.LastSampleAngle = byte * 0x100 + st.LastSampleAngle
-            st.LastSampleAngle >>= 1  # ← 关键！右移1位
+            # C++: 校验和 XOR 原始 LSA (移位前)
+            lsa_raw = (byte << 8) | st.LastSampleAngle
+            st.CheckSumCal ^= lsa_raw
+            st.LastSampleAngle = lsa_raw >> 1
 
             # 计算角度间隔
             cnt = st.package_Sample_Num
@@ -140,11 +145,10 @@ def parse_response_header(st, ser, timeout_s=1.0):
 # parseResponseScanData (L1012)
 # ═══════════════════════════════════════════
 def parse_response_scan_data(st, ser, timeout_s=1.0):
-    """读 count×2 字节距离数据"""
+    """读 count×3 字节采样数据 (NODE_QUAL8: 1B intensity + 2B distance)"""
     import time as _time
     start = _time.time()
-    recvPos = 0
-    need = st.package_Sample_Num * 2
+    need = st.package_Sample_Num * 3  # ← NODE_QUAL8: 每点 3 字节
 
     while (_time.time() - start) < timeout_s:
         b = ser.read(1)
@@ -152,15 +156,25 @@ def parse_response_scan_data(st, ser, timeout_s=1.0):
             continue
         byte = b[0]
 
-        node_buf_idx = recvPos // 2
-        if recvPos % 2 == 0:
-            st.nodes[node_buf_idx] = byte
-        else:
-            st.nodes[node_buf_idx] += byte * 0x100
-            st.CheckSumCal ^= st.nodes[node_buf_idx]
+        # 收集所有原始字节
+        st._raw_samples.append(byte)
 
-        recvPos += 1
-        if recvPos >= need:
+        if len(st._raw_samples) >= need:
+            # 逐点解析: 1B intensity + 2B distance
+            st._parsed_nodes = []
+            for i in range(st.package_Sample_Num):
+                off = i * 3
+                intensity = st._raw_samples[off]
+                dist_raw = st._raw_samples[off + 1] | (st._raw_samples[off + 2] << 8)
+                is_flag = dist_raw & 0x0003
+                dist = dist_raw & 0xFFFC
+                st._parsed_nodes.append((intensity, dist, is_flag))
+
+                # C++: 校验和 — 1B intensity XOR, then 2B distance XOR
+                st.CheckSumCal ^= intensity
+                st.CheckSumCal ^= dist_raw
+
+            st._raw_samples = []
             return True
     return False
 
@@ -169,25 +183,22 @@ def parse_response_scan_data(st, ser, timeout_s=1.0):
 # parseNodeFromeBuffer (L1252)
 # ═══════════════════════════════════════════
 def parse_node_from_buffer(st):
-    """从缓存中取 nodeIndex 指向的点，返回 (angle_deg, dist_m, qual, is_sync)"""
-    raw = st.nodes[st.nodeIndex]
+    """从缓存中取 nodeIndex 指向的点，返回 (angle_deg, dist_m, intensity, is_sync)"""
+    intensity, dist, is_flag = st._parsed_nodes[st.nodeIndex]
 
-    qual = raw & 0x0003
-    dist = raw & 0xFFFC
-    # C++: parseNodeDebugFromBuffer — sync 基于 CT，不依赖校验和
-    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0)
+    # C++: sync 基于 CT bit[0] (零位包标记)，不依赖 LSN
+    is_sync = (st.ct & 0x01) != 0
 
     angle_q64 = st.FirstSampleAngle + st.IntervalSampleAngle * st.nodeIndex
     angle_deg = angle_q64 / 64.0
 
-    # 处理角度溢出
     if angle_deg >= 360:
         angle_deg -= 360
 
-    dist_m = dist / 4000.0  # 1/4mm → m
+    dist_m = dist / 4000.0
 
     st.nodeIndex += 1
-    return angle_deg, dist_m, qual, is_sync
+    return angle_deg, dist_m, intensity, is_sync
 
 
 # ═══════════════════════════════════════════
@@ -230,8 +241,8 @@ def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
         result = wait_package(st, ser, timeout_s)
         if result is None:
             continue
-        angle_deg, dist_m, qual, is_sync = result
-        nodes_list.append((angle_deg, dist_m, qual, is_sync))
+        angle_deg, dist_m, intensity, is_sync = result
+        nodes_list.append((angle_deg, dist_m, intensity, is_sync))
 
         if is_sync and len(nodes_list) > 1:
             break
@@ -253,19 +264,19 @@ def cache_scan_data(st, ser):
         if not batch:
             continue
 
-        for angle_deg, dist_m, qual, is_sync in batch:
+        for angle_deg, dist_m, intensity, is_sync in batch:
             # C++: if (local_buf[pos].sync & LIDAR_RESP_SYNCBIT)
             if is_sync:
                 # C++: if (local_scan[0].sync & LIDAR_RESP_SYNCBIT)
                 if local_scan and local_scan[0][3]:  # 前一个也是 sync → 一圈完成
                     circle = [(a, d) for a, d, _, _ in local_scan
-                              if 0.05 < d < 5.0 and 2 > _]
+                              if 0.05 < d < 12.0]
                     if circle:
                         with lock:
                             latest_scan = circle
-                local_scan = []  # scan_count = 0
+                local_scan = []
 
-            local_scan.append((angle_deg, dist_m, qual, is_sync))
+            local_scan.append((angle_deg, dist_m, intensity, is_sync))
             # C++: if (scan_count == MAX) scan_count -= 1;
             if len(local_scan) > 4096:
                 local_scan.pop(0)
