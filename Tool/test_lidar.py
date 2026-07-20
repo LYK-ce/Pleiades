@@ -174,8 +174,8 @@ def parse_node_from_buffer(st):
 
     qual = raw & 0x0003
     dist = raw & 0xFFFC
-    # 零位包: cnt==1 且 CT&0x01==1 且校验和正确
-    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0) and st.CheckSumResult
+    # C++: parseNodeDebugFromBuffer — sync 基于 CT，不依赖校验和
+    is_sync = (st.package_Sample_Num == 1) and ((st.ct & 0x01) != 0)
 
     angle_q64 = st.FirstSampleAngle + st.IntervalSampleAngle * st.nodeIndex
     angle_deg = angle_q64 / 64.0
@@ -243,28 +243,32 @@ def wait_scan_data(st, ser, max_nodes=2000, timeout_s=1.0):
 # cacheScanData (L613) — 后台线程
 # ═══════════════════════════════════════════
 def cache_scan_data(st, ser):
-    """后台线程：用 CT 零位包检测圈边界"""
+    """C++ cacheScanData (L613): 双 sync 节点逻辑"""
     global latest_scan
-    circ_pts = []
+    local_scan = []  # 累积的 node_info
 
     while True:
-        nodes = wait_scan_data(st, ser, max_nodes=5000, timeout_s=3.0)
-        if not nodes:
+        # waitScanData: 一批节点，末尾是 sync 节点
+        batch = wait_scan_data(st, ser, max_nodes=5000, timeout_s=3.0)
+        if not batch:
             continue
 
-        for angle_deg, dist_m, qual, is_sync in nodes:
-            # SDK 过滤: 阳光噪点(3), 玻璃噪点(2), 距离范围
-            if qual >= 2:
-                continue
-            if 0.05 < dist_m < 5.0:
-                circ_pts.append((angle_deg, dist_m))
+        for angle_deg, dist_m, qual, is_sync in batch:
+            # C++: if (local_buf[pos].sync & LIDAR_RESP_SYNCBIT)
+            if is_sync:
+                # C++: if (local_scan[0].sync & LIDAR_RESP_SYNCBIT)
+                if local_scan and local_scan[0][3]:  # 前一个也是 sync → 一圈完成
+                    circle = [(a, d) for a, d, _, _ in local_scan
+                              if 0.05 < d < 5.0 and 2 > _]
+                    if circle:
+                        with lock:
+                            latest_scan = circle
+                local_scan = []  # scan_count = 0
 
-            # 零位包检测圈边界
-            if is_sync and circ_pts:
-                print(f"[SCAN] 一圈 {len(circ_pts)} 点 (CT=0x{st.ct:02X})")
-                with lock:
-                    latest_scan = circ_pts[:]
-                circ_pts = []
+            local_scan.append((angle_deg, dist_m, qual, is_sync))
+            # C++: if (scan_count == MAX) scan_count -= 1;
+            if len(local_scan) > 4096:
+                local_scan.pop(0)
 
 
 # ═══════════════════════════════════════════
