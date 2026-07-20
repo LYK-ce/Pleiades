@@ -260,7 +260,7 @@ def cache_scan_data(st, ser):
             circle = []
             for i in range(len(nodes)):
                 a, d, q, _ = nodes[i]
-                if q == 0 and 0 < d < 6.0:
+                if q == 0 and 0 < d < 5.0:
                     circle.append((a, d))
             if circle:
                 with lock:
