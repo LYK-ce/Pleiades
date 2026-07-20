@@ -152,7 +152,7 @@ def main():
             sc.set_data([p[0] for p in pts], [p[1] for p in pts])
         return sc,
 
-    ani = FuncAnimation(fig, update, interval=100, blit=True, cache_frame_data=False)
+    ani = FuncAnimation(fig, update, interval=100, blit=False, cache_frame_data=False)
     plt.show()
 
     send_cmd(ser, LIDAR_CMD_STOP)
