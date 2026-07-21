@@ -19,7 +19,7 @@ pub use types::{LaserPoint, LaserScan};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use constants::*;
 use parser::{feed_byte, parse_points, do_process_simple, ParseState};
@@ -74,11 +74,11 @@ impl LidarDevice {
                                 let scan = do_process_simple(
                                     &nodes, 0.0, false, 0, 360.0,
                                 );
-                                info!(
-                                    "[LiDAR] scan: {} pts, freq={:.1}Hz",
-                                    scan.points.len(),
-                                    scan.scan_freq
-                                );
+                                // info!(
+                                //     "[LiDAR] scan: {} pts, freq={:.1}Hz",
+                                //     scan.points.len(),
+                                //     scan.scan_freq
+                                // );
                                 if let Ok(mut guard) = state_clone.try_write() {
                                     guard.scan = Some(scan);
                                 } else {

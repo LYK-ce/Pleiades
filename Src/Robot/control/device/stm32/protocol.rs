@@ -16,7 +16,9 @@ use crate::robot::state::RobotState;
 pub fn build_host_frame(func: u8, data: &[u8]) -> Vec<u8> {
     let mut frame = vec![HEAD, DEV_ID_HOST, 0, func];
     frame.extend_from_slice(data);
-    frame[2] = (frame.len() - 1) as u8;
+    let len = 3 + data.len();
+    debug_assert!(len <= 255, "帧数据过长: {len} > 255 (data={}B)", data.len());
+    frame[2] = len as u8;
     let csum = (frame.iter().map(|&b| b as u32).sum::<u32>() + COMPLEMENT as u32) as u8;
     frame.push(csum);
     frame

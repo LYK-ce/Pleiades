@@ -57,11 +57,15 @@ pub fn spawn_port(
 // TX Loop
 // ============================================================
 
+/// TX 连续写失败多少次后退出(避免在死硬件上无限循环)
+const TX_MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
 async fn tx_loop(
     port: Arc<SerialPort>,
     mut cmd_rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
 ) {
+    let mut consecutive_errors: u32 = 0;
     loop {
         select! {
             _ = cancel.cancelled() => {
@@ -71,9 +75,19 @@ async fn tx_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(bytes) => {
-                        if let Err(e) = port.write(&bytes).await {
-                            error!("串口写入失败: {e}");
-                            return;
+                        match port.write(&bytes).await {
+                            Ok(_) => {
+                                consecutive_errors = 0;
+                            }
+                            Err(e) => {
+                                consecutive_errors += 1;
+                                error!("串口写入失败 (连续 {}/{}): {e}",
+                                    consecutive_errors, TX_MAX_CONSECUTIVE_ERRORS);
+                                if consecutive_errors >= TX_MAX_CONSECUTIVE_ERRORS {
+                                    error!("TX task 退出: 连续 {} 次写入失败", consecutive_errors);
+                                    return;
+                                }
+                            }
                         }
                     }
                     None => {
