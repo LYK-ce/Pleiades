@@ -11,33 +11,40 @@
 | 项目 | 值 |
 |------|------|
 | 传输协议 | WebSocket |
-| 数据格式 | JSON 文本消息 |
+| 数据格式 | JSON 文本消息（map_full 为二进制帧） |
 | 编码 | UTF-8 |
 | 角色 | 小车 = Server，PC = Client |
 | 默认端口 | 9001 |
 
 每条消息为单行 JSON，顶层必有 `type` 字段。
 
-坐标系：2D 用 `(x, y)`，3D 高度用 `z`，与 Godot 坐标系统一。
+## 坐标系
+
+| 项目 | 值 |
+|------|------|
+| 1 cell | 0.5m × 0.5m |
+| Godot 缩放 | 1m = 32px |
+| 2D 轴 | `x`（东/右）, `y`（南/下） |
+| 3D 轴 | 高度用 `z` |
+| 网格坐标 | `gx = floor(x / 0.5)`, `gy = floor(y / 0.5)` |
+
+Chunk 大小：256×256 cell = 128m×128m。
 
 ---
 
 ## 连接流程
-
-连接分两层：
 
 | 阶段 | 触发条件 | 含义 |
 |------|---------|------|
 | WebSocket 握手完成 | TCP 升级为 WS | 物理通道建立 |
 | `hello` 包收到 | 小车发送身份 | **正式建立连接** |
 
-Pictor 仅在收到 `hello` 后才认为连接可用，之后才开始处理 `pose`、`map_*` 等业务消息。
 `hello` 之前收到的任何消息将被丢弃。
 
 ```
-小车 ── TCP 握手 ──→ PC       (物理层)
-小车 ── hello ──→ PC          ← 必须第一帧，业务层连接建立
-小车 ── map_full ──→ PC
+小车 ── TCP 握手 ──→ PC
+小车 ── hello ──→ PC          ← 必须第一帧
+小车 ── map_full ──→ PC       ← 可选
 小车 ── pose ──→ PC
 ```
 
@@ -46,8 +53,6 @@ Pictor 仅在收到 `hello` 后才认为连接可用，之后才开始处理 `po
 ## 上行：小车 → PC
 
 ### hello — 注册身份
-
-连接建立后立即发送，声明车辆 ID。
 
 ```json
 {
@@ -60,7 +65,7 @@ Pictor 仅在收到 `hello` 后才认为连接可用，之后才开始处理 `po
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `vehicle_id` | string | 车辆唯一标识 |
-| `address` | string | 本连接地址，用于匹配 |
+| `address` | string | 本连接地址 |
 
 ### pose — 车辆位姿
 
@@ -87,45 +92,41 @@ Pictor 仅在收到 `hello` 后才认为连接可用，之后才开始处理 `po
 | `yaw` | f32 | 弧度 | 偏航角 |
 | `vx`, `vy` | f32 | 米/秒 | 2D 速度分量 |
 
-### map_full — 全量地图
+### map_full — 全量地图（二进制帧）
 
-连接建立或重连后发送完整地图。
+连接建立后发送完整 Chunk。**使用 WebSocket 二进制帧**，不走 JSON。
+
+```
+字节布局:
+  [0]      type:    u8 = 0 (map_full)
+  [1..4]   chunk_x: int32 (big-endian)
+  [5..8]   chunk_y: int32 (big-endian)
+  [9..]    cells:   PackedByteArray, 65536 bytes (256×256)
+
+  总大小: 65545 bytes
+```
+
+每个 cell: 0=可通行, 1=不可通行, 2=未知，行优先 `index = y * 256 + x`。
+
+### map_delta — 增量地图（文本帧）
+
+仅发送变化的格子，JSON 格式。
 
 ```json
 {
-    "type": "map_full",
-    "ts": 1717800000.200,
+    "type": "map_delta",
     "voxels": [
-        {"gx": 0, "gy": 0, "gz": 0, "state": 0, "conf": 0.95},
-        {"gx": 1, "gy": 0, "gz": 0, "state": 1, "conf": 0.80}
+        {"gx": 2, "gy": 1, "state": 1},
+        {"gx": 3, "gy": 2, "state": 0}
     ]
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `ts` | f64 | Unix 时间戳 |
-| `voxels` | array | 全量体素列表 |
-| `gx`, `gy` | i32 | 2D 网格坐标 |
-| `gz` | i32 | 高度层 |
-| `state` | u8 | 0=可通行 1=不可通行 |
-| `conf` | f32 | 置信度 0.0~1.0 |
-
-### map_delta — 增量地图
-
-仅发送变化的格子。
-
-```json
-{
-    "type": "map_delta",
-    "ts": 1717800000.300,
-    "voxels": [
-        {"gx": 2, "gy": 1, "gz": 0, "state": 1, "conf": 0.90}
-    ]
-}
-```
-
-字段同 `map_full`。
+| `voxels` | array | 变化的格子列表 |
+| `gx`, `gy` | i32 | 网格坐标 |
+| `state` | u8 | 0=可通行, 1=不可通行, 2=未知 |
 
 ---
 
@@ -145,7 +146,7 @@ Pictor 仅在收到 `hello` 后才认为连接可用，之后才开始处理 `po
 | `backward` | 后退 |
 | `spin_left` | 左旋 |
 | `spin_right` | 右旋 |
-| `stop` | 停止（松手时发送） |
+| `stop` | 停止 |
 
 ---
 

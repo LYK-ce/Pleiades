@@ -13,7 +13,7 @@ pub mod protocol;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::warn;
 
 use constants::MotionState;
 use protocol::{
@@ -46,10 +46,8 @@ impl STM32Device {
             port, baudrate, 512,
             move |bytes| {
                 let mut frame_parsed = false;
-                info!("[STM32 RX] raw: {:02X?}", bytes);
                 for &byte in bytes {
                     if let Some((func, data)) = feed_state_machine(&mut sm, byte) {
-                        info!("[STM32] 解析帧 func=0x{func:02X}, data={:02X?}", data);
                         update_state(&mut local_state, func, &data);
                         frame_parsed = true;
                     }
@@ -57,9 +55,6 @@ impl STM32Device {
                 if frame_parsed {
                     if let Ok(mut guard) = state_clone.try_write() {
                         *guard = local_state.clone();
-                        info!("[STM32] 状态更新: vx={:.3}, vy={:.3}, vz={:.3}, bat={:.2}V, roll={:.3}, pitch={:.3}, yaw={:.3}, enc={:?}",
-                            guard.vx, guard.vy, guard.vz, guard.battery,
-                            guard.attitude.roll, guard.attitude.pitch, guard.attitude.yaw, guard.encoders);
                     } else {
                         warn!("[STM32] try_write 失败，状态更新丢弃");
                     }

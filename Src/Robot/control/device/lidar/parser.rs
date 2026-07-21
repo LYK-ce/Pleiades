@@ -265,7 +265,6 @@ fn check_block_status(state: &mut ParseState, byte: u8) {
 /// 返回 Vec<NodeInfo>，不进行角度/距离转换（保持原始值）
 pub fn parse_points(packets: &[ScanPacket], intensity_bit: u8) -> Vec<NodeInfo> {
     let mut nodes = Vec::new();
-    let mut _valid_count = 0u32;
 
     for packet in packets {
         let data = &packet.raw;
@@ -343,10 +342,6 @@ pub fn parse_points(packets: &[ScanPacket], intensity_bit: u8) -> Vec<NodeInfo> 
             if a > SDK_ANGLE360 {
                 a -= SDK_ANGLE360;
             }
-            if dist != 0 {
-                _valid_count += 1;
-            }
-
             let node = NodeInfo {
                 sync: if i == 0 { 1 } else { 0 },
                 is: is_flag,

@@ -57,6 +57,9 @@ pub mod api;
 #[path = "Robot/mod.rs"]
 pub mod robot;
 
+#[path = "WebSocket/mod.rs"]
+pub mod websocket;
+
 // Config模块类型导出
 pub use config::{Pleiades_Config, Log_Config, Network_Config, Storage_Config, Read_Config, Ensure_Config, Update_Config, Ensure_Identity};
 

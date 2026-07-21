@@ -89,10 +89,16 @@ pub struct Robot {
 main.rs / main_robot.rs
   │
   ├── Robot::launch(stm32_port, stm32_baud, car_type, lidar_port?, lidar_baud?)
-  ├── spawn_ws_server(port, event_bus, robot.cmd_tx, robot.robot_state)
-  ├── [Lua 绑定]                ← 上层命令源 (→ cmd_tx)
-  └── [LLM Agent]               ← 上层命令源 (→ cmd_tx)
+  │     └── 内部: broadcast_loop (100ms) → pose_tx + (未来) map_tx
+  │
+  ├── WebSocket (Src/WebSocket/)     ← 订阅 Robot 的 broadcast
+  │     └── 只管传输，不碰 state
+  │
+  ├── [Lua 绑定]                     ← 上层命令源 (→ cmd_tx)
+  └── [LLM Agent]                    ← 上层命令源 (→ cmd_tx)
 ```
+
+> ⚠️ 计划重构：`websocket.rs` → `Src/WebSocket/`，与 Robot 平级。见 Task 5。
 
 ## 已知问题
 
