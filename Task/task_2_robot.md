@@ -1,42 +1,50 @@
 # Task 2: Robot
 
-> 状态：设计中
+> 状态：实现中
 > 创建日期：2026-07-07
+> 最后更新：2026-07-21
 
 ## 目标
 
 实现 `Robot` — 长期运行的 tokio task，作为整个机器人系统的中枢。
 
-## 文件结构
+## 文件结构（当前）
 
 ```
 Src/Robot/
-├── mod.rs         ← 模块入口 + 全局单例 + public export
-├── state.rs       ← RobotState 等全局状态类型
-├── websocket.rs   ← WebSocket 遥控服务
-├── core/          ← Robot 核心
+├── mod.rs          ← 模块入口 + public export
+├── state.rs        ← RobotState + LidarState（各设备独立）
+├── websocket.rs    ← WebSocket 遥控服务
+├── core/           ← Robot 核心
 │   ├── mod.rs
-│   ├── command.rs ← Command 枚举
-│   └── robot.rs   ← Robot::launch() + 主 select! 循环
+│   ├── command.rs  ← Command 枚举
+│   └── robot.rs    ← Robot::launch() + 主 select! 循环 + dispatch
 └── control/
-    ├── types.rs   ← CarType
+    ├── types.rs    ← CarType
     ├── serial/
-    │   └── port.rs
+    │   └── port.rs ← spawn_port() 通用 TX+RX tokio task
     └── device/
-        └── stm32.rs
+        ├── mod.rs
+        ├── stm32/
+        │   ├── mod.rs       ← STM32Device
+        │   ├── constants.rs ← 协议常量 + MotionState
+        │   └── protocol.rs  ← 帧构建 + 状态机 + 传感器解析 + 测试
+        └── lidar/
+            ├── mod.rs       ← LidarDevice
+            ├── constants.rs ← tmini 协议常量
+            ├── types.rs     ← LaserPoint / LaserScan
+            ├── parser.rs    ← feed_byte 状态机 + 点云解析 + 测试
+            └── checksum.rs  ← XOR 校验和 + 测试
 ```
 
 ## 命令定义 (`core/command.rs`)
 
 ```rust
 pub enum Command {
-    Forward(i16),
-    Backward(i16),
-    SpinLeft(i16),
-    SpinRight(i16),
-    Stop,
-    Beep(u16),
-    // 未来：GoTo(f32, f32), Patrol, Explore, ...
+    Forward(i16), Backward(i16),
+    SpinLeft(i16), SpinRight(i16),
+    Stop, Beep(u16),
+    StartLidarScan, StopLidarScan,
 }
 ```
 
@@ -44,77 +52,35 @@ pub enum Command {
 
 ```rust
 pub struct Robot {
-    cmd_tx: mpsc::Sender<Command>,       // 对外：统一命令输入
-    state: Arc<RwLock<RobotState>>,      // 对外：全局状态
-    cancel: CancellationToken,           // 内部：优雅退出
+    pub cmd_tx: mpsc::Sender<Command>,            // 对外：统一命令输入
+    pub robot_state: Arc<RwLock<RobotState>>,      // STM32 独占写，WS/Lua 读
+    pub lidar_state: Arc<RwLock<LidarState>>,      // LiDAR 独占写，WS/Lua 读
+    cancel: CancellationToken,                     // 内部：优雅退出
 }
 ```
 
-命令定义独立于 Robot，便于后续扩展——加命令只需改 `command.rs`。
+**设计原则**：每个 Device 持有独立的 `Arc<RwLock<自己的State>>`，互不干扰。
+- `robot_state` — STM32 RX 回调写入，包含 vx/vy/vz/battery/attitude 等
+- `lidar_state` — LiDAR RX 回调写入，包含 scan: LaserScan
+- 避免单一大锁的竞争和\"整对象覆盖\"导致的数据丢失
 
 ## 启动流程
 
-`Robot::launch()` 依次完成以下初始化：
-
 ```
-1. 创建共享状态
-   state = Arc::new(RwLock::new(RobotState::default()))
+1. 创建各设备独立状态
+   robot_state = Arc::new(RwLock::new(RobotState::default()))
+   lidar_state = Arc::new(RwLock::new(LidarState::default()))
 
-2. spawn 各 Device（每个 Device 内部启动 TX + RX tokio task）
-   stm32 = STM32Device::spawn(port, baud, car_type, state.clone())
-       └── 内部: tokio::spawn( tx_loop ) ← 写串口
-                 tokio::spawn( rx_loop ) ← 读串口 → 写 state
-   lidar = LidarDevice::spawn(...)   // 未来
-   camera = CameraDevice::spawn(...) // 未来
+2. spawn 各 Device
+   stm32 = STM32Device::spawn(port, baud, car_type, robot_state.clone())
+   lidar = LidarDevice::spawn(lidar_port, lidar_baud, lidar_state.clone())  // 可选
+   // 未来: camera, gps, ...
 
 3. 创建命令通道 + spawn 主循环
    (cmd_tx, cmd_rx) = mpsc::channel(32)
-   tokio::spawn( main_loop )
+   tokio::spawn(main_loop)
 
-5. 返回 Robot { cmd_tx, state, cancel }
-```
-
-Robot 退出时调 `cancel` → 所有 task（主循环、各 Device 的 TX/RX）优雅退出。
-
-## 职责
-
-1. **启动时**：创建全局状态，spawn 各 Device 的 TX/RX tokio task，启动 WS 服务，spawn 主循环
-2. **运行时**：select! 接收统一命令 → 调度到对应 Device
-3. **状态**：Device 的 rx_loop 直接写 `RobotState`，Robot 和外部都能读
-
-```rust
-impl Robot {
-    pub fn launch(port: &str, baud: u32, car_type: CarType) -> Self {
-        // 创建共享状态（Device 的 rx_loop 会直接写）
-        let state = Arc::new(RwLock::new(RobotState::default()));
-
-        // spawn STM32
-        let stm32 = STM32Device::spawn(port, baud, car_type, state.clone());
-        // ..未来 spawn LiDAR, Camera, ..
-
-        // 命令通道
-        let (cmd_tx, cmd_rx) = mpsc::channel(32);
-
-        // 主循环
-        tokio::spawn(async move {
-            loop {
-                select! {
-                    cmd = cmd_rx.recv() => dispatch(cmd, &stm32).await;
-                    _ = tick => { /* 状态监控 */ }
-                    _ = cancel.cancelled() => break;
-                }
-            }
-        });
-
-        Self { cmd_tx, state, cancel }
-    }
-
-    // 对外 API：发命令
-    pub async fn forward(&self, speed: i16) { self.cmd_tx.send(Command::Forward(speed)).await; }
-    pub async fn stop(&self) { self.cmd_tx.send(Command::Stop).await; }
-    // 对外 API：读状态
-    pub async fn get_state(&self) -> RobotState { self.state.read().await.clone(); }
-}
+4. 返回 Robot { cmd_tx, robot_state, lidar_state, cancel }
 ```
 
 ## 集成
@@ -122,18 +88,18 @@ impl Robot {
 ```
 main.rs / main_robot.rs
   │
-  ├── Robot::launch()           ← 核心
-  ├── spawn_ws_server()         ← 上层命令源 (→ cmd_tx)
+  ├── Robot::launch(stm32_port, stm32_baud, car_type, lidar_port?, lidar_baud?)
+  ├── spawn_ws_server(port, event_bus, robot.cmd_tx, robot.robot_state)
   ├── [Lua 绑定]                ← 上层命令源 (→ cmd_tx)
   └── [LLM Agent]               ← 上层命令源 (→ cmd_tx)
 ```
 
-```rust
-// main_robot.rs
-let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus);
-spawn_robot_ws_server(9090, event_bus, robot.cmd_tx.clone());
-robot.forward(50).await;
-```
+## 已知问题
+
+| # | 问题 | 状态 |
+|---|------|:---:|
+| 1 | ~~状态写回每帧 spawn task~~ → `try_write()` + `frame_parsed` | ✅ |
+| 2 | ~~状态共享冲突（整对象覆盖）~~ → 各设备独立 State | ✅ |
 
 ## 人类评审
 

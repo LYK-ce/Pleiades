@@ -7,3 +7,4 @@
 //! 每个设备一个文件，实现自己的协议和驱动句柄。
 
 pub mod stm32;
+pub mod lidar;

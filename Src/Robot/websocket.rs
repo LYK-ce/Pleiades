@@ -19,31 +19,34 @@ use crate::robot::core::command::Command;
 use crate::robot::state::RobotState;
 
 pub fn spawn_robot_ws_server(
-    port: u16,
+    bind_addr: &str,
+    vehicle_id: &str,
     event_bus: Arc<EventBus>,
     cmd_tx: mpsc::Sender<Command>,
     state: Arc<tokio::sync::RwLock<RobotState>>,
 ) {
+    let addr = bind_addr.to_string();
+    let id = vehicle_id.to_string();
     tokio::spawn(async move {
-        run_server(port, event_bus, cmd_tx, state).await;
+        run_server(addr, id, event_bus, cmd_tx, state).await;
     });
 }
 
 async fn run_server(
-    port: u16,
+    bind_addr: String,
+    vehicle_id: String,
     event_bus: Arc<EventBus>,
     cmd_tx: mpsc::Sender<Command>,
     state: Arc<tokio::sync::RwLock<RobotState>>,
 ) {
-    let addr = format!("0.0.0.0:{port}");
-    let listener = match TcpListener::bind(&addr).await {
+    let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("[Robot WS] 绑定 {addr} 失败: {e}");
+            tracing::error!("[Robot WS] 绑定 {bind_addr} 失败: {e}");
             return;
         }
     };
-    tracing::info!("[Robot WS] 遥控服务器已启动: ws://{addr}");
+    tracing::info!("[Robot WS] 遥控服务器已启动: ws://{bind_addr}");
 
     // 遥测 broadcast（10Hz）
     let (telemetry_tx, _) = broadcast::channel::<String>(16);
@@ -67,8 +70,10 @@ async fn run_server(
                 };
                 let tx = cmd_tx.clone();
                 let telemetry_rx = telemetry_tx.subscribe();
+                let vid = vehicle_id.clone();
+                let addr = bind_addr.clone();
                 tokio::spawn(async move {
-                    handle_connection(ws, tx, telemetry_rx, peer_addr.to_string()).await;
+                    handle_connection(ws, tx, telemetry_rx, vid, addr, peer_addr.to_string()).await;
                 });
             }
             Err(e) => tracing::error!("[Robot WS] accept 错误: {e}"),
@@ -80,10 +85,16 @@ async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     cmd_tx: mpsc::Sender<Command>,
     mut telemetry_rx: broadcast::Receiver<String>,
+    vehicle_id: String,
+    bind_addr: String,
     peer: String,
 ) {
-    let welcome = serde_json::json!({"type":"welcome","message":"Robot WS connected"});
-    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(welcome.to_string())).await;
+    let hello = serde_json::json!({
+        "type": "hello",
+        "vehicle_id": vehicle_id,
+        "address": format!("ws://{bind_addr}")
+    });
+    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(hello.to_string())).await;
 
     // 转发遥测到客户端
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -119,7 +130,9 @@ async fn handle_connection(
     }
 
     telemetry_handle.abort();
-    let _ = cmd_tx.send(Command::Stop).await;
+    if cmd_tx.send(Command::Stop).await.is_err() {
+        tracing::warn!("[Robot WS] {peer} 断开时无法发送 Stop");
+    }
     tracing::info!("[Robot WS] {peer} 已断开，自动停车");
 }
 
@@ -147,14 +160,16 @@ async fn telemetry_loop(
     loop {
         interval.tick().await;
         let s = state.read().await;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
         let payload = serde_json::json!({
-            "type": "robot_telemetry",
-            "vx": s.vx, "vy": s.vy, "vz": s.vz,
-            "battery": s.battery,
-            "roll": s.attitude.roll,
-            "pitch": s.attitude.pitch,
+            "type": "pose",
+            "ts": ts,
+            "x": 50.0, "y": 50.0, "z": 0.0,
             "yaw": s.attitude.yaw,
-            "encoders": s.encoders,
+            "vx": s.vx, "vy": s.vy,
         });
         let json = payload.to_string();
         event_bus.Publish(Bus_Event::State { payload: json.clone() });

@@ -9,6 +9,12 @@
 
 ### 1. Robot 模块 (`Src/Robot/`)
 
+> ⚠️ 以下为 **旧版（重构前）** 的实现记录。当前已按 Task 1/2/3 重构为 actor 模型：
+> - `protocol.rs` → 合并到 `control/device/stm32.rs`
+> - `serial_io.rs` → 替换为 `control/serial/port.rs` (serial2-tokio)
+> - `capability.rs` → 合并到 `control/device/stm32.rs` (STM32Device)
+> - 新增：`core/command.rs`、`core/robot.rs`、`state.rs`、`websocket.rs`
+
 STM32 串口协议实现，控制 Rosmaster M1 系列小车。
 
 ```
@@ -103,3 +109,4 @@ tokio-tungstenite = "0.24"  # WebSocket 服务端
 
 - `robot::control::protocol::tests` — 24 项全部通过
 - 帧构建（6项）、校验和（3项）、状态机（3项）、解析（5项）、打包（4项）、LEN 计算、往返测试
+- [x] ~~**状态写回每帧冗余 spawn**~~ ✅ **已修复（2026-07-20）**：`stm32.rs:232-248`，加 `frame_parsed` 标志位 + `try_write()` 替代 `tokio::spawn`，仅帧完整解析时才写入

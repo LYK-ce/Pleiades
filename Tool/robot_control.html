@@ -132,10 +132,9 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
     </div>
 
     <div class="telemetry" id="telemetry">
-        <div><span>速度:</span><span class="val" id="tvx">--</span> m/s</div>
-        <div><span>电池:</span><span class="val" id="tbat">--</span> V</div>
-        <div><span>姿态:</span><span class="val" id="tatt">--</span></div>
-        <div><span>编码器:</span><span class="val" id="tenc">--</span></div>
+        <div><span>位置:</span><span class="val" id="tpos">--</span></div>
+        <div><span>朝向:</span><span class="val" id="tyaw">--</span>°</div>
+        <div><span>速度:</span><span class="val" id="tvel">--</span></div>
     </div>
 
     <div class="hint">W前进 / S后退 / A左旋 / D右旋<br>按住移动，松手即停 | 键盘和按钮均可操作</div>
@@ -209,7 +208,7 @@ function connect() {
     ws.onmessage = (e) => {
         try {
             const data = JSON.parse(e.data);
-            if (data.type === 'robot_telemetry' || data.vx !== undefined) {
+            if (data.type === 'pose') {
                 updateTelemetry(data);
             }
         } catch (_) {}
@@ -257,16 +256,13 @@ function highlightButton(cmd, on) {
 
 // ── 遥测 ──────────────────────────────────────
 function updateTelemetry(d) {
-    if (d.vx !== undefined) document.getElementById('tvx').textContent = d.vx.toFixed(2);
-    if (d.battery !== undefined) document.getElementById('tbat').textContent = d.battery.toFixed(1);
-    if (d.roll !== undefined) {
-        document.getElementById('tatt').textContent =
-            'R' + (d.roll * 57.3).toFixed(0) + '° ' +
-            'P' + (d.pitch * 57.3).toFixed(0) + '° ' +
-            'Y' + (d.yaw * 57.3).toFixed(0) + '°';
-    }
-    if (d.encoders) {
-        document.getElementById('tenc').textContent = d.encoders.join(', ');
+    if (d.x !== undefined) document.getElementById('tpos').textContent =
+        '(' + d.x.toFixed(1) + ', ' + d.y.toFixed(1) + ')';
+    if (d.yaw !== undefined) document.getElementById('tyaw').textContent =
+        (d.yaw * 57.3).toFixed(0);
+    if (d.vx !== undefined) {
+        const speed = Math.sqrt(d.vx * d.vx + d.vy * d.vy);
+        document.getElementById('tvel').textContent = speed.toFixed(2) + ' m/s';
     }
 }
 </script>

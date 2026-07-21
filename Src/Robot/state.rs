@@ -1,15 +1,16 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-07
+//Modified Date ： 2026-07-21
 
 //! 机器人全局状态
 //!
-//! 聚合所有设备上报的传感器数据，描述机器人整体状态。
+//! RobotState 由 STM32 写入，LidarState 由 LiDAR 写入，各设备独立。
 
-/// 姿态角
+use crate::robot::control::device::lidar::LaserScan;
+
+/// 姿态角（弧度）
 #[derive(Debug, Clone, Default)]
 pub struct Attitude {
-    /// 弧度
     pub roll: f32,
     pub pitch: f32,
     pub yaw: f32,
@@ -39,7 +40,11 @@ pub struct MagData {
     pub mz: f32,
 }
 
-/// 机器人传感器状态缓存
+// ============================================================
+// RobotState — STM32 传感器上报
+// ============================================================
+
+/// 机器人底盘传感器状态（由 STM32 维护）
 #[derive(Debug, Clone, Default)]
 pub struct RobotState {
     /// 线速度 (m/s)
@@ -64,4 +69,15 @@ pub struct RobotState {
 
     /// 四轮编码器计数
     pub encoders: [i32; 4],
+}
+
+// ============================================================
+// LidarState — LiDAR 点云
+// ============================================================
+
+/// 激光雷达扫描状态（由 LiDAR 维护）
+#[derive(Debug, Clone, Default)]
+pub struct LidarState {
+    /// 最新扫描结果
+    pub scan: Option<LaserScan>,
 }

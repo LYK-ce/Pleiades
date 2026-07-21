@@ -15,6 +15,9 @@ pub enum Command {
     SpinRight(i16),
     Stop,
     Beep(u16),
+    // LiDAR
+    StartLidarScan,
+    StopLidarScan,
     // 未来：
     // GoTo(f32, f32),
     // Patrol,

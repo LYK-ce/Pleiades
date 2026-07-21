@@ -37,6 +37,10 @@ kvcache_dir = ".kvcache"
 
 [Identity]
 peer_name = "new_peer"
+
+[Robot]
+# WebSocket 遥控绑定地址（默认 0.0.0.0:9090）
+ws_bind = "0.0.0.0:9090"
 "#;
 
 /// 默认配置目录名
@@ -71,6 +75,7 @@ pub struct Pleiades_Config {
     pub Network: Option<Network_Config>,
     pub Storage: Option<Storage_Config>,
     pub Identity: Option<Identity_Config>,
+    pub Robot: Option<Robot_Config>,
 }
 
 /// [Log] 段配置
@@ -104,6 +109,12 @@ pub struct Storage_Config {
 #[derive(Debug, Deserialize)]
 pub struct Identity_Config {
     pub peer_name: Option<String>,
+}
+
+/// [Robot] 段配置
+#[derive(Debug, Deserialize)]
+pub struct Robot_Config {
+    pub ws_bind: Option<String>,
 }
 
 /// 读取节点名称，默认 "new_peer"

@@ -96,8 +96,8 @@ async fn rx_loop(
     read_buf_size: usize,
     cancel: CancellationToken,
 ) {
+    let mut buf = vec![0u8; read_buf_size];
     loop {
-        let mut buf = vec![0u8; read_buf_size];
         select! {
             _ = cancel.cancelled() => {
                 info!("RX task 退出");

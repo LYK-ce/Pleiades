@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-05-29 (Storage 使用模式, GGUFSplitModel keep_tokenizer, split 工作流, rexec/session inference 命令更新)
+> **最后更新**: 2026-07-21 (Robot 模块架构, 多设备独立 State 设计, LiDAR 集成)
 
 ---
 
@@ -19,6 +19,7 @@
    - [Orchestrator](#36-orchestrator)
    - [VM (Lua 引擎)](#37-vm-lua-引擎)
    - [TUI](#38-tui)
+   - [Robot](#39-robot)
 4. [关键工作流](#4-关键工作流)
 5. [⚠️ Agent 常见错误](#5️-agent-常见错误)
 
@@ -43,7 +44,16 @@
 │   ├── Storage/                ← 统一存储管理
 │   ├── TUI/                    ← 终端 UI (ratatui)
 │   ├── API/                    ← OpenAI 兼容 HTTP API
-│   └── VM/                     ← Lua 脚本引擎 + 所有绑定
+│   ├── VM/                     ← Lua 脚本引擎 + 所有绑定
+│   └── Robot/                  ← 机器人控制（Pleiades-Orion 分支）
+│       ├── core/               ←   Robot 中枢 + Command
+│       ├── state.rs            ←   RobotState + LidarState
+│       ├── websocket.rs        ←   WebSocket 遥控
+│       └── control/            ←   设备驱动
+│           ├── serial/port.rs  ←     通用 TX+RX tokio task
+│           └── device/
+│               ├── stm32/      ←     STM32 底盘驱动
+│               └── lidar/      ←     YDLIDAR Tmini 驱动
 ├── programs/                   ← Lua 脚本
 │   ├── builtin/                ← 内置 (优先级低于 user)
 │   │   └── legacy/             ← 过期脚本 (API 不兼容)
@@ -63,6 +73,7 @@
 | Phase 4 | 构建 libp2p Swarm (TCP + Noise + Yamux + mDNS + Kademlia + Stream) |
 | Phase 5 | 组装 `Capabilities` → 创建 `Core` |
 | Phase 5.5 | `Core::spawn_initial_flush()` 统一触发初始 flush（Storage 内部自动同步模型到 PeerManager） |
+| Phase 5.6 | Robot 初始化：`Robot::launch()` + `spawn_robot_ws_server()` |
 | Phase 6 | spawn Network 事件循环 + TUI + `core.run()` 主循环 |
 
 ---
@@ -481,6 +492,79 @@ impl SessionManager {
 - `Session` 内部通过 `spawn()` 启动 select! 循环监听 slot 的 `prompt_rx`
 - `SlotHandle` Drop 时自动释放槽位
 - 已集成到 Core，支持 `session <model_id>`, `session inference`, `api` 等 TUI 命令
+
+### 3.10 Robot
+
+**位置**: `Src/Robot/`
+
+机器人控制系统（`Pleiades-Orion` 分支）。采用多 Device 独立 State 架构。
+
+**文件结构**:
+```
+Src/Robot/
+├── mod.rs              ← 模块入口 + public export
+├── state.rs            ← RobotState (STM32) + LidarState (LiDAR)
+├── websocket.rs        ← WebSocket 遥控服务 (10Hz 遥测)
+├── core/
+│   ├── command.rs      ← Command 枚举（Forward/Stop/StartLidarScan 等）
+│   └── robot.rs        ← Robot::launch() + 主 select! 循环
+└── control/
+    ├── types.rs        ← CarType 枚举
+    ├── serial/port.rs  ← spawn_port(): 通用 TX+RX tokio task
+    └── device/
+        ├── stm32/      ← STM32 底盘驱动
+        │   ├── mod.rs       ← STM32Device
+        │   ├── constants.rs ← 协议常量
+        │   └── protocol.rs  ← 帧构建 + 状态机 + 传感器解析
+        └── lidar/      ← YDLIDAR Tmini 驱动
+            ├── mod.rs       ← LidarDevice
+            ├── constants.rs ← tmini 协议常量
+            ├── types.rs     ← LaserPoint / LaserScan
+            ├── parser.rs    ← feed_byte 状态机 + 点云解析
+            └── checksum.rs  ← XOR 校验和
+```
+
+**核心结构**:
+```rust
+pub struct Robot {
+    pub cmd_tx: mpsc::Sender<Command>,            // 统一命令输入
+    pub robot_state: Arc<RwLock<RobotState>>,      // STM32 独占写
+    pub lidar_state: Arc<RwLock<LidarState>>,      // LiDAR 独占写
+    cancel: CancellationToken,
+}
+```
+
+**设计原则**:
+- 每个 Device 持有独立的 `Arc<RwLock<自己的State>>`，互不干扰
+- Device 通过 `spawn_port()` 获取通用 TX+RX tokio task
+- RX 回调内使用 `try_write()` 更新状态（同步，不阻塞）
+- `RobotState` 由 STM32 维护（vx/vy/vz/battery/attitude/encoders）
+- `LidarState` 由 LiDAR 维护（scan: LaserScan）
+- 上层命令（WS/Lua/LLM）通过 `cmd_tx` 统一发送 `Command`
+
+**启动流程** (Phase 5.6):
+```rust
+let robot = Robot::launch(
+    "/dev/myserial", 115200, CarType::X3Plus,
+    lidar_port, lidar_baudrate,  // 可选
+)?;
+spawn_robot_ws_server(9090, event_bus, robot.cmd_tx, robot.robot_state);
+```
+
+**Command**:
+```rust
+pub enum Command {
+    Forward(i16), Backward(i16), SpinLeft(i16), SpinRight(i16),
+    Stop, Beep(u16),
+    StartLidarScan, StopLidarScan,
+}
+```
+
+**测试**:
+- `stm32/protocol.rs` — 16 个纯函数测试（帧构建/状态机/分包/传感器解析）
+- `lidar/checksum.rs` — 校验和往返测试
+- `lidar/parser.rs` — 状态机完整包解析测试
+- `stm32/mod.rs` — 3 个 mock 集成测试（TX 命令/RX 更新/分包）
 
 ### 4.1 模型加载与分析
 

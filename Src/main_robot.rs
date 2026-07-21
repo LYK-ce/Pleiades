@@ -22,23 +22,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Orion Robot 启动中...");
 
-    let robot = match Robot::launch("/dev/myserial", 115200, CarType::X3Plus) {
+    let robot = match Robot::launch("/dev/myserial", 115200, CarType::X3Plus, None, None) {
         Ok(r) => {
             info!("Robot 已启动");
             r
         }
         Err(e) => {
             tracing::warn!("Robot 启动失败: {e}，继续运行（无硬件）");
-            Robot::launch("/dev/null", 9600, CarType::X3Plus)?
+            Robot::launch("/dev/null", 9600, CarType::X3Plus, None, None)?
         }
     };
 
+    let ws_bind = "0.0.0.0:9090";
     let event_bus = Arc::new(pleiades::event_bus::EventBus::New(64));
     pleiades::robot::websocket::spawn_robot_ws_server(
-        9090, event_bus, robot.cmd_tx.clone(), robot.state.clone(),
+        ws_bind, "orion_robot", event_bus, robot.cmd_tx.clone(), robot.robot_state.clone(),
     );
 
-    info!("WebSocket 遥控服务已启动: ws://0.0.0.0:9090");
+    info!("WebSocket 遥控服务已启动: ws://{ws_bind}");
     info!("打开 Tool/robot_control.html 开始遥控");
     info!("按 Ctrl-C 退出");
 

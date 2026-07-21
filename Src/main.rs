@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = pleiades::config::Get_Peer_Name(&config);
+    let vehicle_id = peer_name.clone();
     let peer_manager_arc = create_peer_management(local_peer_id, peer_name);
     let peer_capability_for_network: Arc<dyn pleiades::peer_management::Peer_Management_Capability> = peer_manager_arc.clone();
     let peer_capability_for_core = peer_manager_arc.clone();
@@ -128,13 +129,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Core::spawn_initial_flush(capabilities.clone());
 
     // Phase 5.6: 初始化 Robot 并启动 WebSocket 遥控服务器
-    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus)
+    let ws_bind = config.Robot.as_ref()
+        .and_then(|r| r.ws_bind.as_deref())
+        .unwrap_or("0.0.0.0:9090");
+    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, None, None)
         .unwrap_or_else(|e| {
             tracing::warn!("Robot 启动失败: {e}");
-            Robot::launch("/dev/null", 9600, CarType::X3Plus).unwrap()
+            Robot::launch("/dev/null", 9600, CarType::X3Plus, None, None).unwrap()
         });
     pleiades::robot::websocket::spawn_robot_ws_server(
-        9090, event_bus.clone(), robot.cmd_tx.clone(), robot.state.clone(),
+        ws_bind, &vehicle_id, event_bus.clone(), robot.cmd_tx.clone(), robot.robot_state.clone(),
     );
 
     // ══════════════════════════════════════════════════════
