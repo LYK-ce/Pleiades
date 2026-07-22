@@ -7,7 +7,6 @@
 //! 只启动机器人控制相关组件（Robot + WebSocket 遥控），
 //! 不加载 Pleiades 分布式推理系统。
 
-use std::sync::Arc;
 use tracing::info;
 use pleiades::robot::{CarType, Robot};
 
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pleiades::websocket::start(
         ws_bind, "orion_robot", robot.cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
-        robot.map_full_tx.subscribe(),
+        robot.grid.clone(),
     );
 
     info!("WebSocket 遥控服务已启动: ws://{ws_bind}");

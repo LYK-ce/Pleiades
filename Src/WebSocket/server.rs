@@ -8,23 +8,25 @@
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use super::protocol::parse_command;
 use crate::robot::core::command::Command;
 use crate::robot::core::robot::{Pose, MapDelta};
+use crate::robot::slam::OccupancyGrid;
 
 pub async fn run(
     bind_addr: String,
     vehicle_id: String,
     cmd_tx: mpsc::Sender<Command>,
-    mut pose_rx: broadcast::Receiver<Pose>,
-    mut map_rx: broadcast::Receiver<Vec<MapDelta>>,
-    mut map_full_rx: broadcast::Receiver<Vec<u8>>,
+    pose_rx: broadcast::Receiver<Pose>,
+    map_rx: broadcast::Receiver<Vec<MapDelta>>,
+    grid: Arc<RwLock<OccupancyGrid>>,
 ) {
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
@@ -37,8 +39,6 @@ pub async fn run(
 
     // 本地 broadcast：汇总 text 消息 (pose + map_delta)
     let (feed_tx, _) = broadcast::channel::<String>(32);
-    // 独立 binary 通道：承载 map_full
-    let (feed_bin_tx, _) = broadcast::channel::<Vec<u8>>(8);
 
     // pose 转发
     let pose_feed = feed_tx.clone();
@@ -87,25 +87,6 @@ pub async fn run(
         }
     });
 
-    // map_full 转发 (binary frame)
-    let map_full_feed = feed_bin_tx.clone();
-    let mut map_full_rx2 = map_full_rx.resubscribe();
-    tokio::spawn(async move {
-        loop {
-            match map_full_rx2.recv().await {
-                Ok(data) => {
-                    info!("[WS] 转发 map_full: {} 字节", data.len());
-                    let _ = map_full_feed.send(data);
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("[WS] map_full 广播 lagged {n}");
-                    continue;
-                }
-            }
-        }
-    });
-
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -119,11 +100,11 @@ pub async fn run(
                 };
                 let tx = cmd_tx.clone();
                 let feed = feed_tx.subscribe();
-                let feed_bin = feed_bin_tx.subscribe();
                 let vid = vehicle_id.clone();
                 let addr = bind_addr.clone();
+                let g = grid.clone();
                 tokio::spawn(async move {
-                    handle_connection(ws, tx, feed, feed_bin, vid, addr, peer_addr.to_string()).await;
+                    handle_connection(ws, tx, feed, vid, addr, peer_addr.to_string(), g).await;
                 });
             }
             Err(e) => error!("[WS] accept 错误: {e}"),
@@ -135,10 +116,10 @@ async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     cmd_tx: mpsc::Sender<Command>,
     mut feed_rx: broadcast::Receiver<String>,
-    mut feed_bin_rx: broadcast::Receiver<Vec<u8>>,
     vehicle_id: String,
     bind_addr: String,
     peer: String,
+    grid: Arc<RwLock<OccupancyGrid>>,
 ) {
     let hello = serde_json::json!({
         "type": "hello",
@@ -147,34 +128,26 @@ async fn handle_connection(
     });
     let _ = ws.send(Message::Text(hello.to_string())).await;
 
+    // 发送全量地图
+    {
+        let map_data = grid.read().await.build_map_full();
+        info!("[WS] {peer} 发送 map_full: {} 字节", map_data.len());
+        let _ = ws.send(Message::Binary(map_data.into())).await;
+    }
+
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // 转发 text + binary 消息到客户端（select! 合并两个 feed）
+    // 转发 text 消息到客户端（pose + map_delta）
     let feed_handle = tokio::spawn(async move {
         loop {
-            select! {
-                result = feed_rx.recv() => {
-                    match result {
-                        Ok(json) => {
-                            if ws_tx.send(Message::Text(json)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            match feed_rx.recv().await {
+                Ok(json) => {
+                    if ws_tx.send(Message::Text(json)).await.is_err() {
+                        break;
                     }
                 }
-                result = feed_bin_rx.recv() => {
-                    match result {
-                        Ok(data) => {
-                            if ws_tx.send(Message::Binary(data.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    }
-                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
             }
         }
     });

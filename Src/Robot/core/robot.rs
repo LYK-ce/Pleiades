@@ -45,12 +45,12 @@ pub struct Robot {
     pub cmd_tx: mpsc::Sender<Command>,
     pub robot_state: Arc<RwLock<RobotState>>,
     pub lidar_state: Arc<RwLock<LidarState>>,
+    /// 占据栅格地图（SLAM task 写，WebSocket / 外部读）
+    pub grid: Arc<RwLock<OccupancyGrid>>,
     /// 位姿广播
     pub pose_tx: broadcast::Sender<Pose>,
     /// 地图增量广播
     pub map_tx: broadcast::Sender<Vec<MapDelta>>,
-    /// 全量地图广播 (二进制，预留)
-    pub map_full_tx: broadcast::Sender<Vec<u8>>,
     cancel: CancellationToken,
 }
 
@@ -74,7 +74,7 @@ impl Robot {
         // 2. 广播通道
         let (pose_tx, _) = broadcast::channel::<Pose>(32);
         let (map_tx, _) = broadcast::channel::<Vec<MapDelta>>(32);
-        let (map_full_tx, _) = broadcast::channel::<Vec<u8>>(4);
+        let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
 
         // 3. spawn STM32 Device
         let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone())?;
@@ -104,13 +104,13 @@ impl Robot {
 
         // 6. spawn SLAM task
         let slam_cancel = cancel.clone();
-        let slam_grid = OccupancyGrid::new();
+        let slam_grid = grid.clone();
         let slam_robot = robot_state.clone();
         let slam_lidar = lidar_state.clone();
         let slam_map_tx = map_tx.clone();
-        let slam_full_tx = map_full_tx.clone();
+        
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_full_tx, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_cancel).await;
         });
 
         // 7. 命令通道
@@ -122,7 +122,7 @@ impl Robot {
             main_loop(stm32, lidar, cmd_rx, loop_cancel).await;
         });
 
-        Ok(Self { cmd_tx, robot_state, lidar_state, pose_tx, map_tx, map_full_tx, cancel })
+        Ok(Self { cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, cancel })
     }
 
     /// 优雅退出
@@ -169,15 +169,13 @@ async fn state_notifier(
 // ============================================================
 
 async fn slam_task(
-    mut grid: OccupancyGrid,
+    grid: Arc<RwLock<OccupancyGrid>>,
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
     map_tx: broadcast::Sender<Vec<MapDelta>>,
-    map_full_tx: broadcast::Sender<Vec<u8>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
-    // let mut full_interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         select! {
             _ = interval.tick() => {
@@ -202,7 +200,8 @@ async fn slam_task(
                 };
 
                 if !scan_points.is_empty() {
-                    let deltas = slam::update(&mut grid, &pose, &scan_points);
+                    let mut g = grid.write().await;
+                    let deltas = slam::update(&mut *g, &pose, &scan_points);
                     if !deltas.is_empty() {
                         let typed: Vec<MapDelta> = deltas.iter().map(|d| MapDelta {
                             gx: d.gx, gy: d.gy, state: d.state,
@@ -211,11 +210,6 @@ async fn slam_task(
                     }
                 }
             }
-            // _ = full_interval.tick() => {
-            //     let data = grid.build_map_full();
-            //     info!("[SLAM] 发送 map_full: {} 字节", data.len());
-            //     let _ = map_full_tx.send(data);
-            // }
             _ = cancel.cancelled() => {
                 info!("SLAM task 退出");
                 return;

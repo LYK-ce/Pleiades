@@ -11,9 +11,11 @@
 pub mod server;
 pub mod protocol;
 
-use tokio::sync::{broadcast, mpsc};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use crate::robot::core::command::Command;
 use crate::robot::core::robot::{Pose, MapDelta};
+use crate::robot::slam::OccupancyGrid;
 
 /// 启动 WebSocket 遥控服务器
 pub fn start(
@@ -22,11 +24,11 @@ pub fn start(
     cmd_tx: mpsc::Sender<Command>,
     pose_rx: broadcast::Receiver<Pose>,
     map_rx: broadcast::Receiver<Vec<MapDelta>>,
-    map_full_rx: broadcast::Receiver<Vec<u8>>,
+    grid: Arc<RwLock<OccupancyGrid>>,
 ) {
     let addr = bind_addr.to_string();
     let id = vehicle_id.to_string();
     tokio::spawn(async move {
-        server::run(addr, id, cmd_tx, pose_rx, map_rx, map_full_rx).await;
+        server::run(addr, id, cmd_tx, pose_rx, map_rx, grid).await;
     });
 }

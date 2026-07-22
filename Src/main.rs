@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pleiades::websocket::start(
         ws_bind, &vehicle_id, robot.cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
-        robot.map_full_tx.subscribe(),
+        robot.grid.clone(),
     );
 
     // ══════════════════════════════════════════════════════
