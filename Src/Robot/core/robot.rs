@@ -177,7 +177,7 @@ async fn slam_task(
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
-    let mut full_interval = tokio::time::interval(Duration::from_secs(5));
+    // let mut full_interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         select! {
             _ = interval.tick() => {
@@ -202,21 +202,20 @@ async fn slam_task(
                 };
 
                 if !scan_points.is_empty() {
-                    let _deltas = slam::update(&mut grid, &pose, &scan_points);
-                    // map_delta 暂不发送，仅用 map_full
-                    // if !deltas.is_empty() {
-                    //     let typed: Vec<MapDelta> = deltas.iter().map(|d| MapDelta {
-                    //         gx: d.gx, gy: d.gy, state: d.state,
-                    //     }).collect();
-                    //     let _ = map_tx.send(typed);
-                    // }
+                    let deltas = slam::update(&mut grid, &pose, &scan_points);
+                    if !deltas.is_empty() {
+                        let typed: Vec<MapDelta> = deltas.iter().map(|d| MapDelta {
+                            gx: d.gx, gy: d.gy, state: d.state,
+                        }).collect();
+                        let _ = map_tx.send(typed);
+                    }
                 }
             }
-            _ = full_interval.tick() => {
-                let data = grid.build_map_full();
-                info!("[SLAM] 发送 map_full: {} 字节", data.len());
-                let _ = map_full_tx.send(data);
-            }
+            // _ = full_interval.tick() => {
+            //     let data = grid.build_map_full();
+            //     info!("[SLAM] 发送 map_full: {} 字节", data.len());
+            //     let _ = map_full_tx.send(data);
+            // }
             _ = cancel.cancelled() => {
                 info!("SLAM task 退出");
                 return;
