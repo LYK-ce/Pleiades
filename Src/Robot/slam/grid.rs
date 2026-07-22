@@ -6,6 +6,8 @@
 //!
 //! 单 Chunk (256×256, 0.5m/cell)，初始全未知(2)。
 
+use tracing::info;
+
 /// Chunk 大小 (cells)
 pub const CHUNK_SIZE: usize = 256;
 
@@ -108,11 +110,22 @@ impl OccupancyGrid {
 
     /// 构建 map_full 二进制帧（Pictor 协议）
     pub fn build_map_full(&self) -> Vec<u8> {
+        let raw = self.chunk.raw_bytes();
+        let (mut free, mut occupied, mut unknown) = (0usize, 0usize, 0usize);
+        for &cell in raw.iter() {
+            match cell {
+                0 => free += 1,
+                1 => occupied += 1,
+                _ => unknown += 1,
+            }
+        }
+        info!("[SLAM] 地图状态: 可通行={free} 墙壁={occupied} 未知={unknown}");
+
         let mut buf = Vec::with_capacity(65545);
         buf.push(0u8); // type = map_full
         buf.extend_from_slice(&(self.chunk.origin_gx as i32).to_be_bytes());
         buf.extend_from_slice(&(self.chunk.origin_gy as i32).to_be_bytes());
-        buf.extend_from_slice(self.chunk.raw_bytes().as_ref());
+        buf.extend_from_slice(raw.as_ref());
         buf
     }
 }
