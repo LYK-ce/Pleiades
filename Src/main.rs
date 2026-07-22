@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_bind = config.Robot.as_ref()
         .and_then(|r| r.ws_bind.as_deref())
         .unwrap_or("0.0.0.0:9090");
-    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400))?;
+    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400)).await?;
     pleiades::websocket::start(
         ws_bind, &vehicle_id, robot.cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),

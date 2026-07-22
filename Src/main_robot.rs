@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Orion Robot 启动中...");
 
-    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400))?;
+    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400)).await?;
     info!("Robot 已启动");
 
     let ws_bind = "0.0.0.0:9090";

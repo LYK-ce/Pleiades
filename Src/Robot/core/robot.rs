@@ -58,7 +58,7 @@ impl Robot {
     /// 启动 Robot：创建各设备独立状态，spawn Device，启动所有 task
     ///
     /// - `lidar_port` / `lidar_baudrate`: 可选 LiDAR 配置，None 则不启用
-    pub fn launch(
+    pub async fn launch(
         port: &str,
         baudrate: u32,
         car_type: CarType,
@@ -83,7 +83,10 @@ impl Robot {
         let lidar: Option<LidarDevice> = match (lidar_port, lidar_baudrate) {
             (Some(p), Some(b)) => {
                 info!("启用 LiDAR: port={p}, baud={b}");
-                Some(LidarDevice::spawn(p, b, lidar_state.clone())?)
+                let dev = LidarDevice::spawn(p, b, lidar_state.clone())?;
+                info!("LiDAR 设备已启动，自动开始扫描");
+                dev.start_scan().await?;
+                Some(dev)
             }
             _ => {
                 info!("LiDAR 未配置，跳过");
