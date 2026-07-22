@@ -1,15 +1,18 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-07-22
 
 //! WebSocket 服务器核心
 //!
-//! accept 循环 + handle_connection + pose/map 转发器。
+//! accept 循环 + handle_connection + pose/map/map_full 转发器。
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
+use tokio::select;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{error, info, warn};
 
 use super::protocol::parse_command;
 use crate::robot::core::command::Command;
@@ -21,18 +24,21 @@ pub async fn run(
     cmd_tx: mpsc::Sender<Command>,
     mut pose_rx: broadcast::Receiver<Pose>,
     mut map_rx: broadcast::Receiver<Vec<MapDelta>>,
+    mut map_full_rx: broadcast::Receiver<Vec<u8>>,
 ) {
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("[WS] 绑定 {bind_addr} 失败: {e}");
+            error!("[WS] 绑定 {bind_addr} 失败: {e}");
             return;
         }
     };
     tracing::info!("[WS] 遥控服务器已启动: ws://{bind_addr}");
 
-    // 本地 broadcast：汇总 pose + map，分发给各客户端
+    // 本地 broadcast：汇总 text 消息 (pose + map_delta)
     let (feed_tx, _) = broadcast::channel::<String>(32);
+    // 独立 binary 通道：承载 map_full
+    let (feed_bin_tx, _) = broadcast::channel::<Vec<u8>>(8);
 
     // pose 转发
     let pose_feed = feed_tx.clone();
@@ -56,7 +62,7 @@ pub async fn run(
         }
     });
 
-    // map 转发
+    // map_delta 转发
     let map_feed = feed_tx.clone();
     let mut map_rx2 = map_rx.resubscribe();
     tokio::spawn(async move {
@@ -74,7 +80,26 @@ pub async fn run(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("[WS] map 广播 lagged {n}，部分 voxel 丢失");
+                    warn!("[WS] map 广播 lagged {n}，部分 voxel 丢失");
+                    continue;
+                }
+            }
+        }
+    });
+
+    // map_full 转发 (binary frame)
+    let map_full_feed = feed_bin_tx.clone();
+    let mut map_full_rx2 = map_full_rx.resubscribe();
+    tokio::spawn(async move {
+        loop {
+            match map_full_rx2.recv().await {
+                Ok(data) => {
+                    info!("[WS] 转发 map_full: {} 字节", data.len());
+                    let _ = map_full_feed.send(data);
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("[WS] map_full 广播 lagged {n}");
                     continue;
                 }
             }
@@ -88,19 +113,20 @@ pub async fn run(
                 let ws = match accept_async(stream).await {
                     Ok(ws) => ws,
                     Err(e) => {
-                        tracing::warn!("[WS] 握手失败: {peer_addr} - {e}");
+                        warn!("[WS] 握手失败: {peer_addr} - {e}");
                         continue;
                     }
                 };
                 let tx = cmd_tx.clone();
                 let feed = feed_tx.subscribe();
+                let feed_bin = feed_bin_tx.subscribe();
                 let vid = vehicle_id.clone();
                 let addr = bind_addr.clone();
                 tokio::spawn(async move {
-                    handle_connection(ws, tx, feed, vid, addr, peer_addr.to_string()).await;
+                    handle_connection(ws, tx, feed, feed_bin, vid, addr, peer_addr.to_string()).await;
                 });
             }
-            Err(e) => tracing::error!("[WS] accept 错误: {e}"),
+            Err(e) => error!("[WS] accept 错误: {e}"),
         }
     }
 }
@@ -109,6 +135,7 @@ async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     cmd_tx: mpsc::Sender<Command>,
     mut feed_rx: broadcast::Receiver<String>,
+    mut feed_bin_rx: broadcast::Receiver<Vec<u8>>,
     vehicle_id: String,
     bind_addr: String,
     peer: String,
@@ -118,20 +145,36 @@ async fn handle_connection(
         "vehicle_id": vehicle_id,
         "address": format!("ws://{bind_addr}")
     });
-    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(hello.to_string())).await;
+    let _ = ws.send(Message::Text(hello.to_string())).await;
 
-    // 转发遥测/地图到客户端
     let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // 转发 text + binary 消息到客户端（select! 合并两个 feed）
     let feed_handle = tokio::spawn(async move {
         loop {
-            match feed_rx.recv().await {
-                Ok(json) => {
-                    if ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(json)).await.is_err() {
-                        break;
+            select! {
+                result = feed_rx.recv() => {
+                    match result {
+                        Ok(json) => {
+                            if ws_tx.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                result = feed_bin_rx.recv() => {
+                    match result {
+                        Ok(data) => {
+                            if ws_tx.send(Message::Binary(data.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
             }
         }
     });
@@ -139,15 +182,15 @@ async fn handle_connection(
     // 接收客户端命令
     while let Some(msg) = ws_rx.next().await {
         match msg {
-            Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+            Ok(Message::Text(text)) => {
                 if let Some(cmd) = parse_command(&text) {
                     let _ = cmd_tx.send(cmd).await;
                 }
             }
-            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+            Ok(Message::Close(_)) => break,
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!("[WS] {peer} 读取错误: {e}");
+                warn!("[WS] {peer} 读取错误: {e}");
                 break;
             }
         }
@@ -155,7 +198,7 @@ async fn handle_connection(
 
     feed_handle.abort();
     if cmd_tx.send(Command::Stop).await.is_err() {
-        tracing::warn!("[WS] {peer} 断开时无法发送 Stop");
+        warn!("[WS] {peer} 断开时无法发送 Stop");
     }
     tracing::info!("[WS] {peer} 已断开，自动停车");
 }

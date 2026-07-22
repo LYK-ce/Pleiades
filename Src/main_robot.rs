@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pleiades::websocket::start(
         ws_bind, "orion_robot", robot.cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
+        robot.map_full_tx.subscribe(),
     );
 
     info!("WebSocket 遥控服务已启动: ws://{ws_bind}");

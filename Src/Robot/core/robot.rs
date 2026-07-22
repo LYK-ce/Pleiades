@@ -105,8 +105,9 @@ impl Robot {
         let slam_robot = robot_state.clone();
         let slam_lidar = lidar_state.clone();
         let slam_map_tx = map_tx.clone();
+        let slam_full_tx = map_full_tx.clone();
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_full_tx, slam_cancel).await;
         });
 
         // 7. 命令通道
@@ -169,9 +170,11 @@ async fn slam_task(
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
     map_tx: broadcast::Sender<Vec<MapDelta>>,
+    map_full_tx: broadcast::Sender<Vec<u8>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
+    let mut full_interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         select! {
             _ = interval.tick() => {
@@ -204,6 +207,11 @@ async fn slam_task(
                         let _ = map_tx.send(typed);
                     }
                 }
+            }
+            _ = full_interval.tick() => {
+                let data = grid.build_map_full();
+                info!("[SLAM] 发送 map_full: {} 字节", data.len());
+                let _ = map_full_tx.send(data);
             }
             _ = cancel.cancelled() => {
                 info!("SLAM task 退出");

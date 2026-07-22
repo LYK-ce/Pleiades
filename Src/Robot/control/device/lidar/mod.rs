@@ -19,7 +19,7 @@ pub use types::{LaserPoint, LaserScan};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use constants::*;
 use parser::{feed_byte, parse_points, do_process_simple, ParseState};
@@ -97,6 +97,7 @@ impl LidarDevice {
 
     /// 发送扫描启动命令 (PHA5 + CMD_SCAN)
     pub async fn start_scan(&self) -> Result<(), String> {
+        info!("[LiDAR] 发送启动扫描命令 CMD_SCAN");
         self.cmd_tx
             .send(vec![PHA5, CMD_SCAN])
             .await
