@@ -11,11 +11,13 @@ pub mod constants;
 pub mod protocol;
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use constants::MotionState;
+use constants::RPT_SPEED;
 use protocol::{
     feed_state_machine, pack_beep, pack_car_run, pack_motion, pack_motor,
     pack_reset, pack_rgb, pack_rgb_effect, pack_servo, update_state, RxState,
@@ -41,6 +43,7 @@ impl STM32Device {
         let state_clone = state.clone();
         let mut sm: RxState = RxState::Head;
         let mut local_state = RobotState::default();
+        let mut last_speed_ts = Instant::now();
 
         let cmd_tx = port::spawn_port(
             port, baudrate, 512,
@@ -49,6 +52,14 @@ impl STM32Device {
                 for &byte in bytes {
                     if let Some((func, data)) = feed_state_machine(&mut sm, byte) {
                         update_state(&mut local_state, func, &data);
+                        if func == RPT_SPEED {
+                            let now = Instant::now();
+                            let dt = (now - last_speed_ts).as_secs_f32();
+                            if dt > 0.0 && dt < 1.0 {
+                                local_state.accumulate_odom(dt);
+                            }
+                            last_speed_ts = now;
+                        }
                         frame_parsed = true;
                     }
                 }
@@ -147,6 +158,7 @@ impl STM32Device {
         let handle = tokio::spawn(async move {
             let mut sm: RxState = RxState::Head;
             let mut local_state = RobotState::default();
+            let mut last_speed_ts = Instant::now();
 
             loop {
                 tokio::select! {
@@ -165,6 +177,14 @@ impl STM32Device {
                                 for &b in &bytes {
                                     if let Some((func, data)) = feed_state_machine(&mut sm, b) {
                                         update_state(&mut local_state, func, &data);
+                                        if func == RPT_SPEED {
+                                            let now = Instant::now();
+                                            let dt = (now - last_speed_ts).as_secs_f32();
+                                            if dt > 0.0 && dt < 1.0 {
+                                                local_state.accumulate_odom(dt);
+                                            }
+                                            last_speed_ts = now;
+                                        }
                                         frame_parsed = true;
                                     }
                                 }

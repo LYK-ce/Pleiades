@@ -151,7 +151,7 @@ async fn state_notifier(
                     .as_secs_f64();
                 let _ = pose_tx.send(Pose {
                     ts,
-                    x: 64.0, y: 64.0, z: 0.0,
+                    x: 64.0 + s.odom_x, y: 64.0 + s.odom_y, z: 0.0,
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
                 });
@@ -182,9 +182,10 @@ async fn slam_task(
                 // 同时读位姿和 LiDAR（两个独立锁，无死锁风险）
                 let (pose, scan_points) = {
                     let rs = robot_state.read().await;
+                    // 位姿 = Chunk 中心 (64m,64m) + 里程计累积位移
                     let pose = RobotPose {
-                        x: 64.0,  // Chunk(0,0) 中心，待里程计
-                        y: 64.0,
+                        x: 64.0 + rs.odom_x,
+                        y: 64.0 + rs.odom_y,
                         yaw: rs.attitude.yaw,
                     };
                     let ls = lidar_state.read().await;
@@ -200,6 +201,24 @@ async fn slam_task(
                 };
 
                 if !scan_points.is_empty() {
+                    // 诊断：按 LiDAR 原始角度统计四象限最近距离
+                    let (mut f_min, mut l_min, mut b_min, mut r_min) = (f32::MAX, f32::MAX, f32::MAX, f32::MAX);
+                    for &(angle, range) in &scan_points {
+                        let a = if angle < 0.0 { angle + std::f32::consts::TAU } else { angle };
+                        if a < std::f32::consts::FRAC_PI_4 || a >= 7.0 * std::f32::consts::FRAC_PI_4 {
+                            f_min = f_min.min(range);
+                        } else if a < 3.0 * std::f32::consts::FRAC_PI_4 {
+                            l_min = l_min.min(range);
+                        } else if a < 5.0 * std::f32::consts::FRAC_PI_4 {
+                            b_min = b_min.min(range);
+                        } else {
+                            r_min = r_min.min(range);
+                        }
+                    }
+                    let ff = |v| if v == f32::MAX { String::from("--") } else { format!("{:.1}m", v) };
+                    info!("[诊断] LiDAR 四象限最近距离 | yaw={:.1}° | 前={} 左={} 后={} 右={}",
+                        pose.yaw.to_degrees(), ff(f_min), ff(l_min), ff(b_min), ff(r_min));
+
                     let mut g = grid.write().await;
                     let deltas = slam::update(&mut *g, &pose, &scan_points);
                     if !deltas.is_empty() {

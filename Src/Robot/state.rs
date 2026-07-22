@@ -69,6 +69,21 @@ pub struct RobotState {
 
     /// 四轮编码器计数
     pub encoders: [i32; 4],
+
+    /// 里程计累积位移 (m)，从 (0,0) 起步，RX 回调中实时累积
+    pub odom_x: f32,
+    pub odom_y: f32,
+}
+
+impl RobotState {
+    /// 基于当前 vx + yaw 累积里程计位移
+    ///
+    /// 在 RX 回调中收到 RPT_SPEED 帧后调用，dt 为距上一次 SPEED 帧的真实时间间隔。
+    pub fn accumulate_odom(&mut self, dt: f32) {
+        let yaw = self.attitude.yaw;
+        self.odom_x += self.vx * dt * yaw.cos();
+        self.odom_y += self.vx * dt * yaw.sin();
+    }
 }
 
 // ============================================================
