@@ -177,7 +177,7 @@ async fn slam_task(
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
-    // let mut full_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut full_interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         select! {
             _ = interval.tick() => {
@@ -211,11 +211,11 @@ async fn slam_task(
                     }
                 }
             }
-            // _ = full_interval.tick() => {
-            //     let data = grid.build_map_full();
-            //     info!("[SLAM] 发送 map_full: {} 字节", data.len());
-            //     let _ = map_full_tx.send(data);
-            // }
+            _ = full_interval.tick() => {
+                let data = grid.build_map_full();
+                info!("[SLAM] 发送 map_full: {} 字节", data.len());
+                let _ = map_full_tx.send(data);
+            }
             _ = cancel.cancelled() => {
                 info!("SLAM task 退出");
                 return;
