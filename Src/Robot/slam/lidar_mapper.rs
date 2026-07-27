@@ -48,16 +48,13 @@ pub fn update(
         if end_gx == robot_gx && end_gy == robot_gy {
             continue;
         }
-        // 射线：经过的格子 → Free，终点 → Occupied
+        // 射线：经过的格子 → Free，终点 → Occupied（概率 log-odds）
         let cells = bresenham(robot_gx, robot_gy, end_gx, end_gy);
         for (i, &(cgx, cgy)) in cells.iter().enumerate() {
-            let state = if i == cells.len() - 1 {
-                CellState::Occupied as u8 // 最后一个 = 终点 = 障碍物
-            } else {
-                CellState::Free as u8 // 沿途 = 无障碍
-            };
-            if let Some(old) = grid.set(cgx, cgy, state) {
-                if old != state {
+            let is_occupied = i == cells.len() - 1;
+            if let Some((changed, _)) = grid.update(cgx, cgy, is_occupied) {
+                if changed {
+                    let state = grid.state(cgx, cgy).unwrap_or(CellState::Free as u8);
                     deltas.push(Delta { gx: cgx, gy: cgy, state });
                 }
             }
@@ -144,25 +141,20 @@ mod tests {
     #[test]
     fn test_update_basic() {
         let mut grid = OccupancyGrid::new();
-        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 }; // 在 chunk 正中心
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        let points = vec![(0.0, 0.5)];
 
-        // 扫描：前方 0.5m 处有障碍物
-        let points = vec![
-            (0.0, 0.5),     // 正前方 0.5m → 1 格远
-        ];
+        let center_gx: i32 = 128;
+        let center_gy: i32 = 128;
+
+        // 第 1 圈：路径格 Free(-5=0) 终点 Occupied(+15) 都不越阈值，无 delta
         let deltas = update(&mut grid, &pose, &points);
+        assert!(deltas.is_empty(), "第 1 圈无 delta（不越阈值）");
 
-        // 应该有变化（至少终点格和路径格）
-        assert!(!deltas.is_empty(), "应该有 delta");
-
-        // 终点格子应该是 Occupied
-        let center_gx = 128;
-        let center_gy = 128;
-        let obstacle = grid.get(center_gx + 1, center_gy);
-        assert_eq!(obstacle, Some(CellState::Occupied as u8), "前方 1 格应是障碍物");
-
-        // 当前格子应该被标记（射线起点是机器人位置）
-        let robot_cell = grid.get(center_gx, center_gy);
-        assert_eq!(robot_cell, Some(CellState::Free as u8), "机器人位置应可通行");
+        // 第 2 圈：终点再 +15 → 30 > 15 → Occupied
+        let deltas = update(&mut grid, &pose, &points);
+        assert!(!deltas.is_empty(), "第 2 圈终点越过阈值");
+        assert_eq!(grid.state(center_gx + 1, center_gy), Some(CellState::Occupied as u8));
+        assert_eq!(grid.state(center_gx, center_gy), Some(CellState::Free as u8));
     }
 }
