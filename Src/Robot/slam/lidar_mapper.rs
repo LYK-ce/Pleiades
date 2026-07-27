@@ -147,14 +147,18 @@ mod tests {
         let center_gx: i32 = 128;
         let center_gy: i32 = 128;
 
-        // 第 1 圈：路径格 Free(-5=0) 终点 Occupied(+15) 都不越阈值，无 delta
-        let deltas = update(&mut grid, &pose, &points);
-        assert!(deltas.is_empty(), "第 1 圈无 delta（不越阈值）");
+        // 初始：Unknown
+        assert_eq!(grid.state(center_gx, center_gy), Some(CellState::Unknown as u8));
 
-        // 第 2 圈：终点再 +15 → 30 > 15 → Occupied
+        // 前 3 圈：都不越阈值（终点 +3×3=9 ≤ 10），无 delta
+        for _ in 0..3 {
+            let deltas = update(&mut grid, &pose, &points);
+            assert!(deltas.is_empty());
+        }
+
+        // 第 4 圈：终点 +3=12 > 10 → Occupied
         let deltas = update(&mut grid, &pose, &points);
-        assert!(!deltas.is_empty(), "第 2 圈终点越过阈值");
+        assert!(!deltas.is_empty(), "第 4 圈终点越过阈值");
         assert_eq!(grid.state(center_gx + 1, center_gy), Some(CellState::Occupied as u8));
-        assert_eq!(grid.state(center_gx, center_gy), Some(CellState::Free as u8));
     }
 }
