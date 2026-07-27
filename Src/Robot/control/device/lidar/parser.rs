@@ -216,7 +216,7 @@ pub fn feed_byte(state: &mut ParseState, byte: u8) -> Option<()> {
                 if !verify_check_sum(&raw, NODE_QUAL8) {
                     return None;
                 }
-                state.packets.push(ScanPacket { raw, stamp: state.stamp });
+                state.packets.push(ScanPacket { raw, stamp: state.stamp, zero: state.zero });
                 return Some(());
             }
 
@@ -233,7 +233,7 @@ pub fn feed_byte(state: &mut ParseState, byte: u8) -> Option<()> {
                 if !verify_check_sum(&raw, NODE_QUAL8) {
                     return None;
                 }
-                state.packets.push(ScanPacket { raw, stamp: state.stamp });
+                state.packets.push(ScanPacket { raw, stamp: state.stamp, zero: state.zero });
                 return Some(());
             }
         }

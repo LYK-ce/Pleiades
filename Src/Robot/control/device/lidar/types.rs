@@ -68,6 +68,8 @@ pub struct ScanPacket {
     pub raw: Vec<u8>,
     /// 时间戳 (纳秒)
     pub stamp: u64,
+    /// 零位包标记（CT bit[0] — 每圈第一个包）
+    pub zero: bool,
 }
 
 /// 一帧完整扫描的元数据

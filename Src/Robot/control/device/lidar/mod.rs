@@ -17,6 +17,7 @@ pub mod checksum;
 pub use types::{LaserPoint, LaserScan};
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -49,6 +50,8 @@ impl LidarDevice {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let mut sm = ParseState::new();
+        let mut packet_buf: Vec<ScanPacket> = Vec::with_capacity(32);
+        let mut last_zero = Instant::now();
 
         let cmd_tx = port::spawn_port(
             port_path,
@@ -57,34 +60,41 @@ impl LidarDevice {
             move |bytes| {
                 for &b in bytes {
                     if feed_byte(&mut sm, b).is_some() {
-                        // 有完整包到达
-                        let packets: Vec<ScanPacket> = sm
-                            .take_packets()
-                            .into_iter()
-                            .filter(|p| {
-                                p.raw.len() >= TRI_PACKHEADSIZE
-                                    && p.raw[0] == PH1
-                                    && p.raw[1] == PH2
-                            })
-                            .collect();
+                        // 有完整包到达，累积到 buffer
+                        let mut got_zero = false;
+                        for pkt in sm.take_packets() {
+                            if pkt.raw.len() >= TRI_PACKHEADSIZE
+                                && pkt.raw[0] == PH1
+                                && pkt.raw[1] == PH2
+                            {
+                                if pkt.zero {
+                                    got_zero = true;
+                                }
+                                packet_buf.push(pkt);
+                            }
+                        }
 
-                        if !packets.is_empty() {
-                            let nodes = parse_points(&packets, NODE_QUAL8);
+                        // 零位包到达 → 累积的包 = 完整一圈 → 组装全帧输出
+                        if got_zero && !packet_buf.is_empty() {
+                            let nodes = parse_points(&packet_buf, NODE_QUAL8);
                             if !nodes.is_empty() {
                                 let scan = do_process_simple(
                                     &nodes, 0.0, false, 0, 360.0,
                                 );
-                                // info!(
-                                //     "[LiDAR] scan: {} pts, freq={:.1}Hz",
-                                //     scan.points.len(),
-                                //     scan.scan_freq
-                                // );
                                 if let Ok(mut guard) = state_clone.try_write() {
                                     guard.scan = Some(scan);
                                 } else {
                                     warn!("[LiDAR] try_write 失败，扫描结果丢弃");
                                 }
                             }
+                            packet_buf.clear();
+                            last_zero = Instant::now();
+                        }
+
+                        // 超时保护：2 秒未收到零位包，清空缓存
+                        if last_zero.elapsed() > Duration::from_secs(2) {
+                            packet_buf.clear();
+                            last_zero = Instant::now();
                         }
                     }
                 }
@@ -149,6 +159,8 @@ impl LidarDevice {
 
         let handle = tokio::spawn(async move {
             let mut sm = ParseState::new();
+            let mut packet_buf: Vec<ScanPacket> = Vec::with_capacity(32);
+            let mut last_zero = Instant::now();
 
             loop {
                 tokio::select! {
@@ -161,35 +173,37 @@ impl LidarDevice {
                     rx = rx_feed.recv() => {
                         match rx {
                             Some(bytes) => {
-                                let mut got_scan = false;
-                                let mut latest_scan = None;
                                 for &b in &bytes {
                                     if feed_byte(&mut sm, b).is_some() {
-                                        let packets: Vec<ScanPacket> = sm
-                                            .take_packets()
-                                            .into_iter()
-                                            .filter(|p| {
-                                                p.raw.len() >= TRI_PACKHEADSIZE
-                                                    && p.raw[0] == PH1
-                                                    && p.raw[1] == PH2
-                                            })
-                                            .collect();
-                                        if !packets.is_empty() {
-                                            let nodes = parse_points(&packets, NODE_QUAL8);
-                                            if !nodes.is_empty() {
-                                                latest_scan = Some(do_process_simple(
-                                                    &nodes, 0.0, false, 0, 360.0,
-                                                ));
-                                                got_scan = true;
+                                        let mut got_zero = false;
+                                        for pkt in sm.take_packets() {
+                                            if pkt.raw.len() >= TRI_PACKHEADSIZE
+                                                && pkt.raw[0] == PH1
+                                                && pkt.raw[1] == PH2
+                                            {
+                                                if pkt.zero { got_zero = true; }
+                                                packet_buf.push(pkt);
                                             }
                                         }
-                                    }
-                                }
-                                if got_scan {
-                                    if let Ok(mut guard) = state_clone.try_write() {
-                                        guard.scan = latest_scan;
-                                    } else {
-                                        warn!("[LiDAR mock] try_write 失败，扫描结果丢弃");
+                                        if got_zero && !packet_buf.is_empty() {
+                                            let nodes = parse_points(&packet_buf, NODE_QUAL8);
+                                            if !nodes.is_empty() {
+                                                let scan = do_process_simple(
+                                                    &nodes, 0.0, false, 0, 360.0,
+                                                );
+                                                if let Ok(mut guard) = state_clone.try_write() {
+                                                    guard.scan = Some(scan);
+                                                } else {
+                                                    warn!("[LiDAR mock] try_write 失败，扫描结果丢弃");
+                                                }
+                                            }
+                                            packet_buf.clear();
+                                            last_zero = Instant::now();
+                                        }
+                                        if last_zero.elapsed() > Duration::from_secs(2) {
+                                            packet_buf.clear();
+                                            last_zero = Instant::now();
+                                        }
                                     }
                                 }
                             }
