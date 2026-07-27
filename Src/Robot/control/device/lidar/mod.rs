@@ -60,21 +60,17 @@ impl LidarDevice {
             move |bytes| {
                 for &b in bytes {
                     if feed_byte(&mut sm, b).is_some() {
-                        // 有完整包到达，累积到 buffer
-                        let mut got_zero = false;
-                        for pkt in sm.take_packets() {
-                            if pkt.raw.len() >= TRI_PACKHEADSIZE
-                                && pkt.raw[0] == PH1
-                                && pkt.raw[1] == PH2
-                            {
-                                if pkt.zero {
-                                    got_zero = true;
-                                }
-                                packet_buf.push(pkt);
-                            }
-                        }
+                        // 有完整包到达
+                        let pkts: Vec<ScanPacket> = sm.take_packets()
+                            .into_iter()
+                            .filter(|p| p.raw.len() >= TRI_PACKHEADSIZE
+                                && p.raw[0] == PH1
+                                && p.raw[1] == PH2)
+                            .collect();
 
-                        // 零位包到达 → 累积的包 = 完整一圈 → 组装全帧输出
+                        let got_zero = pkts.iter().any(|p| p.zero);
+
+                        // 零位包到达 → 先组装上一圈累积的包（对齐 C++ 顺序）
                         if got_zero && !packet_buf.is_empty() {
                             let nodes = parse_points(&packet_buf, NODE_QUAL8);
                             if !nodes.is_empty() {
@@ -90,6 +86,9 @@ impl LidarDevice {
                             packet_buf.clear();
                             last_zero = Instant::now();
                         }
+
+                        // 然后推入新包（零位包属于新一圈）
+                        packet_buf.extend(pkts);
 
                         // 超时保护：2 秒未收到零位包，清空缓存
                         if last_zero.elapsed() > Duration::from_secs(2) {
@@ -175,16 +174,14 @@ impl LidarDevice {
                             Some(bytes) => {
                                 for &b in &bytes {
                                     if feed_byte(&mut sm, b).is_some() {
-                                        let mut got_zero = false;
-                                        for pkt in sm.take_packets() {
-                                            if pkt.raw.len() >= TRI_PACKHEADSIZE
-                                                && pkt.raw[0] == PH1
-                                                && pkt.raw[1] == PH2
-                                            {
-                                                if pkt.zero { got_zero = true; }
-                                                packet_buf.push(pkt);
-                                            }
-                                        }
+                                        let pkts: Vec<ScanPacket> = sm.take_packets()
+                                            .into_iter()
+                                            .filter(|p| p.raw.len() >= TRI_PACKHEADSIZE
+                                                && p.raw[0] == PH1
+                                                && p.raw[1] == PH2)
+                                            .collect();
+                                        let got_zero = pkts.iter().any(|p| p.zero);
+                                        // 零位包到达 → 先组装上一圈累积的包
                                         if got_zero && !packet_buf.is_empty() {
                                             let nodes = parse_points(&packet_buf, NODE_QUAL8);
                                             if !nodes.is_empty() {
@@ -200,6 +197,8 @@ impl LidarDevice {
                                             packet_buf.clear();
                                             last_zero = Instant::now();
                                         }
+                                        // 然后推入新包
+                                        packet_buf.extend(pkts);
                                         if last_zero.elapsed() > Duration::from_secs(2) {
                                             packet_buf.clear();
                                             last_zero = Instant::now();
