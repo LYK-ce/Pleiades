@@ -88,7 +88,7 @@ impl Chunk {
         };
 
         let new_state = log_to_state(self.cells[idx]);
-        Some((old_state != new_state, old_state))
+        Some((old_state != new_state, new_state))
     }
 
     /// 读取宏观状态

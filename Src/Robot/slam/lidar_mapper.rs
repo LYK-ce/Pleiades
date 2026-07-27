@@ -52,11 +52,8 @@ pub fn update(
         let cells = bresenham(robot_gx, robot_gy, end_gx, end_gy);
         for (i, &(cgx, cgy)) in cells.iter().enumerate() {
             let is_occupied = i == cells.len() - 1;
-            if let Some((changed, _)) = grid.update(cgx, cgy, is_occupied) {
-                if changed {
-                    let state = grid.state(cgx, cgy).unwrap_or(CellState::Free as u8);
-                    deltas.push(Delta { gx: cgx, gy: cgy, state });
-                }
+            if let Some((true, state)) = grid.update(cgx, cgy, is_occupied) {
+                deltas.push(Delta { gx: cgx, gy: cgy, state });
             }
         }
     }
