@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use super::protocol::parse_command;
-use crate::robot::core::command::Command;
+use crate::robot::core::command::{Command, ManualCmd};
 use crate::robot::core::robot::{Pose, MapDelta};
 use crate::robot::slam::OccupancyGrid;
 
@@ -170,7 +170,7 @@ async fn handle_connection(
     }
 
     feed_handle.abort();
-    if cmd_tx.send(Command::Stop).await.is_err() {
+    if cmd_tx.send(Command::Manual(ManualCmd::Stop)).await.is_err() {
         warn!("[WS] {peer} 断开时无法发送 Stop");
     }
     tracing::info!("[WS] {peer} 已断开，自动停车");

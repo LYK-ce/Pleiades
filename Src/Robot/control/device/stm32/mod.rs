@@ -1,11 +1,13 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-07-28
 
 //! STM32 控制板设备驱动
 //!
-//! STM32Device — 封装串口协议 + async TX/RX。
+//! STM32Device — 封装串口协议 + TX/RX。
 //! 协议层拆分见 constants.rs / protocol.rs。
+//!
+//! 运动控制方法均为同步（try_send），串口写入在独立 TX task 中异步完成。
 
 pub mod constants;
 pub mod protocol;
@@ -79,51 +81,52 @@ impl STM32Device {
 
     pub fn shutdown(&self) { self.cancel.cancel(); }
 
-    // ─── 运动控制 ────────
+    // ─── 运动控制（同步，try_send 入队到 TX task）────────
 
-    pub async fn forward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Forward, speed).await }
-    pub async fn backward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Backward, speed).await }
-    pub async fn stop(&self) -> Result<(), String> { self.send_car_run(MotionState::Stop, 0).await }
-    pub async fn left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Left, speed).await }
-    pub async fn right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Right, speed).await }
-    pub async fn spin_left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinLeft, speed).await }
-    pub async fn spin_right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinRight, speed).await }
+    pub fn forward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Forward, speed) }
+    pub fn backward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Backward, speed) }
+    pub fn stop(&self) -> Result<(), String> { self.send_car_run(MotionState::Stop, 0) }
+    pub fn left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Left, speed) }
+    pub fn right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Right, speed) }
+    pub fn spin_left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinLeft, speed) }
+    pub fn spin_right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinRight, speed) }
 
-    async fn send_car_run(&self, state: MotionState, speed: i16) -> Result<(), String> {
+    fn send_car_run(&self, state: MotionState, speed: i16) -> Result<(), String> {
         let bytes = pack_car_run(self.car_type as u8, state as u8, speed);
-        self.cmd_tx.send(bytes).await.map_err(|_| "TX channel 已关闭".into())
+        self.cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn set_motion(&self, vx: f32, vy: f32, vz: f32) -> Result<(), String> {
+    pub fn set_motion(&self, vx: f32, vy: f32, vz: f32) -> Result<(), String> {
         let limits = self.car_type.motion_limits();
         let bytes = pack_motion(self.car_type as u8, vx, vy, vz, limits);
-        self.cmd_tx.send(bytes).await.map_err(|_| "TX channel 已关闭".into())
+        self.cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn set_motor(&self, m1: i8, m2: i8, m3: i8, m4: i8) -> Result<(), String> {
-        self.cmd_tx.send(pack_motor(m1, m2, m3, m4)).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn set_motor(&self, m1: i8, m2: i8, m3: i8, m4: i8) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_motor(m1, m2, m3, m4)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn beep(&self, duration_ms: u16) -> Result<(), String> {
-        self.cmd_tx.send(pack_beep(duration_ms)).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn beep(&self, duration_ms: u16) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_beep(duration_ms)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn set_servo(&self, id: u8, angle: u8) -> Result<(), String> {
-        self.cmd_tx.send(pack_servo(id, angle)).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn set_servo(&self, id: u8, angle: u8) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_servo(id, angle)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn set_rgb(&self, led_id: u8, r: u8, g: u8, b: u8) -> Result<(), String> {
-        self.cmd_tx.send(pack_rgb(led_id, r, g, b)).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn set_rgb(&self, led_id: u8, r: u8, g: u8, b: u8) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_rgb(led_id, r, g, b)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn set_rgb_effect(&self, effect: u8, speed: u8) -> Result<(), String> {
-        self.cmd_tx.send(pack_rgb_effect(effect, speed)).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn set_rgb_effect(&self, effect: u8, speed: u8) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_rgb_effect(effect, speed)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
-    pub async fn reset_state(&self) -> Result<(), String> {
-        self.cmd_tx.send(pack_reset()).await.map_err(|_| "TX channel 已关闭".into())
+    pub fn reset_state(&self) -> Result<(), String> {
+        self.cmd_tx.try_send(pack_reset()).map_err(|e| format!("TX 通道满: {e}"))
     }
 
+    /// 读取当前传感器状态快照（async：需要持有 RwLock read guard）
     pub async fn get_state(&self) -> RobotState {
         self.state.read().await.clone()
     }
@@ -220,7 +223,7 @@ mod mock_tests {
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
         let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state);
-        dev.forward(50).await.unwrap();
+        dev.forward(50).unwrap();
 
         // 验证 TX 发出了正确的命令帧
         let sent = tx_rx.recv().await.unwrap();

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-07-28
 
 //! SLAM — 占据栅格建图模块
 //!
@@ -8,6 +8,7 @@
 
 pub mod grid;
 pub mod lidar_mapper;
+pub mod pathfinder;
 
 pub use grid::{Delta, OccupancyGrid, CHUNK_SIZE};
 pub use lidar_mapper::{update, RobotPose};

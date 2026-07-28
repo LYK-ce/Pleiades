@@ -16,12 +16,16 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use super::command::Command;
+use super::command::{AutoCmd, Command, ManualCmd, ModeCmd};
+use super::executor::{Executor, ExecutorConfig};
+use super::mission::MissionQueue;
+use super::mode::OpMode;
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::types::CarType;
 use crate::robot::state::{LidarState, RobotState};
 use crate::robot::slam::{self, OccupancyGrid, RobotPose};
+use std::time::Instant;
 
 /// 位姿广播消息
 #[derive(Debug, Clone)]
@@ -51,6 +55,8 @@ pub struct Robot {
     pub pose_tx: broadcast::Sender<Pose>,
     /// 地图增量广播
     pub map_tx: broadcast::Sender<Vec<MapDelta>>,
+    pub op_mode: Arc<RwLock<OpMode>>,
+    pub mission_queue: Arc<RwLock<MissionQueue>>,
     cancel: CancellationToken,
 }
 
@@ -76,7 +82,11 @@ impl Robot {
         let (map_tx, _) = broadcast::channel::<Vec<MapDelta>>(32);
         let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
 
-        // 3. spawn STM32 Device
+        // 3. 运行模式 + 任务队列
+        let op_mode = Arc::new(RwLock::new(OpMode::default()));
+        let mission_queue = Arc::new(RwLock::new(MissionQueue::default()));
+
+        // 4. spawn STM32 Device
         let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone())?;
 
         // 4. spawn LiDAR Device（可选）
@@ -118,11 +128,21 @@ impl Robot {
 
         // 8. spawn 主循环
         let loop_cancel = cancel.clone();
+        let loop_op_mode = op_mode.clone();
+        let loop_mission = mission_queue.clone();
+        let loop_robot_state = robot_state.clone();
+        let loop_lidar_state = lidar_state.clone();
+        let loop_grid = grid.clone();
         tokio::spawn(async move {
-            main_loop(stm32, lidar, cmd_rx, loop_cancel).await;
+            main_loop(
+                stm32, lidar, cmd_rx,
+                loop_op_mode, loop_mission,
+                loop_robot_state, loop_lidar_state, loop_grid,
+                loop_cancel,
+            ).await;
         });
 
-        Ok(Self { cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, cancel })
+        Ok(Self { cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, op_mode, mission_queue, cancel })
     }
 
     /// 优雅退出
@@ -245,19 +265,85 @@ async fn main_loop(
     stm32: STM32Device,
     lidar: Option<LidarDevice>,
     mut cmd_rx: mpsc::Receiver<Command>,
+    op_mode: Arc<RwLock<OpMode>>,
+    mission_queue: Arc<RwLock<MissionQueue>>,
+    robot_state: Arc<RwLock<RobotState>>,
+    lidar_state: Arc<RwLock<LidarState>>,
+    grid: Arc<RwLock<OccupancyGrid>>,
     cancel: CancellationToken,
 ) {
-    info!("Robot 主循环启动");
+    info!("Robot 主循环启动（同步 dispatch + auto_tick）");
+
+    let mut executor = Executor::new(ExecutorConfig::default());
+    let auto_tick_ms = 100u64;
+    let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
     loop {
         select! {
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    Some(c) => dispatch(&stm32, &lidar, c).await,
+                    Some(Command::Mode(m)) => {
+                        let _ = stm32.stop();
+                        match m {
+                            ModeCmd::SwitchToManual => {
+                                info!("[Robot] 切换到 Manual 模式");
+                                *op_mode.write().await = OpMode::Manual;
+                                mission_queue.write().await.clear();
+                                executor.reset();
+                            }
+                            ModeCmd::SwitchToAuto => {
+                                info!("[Robot] 切换到 Auto 模式");
+                                *op_mode.write().await = OpMode::Auto;
+                                executor.reset();
+                                next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
+                            }
+                        }
+                    }
+
+                    Some(Command::Manual(m)) => {
+                        if *op_mode.read().await == OpMode::Manual {
+                            dispatch(&stm32, &lidar, m).await;
+                        } else {
+                            warn!("[Robot] 忽略 Manual 命令：当前为 Auto 模式");
+                        }
+                    }
+
+                    Some(Command::Auto(a)) => {
+                        if *op_mode.read().await == OpMode::Auto {
+                            match a {
+                                AutoCmd::Push(list) => {
+                                    mission_queue.write().await.push(list);
+                                }
+                                AutoCmd::Cancel => {
+                                    let _ = stm32.stop();
+                                    mission_queue.write().await.clear();
+                                    executor.reset();
+                                    info!("[Robot] Auto 任务队列已清空");
+                                }
+                            }
+                        } else {
+                            warn!("[Robot] 忽略 Auto 命令：当前为 Manual 模式");
+                        }
+                    }
+
                     None => {
                         info!("命令通道关闭，Robot 退出");
                         break;
                     }
+                }
+            }
+
+            // auto_tick：仅 Auto 模式激活
+            _ = tokio::time::sleep_until(next_tick.into()), if *op_mode.read().await == OpMode::Auto => {
+                let rs = robot_state.read().await.clone();
+                let ls = lidar_state.read().await.clone();
+                let g = { let guard = grid.read().await; (*guard).clone() };
+
+                executor.step(&stm32, &rs, &ls, &g, &mut *mission_queue.write().await);
+
+                next_tick += Duration::from_millis(auto_tick_ms);
+                if next_tick <= Instant::now() {
+                    next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
                 }
             }
 
@@ -270,7 +356,7 @@ async fn main_loop(
 
     // 退出前：停车 → 停 LiDAR → 关设备
     info!("正在停止机器人...");
-    let _ = stm32.stop().await;
+    let _ = stm32.stop();
     if let Some(l) = &lidar {
         info!("正在停止 LiDAR...");
         let _ = l.stop_scan().await;
@@ -285,15 +371,15 @@ async fn main_loop(
 // 命令分发
 // ============================================================
 
-async fn dispatch(stm32: &STM32Device, lidar: &Option<LidarDevice>, cmd: Command) {
+async fn dispatch(stm32: &STM32Device, lidar: &Option<LidarDevice>, cmd: ManualCmd) {
     match cmd {
-        Command::Forward(s)   => { if let Err(e) = stm32.forward(s).await { warn!("[Robot] Forward 失败: {e}"); } }
-        Command::Backward(s)  => { if let Err(e) = stm32.backward(s).await { warn!("[Robot] Backward 失败: {e}"); } }
-        Command::SpinLeft(s)  => { if let Err(e) = stm32.spin_left(s).await { warn!("[Robot] SpinLeft 失败: {e}"); } }
-        Command::SpinRight(s) => { if let Err(e) = stm32.spin_right(s).await { warn!("[Robot] SpinRight 失败: {e}"); } }
-        Command::Stop         => { if let Err(e) = stm32.stop().await { warn!("[Robot] Stop 失败: {e}"); } }
-        Command::Beep(ms)     => { if let Err(e) = stm32.beep(ms).await { warn!("[Robot] Beep 失败: {e}"); } }
-        Command::StartLidarScan => {
+        ManualCmd::Forward(s)   => { if let Err(e) = stm32.forward(s)   { warn!("[Robot] Forward 失败: {e}"); } }
+        ManualCmd::Backward(s)  => { if let Err(e) = stm32.backward(s)  { warn!("[Robot] Backward 失败: {e}"); } }
+        ManualCmd::SpinLeft(s)  => { if let Err(e) = stm32.spin_left(s)  { warn!("[Robot] SpinLeft 失败: {e}"); } }
+        ManualCmd::SpinRight(s) => { if let Err(e) = stm32.spin_right(s) { warn!("[Robot] SpinRight 失败: {e}"); } }
+        ManualCmd::Stop         => { if let Err(e) = stm32.stop()        { warn!("[Robot] Stop 失败: {e}"); } }
+        ManualCmd::Beep(ms)     => { if let Err(e) = stm32.beep(ms)     { warn!("[Robot] Beep 失败: {e}"); } }
+        ManualCmd::StartLidarScan => {
             if let Some(l) = lidar {
                 match l.start_scan().await {
                     Ok(()) => info!("LiDAR 扫描已启动"),
@@ -303,7 +389,7 @@ async fn dispatch(stm32: &STM32Device, lidar: &Option<LidarDevice>, cmd: Command
                 info!("LiDAR 未启用，忽略 StartLidarScan");
             }
         }
-        Command::StopLidarScan => {
+        ManualCmd::StopLidarScan => {
             if let Some(l) = lidar {
                 match l.stop_scan().await {
                     Ok(()) => info!("LiDAR 扫描已停止"),

@@ -52,6 +52,27 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
 .dot.on { background: #3fb950; }
 .dot.off { background: #f85149; }
 
+/* 模式切换 */
+.mode-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 16px; padding: 10px 12px;
+    background: #0d1117; border: 1px solid #30363d;
+    border-radius: 8px; font-size: 14px;
+}
+.mode-row .label { color: #8b949e; }
+.mode-toggle {
+    display: flex; border-radius: 6px; overflow: hidden;
+    border: 1px solid #30363d;
+}
+.mode-toggle button {
+    background: #21262d; border: none; color: #8b949e;
+    padding: 6px 16px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.mode-toggle button.active {
+    background: #1f6feb; color: white;
+}
+
 /* 方向键 */
 .dpad {
     display: grid;
@@ -73,6 +94,7 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
 .btn:active, .btn.pressed {
     background: #1f6feb; border-color: #58a6ff; color: white;
 }
+.btn-disabled { opacity: 0.35; pointer-events: none; }
 .btn-w { grid-column: 2; grid-row: 1; }
 .btn-a { grid-column: 1; grid-row: 2; }
 .btn-s { grid-column: 2; grid-row: 2; }
@@ -87,6 +109,24 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
     cursor: pointer; font-size: 14px;
 }
 .btn-beep:hover { background: #30363d; }
+
+/* Goto */
+.goto-row {
+    display: flex; gap: 8px; margin-bottom: 16px;
+    align-items: center; font-size: 13px;
+}
+.goto-row input {
+    background: #0d1117; border: 1px solid #30363d;
+    color: #c9d1d9; padding: 6px 8px; border-radius: 6px;
+    width: 70px; font-size: 13px; text-align: center;
+}
+.goto-row .goto-label { color: #8b949e; }
+.goto-row button {
+    background: #1f6feb; border: none; color: white;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 600;
+}
+.goto-row button:hover { background: #388bfd; }
 
 /* 遥测 */
 .telemetry {
@@ -119,16 +159,43 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
         <span id="statusText">未连接</span>
     </div>
 
+    <!-- 模式切换 -->
+    <div class="mode-row">
+        <span class="label">模式:</span>
+        <div class="mode-toggle" id="modeToggle">
+            <button id="btnManual" class="active" onclick="setMode('manual')">Manual</button>
+            <button id="btnAuto" onclick="setMode('auto')">Auto</button>
+        </div>
+    </div>
+
     <div class="dpad" id="dpad">
-        <button class="btn btn-w" id="btnW" onmousedown="press('forward')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('forward');event.preventDefault()" ontouchend="release()">W</button>
-        <button class="btn btn-a" id="btnA" onmousedown="press('spin_left')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('spin_left');event.preventDefault()" ontouchend="release()">A</button>
-        <button class="btn btn-s" id="btnS" onmousedown="press('backward')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('backward');event.preventDefault()" ontouchend="release()">S</button>
-        <button class="btn btn-d" id="btnD" onmousedown="press('spin_right')" onmouseup="release()" onmouseleave="release()" ontouchstart="press('spin_right');event.preventDefault()" ontouchend="release()">D</button>
-        <button class="btn btn-stop" onclick="sendCmd('stop')">停</button>
+        <button class="btn btn-w" id="btnW"
+            onmousedown="press('forward')" onmouseup="release()" onmouseleave="release()"
+            ontouchstart="press('forward');event.preventDefault()" ontouchend="release()">W</button>
+        <button class="btn btn-a" id="btnA"
+            onmousedown="press('spin_left')" onmouseup="release()" onmouseleave="release()"
+            ontouchstart="press('spin_left');event.preventDefault()" ontouchend="release()">A</button>
+        <button class="btn btn-s" id="btnS"
+            onmousedown="press('backward')" onmouseup="release()" onmouseleave="release()"
+            ontouchstart="press('backward');event.preventDefault()" ontouchend="release()">S</button>
+        <button class="btn btn-d" id="btnD"
+            onmousedown="press('spin_right')" onmouseup="release()" onmouseleave="release()"
+            ontouchstart="press('spin_right');event.preventDefault()" ontouchend="release()">D</button>
+        <button class="btn btn-stop" onclick="sendManual('stop')">停</button>
     </div>
 
     <div class="beep-row">
-        <button class="btn-beep" onclick="sendCmd('beep',{ms:200})">🔊 蜂鸣</button>
+        <button class="btn-beep" onclick="sendManual('beep',{ms:200})">🔊 蜂鸣</button>
+    </div>
+
+    <!-- Goto -->
+    <div class="goto-row" id="gotoRow">
+        <span class="goto-label">Goto:</span>
+        <span style="color:#8b949e">X</span>
+        <input id="gotoX" type="number" value="1.0" step="0.1" placeholder="X(m)">
+        <span style="color:#8b949e">Y</span>
+        <input id="gotoY" type="number" value="1.0" step="0.1" placeholder="Y(m)">
+        <button onclick="sendGoto()">出发</button>
     </div>
 
     <div class="telemetry" id="telemetry">
@@ -137,24 +204,24 @@ h1 { font-size: 18px; text-align: center; margin-bottom: 20px; color: #58a6ff; }
         <div><span>速度:</span><span class="val" id="tvel">--</span></div>
     </div>
 
-    <div class="hint">W前进 / S后退 / A左旋 / D右旋<br>按住移动，松手即停 | 键盘和按钮均可操作</div>
+    <div class="hint">
+        W前进 / S后退 / A左旋 / D右旋<br>
+        按住移动，松手即停 | Manual 模式下手动控制<br>
+        Auto 模式下使用 Goto 任务 | 键盘和按钮均可操作
+    </div>
 </div>
 
 <script>
 let ws = null;
+let currentMode = 'manual';  // 当前模式
 
 // ── 键盘事件 ──────────────────────────────────
 const keyMap = {
-    'w': 'forward',
-    'W': 'forward',
-    's': 'backward',
-    'S': 'backward',
-    'a': 'spin_left',
-    'A': 'spin_left',
-    'd': 'spin_right',
-    'D': 'spin_right',
-    'b': 'beep',
-    'B': 'beep',
+    'w': 'forward', 'W': 'forward',
+    's': 'backward', 'S': 'backward',
+    'a': 'spin_left', 'A': 'spin_left',
+    'd': 'spin_right', 'D': 'spin_right',
+    'b': 'beep', 'B': 'beep',
 };
 const keyButtons = {
     'w': 'btnW', 'W': 'btnW',
@@ -168,7 +235,8 @@ document.addEventListener('keydown', (e) => {
     const cmd = keyMap[e.key];
     if (cmd) {
         e.preventDefault();
-        if (cmd === 'beep') { sendCmd(cmd, {ms: 200}); return; }
+        if (cmd === 'beep') { sendManual(cmd, {ms: 200}); return; }
+        if (currentMode !== 'manual') return;
         press(cmd);
     }
 });
@@ -221,11 +289,47 @@ function setStatus(on, text) {
     dot.className = 'dot ' + (on ? 'on' : 'off');
 }
 
-// ── 发送命令 ──────────────────────────────────
-function sendCmd(cmd, extra) {
+// ── 模式切换 ──────────────────────────────────
+function setMode(mode) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg = Object.assign({cmd: cmd}, extra || {});
+    currentMode = mode;
+
+    // 按钮高亮
+    document.getElementById('btnManual').classList.toggle('active', mode === 'manual');
+    document.getElementById('btnAuto').classList.toggle('active', mode === 'auto');
+
+    // 方向键：Manual 可用，Auto 禁用
+    const btns = ['btnW','btnA','btnS','btnD'];
+    btns.forEach(id => {
+        document.getElementById(id).classList.toggle('btn-disabled', mode !== 'manual');
+    });
+
+    // 发模式切换命令
+    const action = mode === 'auto' ? 'switch_to_auto' : 'switch_to_manual';
+    ws.send(JSON.stringify({ cmd: 'mode', action: action }));
+}
+
+// ── 手动命令 ──────────────────────────────────
+function sendManual(action, extra) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (currentMode !== 'manual') return;
+    const msg = { cmd: 'manual', action: action };
+    if (extra) Object.assign(msg, extra);
     ws.send(JSON.stringify(msg));
+}
+
+// ── Goto 命令 ──────────────────────────────────
+function sendGoto() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (currentMode !== 'auto') return;
+    const x = parseFloat(document.getElementById('gotoX').value);
+    const y = parseFloat(document.getElementById('gotoY').value);
+    if (isNaN(x) || isNaN(y)) return;
+    ws.send(JSON.stringify({
+        cmd: 'auto',
+        action: 'push',
+        missions: [{ type: 'goto', x: x, y: y }]
+    }));
 }
 
 // ── 按钮交互 ──────────────────────────────────
@@ -233,15 +337,16 @@ let activeCmd = null;
 
 function press(cmd) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (activeCmd === cmd) return; // 已在执行
+    if (currentMode !== 'manual') return;
+    if (activeCmd === cmd) return;
     activeCmd = cmd;
-    sendCmd(cmd);
+    sendManual(cmd);
     highlightButton(cmd, true);
 }
 
 function release() {
     if (!activeCmd) return;
-    sendCmd('stop');
+    sendManual('stop');
     highlightButton(activeCmd, false);
     activeCmd = null;
 }
