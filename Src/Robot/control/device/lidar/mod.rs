@@ -26,14 +26,14 @@ use constants::*;
 use parser::{feed_byte, parse_points, do_process_simple, ParseState};
 use types::ScanPacket;
 use crate::robot::control::serial::port;
-use crate::robot::state::LidarState;
+use crate::robot::core::state::LidarState;
 
 // ============================================================
 // LidarDevice — 控制句柄
 // ============================================================
 
 pub struct LidarDevice {
-    cmd_tx: mpsc::Sender<Vec<u8>>,
+    serial_cmd_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
 }
 
@@ -53,7 +53,7 @@ impl LidarDevice {
         let mut packet_buf: Vec<ScanPacket> = Vec::with_capacity(32);
         let mut last_zero = Instant::now();
 
-        let cmd_tx = port::spawn_port(
+        let serial_cmd_tx = port::spawn_port(
             port_path,
             baudrate,
             4096, // LiDAR 点云包可达 ~250B，4K 够用
@@ -101,13 +101,13 @@ impl LidarDevice {
             cancel.clone(),
         )?;
 
-        Ok(Self { cmd_tx, cancel })
+        Ok(Self { serial_cmd_tx, cancel })
     }
 
     /// 发送扫描启动命令 (PHA5 + CMD_SCAN)
     pub async fn start_scan(&self) -> Result<(), String> {
         info!("[LiDAR] 发送启动扫描命令 CMD_SCAN");
-        self.cmd_tx
+        self.serial_cmd_tx
             .send(vec![PHA5, CMD_SCAN])
             .await
             .map_err(|_| "TX channel 已关闭".into())
@@ -115,11 +115,11 @@ impl LidarDevice {
 
     /// 发送停止命令 (PHA5 + CMD_FORCE_STOP → PHA5 + CMD_STOP)
     pub async fn stop_scan(&self) -> Result<(), String> {
-        self.cmd_tx
+        self.serial_cmd_tx
             .send(vec![PHA5, CMD_FORCE_STOP])
             .await
             .map_err(|_| "TX channel 已关闭".to_string())?;
-        self.cmd_tx
+        self.serial_cmd_tx
             .send(vec![PHA5, CMD_STOP])
             .await
             .map_err(|_| "TX channel 已关闭".to_string())
@@ -153,7 +153,7 @@ impl LidarDevice {
 
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (serial_cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(32);
         let mock_cancel = cancel.clone();
 
         let handle = tokio::spawn(async move {
@@ -214,6 +214,6 @@ impl LidarDevice {
             }
         });
 
-        (Self { cmd_tx, cancel }, handle)
+        (Self { serial_cmd_tx, cancel }, handle)
     }
 }

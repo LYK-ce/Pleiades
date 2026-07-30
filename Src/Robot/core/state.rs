@@ -1,10 +1,11 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-07-29
 
 //! 机器人全局状态
 //!
 //! RobotState 由 STM32 写入，LidarState 由 LiDAR 写入，各设备独立。
+//! 纯数据结构，不含业务逻辑。里程计计算见 slam/odometry.rs。
 
 use crate::robot::control::device::lidar::LaserScan;
 
@@ -47,7 +48,7 @@ pub struct MagData {
 /// 机器人底盘传感器状态（由 STM32 维护）
 #[derive(Debug, Clone, Default)]
 pub struct RobotState {
-    /// 线速度 (m/s)
+    /// 线速度 (m/s), vz 为角速度 (rad/s)
     pub vx: f32,
     pub vy: f32,
     pub vz: f32,
@@ -70,20 +71,10 @@ pub struct RobotState {
     /// 四轮编码器计数
     pub encoders: [i32; 4],
 
-    /// 里程计累积位移 (m)，从 (0,0) 起步，RX 回调中实时累积
+    /// 里程计累积位移 (m)，从 (0,0) 起步
+    /// 由 slam/odometry.rs 在 RX 回调中实时累积
     pub odom_x: f32,
     pub odom_y: f32,
-}
-
-impl RobotState {
-    /// 基于当前 vx + yaw 累积里程计位移
-    ///
-    /// 在 RX 回调中收到 RPT_SPEED 帧后调用，dt 为距上一次 SPEED 帧的真实时间间隔。
-    pub fn accumulate_odom(&mut self, dt: f32) {
-        let yaw = self.attitude.yaw;
-        self.odom_x += self.vx * dt * yaw.cos();
-        self.odom_y += self.vx * dt * yaw.sin();
-    }
 }
 
 // ============================================================

@@ -7,7 +7,7 @@
 //! 帧构建、命令打包、接收状态机、传感器解析。
 
 use super::constants::*;
-use crate::robot::state::RobotState;
+use crate::robot::core::state::RobotState;
 
 // ============================================================
 // 帧构建

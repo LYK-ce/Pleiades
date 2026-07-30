@@ -23,7 +23,7 @@ use crate::robot::slam::OccupancyGrid;
 pub async fn run(
     bind_addr: String,
     vehicle_id: String,
-    cmd_tx: mpsc::Sender<Command>,
+    robot_cmd_tx: mpsc::Sender<Command>,
     pose_rx: broadcast::Receiver<Pose>,
     map_rx: broadcast::Receiver<Vec<MapDelta>>,
     grid: Arc<RwLock<OccupancyGrid>>,
@@ -98,7 +98,7 @@ pub async fn run(
                         continue;
                     }
                 };
-                let tx = cmd_tx.clone();
+                let tx = robot_cmd_tx.clone();
                 let feed = feed_tx.subscribe();
                 let vid = vehicle_id.clone();
                 let addr = bind_addr.clone();
@@ -114,7 +114,7 @@ pub async fn run(
 
 async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    cmd_tx: mpsc::Sender<Command>,
+    robot_cmd_tx: mpsc::Sender<Command>,
     mut feed_rx: broadcast::Receiver<String>,
     vehicle_id: String,
     bind_addr: String,
@@ -153,11 +153,13 @@ async fn handle_connection(
     });
 
     // 接收客户端命令
+    info!("[WS] {peer} 已连接");
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                info!("[WS] {peer} 收到: {text}");
                 if let Some(cmd) = parse_command(&text) {
-                    let _ = cmd_tx.send(cmd).await;
+                    let _ = robot_cmd_tx.send(cmd).await;
                 }
             }
             Ok(Message::Close(_)) => break,
@@ -170,7 +172,7 @@ async fn handle_connection(
     }
 
     feed_handle.abort();
-    if cmd_tx.send(Command::Manual(ManualCmd::Stop)).await.is_err() {
+    if robot_cmd_tx.send(Command::Manual(ManualCmd::Stop)).await.is_err() {
         warn!("[WS] {peer} 断开时无法发送 Stop");
     }
     tracing::info!("[WS] {peer} 已断开，自动停车");

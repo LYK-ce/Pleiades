@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ws_bind = "0.0.0.0:9090";
     pleiades::websocket::start(
-        ws_bind, "orion_robot", robot.cmd_tx.clone(),
+        ws_bind, "orion_robot", robot.robot_cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
         robot.grid.clone(),
     );

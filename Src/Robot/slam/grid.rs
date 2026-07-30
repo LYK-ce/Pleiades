@@ -44,6 +44,7 @@ pub struct Delta {
 }
 
 /// 一个 Chunk: 256×256 cells（i8 log-odds 概率分）
+#[derive(Clone)]
 pub struct Chunk {
     cells: Box<[i8; CHUNK_SIZE * CHUNK_SIZE]>,
     pub origin_gx: i32,
@@ -118,6 +119,7 @@ fn log_to_state(log: i8) -> u8 {
 }
 
 /// 占据栅格地图（当前单 Chunk）
+#[derive(Clone)]
 pub struct OccupancyGrid {
     pub chunk: Chunk,
 }

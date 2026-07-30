@@ -23,7 +23,7 @@ use super::mode::OpMode;
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::types::CarType;
-use crate::robot::state::{LidarState, RobotState};
+use crate::robot::core::state::{LidarState, RobotState};
 use crate::robot::slam::{self, OccupancyGrid, RobotPose};
 use std::time::Instant;
 
@@ -46,7 +46,7 @@ pub struct MapDelta {
 
 /// Robot — 机器人系统中枢
 pub struct Robot {
-    pub cmd_tx: mpsc::Sender<Command>,
+    pub robot_cmd_tx: mpsc::Sender<Command>,
     pub robot_state: Arc<RwLock<RobotState>>,
     pub lidar_state: Arc<RwLock<LidarState>>,
     /// 占据栅格地图（SLAM task 写，WebSocket / 外部读）
@@ -142,7 +142,7 @@ impl Robot {
             ).await;
         });
 
-        Ok(Self { cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, op_mode, mission_queue, cancel })
+        Ok(Self { robot_cmd_tx: cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, op_mode, mission_queue, cancel })
     }
 
     /// 优雅退出
@@ -221,24 +221,6 @@ async fn slam_task(
                 };
 
                 if !scan_points.is_empty() {
-                    // 诊断：按 LiDAR 原始角度统计四象限最近距离
-                    let (mut f_min, mut l_min, mut b_min, mut r_min) = (f32::MAX, f32::MAX, f32::MAX, f32::MAX);
-                    for &(angle, range) in &scan_points {
-                        let a = if angle < 0.0 { angle + std::f32::consts::TAU } else { angle };
-                        if a < std::f32::consts::FRAC_PI_4 || a >= 7.0 * std::f32::consts::FRAC_PI_4 {
-                            f_min = f_min.min(range);
-                        } else if a < 3.0 * std::f32::consts::FRAC_PI_4 {
-                            l_min = l_min.min(range);
-                        } else if a < 5.0 * std::f32::consts::FRAC_PI_4 {
-                            b_min = b_min.min(range);
-                        } else {
-                            r_min = r_min.min(range);
-                        }
-                    }
-                    let ff = |v| if v == f32::MAX { String::from("--") } else { format!("{:.1}m", v) };
-                    info!("[诊断] LiDAR 四象限最近距离 | yaw={:.1}° | 前={} 左={} 后={} 右={}",
-                        pose.yaw.to_degrees(), ff(f_min), ff(l_min), ff(b_min), ff(r_min));
-
                     let mut g = grid.write().await;
                     let deltas = slam::update(&mut *g, &pose, &scan_points);
                     if !deltas.is_empty() {

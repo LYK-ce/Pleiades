@@ -16,7 +16,7 @@ use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::core::command::Mission;
 use crate::robot::core::mission::MissionQueue;
 use crate::robot::slam::OccupancyGrid;
-use crate::robot::state::{LidarState, RobotState};
+use crate::robot::core::state::{LidarState, RobotState};
 
 /// 执行器状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

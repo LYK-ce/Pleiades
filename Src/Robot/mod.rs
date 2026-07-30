@@ -5,12 +5,11 @@
 //! Robot 模块
 //!
 //! - core/：Robot 核心（主循环、命令、模式、任务队列、执行器）
-//! - state.rs：全局状态
+//! - core/state.rs：全局状态
 //! - control/：底层设备驱动
 //! - slam/：占据栅格建图 + 路径规划
 
 pub mod core;
-pub mod state;
 pub mod control;
 pub mod slam;
 
@@ -19,4 +18,4 @@ pub use core::executor::ExecutorConfig;
 pub use core::mode::OpMode;
 pub use core::robot::Robot;
 pub use control::types::CarType;
-pub use state::RobotState;
+pub use core::state::RobotState;

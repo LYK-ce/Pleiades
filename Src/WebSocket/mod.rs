@@ -21,7 +21,7 @@ use crate::robot::slam::OccupancyGrid;
 pub fn start(
     bind_addr: &str,
     vehicle_id: &str,
-    cmd_tx: mpsc::Sender<Command>,
+    robot_cmd_tx: mpsc::Sender<Command>,
     pose_rx: broadcast::Receiver<Pose>,
     map_rx: broadcast::Receiver<Vec<MapDelta>>,
     grid: Arc<RwLock<OccupancyGrid>>,
@@ -29,6 +29,6 @@ pub fn start(
     let addr = bind_addr.to_string();
     let id = vehicle_id.to_string();
     tokio::spawn(async move {
-        server::run(addr, id, cmd_tx, pose_rx, map_rx, grid).await;
+        server::run(addr, id, robot_cmd_tx, pose_rx, map_rx, grid).await;
     });
 }

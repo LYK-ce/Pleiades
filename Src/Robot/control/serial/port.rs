@@ -38,19 +38,19 @@ pub fn spawn_port(
         .map_err(|e| format!("无法打开串口 {}: {}", port, e))?;
     let serial = Arc::new(serial);
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (serial_cmd_tx, serial_cmd_rx) = mpsc::channel::<Vec<u8>>(32);
 
     // TX task
     let tx_port = serial.clone();
     let tx_cancel = cancel.clone();
-    tokio::spawn(async move { tx_loop(tx_port, cmd_rx, tx_cancel).await });
+    tokio::spawn(async move { tx_loop(tx_port, serial_cmd_rx, tx_cancel).await });
 
     // RX task
     let rx_port = serial.clone();
     let rx_cancel = cancel.clone();
     tokio::spawn(async move { rx_loop(rx_port, on_bytes, read_buf_size, rx_cancel).await });
 
-    Ok(cmd_tx)
+    Ok(serial_cmd_tx)
 }
 
 // ============================================================
@@ -62,7 +62,7 @@ const TX_MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 async fn tx_loop(
     port: Arc<SerialPort>,
-    mut cmd_rx: mpsc::Receiver<Vec<u8>>,
+    mut serial_cmd_rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
 ) {
     let mut consecutive_errors: u32 = 0;
@@ -72,7 +72,7 @@ async fn tx_loop(
                 info!("TX task 退出");
                 return;
             }
-            cmd = cmd_rx.recv() => {
+            cmd = serial_cmd_rx.recv() => {
                 match cmd {
                     Some(bytes) => {
                         match port.write(&bytes).await {

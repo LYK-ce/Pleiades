@@ -26,14 +26,15 @@ use protocol::{
 };
 use super::super::serial::port;
 use super::super::types::CarType;
-use crate::robot::state::RobotState;
+use crate::robot::core::state::RobotState;
+use crate::robot::slam::odometry;
 
 // ============================================================
 // STM32Device — 控制句柄
 // ============================================================
 
 pub struct STM32Device {
-    cmd_tx: mpsc::Sender<Vec<u8>>,
+    serial_cmd_tx: mpsc::Sender<Vec<u8>>,
     state: Arc<RwLock<RobotState>>,
     car_type: CarType,
     cancel: CancellationToken,
@@ -47,7 +48,7 @@ impl STM32Device {
         let mut local_state = RobotState::default();
         let mut last_speed_ts = Instant::now();
 
-        let cmd_tx = port::spawn_port(
+        let serial_cmd_tx = port::spawn_port(
             port, baudrate, 512,
             move |bytes| {
                 let mut frame_parsed = false;
@@ -58,7 +59,7 @@ impl STM32Device {
                             let now = Instant::now();
                             let dt = (now - last_speed_ts).as_secs_f32();
                             if dt > 0.0 && dt < 1.0 {
-                                local_state.accumulate_odom(dt);
+                                odometry::accumulate(&mut local_state, dt);
                             }
                             last_speed_ts = now;
                         }
@@ -76,7 +77,7 @@ impl STM32Device {
             cancel.clone(),
         )?;
 
-        Ok(Self { cmd_tx, state, car_type, cancel })
+        Ok(Self { serial_cmd_tx, state, car_type, cancel })
     }
 
     pub fn shutdown(&self) { self.cancel.cancel(); }
@@ -93,37 +94,37 @@ impl STM32Device {
 
     fn send_car_run(&self, state: MotionState, speed: i16) -> Result<(), String> {
         let bytes = pack_car_run(self.car_type as u8, state as u8, speed);
-        self.cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn set_motion(&self, vx: f32, vy: f32, vz: f32) -> Result<(), String> {
         let limits = self.car_type.motion_limits();
         let bytes = pack_motion(self.car_type as u8, vx, vy, vz, limits);
-        self.cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn set_motor(&self, m1: i8, m2: i8, m3: i8, m4: i8) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_motor(m1, m2, m3, m4)).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_motor(m1, m2, m3, m4)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn beep(&self, duration_ms: u16) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_beep(duration_ms)).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_beep(duration_ms)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn set_servo(&self, id: u8, angle: u8) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_servo(id, angle)).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_servo(id, angle)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn set_rgb(&self, led_id: u8, r: u8, g: u8, b: u8) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_rgb(led_id, r, g, b)).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_rgb(led_id, r, g, b)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn set_rgb_effect(&self, effect: u8, speed: u8) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_rgb_effect(effect, speed)).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_rgb_effect(effect, speed)).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     pub fn reset_state(&self) -> Result<(), String> {
-        self.cmd_tx.try_send(pack_reset()).map_err(|e| format!("TX 通道满: {e}"))
+        self.serial_cmd_tx.try_send(pack_reset()).map_err(|e| format!("TX 通道满: {e}"))
     }
 
     /// 读取当前传感器状态快照（async：需要持有 RwLock read guard）
@@ -154,7 +155,7 @@ impl STM32Device {
 
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (serial_cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(32);
         let mock_cancel = cancel.clone();
 
         // 后台 task：TX 转发 + RX 模拟
@@ -184,7 +185,7 @@ impl STM32Device {
                                             let now = Instant::now();
                                             let dt = (now - last_speed_ts).as_secs_f32();
                                             if dt > 0.0 && dt < 1.0 {
-                                                local_state.accumulate_odom(dt);
+                                                odometry::accumulate(&mut local_state, dt);
                                             }
                                             last_speed_ts = now;
                                         }
@@ -207,7 +208,7 @@ impl STM32Device {
             }
         });
 
-        (Self { cmd_tx, state, car_type, cancel }, handle)
+        (Self { serial_cmd_tx, state, car_type, cancel }, handle)
     }
 }
 

@@ -8,6 +8,7 @@
 
 pub mod grid;
 pub mod lidar_mapper;
+pub mod odometry;
 pub mod pathfinder;
 
 pub use grid::{Delta, OccupancyGrid, CHUNK_SIZE};
