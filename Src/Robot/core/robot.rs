@@ -257,7 +257,7 @@ async fn main_loop(
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
 
     let mut executor = Executor::new(ExecutorConfig::default());
-    let auto_tick_ms = 100u64;
+    let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
     loop {

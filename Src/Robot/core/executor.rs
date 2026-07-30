@@ -1,13 +1,11 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-07-30
 
 //! Executor — 自动任务执行器
 //!
 //! 三状态：Idle → Turning → Moving → Idle（循环）
-//! auto_tick 每 100ms 调用 step()，内部根据状态执行对应逻辑。
-//!
-//! Executor 直接持有 STM32Device 引用，绕过 Command 通道的模式过滤。
+//! auto_tick 每 50ms 调用 step()，内部根据状态执行对应逻辑。
 
 use std::f32::consts::PI;
 use tracing::{info, warn};
@@ -55,10 +53,10 @@ pub struct ExecutorConfig {
 impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
-            auto_tick_ms: 100,
+            auto_tick_ms: 50,
             sub_target_threshold_m: 0.2,
             obstacle_threshold_m: 0.3,
-            turn_speed: 30,
+            turn_speed: 10,
             move_speed: 30,
             turn_align_threshold_deg: 5.0,
             arrival_threshold_m: 0.3,
@@ -143,7 +141,7 @@ impl Executor {
                     self.goal = Some((x, y));
                     self.sub_target = None;
                 }
-                None => return,  // 队列空，等待
+                None => return,
             }
         }
 
@@ -210,11 +208,9 @@ impl Executor {
         let threshold_rad = self.config.turn_align_threshold_deg.to_radians();
 
         if delta.abs() <= threshold_rad {
-            // 对齐了 → 停车 → Idle
             self.state = ExecState::Idle;
             if let Err(e) = stm32.stop() { warn!("[Executor] Stop 失败: {e}"); }
         }
-        // 否则保持 Turning，Spin 命令已在上次 Idle 发出
     }
 
     // ─── Moving：等到 sub_target ────────
