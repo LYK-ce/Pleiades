@@ -94,7 +94,7 @@ impl Executor {
             let front_min = scan.points.iter()
                 .filter(|p| {
                     let a = if p.angle < 0.0 { p.angle + 2.0 * PI } else { p.angle };
-                    a < PI / 4.0 || a >= 7.0 * PI / 4.0
+                    p.range >= 0.1 && (a < PI / 4.0 || a >= 7.0 * PI / 4.0)
                 })
                 .map(|p| p.range)
                 .fold(f32::MAX, f32::min);
