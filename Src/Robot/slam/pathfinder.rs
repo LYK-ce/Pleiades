@@ -30,7 +30,7 @@ impl Eq for Key {}
 
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap 是最大堆，我们反转比较实现最小堆
+        // BinaryHeap 是最大堆，反转比较实现最小堆
         other.k1.partial_cmp(&self.k1).unwrap_or(Ordering::Equal)
             .then_with(|| other.k2.partial_cmp(&self.k2).unwrap_or(Ordering::Equal))
     }
@@ -95,7 +95,6 @@ impl DStarLite {
         // 找邻居中 c(s,s')+g(s') 最小的
         let mut best: Option<((i32, i32), f32)> = None;
         for n in Self::neighbors(self.start) {
-            if n == self.start { continue; }
             let cost = self.cost(grid, self.start, n);
             if cost >= f32::MAX / 2.0 { continue; }
             let val = cost + self.g_val(n);
@@ -114,7 +113,6 @@ impl DStarLite {
 
     /// 标记障碍格（会触发局部修补）
     pub fn mark_obstacle(&mut self, cell: (i32, i32), grid: &OccupancyGrid) {
-        // 将所有经过该格的邻居 rhs 设为 ∞ 并重新计算
         for n in Self::neighbors(cell) {
             if self.has_rhs(n) {
                 self.update_vertex(n, grid);
@@ -132,15 +130,15 @@ impl DStarLite {
         self.rhs.clear();
         self.g.clear();
         self.rhs.insert(self.goal, 0.0);
-        let key = Self::calc_key(self.start, self.goal, 0.0, 0.0);
+        let key = self.calc_key(self.goal, 0.0, 0.0);
         self.u.push((key, self.goal));
     }
 
-    /// 计算节点 key = (min(g, rhs) + h + km, min(g, rhs))
-    fn calc_key(cell: (i32, i32), start: (i32, i32), g: f32, rhs: f32) -> Key {
+    /// 计算节点 key = (min(g, rhs) + h(start, cell) + km, min(g, rhs))
+    fn calc_key(&self, cell: (i32, i32), g: f32, rhs: f32) -> Key {
         let m = g.min(rhs);
-        let h = Self::heuristic(start, cell);
-        Key { k1: m + h, k2: m }
+        let h = Self::heuristic(self.start, cell);
+        Key { k1: m + h + self.km, k2: m }
     }
 
     /// Manhattan 距离
@@ -186,7 +184,6 @@ impl DStarLite {
     /// 更新节点的 rhs 和队列状态
     fn update_vertex(&mut self, cell: (i32, i32), grid: &OccupancyGrid) {
         if cell != self.goal {
-            // rhs = min over neighbors of cost(cell, n) + g(n)
             let mut best = f32::MAX;
             for n in Self::neighbors(cell) {
                 let c = self.cost(grid, cell, n);
@@ -197,15 +194,12 @@ impl DStarLite {
             self.rhs.insert(cell, best);
         }
 
-        // 如果 cell 在队列中，移除旧条目
-        // （简化实现：不实际删除，push 新 key 并在 compute_shortest_path 中检测过期条目）
-
         let g = self.g_val(cell);
         let rhs = self.rhs_val(cell);
 
         if g != rhs {
-            let key = Self::calc_key(cell, self.start, g, rhs);
-            key_adjust(&mut self.u, key, cell);
+            let key = self.calc_key(cell, g, rhs);
+            self.u.push((key, cell));
         }
     }
 
@@ -214,19 +208,24 @@ impl DStarLite {
     /// D* Lite 主循环：扩展节点直到达到一致状态
     fn compute_shortest_path(&mut self, grid: &OccupancyGrid) {
         loop {
-            // 取队首（跳过过期条目）
-            let (key, cell) = match pop_valid(&mut self.u, &self.g, &self.rhs) {
+            // 弹出有效条目（跳过过期）
+            let (key, cell) = match self.pop_valid() {
                 Some(v) => v,
                 None => break,
             };
 
             let g = self.g_val(cell);
             let rhs = self.rhs_val(cell);
-            let start_key = Self::calc_key(self.start, self.start, self.g_val(self.start), self.rhs_val(self.start));
+
+            // 一致节点，跳过
+            if g == rhs {
+                continue;
+            }
+
+            let start_key = self.calc_key(self.start, self.g_val(self.start), self.rhs_val(self.start));
 
             // 终止条件：队首 key ≥ start_key 且 start 一致
             if key >= start_key && self.g_val(self.start) == self.rhs_val(self.start) {
-                // 重新入队
                 self.u.push((key, cell));
                 break;
             }
@@ -240,7 +239,7 @@ impl DStarLite {
                     }
                 }
             } else {
-                // 过一致：提升 g
+                // 过一致：提升 g (g < rhs)
                 self.g.insert(cell, f32::MAX);
                 self.update_vertex(cell, grid);
                 for n in Self::neighbors(cell) {
@@ -251,35 +250,17 @@ impl DStarLite {
             }
         }
     }
-}
 
-// ============================================================
-// 辅助函数
-// ============================================================
-
-/// 插入/调整节点在优先队列中的 key
-fn key_adjust(u: &mut BinaryHeap<(Key, (i32, i32))>, key: Key, cell: (i32, i32)) {
-    u.push((key, cell));
-}
-
-/// 从队列中弹出有效条目（key 与当前 g/rhs 一致），跳过过期条目
-fn pop_valid(
-    u: &mut BinaryHeap<(Key, (i32, i32))>,
-    g: &HashMap<(i32, i32), f32>,
-    rhs: &HashMap<(i32, i32), f32>,
-) -> Option<(Key, (i32, i32))> {
-    loop {
-        let (key, cell) = u.pop()?;
-        let gv = *g.get(&cell).unwrap_or(&f32::MAX);
-        let rv = *rhs.get(&cell).unwrap_or(&f32::MAX);
-        let expected = DStarLite::calc_key(cell, (0, 0), gv, rv);
-        // 注意：calc_key 需要 start 来算 heuristic。
-        // 但我们只需要 k2 和 g/rhs 匹配即可。
-        // 简化：比较 k2 是否等于 min(g, rhs)
-        let m = gv.min(rv);
-        if key.k2 == m {
-            return Some((key, cell));
+    /// 从队列弹出有效条目，跳过 key 与当前 g/rhs 不匹配的过期条目
+    fn pop_valid(&mut self) -> Option<(Key, (i32, i32))> {
+        loop {
+            let (key, cell) = self.u.pop()?;
+            let g = self.g_val(cell);
+            let r = self.rhs_val(cell);
+            let expected = self.calc_key(cell, g, r);
+            if key.k1 == expected.k1 && key.k2 == expected.k2 {
+                return Some((key, cell));
+            }
         }
-        // 否则过期，丢弃，继续 pop
     }
 }

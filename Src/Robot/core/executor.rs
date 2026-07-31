@@ -106,7 +106,6 @@ impl Executor {
                     warn!("[Executor] 前方障碍 {:.2}m < {:.2}m，急停", p.range, self.config.obstacle_threshold_m);
                     if let Err(e) = stm32.stop() { warn!("[Executor] 急停失败: {e}"); }
 
-                    // 标记障碍并重置 sub_target，下 tick 重规划
                     let ob_angle = yaw + p.angle;
                     let ob_wx = wx + p.range * ob_angle.cos();
                     let ob_wy = wy + p.range * ob_angle.sin();
@@ -159,7 +158,6 @@ impl Executor {
                     info!("[Executor] 新任务: Goto({:.2}, {:.2})", x, y);
                     self.goal = Some((x, y));
                     self.sub_target = None;
-                    // 创建新的 D* Lite 规划器
                     let start_gx = (wx / CELL_RESOLUTION).round() as i32;
                     let start_gy = (wy / CELL_RESOLUTION).round() as i32;
                     let goal_gx = (x / CELL_RESOLUTION).round() as i32;
@@ -178,7 +176,11 @@ impl Executor {
             let current_gx = (wx / CELL_RESOLUTION).round() as i32;
             let current_gy = (wy / CELL_RESOLUTION).round() as i32;
 
-            match self.pathfinder.as_mut().and_then(|pf| pf.next_step(grid)) {
+            let next = self.pathfinder.as_mut().and_then(|pf| {
+                pf.move_to((current_gx, current_gy));
+                pf.next_step(grid)
+            });
+            match next {
                 Some((sx, sy)) => {
                     self.sub_target = Some((sx, sy));
                 }
@@ -225,7 +227,6 @@ impl Executor {
             }
         };
 
-        // 实时计算角偏差
         let target_wx = st_x as f32 * CELL_RESOLUTION;
         let target_wy = st_y as f32 * CELL_RESOLUTION;
         let target_angle = (target_wy - wy).atan2(target_wx - wx);
