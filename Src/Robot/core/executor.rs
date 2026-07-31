@@ -176,6 +176,19 @@ impl Executor {
             let current_gx = (wx / CELL_RESOLUTION).round() as i32;
             let current_gy = (wy / CELL_RESOLUTION).round() as i32;
 
+            // 网格级到达检查：已在目标格但世界距离未达标时直接视为到达
+            if let Some((gx, gy)) = self.goal {
+                let goal_gx = (gx / CELL_RESOLUTION).round() as i32;
+                let goal_gy = (gy / CELL_RESOLUTION).round() as i32;
+                if current_gx == goal_gx && current_gy == goal_gy {
+                    info!("[Executor] 已在目标格，到达");
+                    self.goal = None;
+                    self.pathfinder = None;
+                    if let Err(e) = stm32.stop() { warn!("[Executor] Stop 失败: {e}"); }
+                    return;
+                }
+            }
+
             let next = self.pathfinder.as_mut().and_then(|pf| {
                 pf.move_to((current_gx, current_gy));
                 pf.next_step(grid)

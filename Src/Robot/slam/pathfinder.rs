@@ -251,14 +251,14 @@ impl DStarLite {
         }
     }
 
-    /// 从队列弹出有效条目，跳过 key 与当前 g/rhs 不匹配的过期条目
+    /// 从队列弹出有效条目，跳过 g/rhs 已变化的过期条目
+    /// 仅比较 k2（min(g,rhs)），k1 因 km 技巧变化属正常，不比对
     fn pop_valid(&mut self) -> Option<(Key, (i32, i32))> {
         loop {
             let (key, cell) = self.u.pop()?;
             let g = self.g_val(cell);
             let r = self.rhs_val(cell);
-            let expected = self.calc_key(cell, g, r);
-            if key.k1 == expected.k1 && key.k2 == expected.k2 {
+            if key.k2 == g.min(r) {
                 return Some((key, cell));
             }
         }
