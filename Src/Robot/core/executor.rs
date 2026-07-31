@@ -1,11 +1,12 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-07-30
+//Modified Date ： 2026-07-31
 
 //! Executor — 自动任务执行器
 //!
 //! 三状态：Idle → Turning → Moving → Idle（循环）
 //! auto_tick 每 50ms 调用 step()，内部根据状态执行对应逻辑。
+//! 集成 D* Lite 路径规划器，急停时标记障碍并重规划。
 
 use std::f32::consts::PI;
 use tracing::{info, warn};
@@ -13,7 +14,8 @@ use tracing::{info, warn};
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::core::command::Mission;
 use crate::robot::core::mission::MissionQueue;
-use crate::robot::slam::OccupancyGrid;
+use crate::robot::slam::pathfinder::DStarLite;
+use crate::robot::slam::{OccupancyGrid, CELL_RESOLUTION};
 use crate::robot::core::state::{LidarState, RobotState};
 
 /// 执行器状态
@@ -36,6 +38,8 @@ pub struct Executor {
     sub_target: Option<(i32, i32)>,
     /// 配置参数
     config: ExecutorConfig,
+    /// D* Lite 路径规划器（pop 新 Mission 时创建）
+    pathfinder: Option<DStarLite>,
 }
 
 /// 执行器配置
@@ -71,6 +75,7 @@ impl Executor {
             goal: None,
             sub_target: None,
             config,
+            pathfinder: None,
         }
     }
 
@@ -80,34 +85,46 @@ impl Executor {
         stm32: &STM32Device,
         robot_state: &RobotState,
         lidar_state: &LidarState,
-        _grid: &OccupancyGrid,
+        grid: &OccupancyGrid,
         mission_queue: &mut MissionQueue,
     ) {
         // ① 感知：当前位置 + 航向
         let (wx, wy) = (64.0 + robot_state.odom_x, 64.0 + robot_state.odom_y);
         let yaw = robot_state.attitude.yaw;
 
-        // ② 实时障碍急停：前方 LiDAR 距离 < 阈值 → 立即停车
+        // ② 实时障碍急停：前方 LiDAR 距离 < 阈值 → 立即停车 + 标记障碍
         if let Some(ref scan) = lidar_state.scan {
-            let front_min = scan.points.iter()
+            let closest = scan.points.iter()
                 .filter(|p| {
                     let a = if p.angle < 0.0 { p.angle + 2.0 * PI } else { p.angle };
                     p.range >= 0.1 && (a < PI / 4.0 || a >= 7.0 * PI / 4.0)
                 })
-                .map(|p| p.range)
-                .fold(f32::MAX, f32::min);
+                .min_by(|a, b| a.range.partial_cmp(&b.range).unwrap_or(std::cmp::Ordering::Equal));
 
-            if front_min < self.config.obstacle_threshold_m {
-                warn!("[Executor] 前方障碍 {:.2}m < {:.2}m，急停", front_min, self.config.obstacle_threshold_m);
-                if let Err(e) = stm32.stop() { warn!("[Executor] 急停失败: {e}"); }
-                self.state = ExecState::Idle;
-                return;
+            if let Some(p) = closest {
+                if p.range < self.config.obstacle_threshold_m {
+                    warn!("[Executor] 前方障碍 {:.2}m < {:.2}m，急停", p.range, self.config.obstacle_threshold_m);
+                    if let Err(e) = stm32.stop() { warn!("[Executor] 急停失败: {e}"); }
+
+                    // 标记障碍并重置 sub_target，下 tick 重规划
+                    let ob_angle = yaw + p.angle;
+                    let ob_wx = wx + p.range * ob_angle.cos();
+                    let ob_wy = wy + p.range * ob_angle.sin();
+                    let ob_gx = (ob_wx / CELL_RESOLUTION).round() as i32;
+                    let ob_gy = (ob_wy / CELL_RESOLUTION).round() as i32;
+                    if let Some(ref mut pf) = self.pathfinder {
+                        pf.mark_obstacle((ob_gx, ob_gy), grid);
+                    }
+                    self.sub_target = None;
+                    self.state = ExecState::Idle;
+                    return;
+                }
             }
         }
 
         // ③ 状态机
         match self.state {
-            ExecState::Idle => self.step_idle(stm32, wx, wy, yaw, mission_queue),
+            ExecState::Idle => self.step_idle(stm32, wx, wy, yaw, grid, mission_queue),
             ExecState::Turning => self.step_turning(stm32, wx, wy, yaw),
             ExecState::Moving => self.step_moving(stm32, wx, wy),
         }
@@ -119,6 +136,7 @@ impl Executor {
         &mut self,
         stm32: &STM32Device,
         wx: f32, wy: f32, yaw: f32,
+        grid: &OccupancyGrid,
         mission_queue: &mut MissionQueue,
     ) {
         // 检查是否到达 goal
@@ -128,6 +146,7 @@ impl Executor {
                 info!("[Executor] 到达目标 ({:.2}, {:.2})", gx, gy);
                 self.goal = None;
                 self.sub_target = None;
+                self.pathfinder = None;
                 if let Err(e) = stm32.stop() { warn!("[Executor] Stop 失败: {e}"); }
                 return;
             }
@@ -140,34 +159,42 @@ impl Executor {
                     info!("[Executor] 新任务: Goto({:.2}, {:.2})", x, y);
                     self.goal = Some((x, y));
                     self.sub_target = None;
+                    // 创建新的 D* Lite 规划器
+                    let start_gx = (wx / CELL_RESOLUTION).round() as i32;
+                    let start_gy = (wy / CELL_RESOLUTION).round() as i32;
+                    let goal_gx = (x / CELL_RESOLUTION).round() as i32;
+                    let goal_gy = (y / CELL_RESOLUTION).round() as i32;
+                    self.pathfinder = Some(DStarLite::new(
+                        (start_gx, start_gy),
+                        (goal_gx, goal_gy),
+                    ));
                 }
                 None => return,
             }
         }
 
-        // 需要 sub_target → 计算
+        // 需要 sub_target → 问 D* Lite
         if self.sub_target.is_none() {
-            let (gx, gy) = self.goal.unwrap();
-            let grid_x = (gx / 0.5).round() as i32;
-            let grid_y = (gy / 0.5).round() as i32;
-            let current_gx = (wx / 0.5).round() as i32;
-            let current_gy = (wy / 0.5).round() as i32;
+            let current_gx = (wx / CELL_RESOLUTION).round() as i32;
+            let current_gy = (wy / CELL_RESOLUTION).round() as i32;
 
-            if (grid_x, grid_y) == (current_gx, current_gy) {
-                info!("[Executor] 已在目标格，到达");
-                self.goal = None;
-                self.sub_target = None;
-                if let Err(e) = stm32.stop() { warn!("[Executor] Stop 失败: {e}"); }
-                return;
+            match self.pathfinder.as_mut().and_then(|pf| pf.next_step(grid)) {
+                Some((sx, sy)) => {
+                    self.sub_target = Some((sx, sy));
+                }
+                None => {
+                    warn!("[Executor] D* Lite 不可达，跳过此任务");
+                    self.goal = None;
+                    self.pathfinder = None;
+                    return;
+                }
             }
-
-            self.sub_target = Some((grid_x, grid_y));
         }
 
         // 计算角偏差（归一化到 [-π, π]）
         let (st_x, st_y) = self.sub_target.unwrap();
-        let target_wx = st_x as f32 * 0.5;
-        let target_wy = st_y as f32 * 0.5;
+        let target_wx = st_x as f32 * CELL_RESOLUTION;
+        let target_wy = st_y as f32 * CELL_RESOLUTION;
         let target_angle = (target_wy - wy).atan2(target_wx - wx);
         let mut delta = target_angle - yaw;
         delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
@@ -199,8 +226,8 @@ impl Executor {
         };
 
         // 实时计算角偏差
-        let target_wx = st_x as f32 * 0.5;
-        let target_wy = st_y as f32 * 0.5;
+        let target_wx = st_x as f32 * CELL_RESOLUTION;
+        let target_wy = st_y as f32 * CELL_RESOLUTION;
         let target_angle = (target_wy - wy).atan2(target_wx - wx);
         let mut delta = target_angle - yaw;
         delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
@@ -224,8 +251,8 @@ impl Executor {
             }
         };
 
-        let target_wx = st_x as f32 * 0.5;
-        let target_wy = st_y as f32 * 0.5;
+        let target_wx = st_x as f32 * CELL_RESOLUTION;
+        let target_wy = st_y as f32 * CELL_RESOLUTION;
         let dist = ((wx - target_wx).powi(2) + (wy - target_wy).powi(2)).sqrt();
 
         if dist < self.config.sub_target_threshold_m {
@@ -240,5 +267,6 @@ impl Executor {
         self.state = ExecState::Idle;
         self.goal = None;
         self.sub_target = None;
+        self.pathfinder = None;
     }
 }
