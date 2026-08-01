@@ -195,6 +195,7 @@ impl Executor {
             });
             match next {
                 Some((sx, sy)) => {
+                    info!("[Executor] sub_target=({sx}, {sy})");
                     self.sub_target = Some((sx, sy));
                 }
                 None => {
