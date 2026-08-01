@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-31
-//Modified Date ： 2026-07-31
+//Modified Date ： 2026-08-01
 
 //! D* Lite 增量路径规划器
 //!
@@ -10,6 +10,7 @@
 
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
+use tracing::{info, warn};
 
 use crate::robot::slam::{OccupancyGrid, CHUNK_SIZE};
 
@@ -30,7 +31,6 @@ impl Eq for Key {}
 
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap 是最大堆，反转比较实现最小堆
         other.k1.partial_cmp(&self.k1).unwrap_or(Ordering::Equal)
             .then_with(|| other.k2.partial_cmp(&self.k2).unwrap_or(Ordering::Equal))
     }
@@ -76,6 +76,7 @@ impl DStarLite {
             goal,
         };
         slf.initialize();
+        info!("[D*] 创建规划器: start=({},{}) goal=({},{})", start.0, start.1, goal.0, goal.1);
         slf
     }
 
@@ -85,12 +86,16 @@ impl DStarLite {
     ///
     /// 返回 4 连通邻居中 `cost + g` 最小的格子，或 None（不可达/已到达）。
     pub fn next_step(&mut self, grid: &OccupancyGrid) -> Option<(i32, i32)> {
+        info!("[D*] next_step: start=({},{}) goal=({},{}) km={:.1}",
+            self.start.0, self.start.1, self.goal.0, self.goal.1, self.km);
         if self.start == self.goal {
+            warn!("[D*] start==goal，返回 None");
             return None;
         }
         self.compute_shortest_path(grid);
         if self.rhs_val(self.start) >= f32::MAX / 2.0 {
-            return None; // 不可达
+            warn!("[D*] rhs[start]=INF，不可达");
+            return None;
         }
         // 找邻居中 c(s,s')+g(s') 最小的
         let mut best: Option<((i32, i32), f32)> = None;
@@ -107,12 +112,15 @@ impl DStarLite {
 
     /// 更新起点（机器人移动了一步）
     pub fn move_to(&mut self, new_start: (i32, i32)) {
-        self.km += Self::heuristic(self.start, new_start);
+        let old = self.start;
+        self.km += Self::heuristic(old, new_start);
         self.start = new_start;
+        info!("[D*] move_to: ({},{})->({},{}) km={:.1}", old.0, old.1, new_start.0, new_start.1, self.km);
     }
 
     /// 标记障碍格（会触发局部修补）
     pub fn mark_obstacle(&mut self, cell: (i32, i32), grid: &OccupancyGrid) {
+        info!("[D*] mark_obstacle: ({},{})", cell.0, cell.1);
         for n in Self::neighbors(cell) {
             if self.has_rhs(n) {
                 self.update_vertex(n, grid);
@@ -160,8 +168,8 @@ impl DStarLite {
             return f32::MAX;
         }
         match grid.state(to.0, to.1) {
-            Some(1) => f32::MAX,   // Occupied
-            _ => 1.0,              // Free(0) / Unknown(2) → 可通过
+            Some(1) => f32::MAX,
+            _ => 1.0,
         }
     }
 
@@ -181,7 +189,6 @@ impl DStarLite {
 
     // ─── update_vertex ─────────────────────────
 
-    /// 更新节点的 rhs 和队列状态
     fn update_vertex(&mut self, cell: (i32, i32), grid: &OccupancyGrid) {
         if cell != self.goal {
             let mut best = f32::MAX;
@@ -205,33 +212,33 @@ impl DStarLite {
 
     // ─── compute_shortest_path ─────────────────
 
-    /// D* Lite 主循环：扩展节点直到达到一致状态
     fn compute_shortest_path(&mut self, grid: &OccupancyGrid) {
+        let mut iter = 0u32;
         loop {
-            // 弹出有效条目（跳过过期）
             let (key, cell) = match self.pop_valid() {
                 Some(v) => v,
-                None => break,
+                None => {
+                    info!("[D*] compute: heap empty after {} iters", iter);
+                    break;
+                }
             };
 
             let g = self.g_val(cell);
             let rhs = self.rhs_val(cell);
 
-            // 一致节点，跳过
             if g == rhs {
                 continue;
             }
 
             let start_key = self.calc_key(self.start, self.g_val(self.start), self.rhs_val(self.start));
 
-            // 终止条件：队首 key ≥ start_key 且 start 一致
             if key >= start_key && self.g_val(self.start) == self.rhs_val(self.start) {
                 self.u.push((key, cell));
+                info!("[D*] compute: converged after {} iters", iter);
                 break;
             }
 
             if g > rhs {
-                // 欠一致：降低 g
                 self.g.insert(cell, rhs);
                 for n in Self::neighbors(cell) {
                     if n != self.goal {
@@ -239,7 +246,6 @@ impl DStarLite {
                     }
                 }
             } else {
-                // 过一致：提升 g (g < rhs)
                 self.g.insert(cell, f32::MAX);
                 self.update_vertex(cell, grid);
                 for n in Self::neighbors(cell) {
@@ -248,10 +254,11 @@ impl DStarLite {
                     }
                 }
             }
+            iter += 1;
         }
     }
 
-    /// 从队列弹出有效条目，跳过 key 与当前 g/rhs 不匹配的过期条目
+    /// 从队列弹出有效条目
     fn pop_valid(&mut self) -> Option<(Key, (i32, i32))> {
         loop {
             let (key, cell) = self.u.pop()?;
