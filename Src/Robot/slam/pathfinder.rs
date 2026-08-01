@@ -232,7 +232,8 @@ impl DStarLite {
 
             let start_key = self.calc_key(self.start, self.g_val(self.start), self.rhs_val(self.start));
 
-            if key >= start_key && self.g_val(self.start) == self.rhs_val(self.start) {
+            if (key.k1 > start_key.k1 || (key.k1 == start_key.k1 && key.k2 >= start_key.k2))
+                && self.g_val(self.start) == self.rhs_val(self.start) {
                 self.u.push((key, cell));
                 info!("[D*] compute: converged after {} iters", iter);
                 break;
