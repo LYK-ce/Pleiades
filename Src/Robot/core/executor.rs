@@ -80,8 +80,8 @@ impl Executor {
 
     /// 问 D* 下一格：更新 start 到当前位置，返回下一格网格坐标
     fn query_next_sub_target(&mut self, wx: f32, wy: f32, grid: &OccupancyGrid) -> Option<(i32, i32)> {
-        let current_gx = (wx / CELL_RESOLUTION).round() as i32;
-        let current_gy = (wy / CELL_RESOLUTION).round() as i32;
+        let current_gx = (wx / CELL_RESOLUTION).floor() as i32;
+        let current_gy = (wy / CELL_RESOLUTION).floor() as i32;
         self.pathfinder.as_mut().and_then(|pf| {
             pf.move_to((current_gx, current_gy));
             pf.next_step(grid)
@@ -128,8 +128,8 @@ impl Executor {
                     let ob_angle = yaw + p.angle;
                     let ob_wx = wx + p.range * ob_angle.cos();
                     let ob_wy = wy + p.range * ob_angle.sin();
-                    let ob_gx = (ob_wx / CELL_RESOLUTION).round() as i32;
-                    let ob_gy = (ob_wy / CELL_RESOLUTION).round() as i32;
+                    let ob_gx = (ob_wx / CELL_RESOLUTION).floor() as i32;
+                    let ob_gy = (ob_wy / CELL_RESOLUTION).floor() as i32;
                     if let Some(ref mut pf) = self.pathfinder {
                         pf.mark_obstacle((ob_gx, ob_gy), grid);
                     }
@@ -177,10 +177,10 @@ impl Executor {
                     info!("[Executor] 新任务: Goto({:.2}, {:.2})", x, y);
                     self.goal = Some((x, y));
                     self.sub_target = None;
-                    let start_gx = (wx / CELL_RESOLUTION).round() as i32;
-                    let start_gy = (wy / CELL_RESOLUTION).round() as i32;
-                    let goal_gx = (x / CELL_RESOLUTION).round() as i32;
-                    let goal_gy = (y / CELL_RESOLUTION).round() as i32;
+                    let start_gx = (wx / CELL_RESOLUTION).floor() as i32;
+                    let start_gy = (wy / CELL_RESOLUTION).floor() as i32;
+                    let goal_gx = (x / CELL_RESOLUTION).floor() as i32;
+                    let goal_gy = (y / CELL_RESOLUTION).floor() as i32;
                     self.pathfinder = Some(DStarLite::new(
                         (start_gx, start_gy),
                         (goal_gx, goal_gy),
@@ -192,13 +192,13 @@ impl Executor {
 
         // 需要 sub_target → 问 D* Lite
         if self.sub_target.is_none() {
-            let current_gx = (wx / CELL_RESOLUTION).round() as i32;
-            let current_gy = (wy / CELL_RESOLUTION).round() as i32;
+            let current_gx = (wx / CELL_RESOLUTION).floor() as i32;
+            let current_gy = (wy / CELL_RESOLUTION).floor() as i32;
 
             // 网格级到达检查：已在目标格但世界距离未达标时直接视为到达
             if let Some((gx, gy)) = self.goal {
-                let goal_gx = (gx / CELL_RESOLUTION).round() as i32;
-                let goal_gy = (gy / CELL_RESOLUTION).round() as i32;
+                let goal_gx = (gx / CELL_RESOLUTION).floor() as i32;
+                let goal_gy = (gy / CELL_RESOLUTION).floor() as i32;
                 if current_gx == goal_gx && current_gy == goal_gy {
                     info!("[Executor] 已在目标格，到达");
                     self.goal = None;

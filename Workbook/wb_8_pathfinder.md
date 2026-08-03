@@ -55,6 +55,22 @@
 
 **待调参**：`straight_align_threshold_deg` 需实车验证（10° 初值，太小→连续不生效，太大→该转不转）。
 
+## 2026-08-03 修复 P2：round → floor 统一坐标换算
+
+**实车日志暴露的问题**（Goto 测试）：
+- 目标点常落在 .5 边界（如 64.25/0.5=128.5），Rust round() 半远离零舍入 → 目标格/当前格系统性偏 1 格
+- Goto(64.25,63.75) 被 round 成 (129,128)，与机器人同格 → “秒到达”不移动
+- 机器人真实到达目标格中心但 round 算成 (129,128) → D* 永远返回 (128,128) → 方案 A “直行连续化” 死循环刷屏（2 秒 40+ 次）
+- 直到 odom 微动 round 跳变 → 触发 -166° 大掉头 + 7 秒慢转（turn_speed=10）
+
+**结论**：死循环直接触发原因是 P2（round/floor 不一致），修 floor 治本；防循环保护（方案 B）留待后续。
+
+**改动**：`executor.rs` 全部 12 处 `.round()` → `.floor()`（query_next_sub_target / 障碍格 ob_ / pop Mission start/goal / 当前格 / 网格级到达 goal），与 grid.rs/lidar_mapper.rs 建图端统一。
+
+**效果**：Goto(66.25,63.75) → goal 格 (132,127)，格中心=目标点本身；格中心 64.25 → floor(128.5)=128 正确。
+
+**验证**：`./build.sh check` 通过。
+
 ## 待办（下一步）
 
 1. 修 P1：DStarLite 内部 `obstacles: HashSet`，cost() 先查集合（mark_obstacle 强制 ∞）
