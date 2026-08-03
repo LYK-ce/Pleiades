@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-07-31
+//Modified Date ： 2026-08-03
 
 //! Executor — 自动任务执行器
 //!
@@ -52,6 +52,8 @@ pub struct ExecutorConfig {
     pub move_speed: i16,
     pub turn_align_threshold_deg: f32,
     pub arrival_threshold_m: f32,
+    /// 直行连续化：到达 sub_target 后，与下一格方向偏差小于该角度（度）时不停车继续走
+    pub straight_align_threshold_deg: f32,
 }
 
 impl Default for ExecutorConfig {
@@ -64,11 +66,28 @@ impl Default for ExecutorConfig {
             move_speed: 30,
             turn_align_threshold_deg: 5.0,
             arrival_threshold_m: 0.3,
+            straight_align_threshold_deg: 10.0,
         }
     }
 }
 
 impl Executor {
+    /// 网格坐标 → 世界坐标（取格中心，与 world_to_grid 的 floor 语义一致）
+    /// 格 (gx, gy) 覆盖世界 [gx·R, (gx+1)·R)，中心为 (gx + 0.5)·R
+    fn cell_center_world(gx: i32) -> f32 {
+        (gx as f32 + 0.5) * CELL_RESOLUTION
+    }
+
+    /// 问 D* 下一格：更新 start 到当前位置，返回下一格网格坐标
+    fn query_next_sub_target(&mut self, wx: f32, wy: f32, grid: &OccupancyGrid) -> Option<(i32, i32)> {
+        let current_gx = (wx / CELL_RESOLUTION).round() as i32;
+        let current_gy = (wy / CELL_RESOLUTION).round() as i32;
+        self.pathfinder.as_mut().and_then(|pf| {
+            pf.move_to((current_gx, current_gy));
+            pf.next_step(grid)
+        })
+    }
+
     pub fn new(config: ExecutorConfig) -> Self {
         Self {
             state: ExecState::Idle,
@@ -125,7 +144,7 @@ impl Executor {
         match self.state {
             ExecState::Idle => self.step_idle(stm32, wx, wy, yaw, grid, mission_queue),
             ExecState::Turning => self.step_turning(stm32, wx, wy, yaw),
-            ExecState::Moving => self.step_moving(stm32, wx, wy),
+            ExecState::Moving => self.step_moving(stm32, wx, wy, yaw, grid),
         }
     }
 
@@ -189,10 +208,7 @@ impl Executor {
                 }
             }
 
-            let next = self.pathfinder.as_mut().and_then(|pf| {
-                pf.move_to((current_gx, current_gy));
-                pf.next_step(grid)
-            });
+            let next = self.query_next_sub_target(wx, wy, grid);
             match next {
                 Some((sx, sy)) => {
                     info!("[Executor] sub_target=({sx}, {sy})");
@@ -209,8 +225,8 @@ impl Executor {
 
         // 计算角偏差（归一化到 [-π, π]）
         let (st_x, st_y) = self.sub_target.unwrap();
-        let target_wx = st_x as f32 * CELL_RESOLUTION;
-        let target_wy = st_y as f32 * CELL_RESOLUTION;
+        let target_wx = Self::cell_center_world(st_x);
+        let target_wy = Self::cell_center_world(st_y);
         let target_angle = (target_wy - wy).atan2(target_wx - wx);
         let mut delta = target_angle - yaw;
         delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
@@ -245,8 +261,8 @@ impl Executor {
             }
         };
 
-        let target_wx = st_x as f32 * CELL_RESOLUTION;
-        let target_wy = st_y as f32 * CELL_RESOLUTION;
+        let target_wx = Self::cell_center_world(st_x);
+        let target_wy = Self::cell_center_world(st_y);
         let target_angle = (target_wy - wy).atan2(target_wx - wx);
         let mut delta = target_angle - yaw;
         delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
@@ -261,7 +277,7 @@ impl Executor {
 
     // ─── Moving：等到 sub_target ────────
 
-    fn step_moving(&mut self, stm32: &STM32Device, wx: f32, wy: f32) {
+    fn step_moving(&mut self, stm32: &STM32Device, wx: f32, wy: f32, yaw: f32, grid: &OccupancyGrid) {
         let (st_x, st_y) = match self.sub_target {
             Some(st) => st,
             None => {
@@ -270,12 +286,34 @@ impl Executor {
             }
         };
 
-        let target_wx = st_x as f32 * CELL_RESOLUTION;
-        let target_wy = st_y as f32 * CELL_RESOLUTION;
+        let target_wx = Self::cell_center_world(st_x);
+        let target_wy = Self::cell_center_world(st_y);
         let dist = ((wx - target_wx).powi(2) + (wy - target_wy).powi(2)).sqrt();
 
         if dist < self.config.sub_target_threshold_m {
-            self.sub_target = None;
+            // 到达当前 sub_target：先问 D* 下一格
+            match self.query_next_sub_target(wx, wy, grid) {
+                Some((nx, ny)) => {
+                    let n_wx = Self::cell_center_world(nx);
+                    let n_wy = Self::cell_center_world(ny);
+                    let next_angle = (n_wy - wy).atan2(n_wx - wx);
+                    let mut delta = next_angle - yaw;
+                    delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
+                    if delta.abs() < self.config.straight_align_threshold_deg.to_radians() {
+                        // 方向一致 → 直行连续化：不停车，直接换目标继续走
+                        info!("[Executor] 直行连续化 → sub_target=({nx}, {ny})");
+                        self.sub_target = Some((nx, ny));
+                        return;
+                    }
+                    // 方向不一致 → 更新目标，停车交给 Idle 转向
+                    info!("[Executor] 需转向，停车 → sub_target=({nx}, {ny})");
+                    self.sub_target = Some((nx, ny));
+                }
+                None => {
+                    // 无下一格（到达终点/不可达）→ 交给 Idle 收尾
+                    self.sub_target = None;
+                }
+            }
             self.state = ExecState::Idle;
             if let Err(e) = stm32.stop() { warn!("[Executor] Stop 失败: {e}"); }
         }
