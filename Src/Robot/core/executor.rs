@@ -223,9 +223,9 @@ impl Executor {
 
         if delta.abs() > threshold_rad {
             if delta > 0.0 {
-                if let Err(e) = stm32.spin_left(self.config.turn_speed) { warn!("[Executor] SpinLeft 失败: {e}"); }
-            } else {
                 if let Err(e) = stm32.spin_right(self.config.turn_speed) { warn!("[Executor] SpinRight 失败: {e}"); }
+            } else {
+                if let Err(e) = stm32.spin_left(self.config.turn_speed) { warn!("[Executor] SpinLeft 失败: {e}"); }
             }
             self.state = ExecState::Turning;
         } else {
