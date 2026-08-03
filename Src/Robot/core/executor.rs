@@ -215,7 +215,11 @@ impl Executor {
         let mut delta = target_angle - yaw;
         delta = (delta + PI).rem_euclid(2.0 * PI) - PI;
 
+        info!("[转向] turning: delta={:.1}° yaw={:.1}°", delta.to_degrees(), yaw.to_degrees());
+
         let threshold_rad = self.config.turn_align_threshold_deg.to_radians();
+
+        info!("[转向] delta={:.1}° yaw={:.1}° target={:.1}° st=({},{})", delta.to_degrees(), yaw.to_degrees(), target_angle.to_degrees(), st_x, st_y);
 
         if delta.abs() > threshold_rad {
             if delta > 0.0 {
