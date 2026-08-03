@@ -282,13 +282,43 @@ impl DStarLite {
 
 - 输出**单格方向**，不输出路点列表
 - 内部维护距离场，障碍时局部修补
-- 同时承担 Global + Local Planner（现阶段不拆分）
-- Unknown 格子视为 Free（乐观假设可通行）
-- 查询时机：sub_target 到达 / 障碍触发（不每 tick）
+---
+
+## 7. 传感器与坐标系约定
+
+### 8.1 STM32 yaw
+
+| 项目 | 实际行为（2026-08-03 实测） |
+|------|---------------------------|
+| 初始值 | **开机当前朝向 = 0°**（非磁北） |
+| 正方向 | **顺时针为正**（右转 → yaw 增大） |
+| 数据来源 | STM32 固件 AHRS，约 10Hz 主动上报 `RPT_IMU_ATT` (0x0C) |
+| 解析 | `i16 ÷ 10000 → 弧度` |
+
+> ⚠️ 此前假设"yaw=0=北"是错误的。每次启动小车朝向不同，yaw 从当前朝向的 0° 开始。
+
+### 8.2 spin_left / spin_right
+
+| 命令 | 物理动作 | yaw 变化 | 代码调用 |
+|------|---------|---------|---------|
+| `spin_left` | 左转（逆时针） | yaw **减小** | delta < 0 时 |
+| `spin_right` | 右转（顺时针） | yaw **增大** | delta > 0 时 |
+
+经过实车测试确认 spin_left/spin_right 方向后已在 `890e2fc` 对调完成。
+
+### 8.3 里程计
+
+odom 累积使用数学约定（`(cos, sin)`），Pictor 可视化一致。坐标转换代码未修改。
+
+### 8.4 LiDAR 投影
+
+`laser_to_world` 使用数学约定（`(cos, sin)`），与 odom 一致。Pictor 地图显示正确。
 
 ---
 
-## 7. 障碍检测
+---
+
+## 8. 障碍检测
 
 双层保障：
 
@@ -301,7 +331,7 @@ impl DStarLite {
 
 ---
 
-## 8. 配置
+## 9. 配置
 
 ```toml
 [Robot]
@@ -311,12 +341,12 @@ lidar_port = "/dev/rplidar"
 lidar_baud = 230400
 ws_bind = "0.0.0.0:9090"
 
-auto_tick_ms = 100
+auto_tick_ms = 50
 arrival_threshold_m = 0.3
 sub_target_threshold_m = 0.2
 obstacle_threshold_m = 0.3
 
-turn_speed = 30
+turn_speed = 10
 move_speed = 30
 turn_align_threshold_deg = 5
 
@@ -325,7 +355,9 @@ unknown_as_free = true
 
 ---
 
-## 9. 文件结构
+## 10. 文件结构
+
+
 
 ```
 Src/Robot/
@@ -343,7 +375,7 @@ Src/Config/
     └── config.rs       ← RobotConfig
 ```
 
-## 10. 已知限制
+## 11. 已知限制
 
 - 不拆分 Global/Local Planner（后续可升级）
 - 仅单 Chunk 内路径规划
