@@ -1,14 +1,15 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-27
+//Modified Date ： 2026-08-04
 
 //! 占据栅格地图 — 概率 log-odds（三态）
 //!
 //! 对标 Cartographer / GMapping 标准做法。
 //! 单 Chunk (256×256, 0.5m/cell)，初始全 0（Unknown）。
-//! Occupied: +3/次, 夹断 +30, >+10 视为 Occupied
-//! Free:     -2/次, 夹断 -20, <-10 视为 Free
-//! 中间 [-10, +10] → Unknown
+//! Occupied: +3/次, 夹断 +8,  >+6 视为 Occupied
+//! Free:     -1/次, 夹断 -8,  <-6 视为 Free
+//! 中间 [-6, +6] → Unknown
+//! 不对称增量（3:1）对齐 OctoMap 风格：一次命中可抵消三次掠过
 
 use tracing::info;
 
@@ -20,11 +21,11 @@ pub const CELL_RESOLUTION: f32 = 0.5;
 
 /// log-odds 参数
 const OCCUPIED_INCREMENT: i8 = 3;
-const FREE_DECREMENT: i8 = 2;
-const OCCUPIED_CLAMP: i8 = 30;
-const FREE_CLAMP: i8 = -20;
-const OCCUPIED_THRESHOLD: i8 = 10;
-const FREE_THRESHOLD: i8 = -10;
+const FREE_DECREMENT: i8 = 1;
+const OCCUPIED_CLAMP: i8 = 8;
+const FREE_CLAMP: i8 = -8;
+const OCCUPIED_THRESHOLD: i8 = 6;
+const FREE_THRESHOLD: i8 = -6;
 
 /// 格子宏观状态（供外部使用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +71,7 @@ impl Chunk {
         Some(self.cells[ly as usize * CHUNK_SIZE + lx as usize])
     }
 
-    /// 概率更新：occupied=true → +3 (夹断+30), false → -2 (夹断-20)
+    /// 概率更新：occupied=true → +3 (夹断+8), false → -1 (夹断-8)
     /// 返回 (宏观状态是否变化, 旧宏观状态)
     pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8)> {
         let lx = gx - self.origin_gx;
@@ -192,20 +193,28 @@ mod tests {
     fn test_probabilistic_update() {
         let mut chunk = Chunk::new(0, 0);
 
-        // 1 次命中：0+3=3，≤10 → Unknown
+        // 1 次命中：0+3=3，≤6 → Unknown
         let (changed, old) = chunk.update(100, 200, true).unwrap();
         assert!(!changed);
         assert_eq!(old, CellState::Unknown as u8);
         assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
 
-        // 4 次命中：12 > 10 → Occupied
-        chunk.update(100, 200, true); // 6
-        chunk.update(100, 200, true); // 9
-        let (changed, _) = chunk.update(100, 200, true).unwrap(); // 12
+        // 2 次命中：6，6>6 否 → 仍 Unknown
+        let (changed, _) = chunk.update(100, 200, true).unwrap(); // 6
+        assert!(!changed);
+        assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
+
+        // 第 3 次命中：9 → 夹断 8，8 > 6 → Occupied
+        let (changed, _) = chunk.update(100, 200, true).unwrap(); // 8(clamp)
         assert!(changed);
         assert_eq!(chunk.state(100, 200), Some(CellState::Occupied as u8));
 
-        // 1 次漏打：12-2=10，>10=否 → Unknown
+        // 1 次漏打：8-1=7，>6 → 仍 Occupied
+        let (changed, _) = chunk.update(100, 200, false).unwrap();
+        assert!(!changed);
+        assert_eq!(chunk.state(100, 200), Some(CellState::Occupied as u8));
+
+        // 第 2 次漏打：7-1=6，6>6 否 → Unknown
         let (changed, _) = chunk.update(100, 200, false).unwrap();
         assert!(changed);
         assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
@@ -215,39 +224,38 @@ mod tests {
     fn test_threshold_boundary() {
         let mut chunk = Chunk::new(0, 0);
 
-        // 精确命中 +10：仍 Unknown
-        // 初始 0, +3×3=9, 需要直接设值来测试边界
-        for _ in 0..4 { chunk.update(10, 10, true); } // 12 > 10 → Occupied
+        // 3 次命中：9 → 夹断 8 > 6 → Occupied
+        for _ in 0..3 { chunk.update(10, 10, true); }
         assert_eq!(chunk.state(10, 10), Some(CellState::Occupied as u8));
 
-        // 拆回：3 次 -2
-        chunk.update(10, 10, false); // 10
-        assert_eq!(chunk.state(10, 10), Some(CellState::Unknown as u8)); // 10 不 > 10
-        chunk.update(10, 10, false); // 8 → Unknown
+        // 边界：8-1=7 仍 Occupied，7-1=6 恰好 6 不 > 6 → Unknown
+        chunk.update(10, 10, false); // 7
+        assert_eq!(chunk.state(10, 10), Some(CellState::Occupied as u8));
+        chunk.update(10, 10, false); // 6
         assert_eq!(chunk.state(10, 10), Some(CellState::Unknown as u8));
 
-        // Free 边界：需要多轮
-        for _ in 0..10 { chunk.update(20, 20, false); } // 饱和到 -20
-        assert_eq!(chunk.get(20, 20).unwrap(), -20);
-        assert_eq!(chunk.state(20, 20), Some(CellState::Free as u8)); // -20 < -10
+        // Free 边界：8 次 miss 饱和到 -8，-8 < -6 → Free
+        for _ in 0..8 { chunk.update(20, 20, false); }
+        assert_eq!(chunk.get(20, 20).unwrap(), -8);
+        assert_eq!(chunk.state(20, 20), Some(CellState::Free as u8));
     }
 
     #[test]
     fn test_saturation() {
         let mut chunk = Chunk::new(0, 0);
 
-        // Occupied 夹断到 +30
+        // Occupied 夹断到 +8
         for _ in 0..20 {
             chunk.update(50, 50, true);
         }
-        assert_eq!(chunk.get(50, 50).unwrap(), 30);
+        assert_eq!(chunk.get(50, 50).unwrap(), 8);
         assert_eq!(chunk.state(50, 50), Some(CellState::Occupied as u8));
 
-        // Free 夹断到 -20
+        // Free 夹断到 -8
         for _ in 0..20 {
             chunk.update(60, 60, false);
         }
-        assert_eq!(chunk.get(60, 60).unwrap(), -20);
+        assert_eq!(chunk.get(60, 60).unwrap(), -8);
         assert_eq!(chunk.state(60, 60), Some(CellState::Free as u8));
     }
 

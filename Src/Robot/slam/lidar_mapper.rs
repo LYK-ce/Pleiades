@@ -4,7 +4,12 @@
 
 //! LiDAR 点云 → 占据栅格更新
 //!
-//! 流程：坐标转换 → HashSet 去重终点 → Bresenham 射线 → 收集 Delta
+//! 流程：坐标转换 → HashSet 去重终点 → 先 hit 后 miss（Cartographer 机制）→ 射线截断 → 收集 Delta
+//!
+//! 更新策略（对齐业界标准）：
+//! - 端点格（hit）优先 +3；射线途经格（miss）-1
+//! - 射线遇到本帧端点格即截断（激光被障碍挡住），被遮挡区域保持 Unknown
+//! - 每帧每格最多更新一次
 
 use std::collections::HashSet;
 
@@ -41,18 +46,40 @@ pub fn update(
         }
     }
 
-    // 2. 对每个唯一终点画 Bresenham 射线
+    // 2. 先 hit 全部端点（hit 优先于 miss，Cartographer 机制）
     let mut deltas: Vec<Delta> = Vec::new();
-    for &(end_gx, end_gy) in &endpoints {
+    let mut updated: HashSet<(i32, i32)> = HashSet::new();
+    for &(egx, egy) in &endpoints {
         // 跳过机器人自己的格子（超近距离反射噪声）
-        if end_gx == robot_gx && end_gy == robot_gy {
+        if egx == robot_gx && egy == robot_gy {
             continue;
         }
-        // 射线：经过的格子 → Free，终点 → Occupied（概率 log-odds）
-        let cells = bresenham(robot_gx, robot_gy, end_gx, end_gy);
-        for (i, &(cgx, cgy)) in cells.iter().enumerate() {
-            let is_occupied = i == cells.len() - 1;
-            if let Some((true, state)) = grid.update(cgx, cgy, is_occupied) {
+        if let Some((true, state)) = grid.update(egx, egy, true) {
+            deltas.push(Delta { gx: egx, gy: egy, state });
+        }
+        updated.insert((egx, egy));
+    }
+
+    // 3. miss：逐端点画射线，遇到本帧端点格即截断（被遮挡保持 Unknown）
+    for &(egx, egy) in &endpoints {
+        if egx == robot_gx && egy == robot_gy {
+            continue;
+        }
+        let cells = bresenham(robot_gx, robot_gy, egx, egy);
+        for &(cgx, cgy) in &cells {
+            if cgx == robot_gx && cgy == robot_gy {
+                continue; // 机器人格不标 Free
+            }
+            if cgx == egx && cgy == egy {
+                break; // 终点格：不标 miss
+            }
+            if endpoints.contains(&(cgx, cgy)) {
+                break; // 遇到本帧其他端点格 → 射线截断（激光被障碍挡住）
+            }
+            if !updated.insert((cgx, cgy)) {
+                continue; // 每帧每格最多一次 miss
+            }
+            if let Some((true, state)) = grid.update(cgx, cgy, false) {
                 deltas.push(Delta { gx: cgx, gy: cgy, state });
             }
         }
@@ -136,6 +163,40 @@ mod tests {
     }
 
     #[test]
+    fn test_ray_terminates_at_endpoint() {
+        let mut grid = OccupancyGrid::new();
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        // 近处端点 (130,128)（1m）挡住后方
+        let points = vec![(0.0, 1.0)];
+        for _ in 0..3 {
+            update(&mut grid, &pose, &points);
+        }
+        // 端点格 3 次命中 → Occupied
+        assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
+        // 射线截断后的格（131,128 起）从未更新 → 保持 Unknown
+        assert_eq!(grid.state(131, 128), Some(CellState::Unknown as u8));
+    }
+
+    #[test]
+    fn test_endpoint_not_erased_by_through_ray() {
+        let mut grid = OccupancyGrid::new();
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        // 近端点 (130,128)（1m）+ 远端点 (140,128)（6m）
+        // 远射线 (128→140) 经过 (130,128)：旧代码会用它的 miss 抵消近端点（回归测试）
+        let points = vec![(0.0, 1.0), (0.0, 6.0)];
+        for _ in 0..3 {
+            update(&mut grid, &pose, &points);
+        }
+        // 近端点格：3 圈 +3×3=9 → Occupied（不被穿行射线抵消）
+        assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
+        // 远端点格：也是端点 → Occupied
+        assert_eq!(grid.state(140, 128), Some(CellState::Occupied as u8));
+        // 两端点之间的格：射线被 (130,128) 截断 → 保持 Unknown
+        assert_eq!(grid.state(131, 128), Some(CellState::Unknown as u8));
+        assert_eq!(grid.state(135, 128), Some(CellState::Unknown as u8));
+    }
+
+    #[test]
     fn test_update_basic() {
         let mut grid = OccupancyGrid::new();
         let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
@@ -147,15 +208,16 @@ mod tests {
         // 初始：Unknown
         assert_eq!(grid.state(center_gx, center_gy), Some(CellState::Unknown as u8));
 
-        // 前 3 圈：都不越阈值（终点 +3×3=9 ≤ 10），无 delta
-        for _ in 0..3 {
+
+        // 前 2 圈：终点 +3×2=6 ≤ 6，无 delta
+        for _ in 0..2 {
             let deltas = update(&mut grid, &pose, &points);
             assert!(deltas.is_empty());
         }
 
-        // 第 4 圈：终点 +3=12 > 10 → Occupied
+        // 第 3 圈：终点 +3×3=9 → 夹断 8 > 6 → Occupied
         let deltas = update(&mut grid, &pose, &points);
-        assert!(!deltas.is_empty(), "第 4 圈终点越过阈值");
+        assert!(!deltas.is_empty(), "第 3 圈终点越过阈值");
         assert_eq!(grid.state(center_gx + 1, center_gy), Some(CellState::Occupied as u8));
     }
 }

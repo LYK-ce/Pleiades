@@ -71,6 +71,26 @@
 
 **验证**：`./build.sh check` 通过。
 
+## 2026-08-04 建图算法修复（根因 #1：log-odds 命中/穿行对冲）
+
+**实车现象**：墙比实际短一截；前方有障碍但地图没标记 → D* 径直走直到 LiDAR 急停。
+
+**根因**（子 agent 审查确认）：端点去重后命中格每圈仅 +3，而射向远端的旁掠射线会穿过墙端格/窄障碍格施加多个 -2 → 净变化 ≤0 → 障碍被确定性抹除。
+
+**业界调研**（子 agent，源码级验证 Thrun/ROS costmap/Cartographer/gmapping/OctoMap）：
+- 被遮挡/未观测区域保持 Unknown（不标 Free）——全部系统一致
+- 射线在命中点终止是标准做法（Cartographer 用“每帧每格一次 + hit 优先”）
+- 不对称增量 + 钳位（OctoMap：hit +0.85 / miss −0.4，clamp [−2,+3.5]）
+- 候选方案“12m 半径全盘 -2”无先例，反模式（墙后阴影被标 Free → D* 穿墙）
+
+**修复**：
+- `grid.rs`：FREE_DECREMENT −2→−1、clamp ±30/±20→±8、阈值 ±10→±6（3 次命中 Occupied，不对称 3:1）
+- `lidar_mapper.rs`：重写 update()——先 hit 后 miss（hit 优先）、射线遇到本帧端点格即截断（被遮挡保持 Unknown）、每帧每格最多一次 miss（updated HashSet）
+
+**测试**：新增 test_ray_terminates_at_endpoint（截断+Unknown 保持）、test_endpoint_not_erased_by_through_ray（回归：端点不被穿行抵消）；适配 grid/lidar_mapper 旧测试。34 个 robot 测试全绿。
+
+**待办**：#2 mark_obstacle 写 grid（急停标记生效）、#3 近场盲区（<0.5m）、#4 map_delta 丢帧、分辨率暂保持 0.5m。
+
 ## 待办（下一步）
 
 1. 修 P1：DStarLite 内部 `obstacles: HashSet`，cost() 先查集合（mark_obstacle 强制 ∞）
