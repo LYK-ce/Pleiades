@@ -134,6 +134,8 @@ pub struct Network_Service {
     pub(crate) config: NetworkConfig,
     /// 全局事件总线，用于发布网络层事件（节点发现/离开、连接建立/断开等）
     pub(crate) event_bus: Arc<EventBus>,
+    /// Robot 数据专用事件总线（Task 9_1：位姿/地图高频数据与全局总线隔离）
+    pub(crate) robot_bus: Arc<EventBus>,
 
     // ===== 组件化管理器 =====
 
@@ -182,6 +184,7 @@ impl Network_Service {
         keypair: Keypair,
         peer_handle: Arc<dyn Peer_Management_Capability>,
         event_bus: Arc<EventBus>,
+        robot_bus: Arc<EventBus>,
     ) -> Result<(
         Self,
         NodeHandle,
@@ -300,6 +303,7 @@ impl Network_Service {
             cmd_rx,
             config,
             event_bus,
+            robot_bus,
             inbound_manager,
             outbound_manager,
             orchestrator_event_tx,

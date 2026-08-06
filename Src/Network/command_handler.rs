@@ -29,6 +29,25 @@ impl Network_Service {
                     self.outbound_manager.Register_Outbound(outbound_id, tx);
                 }
             }
+
+            NodeCommand::Broadcast { data_type, payload } => {
+                info!("广播数据 | type={:?} | size={} bytes", data_type, payload.len());
+                if let Ok(peer_infos) = self.peer_handle.Get_All_Peers().await {
+                    for peer_info in peer_infos {
+                        if peer_info.local {
+                            continue;
+                        }
+                        let request = Network_Data { data_type, payload: payload.clone() };
+                        // fire-and-forget：不注册 oneshot，不等待 Response（Task 9_1）
+                        self.swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&peer_info.peer_id, request);
+                    }
+                } else {
+                    warn!("广播失败：获取节点列表失败");
+                }
+            }
             NodeCommand::PutRecord { key, value } => {
                 let record_key = kad::RecordKey::new(&key);
                 let record = kad::Record {

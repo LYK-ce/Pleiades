@@ -65,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ══════════════════════════════════════════════════════
 
     let event_bus = Arc::new(EventBus::New(1024));
+    let robot_bus = Arc::new(EventBus::New(1024));
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = pleiades::config::Get_Peer_Name(&config);
@@ -106,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (mut network_service, _node_handle, inbound_rx, net_capability, net_event_rx)
-        = Network_Service::Init(net_cfg, keypair, peer_capability_for_network, event_bus.clone()).await?;
+        = Network_Service::Init(net_cfg, keypair, peer_capability_for_network, event_bus.clone(), robot_bus.clone()).await?;
     info!("Network 服务初始化完成");
 
     // ══════════════════════════════════════════════════════

@@ -36,6 +36,8 @@ pub enum DataType {
     Data = 1,
     /// 文件通知（仅传输文件元数据：文件名、大小等，不传输文件内容）
     File = 2,
+    /// 机器人数据（位姿/地图等，Task 9_1）
+    Robot = 3,
     /// 信息通知（节点状态、能力描述等元信息交换）
     Info = 4,
 }
@@ -47,6 +49,7 @@ impl DataType {
             0 => Ok(DataType::Command),
             1 => Ok(DataType::Data),
             2 => Ok(DataType::File),
+            3 => Ok(DataType::Robot),
             4 => Ok(DataType::Info),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,

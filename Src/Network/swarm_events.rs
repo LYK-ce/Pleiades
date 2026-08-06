@@ -192,6 +192,22 @@ impl Network_Service {
                                 error!("Data 入站回复失败: {:?}", e);
                             }
                         }
+                        DataType::Robot => {
+                            // Task 9_1：机器人数据（位姿/地图）原样转发 robot_bus，不解析
+                            // （序列化/解析是上层职责；payload 自带 peer_id 由发布方写入）
+                            let _ = self.robot_bus.Publish(Bus_Event::Stream {
+                                payload: String::from_utf8_lossy(&request.payload).to_string(),
+                            });
+                            // 回最小响应闭合协议状态机（防发送方 30s 超时风暴）
+                            let response = Network_Data {
+                                data_type: DataType::Robot,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm.behaviour_mut()
+                                .request_response.send_response(channel, response) {
+                                error!("Robot 入站回复失败: {:?}", e);
+                            }
+                        }
                         DataType::Info => {
                             // 解析对方信息: "name|models_json|sessions_json"
                             let payload_str = String::from_utf8_lossy(&request.payload);
