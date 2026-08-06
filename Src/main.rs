@@ -17,7 +17,7 @@ use pleiades::storage::StorageManager;
 use pleiades::orchestrator::Capabilities;
 use pleiades::orchestrator::core::Core;
 use pleiades::orchestrator::command::UserCommand;
-use pleiades::robot::{CarType, Robot};
+
 use pleiades::tui::TUI_Loop;
 
 #[tokio::main]
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = pleiades::config::Get_Peer_Name(&config);
-    let vehicle_id = peer_name.clone();
+
     let peer_manager_arc = create_peer_management(local_peer_id, peer_name);
     let peer_capability_for_network: Arc<dyn pleiades::peer_management::Peer_Management_Capability> = peer_manager_arc.clone();
     let peer_capability_for_core = peer_manager_arc.clone();
@@ -129,16 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动时后台 flush
     Core::spawn_initial_flush(capabilities.clone());
 
-    // Phase 5.6: 初始化 Robot 并启动 WebSocket 遥控服务器
-    let ws_bind = config.Robot.as_ref()
-        .and_then(|r| r.ws_bind.as_deref())
-        .unwrap_or("0.0.0.0:9090");
-    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400), (64.0, 64.0)).await?;
-    pleiades::websocket::start(
-        ws_bind, &vehicle_id, robot.robot_cmd_tx.clone(),
-        robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
-        robot.grid.clone(),
-    );
+
 
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时
@@ -164,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         core.run().await;
     }
 
-    robot.shutdown();
+
     info!("Pleiades 已退出");
     Ok(())
 }
