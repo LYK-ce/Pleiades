@@ -149,3 +149,6 @@ pub async fn robot_bootstrap(
 ## 人类评审
 
 <!-- 在此区域写下评审意见 -->
+
+
+> ✅ **2026-08-06 实测修复（P0）**：`core_bootstrap()` 抽取后 `_log_guard`（tracing_appender WorkerGuard）随函数返回被 drop → 日志 worker 线程关闭，`robot_bootstrap` 及之后所有日志静默丢失（实测现象：车端日志停在 `Orchestrator Core 初始化完成`，WS 却正常）。修复：guard 移入 `CoreBootstrap` 字段，由 `run(self)` 持有到进程退出。

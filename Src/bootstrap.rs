@@ -38,6 +38,8 @@ pub struct CoreBootstrap {
     pub network_service: Network_Service,
     pub core: Core,
     pub user_cmd_tx: mpsc::Sender<UserCommand>,
+    /// 日志 worker 保活（drop 即关闭日志线程——必须存活到进程退出，Task 9_2 实测修复）
+    _log_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
 impl CoreBootstrap {
@@ -87,7 +89,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     let timestamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
     let log_path = log_dir.join(format!("pleiades.log.{timestamp}"));
     let log_file = std::fs::File::create(&log_path)?;
-    let (non_blocking, _log_guard) = tracing_appender::non_blocking(log_file);
+    let (non_blocking, log_guard) = tracing_appender::non_blocking(log_file);
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -168,7 +170,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     // 启动时后台 flush
     Core::spawn_initial_flush(capabilities.clone());
 
-    Ok(CoreBootstrap { config, event_bus, robot_bus, node_handle, network_service, core, user_cmd_tx })
+    Ok(CoreBootstrap { config, event_bus, robot_bus, node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
 }
 
 /// Robot bootstrap：读取 [Robot] 段配置 → Robot::launch（注入 node_handle/robot_bus）→ WS 遥控
@@ -195,8 +197,11 @@ pub async fn robot_bootstrap(
         }
         None => CarType::X3Plus,
     };
-    let lidar_port = r.and_then(|r| r.lidar_port.clone());
-    let lidar_baudrate = r.and_then(|r| r.lidar_baudrate);
+    // LiDAR 缺省沿用硬编码（决策 #8）；显式留空（""）= 禁用
+    let lidar_port = r.and_then(|r| r.lidar_port.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some("/dev/rplidar".to_string()));
+    let lidar_baudrate = r.and_then(|r| r.lidar_baudrate).or(Some(230400));
     let ws_bind = r.and_then(|r| r.ws_bind.clone())
         .unwrap_or_else(|| "0.0.0.0:9090".to_string());
 

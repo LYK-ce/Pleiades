@@ -80,3 +80,15 @@
 **待办追加**：④ config.rs 文件头 Modified Date 补 2026-08-06；⑤ 广播失败 warn 退避（可选）
 
 **完整问题清单**（P1/P2/P3 逐条 + 状态）见 `Task/task_9_2_robot_loop.md` 的「Code Review 记录」小节。用户 2026-08-06 指示：先测试，问题暂不修。
+
+## 2026-08-06 实测发现并修复 P0：日志 guard 生命周期 bug
+
+**现象**（用户实车联调）：Pictor 能注册 WS（Binah @ ws://10.100.80.239:9090）并收到 map_full，但地图全 Unknown（[0:0 1:0 2:65536]，0 Free / 0 Occupied / 65536 Unknown）——grid 从未被 slam_task 更新；车端日志停在 `Orchestrator Core 初始化完成`，**没有** `Robot 配置` / `LiDAR 设备已启动` 等行。
+
+**根因**：`core_bootstrap()` 里 `let (non_blocking, _log_guard) = tracing_appender::non_blocking(log_file)`——`_log_guard` 是**函数局部变量**，core_bootstrap 返回即 drop。tracing-appender 0.2.4 的 `WorkerGuard::drop` 发送 `Msg::Shutdown` 关闭日志 worker（non_blocking.rs:282-300 源码确认）→ 之后所有日志静默丢失。原版 main.rs 中 guard 是 main() 局部变量活到退出，抽取后生命周期被截断。
+
+**修复**：`CoreBootstrap` 加 `_log_guard: tracing_appender::non_blocking::WorkerGuard` 字段，`run(self)` 持有到 `core.run().await` 结束（进程退出前）。
+
+**验证**：/tmp 下跑 orion-robot → 日志文件完整包含 `Core bootstrap 完成` / `初始世界坐标 origin` / `Robot 配置: port=/dev/myserial baud=115200 car=X3Plus lidar=/dev/rplidar ws=0.0.0.0:9090 peer_name=new_peer` ✅（修复前这些行不存在）
+
+**⚠️ 遗留确认项**：车端旧 config.toml 缺 `[Robot]` 新字段（serial_port/baudrate/car_type/lidar_port/lidar_baudrate）→ `robot_bootstrap` 的 `lidar_port` 为 None → launch 走 `_` 臂 `LiDAR 未配置，跳过` → 地图永不更新（全 Unknown）。修复日志后车端可见 `Robot 配置: ... lidar=None` + `LiDAR 未配置，跳过`。**待用户更新车端 config.toml 或代码补缺省**（决策 #8：缺省沿用硬编码 /dev/rplidar、230400）。
