@@ -38,6 +38,9 @@ pub mod storage;
 #[path = "Session_Manager/mod.rs"]
 pub mod session;
 
+#[path = "bootstrap.rs"]
+pub mod bootstrap;
+
 
 #[path = "EventBus/mod.rs"]
 pub mod event_bus;

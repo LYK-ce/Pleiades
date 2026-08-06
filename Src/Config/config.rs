@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date : 2026-04-09
-//Modified Date ： 2026-06-15
+//Modified Date ： 2026-08-06
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -41,6 +41,13 @@ peer_name = "new_peer"
 [Robot]
 # WebSocket 遥控绑定地址（默认 0.0.0.0:9090）
 ws_bind = "0.0.0.0:9090"
+# STM32 底盘串口（缺省沿用硬编码）
+serial_port = "/dev/myserial"
+baudrate = 115200
+car_type = "X3Plus" # X3 / X3Plus / X1 / R2
+# LiDAR 串口（留空则不启用）
+lidar_port = "/dev/rplidar"
+lidar_baudrate = 230400
 "#;
 
 /// 默认配置目录名
@@ -115,6 +122,11 @@ pub struct Identity_Config {
 #[derive(Debug, Deserialize)]
 pub struct Robot_Config {
     pub ws_bind: Option<String>,
+    pub serial_port: Option<String>,
+    pub baudrate: Option<u32>,
+    pub car_type: Option<String>,
+    pub lidar_port: Option<String>,
+    pub lidar_baudrate: Option<u32>,
 }
 
 /// 读取节点名称，默认 "new_peer"

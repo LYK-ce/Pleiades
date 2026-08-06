@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-08-06
 
 //! Robot 主循环
 //!
@@ -26,6 +26,10 @@ use crate::robot::control::types::CarType;
 use crate::robot::core::state::{LidarState, RobotState};
 use crate::robot::slam::{self, OccupancyGrid, RobotPose};
 use std::time::Instant;
+
+use crate::event_bus::{Bus_Event, EventBus};
+use crate::network::{DataType, NodeHandle};
+use serde_json::json;
 
 /// 位姿广播消息
 #[derive(Debug, Clone)]
@@ -65,6 +69,8 @@ impl Robot {
     ///
     /// - `lidar_port` / `lidar_baudrate`: 可选 LiDAR 配置，None 则不启用
     /// - `origin`: 小车初始世界坐标 (x, y)（默认 64,64），Task 9：RobotState 记录全局唯一坐标
+    /// - `node_handle` / `robot_bus`: 网络数据面（Task 9_2），None 则纯本地运行
+    /// - `peer_name`: 车名（广播 payload 的 peer_name 字段 + WS vehicle_id）
     pub async fn launch(
         port: &str,
         baudrate: u32,
@@ -72,6 +78,9 @@ impl Robot {
         lidar_port: Option<&str>,
         lidar_baudrate: Option<u32>,
         origin: (f32, f32),
+        node_handle: Option<Arc<NodeHandle>>,
+        robot_bus: Option<Arc<EventBus>>,
+        peer_name: String,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
 
@@ -116,8 +125,10 @@ impl Robot {
         let notifier_cancel = cancel.clone();
         let notifier_state = robot_state.clone();
         let notifier_tx = pose_tx.clone();
+        let notifier_handle = node_handle.clone();
+        let notifier_name = peer_name.clone();
         tokio::spawn(async move {
-            state_notifier(notifier_state, notifier_tx, notifier_cancel).await;
+            state_notifier(notifier_state, notifier_tx, notifier_handle, notifier_name, notifier_cancel).await;
         });
 
         // 6. spawn SLAM task
@@ -127,8 +138,10 @@ impl Robot {
         let slam_lidar = lidar_state.clone();
         let slam_map_tx = map_tx.clone();
         
+        let slam_handle = node_handle.clone();
+        let slam_name = peer_name.clone();
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_cancel).await;
         });
 
         // 7. 命令通道
@@ -141,11 +154,13 @@ impl Robot {
         let loop_robot_state = robot_state.clone();
         let loop_lidar_state = lidar_state.clone();
         let loop_grid = grid.clone();
+        let loop_robot_bus = robot_bus.clone();
         tokio::spawn(async move {
             main_loop(
                 stm32, lidar, cmd_rx,
                 loop_op_mode, loop_mission,
                 loop_robot_state, loop_lidar_state, loop_grid,
+                loop_robot_bus,
                 loop_cancel,
             ).await;
         });
@@ -166,6 +181,8 @@ impl Robot {
 async fn state_notifier(
     state: Arc<RwLock<RobotState>>,
     pose_tx: broadcast::Sender<Pose>,
+    node_handle: Option<Arc<NodeHandle>>,
+    peer_name: String,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -183,6 +200,21 @@ async fn state_notifier(
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
                 });
+
+                // Task 9_2：位姿广播到集群（fire-and-forget，Network 只搬运字节）
+                if let Some(nh) = &node_handle {
+                    let payload = json!({
+                        "peer_id": nh.Get_Local_Peer_Id().to_string(),
+                        "peer_name": &peer_name,
+                        "type": "robot_pose",
+                        "x": s.x, "y": s.y, "yaw": s.attitude.yaw,
+                        "vx": s.vx, "vy": s.vy,
+                        "ts": ts,
+                    });
+                    if let Err(e) = nh.Broadcast(DataType::Robot, payload.to_string().into_bytes()) {
+                        warn!("[Robot] 位姿广播失败: {e}");
+                    }
+                }
             }
             _ = cancel.cancelled() => {
                 info!("state_notifier 退出");
@@ -201,6 +233,8 @@ async fn slam_task(
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
     map_tx: broadcast::Sender<Vec<MapDelta>>,
+    node_handle: Option<Arc<NodeHandle>>,
+    peer_name: String,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -235,7 +269,22 @@ async fn slam_task(
                         let typed: Vec<MapDelta> = deltas.iter().map(|d| MapDelta {
                             gx: d.gx, gy: d.gy, state: d.state,
                         }).collect();
-                        let _ = map_tx.send(typed);
+                        let _ = map_tx.send(typed.clone());
+
+                        // Task 9_2：地图增量广播到集群（有 delta 才发）
+                        if let Some(nh) = &node_handle {
+                            let payload = json!({
+                                "peer_id": nh.Get_Local_Peer_Id().to_string(),
+                                "peer_name": &peer_name,
+                                "type": "robot_map_delta",
+                                "deltas": typed.iter().map(|d| json!({
+                                    "gx": d.gx, "gy": d.gy, "state": d.state,
+                                })).collect::<Vec<_>>(),
+                            });
+                            if let Err(e) = nh.Broadcast(DataType::Robot, payload.to_string().into_bytes()) {
+                                warn!("[Robot] 地图增量广播失败: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -260,6 +309,7 @@ async fn main_loop(
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
     grid: Arc<RwLock<OccupancyGrid>>,
+    robot_bus: Option<Arc<EventBus>>,
     cancel: CancellationToken,
 ) {
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
@@ -268,8 +318,16 @@ async fn main_loop(
     let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
+    let mut robot_rx = robot_bus.as_ref().map(|b| b.Subscribe());
+
     loop {
         select! {
+            robot_ev = recv_robot_event(&mut robot_rx) => {
+                // Task 9_2：入站机器人数据暂不处理，仅打印（融合/避障将来做）
+                if let Some(Bus_Event::Stream { payload }) = robot_ev {
+                    info!("[Robot] 收到远端机器人数据: {payload}");
+                }
+            }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(Command::Mode(m)) => {
@@ -355,6 +413,21 @@ async fn main_loop(
     stm32.shutdown();
 
     info!("Robot 主循环已退出");
+}
+
+/// robot_bus 订阅接收（None 时永远 pending；Lagged 打印警告后继续，无忙循环）
+async fn recv_robot_event(rx: &mut Option<broadcast::Receiver<Bus_Event>>) -> Option<Bus_Event> {
+    match rx.as_mut() {
+        Some(rx) => match rx.recv().await {
+            Ok(ev) => Some(ev),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("[Robot] robot_bus 订阅落后 {n} 条");
+                None
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        },
+        None => std::future::pending().await,
+    }
 }
 
 // ============================================================

@@ -1,6 +1,6 @@
 # Task 9: Location Set and Main Loop
 
-> 状态：Location Set 已实施完成（待实车验证）；Main Loop 部分待讨论
+> 状态：Location Set 已实施完成（待实车验证）；Main Loop 部分设计已定稿（待实施）
 > 创建日期：2026-08-06
 > 最后更新：2026-08-06
 >
@@ -11,8 +11,49 @@
 本任务包含两个子目标：
 
 1. **Location Set（已确认）**：`RobotState` 直接记录全局唯一世界坐标，消除"相对位移 + 消费方各自 +64.0"的旧写法；支持 `./orion-robot 66.5 63.25` 启动参数设定小车初始位置（origin），缺省 (64.0, 64.0)。
-2. **Main Loop（待讨论）**：待人类补充需求。
+2. **Main Loop（已定稿）**：Robot ↔ Network 数据通道打通——位姿/地图经 P2P 广播到集群其他节点，并接收其他节点的位姿/地图落地展示。**不做融合/协同决策**（将来再做）。命令不走 P2P。
 
+
+## Main Loop 部分设计（2026-08-06 定稿）
+
+### 架构决策
+
+1. **两个主循环保持独立**：推理主循环（Core）与 Robot 主循环各跑各的，互不知道对方存在（实时性隔离：Robot 50ms tick 不被推理任务拖累；职责边界：Core 属 ML_review 分支）。
+2. **命令不走 P2P**：Robot 命令来源只有本地（WS 遥控，未来 Lua/TUI）。Network 与 Robot 只交换数据。
+3. **数据全部走 B2（request-response 通道）**：帧上限 2GB（Request_Response/codec.rs:25），65KB 全量地图一帧承载，不落盘不进 Storage；send_file 文件流留给 GB 级模型分发。
+4. **EventBus 只作入站公告板**：不是两个循环的连接线（两循环间无直接连接）；出向走 Robot 自己的 broadcast（pose_tx/map_tx）。
+
+### 数据流
+
+```
+出向（Robot → Network）：组装层 relay task（main.rs 建）
+  pose_tx(100ms) ──► RobotPose JSON ──► network.broadcast
+  map_tx(200ms)  ──► RobotMapDelta JSON ──► network.broadcast
+  grid(低频)     ──► RobotMapFull 65KB ──► network.broadcast
+
+入向（Network → 本地）：
+  B2 inbound_rx → route_inbound（branch_command.rs:15）加 3 个 match 臂
+    ├─ RobotPose / RobotMapDelta / RobotMapFull
+    └─ 解析 → EventBus Stream{type:"robot_pose" / "robot_map_delta" / "robot_map_full"}
+        → 前端/TUI 订阅展示（融合/避障逻辑本次不做）
+```
+
+### 文件计划
+
+| 侧 | 文件 | 改动 |
+|---|---|---|
+| Robot 侧（本分支） | 新增 relay task（组装层，main.rs 或新模块） | 订阅 pose_tx/map_tx/grid → Network 能力 |
+| Network 侧（ML_review） | command.rs：`NetworkProtocol` 加 `RobotPose`/`RobotMapDelta`/`RobotMapFull` 变体 + Parse/Serialize | 必改 |
+| Network 侧 | branch_command.rs：route_inbound 加 3 个 match 臂 → EventBus | 必改 |
+| Network 侧 | Network/mod.rs：`broadcast(dt, payload)`（照抄 broadcast_local_info 遍历模式） | 必改 |
+| Network 侧 | node_handle.rs：fire-and-forget 发送 API（`send_data_no_wait`），避免 10Hz 广播积压 | 必改 |
+| Network 侧 | capability_binding.rs：`caps.network.broadcast` Lua 绑定（可选） | 建议 |
+
+### ⚠️ 入站坑（必须注意）
+
+- `DataType::Data` 入站被 Network 内部自动回 "OK"、**不转发 Core**（swarm_events.rs:150-160）→ 位姿/地图必须走 **Command 通道新协议变体**，否则永远收不到。
+- send_data 强制等对端 Response（默认 300s 超时）→ 高频广播必须用 fire-and-forget。
+- 无原生广播：broadcast API 需要 Network 侧新增（遍历 peers 模板已存在）。
 ## 背景
 
 ### 历史遗留（Location Set 为什么存在）

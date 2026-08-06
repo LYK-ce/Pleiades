@@ -1,6 +1,6 @@
 # Task 9_1: Network Update
 
-> 状态：✅ 已实施完成（S1~S6，2026-08-06）；待 Task 9 联调 + 实车验证。详见 `Workbook/wb_9_1_network_update.md`
+> 状态：✅ 已实施完成（S1~S6，2026-08-06）；待 Task 9_2（Robot 侧接入）联调 + 实车/多节点验证。详见 `Workbook/wb_9_1_network_update.md`
 > 创建日期：2026-08-06
 > 最后更新：2026-08-06
 
@@ -67,6 +67,8 @@
 | `Src/Network/command_handler.rs` | Handle_Command 加 Broadcast 臂（遍历 peers fire-and-forget） |
 | `Src/main.rs` | 创建 robot_bus + 注入 Network_Service |
 
+> ⚠️ Task 9_2 后续会重构：`main.rs` 的 Phase 1~6 将抽取为 `Src/bootstrap.rs::core_bootstrap()`（含 robot_bus 创建与注入），`main.rs` 变薄——robot_bus 相关逻辑随抽取迁移，行为不变。
+
 ## 实施步骤
 
 | 步骤 | 内容 | 验证 |
@@ -93,6 +95,7 @@
 | 5 | 广播实现 | NodeCommand::Broadcast + 事件循环遍历 peers + fire-and-forget |
 | 6 | payload 协议归属 | Robot 侧 Task 9 负责（Network 只搬运字节） |
 | 7 | 全量地图 | 走 Broadcast（65KB < 2GB 帧上限），不落盘 |
+| 8 | 使用时机衔接（Task 9_2 确认） | **map_full 本次不广播**（传输能力已具备，全量地图留后续）；payload 协议已定：位姿/地图 delta JSON 带 `peer_id` + `peer_name` 双字段，peer_name=车名 |
 
 ---
 

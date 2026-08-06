@@ -35,3 +35,48 @@
 5. payload 协议定义（位姿/地图 JSON，含 peer_id）
 6. 全量地图发布时机
 7. 联调验证（多节点完整系统）
+
+## 2026-08-06 实施完成（bootstrap 抽取 + Robot 网络接入 + 入站仅打印）
+
+**目标**：orion-robot 成为完整车载节点（bootstrap + Core + Robot + 网络数据面）；Pleiades 保持纯推理。
+
+**改动文件**（7 个，其中 bootstrap.rs 为新增）：
+1. `Src/bootstrap.rs`（**新**）：`core_bootstrap()` 抽取 main.rs Phase 1~6 → `CoreBootstrap`{config/event_bus/robot_bus/node_handle/network_service/core/user_cmd_tx}；`robot_bootstrap()`（读 [Robot] 段 → launch 注入 → WS，vehicle_id=peer_name）；`CoreBootstrap::run(self)`（network_service.Start() spawn + TUI/CLI 分支 + core.run() 阻塞）
+2. `Src/lib.rs`：`#[path="bootstrap.rs"] pub mod bootstrap;`（session mod 后）
+3. `Src/main.rs`（161→15 行）：`core_bootstrap().await?` + `boot.run().await`
+4. `Src/main_robot.rs`：core_bootstrap → parse_origin（保持，日志初始化后调用，warn 可见）→ robot_bootstrap（`Arc::new(boot.node_handle.clone())`，**必须 clone**——boot 后续 run() 消费自身）→ boot.run() → robot.shutdown()；tracing 初始化移除（core_bootstrap 负责）
+5. `Src/Config/config.rs`：`Robot_Config` +5 字段（serial_port/baudrate/car_type/lidar_port/lidar_baudrate，全 Option）；DEFAULT_CONFIG [Robot] 段补模板
+6. `Src/Robot/control/types.rs`：`CarType::from_str`（trim + 大小写不敏感，兼容 X3_Plus/X3-Plus）+ 8 断言测试
+7. `Src/Robot/core/robot.rs`：
+   - `launch` +3 参数：`node_handle: Option<Arc<NodeHandle>>`、`robot_bus: Option<Arc<EventBus>>`、`peer_name: String`，透传三 task（None 行为不变，纯本地可用）
+   - `state_notifier`：100ms 发 pose_tx 后广播 `robot_pose` JSON（peer_id + peer_name + x/y/yaw/vx/vy/ts）
+   - `slam_task`：有 delta 才广播 `robot_map_delta` JSON（deltas 数组）——`map_tx.send(typed.clone())` 后组广播
+   - `main_loop`：`robot_bus.as_ref().map(|b| b.Subscribe())` → select! 加 `robot_ev = recv_robot_event(&mut robot_rx)` 臂，`Bus_Event::Stream` 仅 `info!` 打印（人类确认：入站不处理）
+   - 新增 `recv_robot_event` helper（Option 化接收；Lagged warn 后继续无忙循环；None 时永远 pending）
+
+**决策落地**（task_9_2 已决策表）：#1 两入口一致 TUI/CLI（run() 内 args 检测）；#2 Start() 进 run()；#3 返回 Robot；#4 launch 透传；#5 origin 保持 CLI；#6 payload 带 peer_id+peer_name、peer_name=车名=WS vehicle_id（main_robot 原硬编码 orion_robot 已删）；#8 缺省沿用硬编码 + car_type 失败回退 X3Plus；#9 bootstrap.rs 位置；#10 core_bootstrap→robot_bootstrap→run()；**#11 新增：入站仅打印**（swarm_events.rs 不动）
+
+**验证**：`cargo check` ✅ 无新增 warning（27 条均为既有）；`cargo test --lib robot` 37 passed（36+from_str）；`--bin orion-robot` 3 passed；`--lib network` 4 passed；全量 `--lib` 149/1（唯一失败 `vm test_sandbox_os_blocked` 为原有）；Pleiades + orion-robot 构建 ✅
+
+**踩坑**：
+- transform anchor 替换文本若自带闭合行，会与保留行重复（launch 签名 `) -> Result`、两处 spawn `});` 各重复一次，手动删）
+- pattern 替换会保留原行缩进前缀，替换文本需自带完整缩进（两次缩进错位）
+- `robot_bus.as_ref().map(EventBus::Subscribe)` 类型不匹配（Option<&Arc> vs &EventBus），改闭包 `|b| b.Subscribe()`
+- main_robot 部分 move：`Arc::new(boot.node_handle)` 移走字段后 boot.run() 报 E0382，改 `.clone()`
+
+**待办**：① 多节点联调（两机互跑 orion-robot/Pleiades，日志确认位姿/地图广播互通 + 入站打印）；② 实车验证（串口 + LiDAR + WS）；③ 旧 config.toml 无 [Robot] 新字段 → 走缺省（如需用配置更新实际文件）
+
+
+## 2026-08-06 移除 CLI 模式（人类决策）+ Code Review
+
+**背景**：review 发现 `CoreBootstrap::run()` 的 `args().nth(1)=="cli"` 检测与 main_robot 的 parse_origin（位置参数 x y）抢第一个参数——`orion-robot cli` 会 warn"参数数量错误"回退默认坐标；`orion-robot cli 66.5 63.25` 坐标被丢。
+
+**人类决策**：直接去掉 CLI 模式，不与位置参数抢。
+
+**改动**：`bootstrap.rs` CoreBootstrap::run() 删除 cli_mode 检测 + CLI 分支（spawn_stdout_subscriber/spawn_stdin_repl 调用），统一 TUI；`Src/CLI/` 模块保留（pub mod，无调用者，无 dead_code 警告，属主枝 ML_review 范围不删）。
+
+**Review 结论**（子 agent 只读审查）：无 P0，可合入；13 条清单 + 决策 #1~#11 全落地；P1 遗留：① cli 冲突（本次已通过去 CLI 解决）② config.rs 文件头 Modified Date 未更新 ③ 广播失败 warn 无退避（弱网 10Hz 日志风暴风险）；P2/P3 非阻塞（锁内组 JSON、Closed 忙循环隐患、peer_id 每 tick 分配等）。
+
+**待办追加**：④ config.rs 文件头 Modified Date 补 2026-08-06；⑤ 广播失败 warn 退避（可选）
+
+**完整问题清单**（P1/P2/P3 逐条 + 状态）见 `Task/task_9_2_robot_loop.md` 的「Code Review 记录」小节。用户 2026-08-06 指示：先测试，问题暂不修。

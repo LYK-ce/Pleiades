@@ -2,16 +2,18 @@
 //Created Date ： 2026-07-07
 //Modified Date ： 2026-08-06
 
-//! Orion Robot — 独立调试入口
+//! Orion Robot — Jetson 车载完整节点
 //!
-//! 只启动机器人控制相关组件（Robot + WebSocket 遥控），
-//! 不加载 Pleiades 分布式推理系统。
+//! 完整 bootstrap + Core 推理循环 + Robot 循环 + 网络数据面（位姿/地图广播）。
 //!
 //! 用法: orion-robot [x y]    可选的小车初始世界坐标（默认 64 64）
 //! 例:   orion-robot 66.5 63.25
 
+use std::sync::Arc;
+
 use tracing::{info, warn};
-use pleiades::robot::{CarType, Robot};
+
+use pleiades::bootstrap::{core_bootstrap, robot_bootstrap};
 
 /// 地图范围（世界坐标 [0,128)m，与 OccupancyGrid 256 格 × 0.5m 对应）
 const WORLD_MIN: f32 = 0.0;
@@ -45,37 +47,28 @@ fn parse_origin(args: Vec<String>) -> (f32, f32) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-        )
-        .init();
-
-    info!("Orion Robot 启动中...");
+    // 完整 bootstrap（含 tracing 日志初始化）
+    let boot = core_bootstrap().await?;
+    info!("Core bootstrap 完成");
 
     let origin = parse_origin(std::env::args().skip(1).collect());
     info!("初始世界坐标 origin = ({}, {})", origin.0, origin.1);
 
-    let robot = Robot::launch("/dev/myserial", 115200, CarType::X3Plus, Some("/dev/rplidar"), Some(230400), origin).await?;
-    info!("Robot 已启动");
+    // Robot + 网络数据面（launch 内 main_loop/slam/notifier 后台跑）
+    let robot = robot_bootstrap(
+        &boot.config,
+        Arc::new(boot.node_handle.clone()),
+        boot.robot_bus.clone(),
+        origin,
+    ).await?;
 
-    let ws_bind = "0.0.0.0:9090";
-    pleiades::websocket::start(
-        ws_bind, "orion_robot", robot.robot_cmd_tx.clone(),
-        robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
-        robot.grid.clone(),
-    );
+    // 进入主循环（阻塞：network 事件循环 + TUI/CLI + Core；Robot 循环已在后台并行）
+    boot.run().await;
 
-    info!("WebSocket 遥控服务已启动: ws://{ws_bind}");
-    info!("打开 Tool/robot_control.html 开始遥控");
-    info!("按 Ctrl-C 退出");
-
-    tokio::signal::ctrl_c().await?;
+    info!("主循环退出，关闭 Robot...");
     robot.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     info!("Orion Robot 已退出");
-
     Ok(())
 }
 
