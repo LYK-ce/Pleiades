@@ -92,3 +92,13 @@
 **验证**：/tmp 下跑 orion-robot → 日志文件完整包含 `Core bootstrap 完成` / `初始世界坐标 origin` / `Robot 配置: port=/dev/myserial baud=115200 car=X3Plus lidar=/dev/rplidar ws=0.0.0.0:9090 peer_name=new_peer` ✅（修复前这些行不存在）
 
 **⚠️ 遗留确认项**：车端旧 config.toml 缺 `[Robot]` 新字段（serial_port/baudrate/car_type/lidar_port/lidar_baudrate）→ `robot_bootstrap` 的 `lidar_port` 为 None → launch 走 `_` 臂 `LiDAR 未配置，跳过` → 地图永不更新（全 Unknown）。修复日志后车端可见 `Robot 配置: ... lidar=None` + `LiDAR 未配置，跳过`。**待用户更新车端 config.toml 或代码补缺省**（决策 #8：缺省沿用硬编码 /dev/rplidar、230400）。
+
+## 2026-08-06 核查收尾：P2-1 + P2#7 修复
+
+**P2-1（LiDAR 空串禁用失效）**：`Some("")` 被 `filter(!is_empty())` 剔除后 `or_else` 又补回 /dev/rplidar → 空串无法禁用，且无 LiDAR 的车配置 `lidar_port=""` 会尝试打开设备失败 → 启动报错退出。修复：`bootstrap.rs` 三态 match——显式值用配置 / 空串（含纯空白）禁用（None）/ 字段缺失缺省 /dev/rplidar。三态实测：default→/dev/rplidar、empty→None、custom→/dev/ttyUSB0 ✅。
+
+**P2#7（LiDAR 失败路径 STM32 泄漏）**：`robot.rs` launch 中 LiDAR `spawn`/`start_scan` 失败 `?` 提前返回时，已 spawn 的 STM32 串口后台任务未 shutdown（当前单进程退出 runtime 兜底，将来长驻进程会泄漏）。修复：两处失败路径改 match/if-let，返回前 `stm32.shutdown()`。
+
+**验证**：`cargo check` 0 errors；robot 37 passed。Task 9_2 Code Review 记录已同步（#7、P2-1 → 已解决）。
+
+**剩余未修**：P1#3（warn 退避）、P2#4（锁内组 JSON）、P2#5（Closed 忙循环）、P2#6（from_utf8_lossy）、P3#9~13（分配/注释/日期等）+ 核查 P3（executor 重复注释、robot 重复编号、3 文件 Modified Date）。

@@ -110,9 +110,20 @@ impl Robot {
         let lidar: Option<LidarDevice> = match (lidar_port, lidar_baudrate) {
             (Some(p), Some(b)) => {
                 info!("启用 LiDAR: port={p}, baud={b}");
-                let dev = LidarDevice::spawn(p, b, lidar_state.clone())?;
+                let dev = match LidarDevice::spawn(p, b, lidar_state.clone()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // P2#7：失败路径清理——已 spawn 的 STM32 后台任务必须 shutdown
+                        stm32.shutdown();
+                        return Err(e);
+                    }
+                };
                 info!("LiDAR 设备已启动，自动开始扫描");
-                dev.start_scan().await?;
+                if let Err(e) = dev.start_scan().await {
+                    // P2#7：失败路径清理
+                    stm32.shutdown();
+                    return Err(e);
+                }
                 Some(dev)
             }
             _ => {

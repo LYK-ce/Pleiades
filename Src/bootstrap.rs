@@ -197,10 +197,12 @@ pub async fn robot_bootstrap(
         }
         None => CarType::X3Plus,
     };
-    // LiDAR 缺省沿用硬编码（决策 #8）；显式留空（""）= 禁用
-    let lidar_port = r.and_then(|r| r.lidar_port.clone())
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some("/dev/rplidar".to_string()));
+    // LiDAR 配置三态：显式值 → 用配置；显式空串 → 禁用；字段缺失 → 缺省 /dev/rplidar（决策 #8）
+    let lidar_port = match r.and_then(|r| r.lidar_port.clone()) {
+        Some(s) if !s.trim().is_empty() => Some(s),                       // 显式配置
+        Some(_) => None,                                                  // 留空 = 禁用
+        None => Some("/dev/rplidar".to_string()),                        // 缺省
+    };
     let lidar_baudrate = r.and_then(|r| r.lidar_baudrate).or(Some(230400));
     let ws_bind = r.and_then(|r| r.ws_bind.clone())
         .unwrap_or_else(|| "0.0.0.0:9090".to_string());

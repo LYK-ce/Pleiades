@@ -132,7 +132,8 @@ pub async fn robot_bootstrap(
 | 4 | robot.rs:266-287 | slam_task 在 `grid` 写锁内做 JSON 序列化 + broadcast（锁持有时间非最短） | ⬜ 待处理（建议：锁内只取 deltas，锁外组 JSON） |
 | 5 | robot.rs:427 | `recv_robot_event` 的 `Closed => None` 若 sender 全 drop 会忙循环（当前 main_loop 自持 Arc 保活，实际不可达——隐性陷阱） | ⬜ 待处理（建议：注释注明依赖，或 Closed 返回哨兵让 main_loop break） |
 | 6 | swarm_events.rs:199 | 入站 Robot payload 走 `from_utf8_lossy`——当前 JSON 安全；未来 map_full 二进制会被损坏 | ⬜ 待处理（建议：文档注明 robot_bus 仅支持 UTF-8 JSON） |
-| 7 | robot.rs:131-136 | LiDAR spawn/start_scan 失败 `?` 提前返回时已 spawn 的 STM32 串口任务未 shutdown（预存问题） | ⬜ 待处理（建议：提前返回前 `stm32.shutdown()`） |
+| 7 | robot.rs:131-136 | LiDAR spawn/start_scan 失败 `?` 提前返回时已 spawn 的 STM32 串口任务未 shutdown（预存问题） | ✅ **已解决**（2026-08-06）：两处失败路径改为 match/if-let，返回前 `stm32.shutdown()` |
+| P2-1 | bootstrap.rs:200-203 | **LiDAR 空串禁用失效**（核查新发现）：`Some("")` 被 filter 剔除后 or_else 又补回 /dev/rplidar → 无 LiDAR 的车配置 `lidar_port=""` 会尝试打开设备失败、启动报错退出；与三处注释/文档声明矛盾 | ✅ **已解决**（2026-08-06）：改为三态 match——显式值用配置 / 空串禁用（None）/ 缺省 /dev/rplidar；三态实测通过（default→/dev/rplidar、empty→None、custom→/dev/ttyUSB0） |
 
 ### P3
 
