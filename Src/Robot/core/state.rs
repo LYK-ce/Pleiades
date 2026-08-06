@@ -6,6 +6,11 @@
 //!
 //! RobotState 由 STM32 写入，LidarState 由 LiDAR 写入，各设备独立。
 //! 纯数据结构，不含业务逻辑。里程计计算见 slam/odometry.rs。
+//!
+//! 位置语义（Task 9）：`x/y` 为全局世界坐标 (m)，初值 = origin（默认 64,64），
+//! 由 `STM32Device::spawn` 注入 local_state。
+//! 单一写入者不变式：共享 RobotState 只被 STM32 RX 回调全量覆盖写，
+//! 任何其他路径不得直接修改共享态字段。
 
 use crate::robot::control::device::lidar::LaserScan;
 
@@ -71,10 +76,10 @@ pub struct RobotState {
     /// 四轮编码器计数
     pub encoders: [i32; 4],
 
-    /// 里程计累积位移 (m)，从 (0,0) 起步
-    /// 由 slam/odometry.rs 在 RX 回调中实时累积
-    pub odom_x: f32,
-    pub odom_y: f32,
+    /// 全局世界坐标 (m)，启动时 = origin（默认 64,64）
+    /// 由 STM32 RX 回调中的 odometry::accumulate 直接积分维护
+    pub x: f32,
+    pub y: f32,
 }
 
 // ============================================================

@@ -64,17 +64,25 @@ impl Robot {
     /// 启动 Robot：创建各设备独立状态，spawn Device，启动所有 task
     ///
     /// - `lidar_port` / `lidar_baudrate`: 可选 LiDAR 配置，None 则不启用
+    /// - `origin`: 小车初始世界坐标 (x, y)（默认 64,64），Task 9：RobotState 记录全局唯一坐标
     pub async fn launch(
         port: &str,
         baudrate: u32,
         car_type: CarType,
         lidar_port: Option<&str>,
         lidar_baudrate: Option<u32>,
+        origin: (f32, f32),
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
 
         // 1. 创建各设备独立状态
         let robot_state = Arc::new(RwLock::new(RobotState::default()));
+        // 立即注入初始世界坐标，关闭 (0,0) 初始化窗口（首帧 RX 覆盖前消费方可见）
+        {
+            let mut g = robot_state.write().await;
+            g.x = origin.0;
+            g.y = origin.1;
+        }
         let lidar_state = Arc::new(RwLock::new(LidarState::default()));
 
         // 2. 广播通道
@@ -87,7 +95,7 @@ impl Robot {
         let mission_queue = Arc::new(RwLock::new(MissionQueue::default()));
 
         // 4. spawn STM32 Device
-        let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone())?;
+        let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?;
 
         // 4. spawn LiDAR Device（可选）
         let lidar: Option<LidarDevice> = match (lidar_port, lidar_baudrate) {
@@ -171,7 +179,7 @@ async fn state_notifier(
                     .as_secs_f64();
                 let _ = pose_tx.send(Pose {
                     ts,
-                    x: 64.0 + s.odom_x, y: 64.0 + s.odom_y, z: 0.0,
+                    x: s.x, y: s.y, z: 0.0,
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
                 });
@@ -202,10 +210,10 @@ async fn slam_task(
                 // 同时读位姿和 LiDAR（两个独立锁，无死锁风险）
                 let (pose, scan_points) = {
                     let rs = robot_state.read().await;
-                    // 位姿 = Chunk 中心 (64m,64m) + 里程计累积位移
+                    // 位姿 = 全局世界坐标（直读 RobotState，Task 9）
                     let pose = RobotPose {
-                        x: 64.0 + rs.odom_x,
-                        y: 64.0 + rs.odom_y,
+                        x: rs.x,
+                        y: rs.y,
                         yaw: rs.attitude.yaw,
                     };
                     let ls = lidar_state.read().await;

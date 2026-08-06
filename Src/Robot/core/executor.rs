@@ -108,7 +108,8 @@ impl Executor {
         mission_queue: &mut MissionQueue,
     ) {
         // ① 感知：当前位置 + 航向
-        let (wx, wy) = (64.0 + robot_state.odom_x, 64.0 + robot_state.odom_y);
+        // ① 感知：当前位置（世界坐标，直读 RobotState）+ 航向
+        let (wx, wy) = (robot_state.x, robot_state.y);
         let yaw = robot_state.attitude.yaw;
 
         // ② 实时障碍急停：前方 LiDAR 距离 < 阈值 → 立即停车 + 标记障碍
