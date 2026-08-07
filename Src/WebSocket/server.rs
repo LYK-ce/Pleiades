@@ -1,10 +1,13 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-22
+//Modified Date ： 2026-08-07
 
 //! WebSocket 服务器核心
 //!
 //! accept 循环 + handle_connection + pose/map/map_full 转发器。
+//!
+//! 2026-08-07 协议统一：WS 通道保留（Pictor 仍走 WS 连接），
+//! 消息 payload 统一为 ORION 协议帧（二进制）；hello 连接握手保留（JSON，唯一不换的消息）。
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -15,10 +18,14 @@ use tracing::{error, info, warn};
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use super::protocol::parse_command;
+use super::protocol::parse_orion_frame;
 use crate::robot::core::command::{Command, ManualCmd};
-use crate::robot::core::robot::{Pose, MapDelta};
-use crate::robot::slam::OccupancyGrid;
+use crate::robot::core::protocol::{
+    encode_frame, encode_map_delta, encode_map_full, encode_pose, now_boot_ms,
+    COMPID_ROBOT, MSGID_MAP_DELTA, MSGID_MAP_FULL, MSGID_POSE, MapDeltaEntry, PoseData,
+};
+use crate::robot::core::robot::{MapDelta, Pose};
+use crate::robot::slam::{CELL_RESOLUTION, CHUNK_SIZE, OccupancyGrid};
 
 pub async fn run(
     bind_addr: String,
@@ -37,24 +44,24 @@ pub async fn run(
     };
     tracing::info!("[WS] 遥控服务器已启动: ws://{bind_addr}");
 
-    // 本地 broadcast：汇总 text 消息 (pose + map_delta)
-    let (feed_tx, _) = broadcast::channel::<String>(32);
+    // 本地 broadcast：汇总 ORION 帧字节 (pose + map_delta)
+    let (feed_tx, _) = broadcast::channel::<Vec<u8>>(32);
 
-    // pose 转发
+    // pose 转发（ORION_POSE 帧）
     let pose_feed = feed_tx.clone();
     let mut pose_rx2 = pose_rx.resubscribe();
     tokio::spawn(async move {
         loop {
             match pose_rx2.recv().await {
                 Ok(p) => {
-                    let json = serde_json::json!({
-                        "type": "pose",
-                        "ts": p.ts,
-                        "x": p.x, "y": p.y, "z": p.z,
-                        "yaw": p.yaw,
-                        "vx": p.vx, "vy": p.vy,
-                    }).to_string();
-                    let _ = pose_feed.send(json);
+                    let pose = PoseData {
+                        time_boot_ms: p.time_boot_ms,
+                        x: p.x, y: p.y,
+                        vx: p.vx, vy: p.vy,
+                        yaw: p.yaw,
+                    };
+                    let frame = encode_frame(MSGID_POSE, 0, COMPID_ROBOT, &encode_pose(&pose));
+                    let _ = pose_feed.send(frame);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -62,21 +69,19 @@ pub async fn run(
         }
     });
 
-    // map_delta 转发
+    // map_delta 转发（ORION_MAP_DELTA 帧）
     let map_feed = feed_tx.clone();
     let mut map_rx2 = map_rx.resubscribe();
     tokio::spawn(async move {
         loop {
             match map_rx2.recv().await {
                 Ok(deltas) => {
-                    let voxels: Vec<serde_json::Value> = deltas.iter().map(|d| {
-                        serde_json::json!({"gx": d.gx, "gy": d.gy, "state": d.state})
-                    }).collect();
-                    let json = serde_json::json!({
-                        "type": "map_delta",
-                        "voxels": voxels,
-                    }).to_string();
-                    let _ = map_feed.send(json);
+                    let entries: Vec<MapDeltaEntry> = deltas.iter()
+                        .map(|d| MapDeltaEntry { gx: d.gx, gy: d.gy, state: d.state })
+                        .collect();
+                    let payload = encode_map_delta(now_boot_ms(), &entries);
+                    let frame = encode_frame(MSGID_MAP_DELTA, 0, COMPID_ROBOT, &payload);
+                    let _ = map_feed.send(frame);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -115,12 +120,13 @@ pub async fn run(
 async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     robot_cmd_tx: mpsc::Sender<Command>,
-    mut feed_rx: broadcast::Receiver<String>,
+    mut feed_rx: broadcast::Receiver<Vec<u8>>,
     vehicle_id: String,
     bind_addr: String,
     peer: String,
     grid: Arc<RwLock<OccupancyGrid>>,
 ) {
+    // hello：连接握手（过渡期保留，唯一 JSON 消息）
     let hello = serde_json::json!({
         "type": "hello",
         "vehicle_id": vehicle_id,
@@ -128,21 +134,32 @@ async fn handle_connection(
     });
     let _ = ws.send(Message::Text(hello.to_string())).await;
 
-    // 发送全量地图
+    // 发送全量地图（ORION_MAP_FULL 帧）
     {
-        let map_data = grid.read().await.build_map_full();
-        info!("[WS] {peer} 发送 map_full: {} 字节", map_data.len());
-        let _ = ws.send(Message::Binary(map_data.into())).await;
+        let g = grid.read().await;
+        let data = g.chunk.state_bytes();
+        let payload = encode_map_full(
+            now_boot_ms(),
+            g.chunk.origin_gx,
+            g.chunk.origin_gy,
+            CHUNK_SIZE as u16,
+            CHUNK_SIZE as u16,
+            CELL_RESOLUTION,
+            data.as_ref(),
+        );
+        let frame = encode_frame(MSGID_MAP_FULL, 0, COMPID_ROBOT, &payload);
+        info!("[WS] {peer} 发送 map_full: {} 字节", frame.len());
+        let _ = ws.send(Message::Binary(frame.into())).await;
     }
 
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // 转发 text 消息到客户端（pose + map_delta）
+    // 转发 ORION 帧到客户端（pose + map_delta，二进制）
     let feed_handle = tokio::spawn(async move {
         loop {
             match feed_rx.recv().await {
-                Ok(json) => {
-                    if ws_tx.send(Message::Text(json)).await.is_err() {
+                Ok(frame) => {
+                    if ws_tx.send(Message::Binary(frame.into())).await.is_err() {
                         break;
                     }
                 }
@@ -152,13 +169,12 @@ async fn handle_connection(
         }
     });
 
-    // 接收客户端命令
+    // 接收客户端命令（ORION 帧，二进制）
     info!("[WS] {peer} 已连接");
     while let Some(msg) = ws_rx.next().await {
         match msg {
-            Ok(Message::Text(text)) => {
-                info!("[WS] {peer} 收到: {text}");
-                if let Some(cmd) = parse_command(&text) {
+            Ok(Message::Binary(bytes)) => {
+                if let Some(cmd) = parse_orion_frame(&bytes) {
                     let _ = robot_cmd_tx.send(cmd).await;
                 }
             }

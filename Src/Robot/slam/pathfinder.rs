@@ -12,7 +12,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
 use tracing::{info, warn};
 
-use crate::robot::slam::{OccupancyGrid, CHUNK_SIZE};
+use crate::robot::slam::{CellState, OccupancyGrid, CHUNK_SIZE};
 
 // ============================================================
 // Key — D* Lite 优先队列排序键 (k1, k2)
@@ -168,7 +168,7 @@ impl DStarLite {
             return f32::MAX;
         }
         match grid.state(to.0, to.1) {
-            Some(1) => f32::MAX,
+            Some(val) if val == CellState::Occupied as u8 => f32::MAX,
             _ => 1.0,
         }
     }

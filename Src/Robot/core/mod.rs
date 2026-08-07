@@ -12,6 +12,7 @@
 //! - robot.rs：Robot::launch() + 主 select! 循环
 
 pub mod command;
+pub mod protocol;
 pub mod state;
 pub mod executor;
 pub mod mission;

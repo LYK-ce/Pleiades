@@ -11,7 +11,6 @@
 //! 中间 [-6, +6] → Unknown
 //! 不对称增量（3:1）对齐 OctoMap 风格：一次命中可抵消三次掠过
 
-use tracing::info;
 
 /// Chunk 大小 (cells)
 pub const CHUNK_SIZE: usize = 256;
@@ -29,11 +28,14 @@ const FREE_THRESHOLD: i8 = -6;
 
 /// 格子宏观状态（供外部使用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
+#[repr(i8)]
 pub enum CellState {
+    /// 可通行
     Free = 0,
-    Occupied = 1,
-    Unknown = 2,
+    /// 占据（MAVLink 惯例 100）
+    Occupied = 100,
+    /// 未知（i8 -1，u8 线上 = 255；2026-08-07 协议统一 0/100/255）
+    Unknown = -1,
 }
 
 /// 变化的格子
@@ -140,26 +142,6 @@ impl OccupancyGrid {
         self.chunk.state(gx, gy)
     }
 
-    /// 构建 map_full 二进制帧（Pictor 协议）
-    pub fn build_map_full(&self) -> Vec<u8> {
-        let bytes = self.chunk.state_bytes();
-        let (mut free, mut occupied, mut unknown) = (0usize, 0usize, 0usize);
-        for &b in bytes.iter() {
-            match b {
-                0 => free += 1,
-                1 => occupied += 1,
-                _ => unknown += 1,
-            }
-        }
-        info!("[SLAM] 地图状态: 可通行={free} 墙壁={occupied} 未知={unknown}");
-
-        let mut buf = Vec::with_capacity(65545);
-        buf.push(0u8); // type = map_full
-        buf.extend_from_slice(&(self.chunk.origin_gx as i32).to_be_bytes());
-        buf.extend_from_slice(&(self.chunk.origin_gy as i32).to_be_bytes());
-        buf.extend_from_slice(bytes.as_ref());
-        buf
-    }
 }
 
 impl Default for OccupancyGrid {

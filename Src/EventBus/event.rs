@@ -42,6 +42,12 @@ pub enum Bus_Event {
         /// JSON payload，含 "type" 字段用于路由
         payload: String,
     },
+    /// 高频流式推送——原始字节（二进制帧专用，如 ORION 协议帧）
+    /// 2026-08-07：robot_bus 二进制承载（新协议前置依赖）；File_Stream 等 JSON 使用者仍走 Stream
+    StreamRaw {
+        /// 原始字节 payload（不经过 UTF-8/JSON 处理）
+        payload: Vec<u8>,
+    },
     /// 命令输出（对应原 CommandResult / HelpInfo）
     Output {
         /// JSON payload，含 "type" 字段用于路由

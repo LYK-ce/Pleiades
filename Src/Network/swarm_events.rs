@@ -193,10 +193,11 @@ impl Network_Service {
                             }
                         }
                         DataType::Robot => {
-                            // Task 9_1：机器人数据（位姿/地图）原样转发 robot_bus，不解析
-                            // （序列化/解析是上层职责；payload 自带 peer_id 由发布方写入）
-                            let _ = self.robot_bus.Publish(Bus_Event::Stream {
-                                payload: String::from_utf8_lossy(&request.payload).to_string(),
+                            // Task 9_1：机器人数据原样转发 robot_bus，不解析
+                            // 2026-08-07 协议统一：ORION 帧为二进制，走 StreamRaw（原始字节），
+                            // 不再 from_utf8_lossy（会损坏二进制帧）
+                            let _ = self.robot_bus.Publish(Bus_Event::StreamRaw {
+                                payload: request.payload,
                             });
                             // 回最小响应闭合协议状态机（防发送方 30s 超时风暴）
                             let response = Network_Data {

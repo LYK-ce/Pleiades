@@ -1,79 +1,65 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-07
 
-//! WebSocket 协议编解码
+//! WebSocket 协议编解码——ORION 协议帧解析
 //!
-//! 三层 JSON 协议：
-//! - mode:   {"cmd":"mode",  "action":"switch_to_auto"|"switch_to_manual"}
-//! - manual: {"cmd":"manual","action":"forward"|...,"speed":50}
-//! - auto:   {"cmd":"auto",  "action":"push"|"cancel","missions":[...]}
+//! 2026-08-07 协议统一：WS payload 统一为 ORION 帧（协议文档
+//! `docs/design_doc/orion_protocol.md`）；旧 JSON 三层命令（mode/manual/auto）已移除。
 
-use serde_json::Value;
 use crate::robot::core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
+use crate::robot::core::protocol::{
+    decode_frame, decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP,
+    ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP,
+    ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, MISSION_GOTO,
+    MSGID_MANUAL_CONTROL, MSGID_TASK_SET,
+};
 
-/// 解析客户端 JSON 控制指令
-pub fn parse_command(text: &str) -> Option<Command> {
-    let v: Value = serde_json::from_str(text).ok()?;
-    let cmd = v["cmd"].as_str()?;
-
-    match cmd {
-        "mode"   => parse_mode(&v),
-        "manual" => parse_manual(&v),
-        "auto"   => parse_auto(&v),
-        other    => { tracing::warn!("[WS] 未知命令类型: {other}"); None }
-    }
-}
-
-fn parse_mode(v: &Value) -> Option<Command> {
-    let action = v["action"].as_str()?;
-    match action {
-        "switch_to_manual" => Some(Command::Mode(ModeCmd::SwitchToManual)),
-        "switch_to_auto"   => Some(Command::Mode(ModeCmd::SwitchToAuto)),
-        _ => { tracing::warn!("[WS] 未知 mode action: {action}"); None }
-    }
-}
-
-fn parse_manual(v: &Value) -> Option<Command> {
-    let action = v["action"].as_str()?;
-    let speed = v["speed"].as_i64().unwrap_or(50) as i16;
-    match action {
-        "forward"    => Some(Command::Manual(ManualCmd::Forward(speed))),
-        "backward"   => Some(Command::Manual(ManualCmd::Backward(speed))),
-        "spin_left"  => Some(Command::Manual(ManualCmd::SpinLeft(speed))),
-        "spin_right" => Some(Command::Manual(ManualCmd::SpinRight(speed))),
-        "stop"       => Some(Command::Manual(ManualCmd::Stop)),
-        "beep"       => {
-            let ms = v["ms"].as_u64().unwrap_or(200) as u16;
-            Some(Command::Manual(ManualCmd::Beep(ms)))
+/// 解析 ORION 帧 → 内部命令（WS 入站：终端 → 车）
+pub fn parse_orion_frame(bytes: &[u8]) -> Option<Command> {
+    let frame = decode_frame(bytes)?;
+    match frame.msgid {
+        MSGID_MANUAL_CONTROL => {
+            let mc = decode_manual_control(&frame.payload)?;
+            manual_action_to_command(mc.action, mc.param)
         }
-        "start_lidar" => Some(Command::Manual(ManualCmd::StartLidarScan)),
-        "stop_lidar"  => Some(Command::Manual(ManualCmd::StopLidarScan)),
-        _ => { tracing::warn!("[WS] 未知 manual action: {action}"); None }
-    }
-}
-
-fn parse_auto(v: &Value) -> Option<Command> {
-    let action = v["action"].as_str()?;
-    match action {
-        "push" => {
-            let missions = v["missions"].as_array()?;
-            let mut list = Vec::with_capacity(missions.len());
-            for m in missions {
-                let mtype = m["type"].as_str()?;
-                match mtype {
-                    "goto" => {
-                        let x = m["x"].as_f64()? as f32;
-                        let y = m["y"].as_f64()? as f32;
-                        list.push(Mission::Goto(x, y));
+        MSGID_TASK_SET => {
+            let missions = decode_task_set(&frame.payload)?;
+            let list: Vec<Mission> = missions
+                .into_iter()
+                .filter_map(|m| match m.mission_type {
+                    MISSION_GOTO => Some(Mission::Goto(m.x, m.y)),
+                    _ => {
+                        tracing::warn!("[WS] 未知 mission type: {}", m.mission_type);
+                        None
                     }
-                    _ => { tracing::warn!("[WS] 未知 mission type: {mtype}"); }
-                }
-            }
-            if list.is_empty() { None }
-            else { Some(Command::Auto(AutoCmd::Push(list))) }
+                })
+                .collect();
+            Some(Command::Auto(AutoCmd::Set(list)))
         }
-        "cancel" => Some(Command::Auto(AutoCmd::Cancel)),
-        _ => { tracing::warn!("[WS] 未知 auto action: {action}"); None }
+        other => {
+            tracing::warn!("[WS] 未知 ORION msgid: {other}");
+            None
+        }
+    }
+}
+
+/// action 枚举 → 内部命令（未知动作保守返回 None）
+fn manual_action_to_command(action: u8, param: i16) -> Option<Command> {
+    match action {
+        ACTION_FORWARD => Some(Command::Manual(ManualCmd::Forward(param))),
+        ACTION_BACKWARD => Some(Command::Manual(ManualCmd::Backward(param))),
+        ACTION_SPIN_LEFT => Some(Command::Manual(ManualCmd::SpinLeft(param))),
+        ACTION_SPIN_RIGHT => Some(Command::Manual(ManualCmd::SpinRight(param))),
+        ACTION_STOP => Some(Command::Manual(ManualCmd::Stop)),
+        ACTION_BEEP => Some(Command::Manual(ManualCmd::Beep(param as u16))),
+        ACTION_START_LIDAR => Some(Command::Manual(ManualCmd::StartLidarScan)),
+        ACTION_STOP_LIDAR => Some(Command::Manual(ManualCmd::StopLidarScan)),
+        ACTION_SWITCH_TO_MANUAL => Some(Command::Mode(ModeCmd::SwitchToManual)),
+        ACTION_SWITCH_TO_AUTO => Some(Command::Mode(ModeCmd::SwitchToAuto)),
+        other => {
+            tracing::warn!("[WS] 未知 manual action: {other}");
+            None
+        }
     }
 }

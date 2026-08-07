@@ -29,12 +29,15 @@ use std::time::Instant;
 
 use crate::event_bus::{Bus_Event, EventBus};
 use crate::network::{DataType, NodeHandle};
-use serde_json::json;
+use crate::robot::core::protocol::{
+    encode_frame, encode_map_delta, encode_pose, now_boot_ms, sysid_from_multihash,
+    COMPID_ROBOT, MapDeltaEntry, MSGID_MAP_DELTA, MSGID_POSE, PoseData,
+};
 
 /// 位姿广播消息
 #[derive(Debug, Clone)]
 pub struct Pose {
-    pub ts: f64,
+    pub time_boot_ms: u32,
     pub x: f32, pub y: f32, pub z: f32,
     pub yaw: f32,
     pub vx: f32, pub vy: f32,
@@ -201,12 +204,9 @@ async fn state_notifier(
         select! {
             _ = interval.tick() => {
                 let s = state.read().await;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64();
+                let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {
-                    ts,
+                    time_boot_ms,
                     x: s.x, y: s.y, z: 0.0,
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
@@ -214,15 +214,16 @@ async fn state_notifier(
 
                 // Task 9_2：位姿广播到集群（fire-and-forget，Network 只搬运字节）
                 if let Some(nh) = &node_handle {
-                    let payload = json!({
-                        "peer_id": nh.Get_Local_Peer_Id().to_string(),
-                        "peer_name": &peer_name,
-                        "type": "robot_pose",
-                        "x": s.x, "y": s.y, "yaw": s.attitude.yaw,
-                        "vx": s.vx, "vy": s.vy,
-                        "ts": ts,
-                    });
-                    if let Err(e) = nh.Broadcast(DataType::Robot, payload.to_string().into_bytes()) {
+                    let sysid = sysid_from_multihash(&nh.Get_Local_Peer_Id().to_bytes());
+                    let pose = PoseData {
+                        time_boot_ms,
+                        x: s.x, y: s.y,
+                        vx: s.vx, vy: s.vy,
+                        yaw: s.attitude.yaw,
+                    };
+                    // ORION 协议：位姿帧广播（2026-08-07 协议统一，替代散装 JSON）
+                    let frame = encode_frame(MSGID_POSE, sysid, COMPID_ROBOT, &encode_pose(&pose));
+                    if let Err(e) = nh.Broadcast(DataType::Robot, frame) {
                         warn!("[Robot] 位姿广播失败: {e}");
                     }
                 }
@@ -284,15 +285,14 @@ async fn slam_task(
 
                         // Task 9_2：地图增量广播到集群（有 delta 才发）
                         if let Some(nh) = &node_handle {
-                            let payload = json!({
-                                "peer_id": nh.Get_Local_Peer_Id().to_string(),
-                                "peer_name": &peer_name,
-                                "type": "robot_map_delta",
-                                "deltas": typed.iter().map(|d| json!({
-                                    "gx": d.gx, "gy": d.gy, "state": d.state,
-                                })).collect::<Vec<_>>(),
-                            });
-                            if let Err(e) = nh.Broadcast(DataType::Robot, payload.to_string().into_bytes()) {
+                            let sysid = sysid_from_multihash(&nh.Get_Local_Peer_Id().to_bytes());
+                            let entries: Vec<MapDeltaEntry> = typed.iter().map(|d| MapDeltaEntry {
+                                gx: d.gx, gy: d.gy, state: d.state,
+                            }).collect();
+                            // ORION 协议：地图增量帧广播（2026-08-07 协议统一，替代散装 JSON）
+                            let payload = encode_map_delta(now_boot_ms(), &entries);
+                            let frame = encode_frame(MSGID_MAP_DELTA, sysid, COMPID_ROBOT, &payload);
+                            if let Err(e) = nh.Broadcast(DataType::Robot, frame) {
                                 warn!("[Robot] 地图增量广播失败: {e}");
                             }
                         }
@@ -335,8 +335,15 @@ async fn main_loop(
         select! {
             robot_ev = recv_robot_event(&mut robot_rx) => {
                 // Task 9_2：入站机器人数据暂不处理，仅打印（融合/避障将来做）
-                if let Some(Bus_Event::Stream { payload }) = robot_ev {
-                    info!("[Robot] 收到远端机器人数据: {payload}");
+                // 2026-08-07 协议统一：入站为 ORION 帧（StreamRaw），解码帧头打印摘要
+                if let Some(Bus_Event::StreamRaw { payload }) = robot_ev {
+                    match crate::robot::core::protocol::decode_frame(&payload) {
+                        Some(f) => info!(
+                            "[Robot] 收到远端 ORION 帧: msgid={} sysid={} compid={} payload_len={}",
+                            f.msgid, f.sysid, f.compid, f.payload.len()
+                        ),
+                        None => warn!("[Robot] 收到无法解析的 ORION 帧 ({} 字节)", payload.len()),
+                    }
                 }
             }
             cmd = cmd_rx.recv() => {
@@ -370,14 +377,12 @@ async fn main_loop(
                     Some(Command::Auto(a)) => {
                         if *op_mode.read().await == OpMode::Auto {
                             match a {
-                                AutoCmd::Push(list) => {
-                                    mission_queue.write().await.push(list);
-                                }
-                                AutoCmd::Cancel => {
+                                AutoCmd::Set(list) => {
+                                    // ORION_TASK_SET 替换语义（2026-08-07）：立即中断当前任务 + 整体替换队列
                                     let _ = stm32.stop();
-                                    mission_queue.write().await.clear();
+                                    mission_queue.write().await.replace(list);
                                     executor.reset();
-                                    info!("[Robot] Auto 任务队列已清空");
+                                    info!("[Robot] Auto 任务队列已替换");
                                 }
                             }
                         } else {

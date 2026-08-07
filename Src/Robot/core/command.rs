@@ -40,10 +40,9 @@ pub enum ManualCmd {
 /// 自动任务命令
 #[derive(Debug, Clone)]
 pub enum AutoCmd {
-    /// 追加任务到队列
-    Push(Vec<Mission>),
-    /// 清空队列
-    Cancel,
+    /// 整体替换任务队列（2026-08-07 协议统一：替代原 Push 追加语义）
+    /// 空列表 = 取消全部任务（停车待命）；收到即丢弃旧队列（含正在执行的任务）
+    Set(Vec<Mission>),
 }
 
 /// 任务单元

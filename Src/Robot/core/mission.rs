@@ -32,6 +32,13 @@ impl MissionQueue {
         self.queue.clear();
     }
 
+    /// 整体替换队列（2026-08-07：协议 ORION_TASK_SET 替换语义）
+    /// 先清空再加入，不合并、不追加；空列表等价取消
+    pub fn replace(&mut self, missions: Vec<Mission>) {
+        self.queue.clear();
+        self.queue.extend(missions);
+    }
+
     /// 队列是否为空
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()

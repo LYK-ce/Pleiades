@@ -169,6 +169,9 @@ fn Handle_Bus_Event(app: &mut App, event: Bus_Event) {
             };
             handle_stream(app, &v);
         }
+        Bus_Event::StreamRaw { .. } => {
+            // 二进制帧（ORION 协议）不由 TUI 消费，忽略
+        }
         Bus_Event::Output { payload } => {
             let v = match serde_json::from_str::<serde_json::Value>(&payload) {
                 Ok(v) => v,
