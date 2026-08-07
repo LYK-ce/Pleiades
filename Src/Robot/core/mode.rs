@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-07
 
 //! 运行模式
 
@@ -15,6 +15,7 @@ pub enum OpMode {
 
 impl Default for OpMode {
     fn default() -> Self {
-        OpMode::Manual
+        // 2026-08-07 决策：默认 Auto（开机即进入自动任务模式，任务下发无需先切模式）
+        OpMode::Auto
     }
 }
