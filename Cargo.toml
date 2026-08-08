@@ -42,7 +42,9 @@ libp2p = { version = "0.56", features = [
     "kad",
     "request-response",
     "macros",
-    "ping"
+    "ping",
+    "identify",
+    "gossipsub"
 ]}
 
 # 异步运行时

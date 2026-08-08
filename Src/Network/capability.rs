@@ -305,6 +305,20 @@ pub trait Network_Capability: Send + Sync {
     fn get_local_peer_id(&self) -> PeerId;
 
     // ========================================
+    // GossipSub 发布
+    // ========================================
+
+    /// 发布消息到 GossipSub topic（广播业务状态：peer-info / models / sessions）
+    ///
+    /// 内部通过 NodeHandle 命令通道发送到 Network_Service 执行。
+    /// 无订阅者时不报错（仅日志），业务状态广播允许丢失。
+    ///
+    /// # 参数
+    /// - `topic`: GossipSub topic 名称
+    /// - `payload`: 已序列化的消息载荷（应用层 JSON）
+    async fn publish_gossipsub(&self, topic: &str, payload: Vec<u8>) -> Result<(), Network_Error>;
+
+    // ========================================
     // 带宽测试
     // ========================================
 
@@ -420,6 +434,13 @@ impl Network_Capability for Network_Service_Capability {
     ) -> Result<Network_Data, Network_Error> {
         self.node_handle
             .Send_Data(&peer, data_type, payload)
+            .await
+            .map_err(|e| Network_Error::ChannelClosed(e.to_string()))
+    }
+
+    async fn publish_gossipsub(&self, topic: &str, payload: Vec<u8>) -> Result<(), Network_Error> {
+        self.node_handle
+            .Gossipsub_Publish(topic, payload)
             .await
             .map_err(|e| Network_Error::ChannelClosed(e.to_string()))
     }

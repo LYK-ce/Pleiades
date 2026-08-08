@@ -26,6 +26,8 @@
 //! 广域网放到未来支持。
 #[allow(nonstandard_style)]
 use libp2p::{
+    gossipsub,
+    identify,
     identity::Keypair,
     kad::{self, store::MemoryStore, Mode},
     mdns,
@@ -40,13 +42,13 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 use futures::StreamExt;
 
 use crate::event_bus::EventBus;
 
 use super::request_response::{
-    DataType, Network_Data, PleiadesCodec, DATA_PROTOCOL,
+    PleiadesCodec, DATA_PROTOCOL,
     Inbound_Manager, Outbound_Manager,
 };
 use super::node_handle::{NodeCommand, NodeHandle, InboundRequest};
@@ -105,6 +107,7 @@ impl Default for NetworkConfig {
 }
 
 /// 网络行为组合
+/// 网络行为组合
 #[derive(NetworkBehaviour)]
 pub struct PleiadesNetworkBehaviour {
     /// mDNS局域网发现
@@ -117,6 +120,10 @@ pub struct PleiadesNetworkBehaviour {
     pub stream: stream::Behaviour,
     /// Ping心跳协议
     pub ping: ping::Behaviour,
+    /// Identify 节点识别（连接建立后自动交换协议级元信息）
+    pub identify: identify::Behaviour,
+    /// GossipSub 主题广播（业务状态：peer-info / models / sessions）
+    pub gossipsub: gossipsub::Behaviour,
 }
 
 /// 网络服务（内部实现）
@@ -246,12 +253,32 @@ impl Network_Service {
                     .with_timeout(Duration::from_secs(config.heartbeat_timeout));
                 let ping_behaviour = ping::Behaviour::new(ping_config);
 
+                // 创建 Identify 行为 — 连接建立后自动交换节点元信息（protocols/地址/版本）
+                let identify = identify::Behaviour::new(
+                    identify::Config::new(
+                        "/pleiades/1.0.0".to_string(),
+                        key.public().clone(),
+                    )
+                    .with_agent_version(format!("pleiades/{}", env!("CARGO_PKG_VERSION")))
+                    .with_interval(Duration::from_secs(60))
+                    .with_push_listen_addr_updates(true),
+                );
+
+                // 创建 GossipSub 行为 — 业务状态主题广播（Signed 消息认证）
+                let gossipsub_config = gossipsub::ConfigBuilder::default().build()?;
+                let gossipsub = gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(key.clone()),
+                    gossipsub_config,
+                )?;
+
                 Ok(PleiadesNetworkBehaviour {
                     mdns,
                     kademlia,
                     request_response,
                     stream,
                     ping: ping_behaviour,
+                    identify,
+                    gossipsub,
                 })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(86400)))
@@ -340,6 +367,19 @@ impl Network_Service {
                 warn!("Kademlia引导失败: {}", e);
             }
         }
+
+        // 2.5 订阅 GossipSub 业务状态 topic（IdentTopic = 原始字符串 topic，与默认配置一致）
+        let topics = [
+            gossipsub::IdentTopic::new(super::TOPIC_PEER_INFO),
+            gossipsub::IdentTopic::new(super::TOPIC_MODELS),
+            gossipsub::IdentTopic::new(super::TOPIC_SESSIONS),
+        ];
+        for t in &topics {
+            if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(t) {
+                warn!("GossipSub 订阅失败 ({}): {}", t, e);
+            }
+        }
+        info!("GossipSub 已订阅 {} 个 topic", topics.len());
 
         // 3. 注册流式传输协议，接受入站流
         let mut incoming_file_streams = self.file_accept_control

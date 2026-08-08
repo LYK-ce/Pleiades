@@ -208,6 +208,20 @@ Level 3: Orchestrator → TUI/CLI
 - Box<dyn Model + Send> 替代 enum dispatch
 - impl Model for Model_Weights / Qwen3MoE_Model（完全限定语法避免递归）
 - Test 3 全链路通过 ✅
+
+### 全源码梳理 (2026-08-08)
+- 子agent 全量梳理 Src/ (约 18,800 行)，对照 Task 17 方案核对：
+- ✅ Task 17.1-17.8 全部落地（CONFIG_DIR pub、workspace_dir/log_dir/log_level、kvcache_dir OnceLock、时间戳日志、CLI 模块化）
+- ✅ Storage 已按方案 B 持有 peer_manager + event_bus（storage_manager.rs:29-30）
+- 📝 新发现（讨论素材）：
+  🔴 capability_binding.rs:383-608 list_model_peers 闭包 ~220 行业务逻辑 + 硬编码 devices={cuda:0,cuda:1}（违反错误 4）
+  🔴 session.rs:80 MlContext::new("cpu") 设备硬编码（SetDevice 未生效）
+  🔴 Tensor_Buffer 容量 3 处 magic number（capability_binding.rs:712 / local_stream.rs:106 / session.rs:132）
+  🟠 branch_user.rs:153 SetName 主循环内同步写 config.toml（违反纯路由）
+  🟠 network_service.rs:318 bootstrap PeerId::random() TODO
+  🟠 engine.rs:22 os 沙箱禁用被注释 + test_sandbox_os_blocked 测试矛盾
+  🟡 quota_gb 死配置项 / find_available_port(8080) / programs 路径 / max_tokens 256 / 槽位数 4 硬编码
+  🟡 gguf_model_legacy.rs (722行) 疑似死代码 / Causal_Mask 3 处重复 / Build_From_Extracted 4 处重复
 ### trait Stage 重构 (2026-07-04)
 - 新增 common/stage.rs: trait Stage + Embedding_Stage + Output_Stage
 - Layer_Weights / Qwen3MoE_Layer impl Stage（kv_cache + clear_kv_cache）

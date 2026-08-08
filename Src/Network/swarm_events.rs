@@ -5,7 +5,7 @@
 //!
 //! Network_Service 的 swarm 事件响应方法。
 
-use libp2p::{kad, mdns, ping, request_response, swarm::SwarmEvent, Multiaddr, PeerId};
+use libp2p::{gossipsub, identify, kad, mdns, ping, request_response, swarm::SwarmEvent};
 use tracing::{debug, error, info, warn};
 
 use super::network_service::{Network_Service, PleiadesNetworkBehaviourEvent};
@@ -42,14 +42,8 @@ impl Network_Service {
                 );
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
-                // 向新节点发送本机信息（name + models + sessions）
-                if let Ok(local) = self.peer_handle.Get_Local_Peer().await {
-                    let payload = super::build_local_info_payload(&local).into_bytes();
-                    let request = Network_Data { data_type: DataType::Info, payload };
-                    self.swarm.behaviour_mut().request_response.send_request(&peer_id, request);
-                } else {
-                    warn!("无法获取本地 PeerInfo，跳过 Info 交换");
-                }
+                // 连接建立后发布本地业务状态（gossipsub 无历史回放，新 peer 只能收到订阅后的消息）
+                self.publish_local_state_to_gossipsub().await;
 
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
@@ -75,6 +69,12 @@ impl Network_Service {
             }
             SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Ping(ping_event)) => {
                 self.Handle_Ping_Event(ping_event).await;
+            }
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Identify(event)) => {
+                self.Handle_Identify_Event(event).await;
+            }
+            SwarmEvent::Behaviour(PleiadesNetworkBehaviourEvent::Gossipsub(event)) => {
+                self.Handle_Gossipsub_Event(event).await;
             }
             event => {
                 debug!("其他事件: {:?}", event);
@@ -193,63 +193,8 @@ impl Network_Service {
                             }
                         }
                         DataType::Info => {
-                            // 解析对方信息: "name|models_json|sessions_json"
-                            let payload_str = String::from_utf8_lossy(&request.payload);
-                            let parts: Vec<&str> = payload_str.splitn(3, '|').collect();
-                            let name = parts.first().copied().unwrap_or("");
-                            let models_json = parts.get(1).copied().unwrap_or("[]");
-                            let sessions_json = parts.get(2).copied().unwrap_or("[]");
-
-                            if !name.is_empty() {
-                                let mut updated = crate::peer_management::PeerInfo::new(peer, vec![]);
-                                updated.name = name.to_string();
-                                let _ = self.peer_handle.Upsert_Peer(updated).await;
-                            }
-                            let models: Vec<crate::peer_management::SupportedModel> =
-                                serde_json::from_str(models_json).unwrap_or_default();
-                            if !models.is_empty() {
-                                let _ = self.peer_handle.Update_Supported_Models(&peer, models.clone()).await;
-                            }
-                            let sessions: Vec<crate::peer_management::SessionSummary> =
-                                serde_json::from_str(sessions_json).unwrap_or_default();
-                            if !sessions.is_empty() {
-                                let _ = self.peer_handle.Update_Sessions(&peer, sessions.clone()).await;
-                            }
-
-                            // 通知 TUI
-                            let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
-                                serde_json::json!({
-                                    "file_name": m.file_name,
-                                    "layer_range": m.layer_range(),
-                                })
-                            }).collect();
-                            let sessions_display: Vec<serde_json::Value> = sessions.iter().map(|s| {
-                                serde_json::json!({
-                                    "session_id": s.session_id,
-                                    "model_id": s.model_id,
-                                    "occupied_slots": s.occupied_slots,
-                                    "total_slots": s.total_slots,
-                                })
-                            }).collect();
-                            self.event_bus.Publish(Bus_Event::State {
-                                payload: serde_json::json!({
-                                    "type": "peer_info_updated",
-                                    "peer_id": peer.to_string(),
-                                    "peer_name": name,
-                                    "is_local": false,
-                                    "models": models_display,
-                                    "sessions": sessions_display,
-                                }).to_string(),
-                            });
-
-                            let response = Network_Data {
-                                data_type: DataType::Info,
-                                payload: b"OK".to_vec(),
-                            };
-                            if let Err(e) = self.swarm.behaviour_mut()
-                                .request_response.send_response(channel, response) {
-                                error!("Info 入站回复失败: {:?}", e);
-                            }
+                            // Info 类型已废弃（业务状态改走 GossipSub），仅记录日志
+                            warn!("收到 Info 类型消息（已废弃，忽略） from {}", peer);
                         }
                         DataType::Command | DataType::File => {
                             self.inbound_manager.Register_Inbound(peer, request, channel).await;
@@ -318,6 +263,161 @@ impl Network_Service {
             }
             Err(ping::Failure::Other { error }) => {
                 info!("Ping错误 ({}): {}", peer_id, error);
+            }
+        }
+    }
+
+    /// 发布本地业务状态到全部 GossipSub topic（连接建立 / 对方订阅时调用）
+    ///
+    /// gossipsub 无历史回放，新 peer 只能收到订阅后的消息；
+    /// 因此在连接建立与收到 Subscribed 事件时主动发布一次，确保新 peer 能拿到本机状态。
+    async fn publish_local_state_to_gossipsub(&mut self) {
+        use crate::network::Gossipsub::{
+            Build_Models_Payload, Build_Peer_Info_Payload, Build_Sessions_Payload,
+            TOPIC_MODELS, TOPIC_PEER_INFO, TOPIC_SESSIONS,
+        };
+
+        let Ok(local) = self.peer_handle.Get_Local_Peer().await else { return };
+
+        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+            gossipsub::TopicHash::from_raw(TOPIC_PEER_INFO),
+            Build_Peer_Info_Payload(&local),
+        );
+        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+            gossipsub::TopicHash::from_raw(TOPIC_MODELS),
+            Build_Models_Payload(&local),
+        );
+        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+            gossipsub::TopicHash::from_raw(TOPIC_SESSIONS),
+            Build_Sessions_Payload(&local),
+        );
+    }
+
+    /// 处理 Identify 事件（连接建立后自动交换的协议级元信息）
+    pub(super) async fn Handle_Identify_Event(&mut self, event: identify::Event) {
+        match event {
+            identify::Event::Received { peer_id, info, .. } => {
+                info!("identify 收到: {} | agent={} | proto={:?} | listen={:?}",
+                      peer_id, info.agent_version, info.protocols, info.listen_addrs);
+                // 更新 PeerManager 地址列表（从连接端点升级为完整监听地址）
+                let pi = PeerInfo::new(peer_id, info.listen_addrs);
+                let _ = self.peer_handle.Upsert_Peer(pi).await;
+            }
+            identify::Event::Sent { peer_id, .. } => {
+                debug!("identify 已发送: {}", peer_id);
+            }
+            identify::Event::Pushed { peer_id, .. } => {
+                debug!("identify 已推送: {}", peer_id);
+            }
+            identify::Event::Error { peer_id, error, .. } => {
+                debug!("identify 错误 {}: {:?}", peer_id, error);
+            }
+        }
+    }
+
+    /// 处理 GossipSub 事件（业务状态广播：peer-info / models / sessions）
+    pub(super) async fn Handle_Gossipsub_Event(&mut self, event: gossipsub::Event) {
+        use crate::peer_management::{SessionSummary, SupportedModel};
+        match event {
+            gossipsub::Event::Message { message, .. } => {
+                let Some(author) = message.source else {
+                    debug!("收到无作者的 gossipsub 消息，忽略");
+                    return;
+                };
+                match message.topic.as_str() {
+                    super::TOPIC_PEER_INFO => {
+                        // 节点身份：{"name": "..."}
+                        let name = serde_json::from_slice::<serde_json::Value>(&message.data)
+                            .ok()
+                            .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        if !name.is_empty() {
+                            let mut updated = PeerInfo::new(author, vec![]);
+                            updated.name = name.clone();
+                            let _ = self.peer_handle.Upsert_Peer(updated).await;
+                        }
+                        // 通知 TUI
+                        self.event_bus.Publish(Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": author.to_string(),
+                                "peer_name": name,
+                                "is_local": false,
+                                "models": [],
+                                "sessions": [],
+                            }).to_string(),
+                        });
+                    }
+                    super::TOPIC_MODELS => {
+                        // 模型能力：Vec<SupportedModel>
+                        let models: Vec<SupportedModel> = serde_json::from_slice(&message.data)
+                            .unwrap_or_default();
+                        if !models.is_empty() {
+                            let _ = self.peer_handle
+                                .Update_Supported_Models(&author, models.clone())
+                                .await;
+                        }
+                        let models_display: Vec<serde_json::Value> = models.iter().map(|m| {
+                            serde_json::json!({
+                                "file_name": m.file_name,
+                                "layer_range": m.layer_range(),
+                            })
+                        }).collect();
+                        self.event_bus.Publish(Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": author.to_string(),
+                                "peer_name": "",
+                                "is_local": false,
+                                "models": models_display,
+                                "sessions": [],
+                            }).to_string(),
+                        });
+                    }
+                    super::TOPIC_SESSIONS => {
+                        // 会话状态：Vec<SessionSummary>
+                        let sessions: Vec<SessionSummary> = serde_json::from_slice(&message.data)
+                            .unwrap_or_default();
+                        if !sessions.is_empty() {
+                            let _ = self.peer_handle
+                                .Update_Sessions(&author, sessions.clone())
+                                .await;
+                        }
+                        let sessions_display: Vec<serde_json::Value> = sessions.iter().map(|s| {
+                            serde_json::json!({
+                                "session_id": s.session_id,
+                                "model_id": s.model_id,
+                                "occupied_slots": s.occupied_slots,
+                                "total_slots": s.total_slots,
+                            })
+                        }).collect();
+                        self.event_bus.Publish(Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": author.to_string(),
+                                "peer_name": "",
+                                "is_local": false,
+                                "models": [],
+                                "sessions": sessions_display,
+                            }).to_string(),
+                        });
+                    }
+                    _ => { debug!("未知 gossipsub topic: {}", message.topic); }
+                }
+            }
+            gossipsub::Event::Subscribed { peer_id, .. } => {
+                // 对方订阅 topic：补发本地业务状态（弥补 gossipsub 无历史回放）
+                debug!("节点订阅 gossipsub topic: {}", peer_id);
+                self.publish_local_state_to_gossipsub().await;
+            }
+            gossipsub::Event::Unsubscribed { peer_id, .. } => {
+                debug!("节点退订 gossipsub topic: {}", peer_id);
+            }
+            gossipsub::Event::GossipsubNotSupported { peer_id } => {
+                warn!("节点不支持 gossipsub: {}", peer_id);
+            }
+            gossipsub::Event::SlowPeer { peer_id, .. } => {
+                debug!("gossipsub 慢节点: {}", peer_id);
             }
         }
     }

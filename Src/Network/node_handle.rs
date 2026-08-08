@@ -64,6 +64,8 @@ pub enum NodeCommand {
     PutRecord { key: Vec<u8>, value: Vec<u8> },
     /// DHT读取
     GetRecord { key: Vec<u8> },
+    /// GossipSub 发布（广播业务状态到 topic）
+    GossipsubPublish { topic: String, payload: Vec<u8> },
     /// 主动连接
     Dial { addr: Multiaddr },
     /// 断开连接
@@ -177,6 +179,15 @@ impl NodeHandle {
     /// 断开与指定节点的连接
     pub async fn Disconnect(&self, peer: &PeerId) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.cmd_tx.send(NodeCommand::Disconnect { peer: *peer }).await?;
+        Ok(())
+    }
+
+    /// 发布消息到 GossipSub topic（广播业务状态）
+    pub async fn Gossipsub_Publish(&self, topic: &str, payload: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.cmd_tx.send(NodeCommand::GossipsubPublish {
+            topic: topic.to_string(),
+            payload,
+        }).await?;
         Ok(())
     }
 

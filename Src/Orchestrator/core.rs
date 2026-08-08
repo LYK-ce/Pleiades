@@ -186,11 +186,18 @@ impl Core {
 
     // ─── Flush 管理 ────────────────────────────────────────
 
-    /// 执行 flush + 广播本地节点信息，返回结果文本
+    /// 执行 flush + 广播本地节点信息（GossipSub models/sessions topic），返回结果文本
     pub async fn do_flush(caps: &Capabilities) -> String {
         match caps.storage.Flush().await {
             Ok((added, removed)) => {
-                crate::network::broadcast_local_info(
+                // 模型文件变更 → 广播 peer-info + models + sessions topic
+                crate::network::publish_peer_info(
+                    &*caps.peer_manager, &*caps.network, &caps.event_bus
+                ).await;
+                crate::network::publish_models(
+                    &*caps.peer_manager, &*caps.network, &caps.event_bus
+                ).await;
+                crate::network::publish_sessions(
                     &*caps.peer_manager, &*caps.network, &caps.event_bus
                 ).await;
                 format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)

@@ -342,7 +342,6 @@ pub fn register_network_caps(
                 "Command" => DataType::Command,
                 "Data" => DataType::Data,
                 "File" => DataType::File,
-                "Info" => DataType::Info,
                 _ => return Err(mlua::Error::runtime(format!("未知 DataType: {}", data_type_str))),
             };
             let result = caps_net.network.send_data(peer, dt, payload.into_bytes()).await
