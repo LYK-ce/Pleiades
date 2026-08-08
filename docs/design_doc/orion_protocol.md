@@ -50,10 +50,11 @@
 
 ### 1.5 过渡期说明
 
-Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路继续使用现有协议**（含 `hello` 连接握手消息，仅发送一次，成本可忽略）。
+Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**（连接机制 + `hello` 握手消息，`hello` 仅发送一次，成本可忽略）。
 
-- 现有 WS 协议（JSON 命令/遥测 + `map_full` 二进制帧）**保持不变，不迁移、不删除**
-- 新协议（本文档）面向 libp2p 统一后的目标形态
+- **WS 消息 payload 已迁移为 ORION 帧**（2026-08-07 实施）：pose / map_delta / map_full / 命令全部为二进制 ORION 帧，旧 JSON 协议（`cmd/action` 三层命令、`type:pose` 遥测）**已移除**
+- `hello` 为唯一保留的 JSON 消息（连接握手）
+- **`Tool/robot_control.html` 已废弃**（旧 JSON 协议，不再维护；主力地面站为 Pictor）
 - Pictor 完成 libp2p 接入后，WS 链路与 `hello` 一并退役
 
 ---
@@ -181,7 +182,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路继续使
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `time_boot_ms` | uint32 | ms |
-| `count` | uint16 | 变化格子数 |
+| `count` | uint16 | 变化格子数；**协议上限 65535 条目/帧** |
 | `entries` | 结构数组 | 每项 9 字节（见下） |
 
 `entries[i]`：
@@ -246,7 +247,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路继续使
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `count` | uint8 | 任务数；**0 = 取消全部任务（停车待命）** |
+| `count` | uint8 | 任务数；**0 = 取消全部任务（停车待命）**；**协议上限 255 任务/帧** |
 | `missions` | 结构数组 | 每项 9 字节（见下） |
 
 `missions[i]`：

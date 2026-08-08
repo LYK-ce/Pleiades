@@ -109,7 +109,10 @@ pub fn encode_map_full(
 // ============================================================
 
 /// 编码增量地图：time_boot_ms + count + entries（每项 gx i32 + gy i32 + state i8）
+///
+/// `count` 字段为 u16，协议上限 **65535** 条目/帧（超出会截断导致接收端校验失败）
 pub fn encode_map_delta(time_boot_ms: u32, entries: &[MapDeltaEntry]) -> Vec<u8> {
+    debug_assert!(entries.len() <= u16::MAX as usize, "map_delta 条目数超出 u16 上限");
     let mut buf = Vec::with_capacity(6 + 9 * entries.len());
     buf.extend_from_slice(&time_boot_ms.to_be_bytes());
     buf.extend_from_slice(&(entries.len() as u16).to_be_bytes());
@@ -188,7 +191,10 @@ pub const MISSION_GOTO: u8 = 0;
 
 /// 编码任务队列替换：count + missions（每项 type u8 + x f32 + y f32）
 /// count = 0 表示取消全部任务（停车待命）
+///
+/// `count` 字段为 u8，协议上限 **255** 任务/帧（超出会截断导致接收端校验失败）
 pub fn encode_task_set(missions: &[MissionItem]) -> Vec<u8> {
+    debug_assert!(missions.len() <= u8::MAX as usize, "task_set 任务数超出 u8 上限");
     let mut buf = Vec::with_capacity(1 + 9 * missions.len());
     buf.push(missions.len() as u8);
     for m in missions {
