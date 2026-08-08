@@ -109,3 +109,10 @@
 4. 补 pathfinder 单元测试（17 场景清单在审查报告中）
 5. 修 P6（goal 占用格死循环）、P7（日志级别）
 6. 实车验证（步骤 7）
+
+
+## 2026-08-08 归档
+
+- 任务完成：D* Lite 集成 + 实车验证通过（2026-08-05，稳定 20 分钟）
+- 归档：Task 8 移入 `Task/archived task/`，本记录移入 `Workbook/archived workbook/`
+- 遗留待办（已转入 task_11 完善方向 A）：P1 mark_obstacle 强制 ∞、P3 迭代上限、P6 goal 占用格、P7 日志级别、pathfinder 无单测（17 场景清单）

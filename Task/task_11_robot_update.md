@@ -2,7 +2,7 @@
 
 > 状态：进行中——通信协议统一方向已明确（2026-08-07 讨论），A~E 待确认
 > 创建日期：2026-08-07
-> 最后更新：2026-08-07
+> 最后更新：2026-08-08
 
 ## 目标
 
@@ -61,52 +61,18 @@ Robot 模块已完成基础闭环（STM32 驱动 / LiDAR / SLAM / D* Lite 导航
 - ⏳ 集群 map_full 通道：ConnectionEstablished 触发点，待集群多车阶段实现
 ## 完善方向候选清单
 
-### A. 导航可靠性（Task 8 遗留）
-
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| P1 | `pathfinder.rs` mark_obstacle | 未强制置 ∞，只重读概率栅格——需 4 次 LiDAR 命中才 Occupied，动态障碍 D* 不知情，急停后仍可能反复撞 | mark_obstacle 直接置 cost=∞（或同步写 grid） |
-| P3 | `pathfinder.rs` compute_shortest_path | 无迭代上限（无 watchdog），极端地图拖垮 50ms auto_tick | 加迭代上限/时间预算，超限降级 |
-| P6 | `executor.rs` | goal 格为 Occupied 时任务永不完成也不失败 | 目标格不可达时明确失败并报错 |
-| P7 | `executor.rs` | D* 规划失败仅 warn! | 提升为 error! |
-| N10 | `pathfinder.rs` | 零单元测试（17 场景清单已在 wb_8 给出，未落地） | 补全单元测试 |
-
-### B. 性能完善
-
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| N2 | `core/robot.rs` auto_tick | 每 50ms 全量 clone 三态（grid 65KB+） | 按需 clone / 增量 |
-| P2#4 | `core/robot.rs` slam_task | grid 写锁内做 JSON 序列化 + broadcast | 锁内只取 deltas，锁外组 JSON |
-| P3#9 | `core/robot.rs` notifier/slam_task | `Get_Local_Peer_Id().to_string()` 每 100/200ms 分配一次 | launch 时算一次传闭包 |
-| P3#10 | `core/robot.rs` | `typed.clone()` 两次分配 | 复用一次 |
-
-### C. 健壮性完善
-
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| P1#3 | `core/robot.rs` 广播失败 | warn! 无退避——弱网下 10Hz warn 风暴 | 连续失败降频 debug!，成功复位 |
-| P2#5 | `core/robot.rs` recv_robot_event | `Closed => None` 隐性忙循环 | 注释注明依赖 / Closed 返回哨兵 break |
-| P2#6 | `Network/swarm_events.rs:199` | 入站 Robot payload 走 `from_utf8_lossy`——未来二进制 map 会被损坏 | 文档注明 robot_bus 仅 UTF-8 JSON；二进制另走通道 |
-| N5 | `WebSocket/` | WS send 静默忽略失败 | 失败时降级/断开处理 |
-| N6 | Robot 模块 | 日志级别不一致 | 统一规范 |
-
-### D. API 完整性
-
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| N3 | `Src/VM/capability_binding.rs:755` | `register_robot_caps` 空 stub 且无调用点——`robot_test.lua` 期望的 `robot.open/forward/stop/beep/get_state` 均不存在 | 实现基于 STM32Device 的 Lua 绑定（遵循 Lua 绑定规范：闭包薄胶水） |
-| N9 | `lib.rs` | Robot 模块无 re-export | 补齐（若按项目惯例需要） |
-
-### E. 规范/卫生
-
-| # | 位置 | 问题 |
-|---|---|---|
-| N4 | `executor.rs` | 双重转向日志 |
-| N7 | `slam/grid.rs` | build_map_full info! 刷屏 |
-| N8 | 实车 | 路径偏差（待分析） |
-| P3#11 | `lib.rs` | 文件头无 Modified Date |
-| 核查 P3-1~4 | 多处 | 重复注释、编号重复、Modified Date 未 bump、注释过时 |
-
+> 问题清单已统一迁移至 `Task/robot_review_problem.md`（唯一问题池，2026-08-08 建立），本文件不再重复维护清单。
+>
+> A~E 分组对应：
+> - A. 导航可靠性 → robot_review_problem.md 第一节（P1/P3/P6/P7/N10/N8）
+> - B. 性能完善 → 第二节（N2/P2#4/N1/P3#9/P3#10）
+> - C. 健壮性完善 → 第三节（P1#3/P2#5/N5/N6/P3#13）
+> - D. API 完整性 → 第四节（N3/N9）
+> - E. 规范/卫生 → 第五节（N4/核查 P3-1~4/P3#11/N7）
+> - 前端/文档断链（2026-08-08 梳理新增）→ 第六节
+> - 已解决追溯 → 第七节
+>
+> 后续问题管理、状态更新一律在 `robot_review_problem.md` 中进行。
 ## 待决策问题
 
 1. 完善范围与优先级：A~E 哪些纳入本次？是否全做？
