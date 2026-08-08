@@ -69,6 +69,7 @@ pub(crate) mod test_utils {
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn get_record(&self, _key: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         fn get_local_peer_id(&self) -> libp2p::PeerId { libp2p::PeerId::random() }
+        async fn publish_gossipsub(&self, _topic: &str, _payload: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn test_bandwidth(&self, _peer: libp2p::PeerId) -> Result<u64, Network_Error> { Ok(0) }
     }
 

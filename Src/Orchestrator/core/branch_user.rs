@@ -154,6 +154,12 @@ impl Core {
                         if let Err(e) = crate::config::Set_Peer_Name(&config_path, &name) {
                             format!("名称已设置为 {}，但持久化失败: {}", name, e)
                         } else {
+                            // 广播新的节点名称（GossipSub peer-info topic）
+                            crate::network::publish_peer_info(
+                                &*self.capabilities.peer_manager,
+                                &*self.capabilities.network,
+                                &self.capabilities.event_bus,
+                            ).await;
                             format!("节点名称已设置为: {}", name)
                         }
                     }
@@ -389,8 +395,8 @@ impl Core {
                         let _ = caps.peer_manager.Update_Sessions(&local.peer_id, sessions).await;
                     }
 
-                    // 广播本地节点信息（Info → peers + EventBus → TUI）
-                    crate::network::broadcast_local_info(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
+                    // 广播本地会话状态（GossipSub sessions topic + EventBus → TUI）
+                    crate::network::publish_sessions(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
 
                     caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
                         level: crate::event_bus::NotifyLevel::Info,

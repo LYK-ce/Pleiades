@@ -45,6 +45,8 @@ pub mod bandwidth_stream;
 pub mod session_stream;
 mod command_handler;
 mod swarm_events;
+#[path = "Gossipsub/mod.rs"]
+pub mod Gossipsub;
 
 // 重新导出常用类型
 pub use capability::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};
@@ -76,86 +78,8 @@ pub use session_stream::protocol::{
     Write_Session_Handshake, Read_Session_Handshake,
     write_session_frame, read_session_frame,
 };
-
-/// 构建本地节点信息 payload（"name|models_json|sessions_json"），用于 Info 协议交换
-pub fn build_local_info_payload(local: &crate::peer_management::PeerInfo) -> String {
-    let models_json = serde_json::to_string(&local.supported_models)
-        .unwrap_or_else(|_| "[]".to_string());
-    let sessions_json = serde_json::to_string(&local.sessions)
-        .unwrap_or_else(|_| "[]".to_string());
-    format!("{}|{}|{}", local.name, models_json, sessions_json)
-}
-
-/// 广播本地节点 Info 到所有远程节点，并通知 TUI 刷新
-///
-/// 内部流程：
-/// 1. 从 PeerManager 获取最新的本地 PeerInfo
-/// 2. 用 `build_local_info_payload` 构造三段 payload
-/// 3. 向所有远程节点发送 `DataType::Info`
-/// 4. 通过 EventBus 发布 `peer_info_updated`（含 models + sessions）
-///
-/// 调用方需先更新 PeerManager（如 `Update_Sessions` / `Update_Supported_Models`），
-/// 再调用本函数广播最新状态。
-pub async fn broadcast_local_info(
-    peer_manager: &dyn crate::peer_management::Peer_Management_Capability,
-    network: &dyn crate::network::Network_Capability,
-    event_bus: &crate::event_bus::EventBus,
-) {
-    use crate::event_bus::Bus_Event;
-
-    let local = match peer_manager.Get_Local_Peer().await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-
-    let info = build_local_info_payload(&local);
-
-    // 向所有远程节点发送 Info
-    if let Ok(peers) = peer_manager.Get_All_Peers().await {
-        for peer in &peers {
-            if peer.peer_id != local.peer_id {
-                let _ = network
-                    .send_data(peer.peer_id, request_response::DataType::Info, info.clone().into_bytes())
-                    .await;
-            }
-        }
-    }
-
-    // 通知 TUI 刷新
-    let models_display: Vec<serde_json::Value> = local
-        .supported_models
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "file_name": m.file_name,
-                "layer_range": m.layer_range(),
-            })
-        })
-        .collect();
-
-    let sessions_display: Vec<serde_json::Value> = local
-        .sessions
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "session_id": s.session_id,
-                "model_id": s.model_id,
-                "occupied_slots": s.occupied_slots,
-                "total_slots": s.total_slots,
-            })
-        })
-        .collect();
-
-    event_bus.Publish(Bus_Event::State {
-        payload: serde_json::json!({
-            "type": "peer_info_updated",
-            "peer_id": local.peer_id.to_string(),
-            "peer_name": local.name,
-            "is_local": true,
-            "models": models_display,
-            "sessions": sessions_display,
-        })
-        .to_string(),
-    });
-}
-
+// GossipSub 业务状态广播（re-export 保持调用方不变）
+pub use Gossipsub::{
+    TOPIC_PEER_INFO, TOPIC_MODELS, TOPIC_SESSIONS,
+    publish_peer_info, publish_models, publish_sessions,
+};

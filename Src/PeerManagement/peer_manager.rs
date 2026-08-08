@@ -35,6 +35,7 @@ impl PeerManager {
     }
 
     /// 添加或覆盖节点信息，返回 true=更新，false=新增
+    /// 添加或覆盖节点信息，返回 true=更新，false=新增
     pub(crate) async fn upsert_peer(&self, mut peer_info: PeerInfo) -> bool {
         let mut peers = self.peers.write().await;
         if let Some(old) = peers.get(&peer_info.peer_id) {
@@ -42,6 +43,10 @@ impl PeerManager {
             peer_info.last_active = old.last_active;
             peer_info.profile = old.profile.clone();
             peer_info.supported_models = old.supported_models.clone();
+            // sessions 为空时保留旧值（gossipsub 分 topic 消息到达，peer-info 消息可能不带 sessions）
+            if peer_info.sessions.is_empty() {
+                peer_info.sessions = old.sessions.clone();
+            }
             peer_info.local = old.local;
             if peer_info.name.is_empty() {
                 peer_info.name = old.name.clone();

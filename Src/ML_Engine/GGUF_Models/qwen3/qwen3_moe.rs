@@ -89,6 +89,7 @@ impl Qwen3MoE_Layer {
         is_moe: bool,
         moe_cfg: &MoeCfg,
         model_dtype: DType,
+        device: &Device,
     ) -> Result<Self> {
         let prefix = format!("blk.{layer_idx}");
 
@@ -114,7 +115,7 @@ impl Qwen3MoE_Layer {
         let mlp = if is_moe {
             let gate_qt = tensors.remove(&format!("{prefix}.ffn_gate_inp.weight"))
                 .ok_or_else(|| candle_core::Error::Msg(format!("missing: {prefix}.ffn_gate_inp.weight")))?;
-            let gate_ws = gate_qt.dequantize(&Device::Cpu)?.to_dtype(DType::F32)?;
+            let gate_ws = gate_qt.dequantize(device)?.to_dtype(DType::F32)?;
             let gate = candle_nn::Linear::new(gate_ws, None);
 
             let gate_experts = Arc::new(
@@ -248,6 +249,7 @@ impl Qwen3MoE_Model {
                 moe_cfg.num_experts > 0,
                 moe_cfg,
                 model_dtype,
+                device,
             )
             .map_err(|e| anyhow::anyhow!("Layer {} (blk.{}) assembly failed: {}", i, blk_idx, e))?;
             layers.push(layer);

@@ -5,7 +5,7 @@
 //!
 //! Network_Service 的命令通道事件处理方法。
 
-use libp2p::{kad, PeerId};
+use libp2p::{gossipsub, kad};
 use tracing::{debug, error, info, warn};
 
 use super::network_service::Network_Service;
@@ -69,6 +69,16 @@ impl Network_Service {
                 let record_key = kad::RecordKey::new(&key);
                 self.swarm.behaviour_mut().kademlia.get_record(record_key);
                 info!("DHT查询: {:?}", key);
+            }
+            NodeCommand::GossipsubPublish { topic, payload } => {
+                let topic_hash = gossipsub::TopicHash::from_raw(topic.clone());
+                match self.swarm.behaviour_mut().gossipsub.publish(topic_hash, payload) {
+                    Ok(msg_id) => debug!("gossipsub 发布成功: topic={} id={:?}", topic, msg_id),
+                    Err(e) => {
+                        // 无订阅者属正常情况（PublishError::NoPeersSubscribedToTopic）
+                        warn!("gossipsub 发布失败 ({}): {:?}", topic, e);
+                    }
+                }
             }
             NodeCommand::Dial { addr } => {
                 info!("尝试连接: {}", addr);
