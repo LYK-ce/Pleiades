@@ -4,19 +4,18 @@
 
 //! GossipSub 业务状态广播模块
 //!
-//! 负责三个业务 topic 的发布：
+//! 负责三个业务 topic 的常量定义与通用快照缓存：
 //! - `pleiades/peer-info`  — 节点身份（name；未来扩展算力/内存等硬件信息）
 //! - `pleiades/models`     — 模型能力（SupportedModel 列表 + 层位图）
 //! - `pleiades/sessions`   — 会话状态（SessionSummary 列表）
 //!
-//! 提供两层 API：
-//! - `Build_*_Payload`：纯函数，构造消息 payload（供 Network_Service 事件循环内直接发布）
-//! - `publish_*`：高层发布（Orchestrator 层调用，走 Network_Capability 命令通道）
-//!
-//! 注意：gossipsub 不回流本机，本地 TUI 刷新需显式发布 EventBus 事件。
+//! 分层职责（Task 20 重构后）：
+//! - **payload 构建**：业务层（PeerManagement::Build_*_Payload）负责，Network 层不解析业务结构
+//! - **发布唯一口**：`Network_Capability::publish_gossipsub(topic, payload)`（由调用方选 topic、构造 payload）
+//! - **快照机制**：Network 层只缓存 bytes，对方订阅 topic 时按 topic 精准重放（类似 MQTT retained message）
+//! - **接收侧**：Network 层消化（Handle_Gossipsub_Event），业务层无感
 
-use crate::event_bus::EventBus;
-use crate::peer_management::{Peer_Management_Capability, PeerInfo};
+use std::collections::HashMap;
 
 // ===== Topic 常量 =====
 
@@ -27,142 +26,39 @@ pub const TOPIC_MODELS: &str = "pleiades/models";
 /// sessions topic：会话状态（SessionSummary 列表）
 pub const TOPIC_SESSIONS: &str = "pleiades/sessions";
 
-// ===== Payload 构造（纯函数，供事件循环内直接发布） =====
+// ===== 快照缓存（通用消息层机制，类似 MQTT retained message） =====
 
-/// 构造 peer-info 消息 payload：`{"peer_id": "...", "name": "..."}`
-pub fn Build_Peer_Info_Payload(local: &PeerInfo) -> Vec<u8> {
-    serde_json::json!({
-        "peer_id": local.peer_id.to_string(),
-        "name": local.name,
-    }).to_string().into_bytes()
-}
-
-/// 构造 models 消息 payload：`Vec<SupportedModel>` JSON
-pub fn Build_Models_Payload(local: &PeerInfo) -> Vec<u8> {
-    serde_json::to_string(&local.supported_models)
-        .unwrap_or_else(|_| "[]".to_string())
-        .into_bytes()
-}
-
-/// 构造 sessions 消息 payload：`Vec<SessionSummary>` JSON
-pub fn Build_Sessions_Payload(local: &PeerInfo) -> Vec<u8> {
-    serde_json::to_string(&local.sessions)
-        .unwrap_or_else(|_| "[]".to_string())
-        .into_bytes()
-}
-
-// ===== 高层发布函数（Orchestrator 层调用） =====
-
-/// 发布本地节点身份（name）到 peer-info topic，并通知 TUI 刷新
+/// 快照缓存：缓存每个 topic 最近发布的 payload
 ///
-/// 调用方需先确保 PeerManager 本地节点信息已更新。
-pub async fn publish_peer_info(
-    peer_manager: &dyn Peer_Management_Capability,
-    network: &dyn crate::network::Network_Capability,
-    event_bus: &EventBus,
-) {
-    use crate::event_bus::Bus_Event;
-
-    let local = match peer_manager.Get_Local_Peer().await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-
-    let _ = network
-        .publish_gossipsub(TOPIC_PEER_INFO, Build_Peer_Info_Payload(&local))
-        .await;
-
-    // gossipsub 不回流本机，本地 TUI 刷新需显式发布
-    event_bus.Publish(Bus_Event::State {
-        payload: serde_json::json!({
-            "type": "peer_info_updated",
-            "peer_id": local.peer_id.to_string(),
-            "peer_name": local.name,
-            "is_local": true,
-            "models": [],
-            "sessions": [],
-        }).to_string(),
-    });
+/// - 发布（GossipsubPublish）时更新：无论是否有订阅者都更新——快照是"最近状态"，
+///   与订阅者无关，新节点加入订阅时重放即可
+/// - 收到对方 `Subscribed` 事件时按 topic 精准重放（gossipsub 只投递给已订阅者，
+///   订阅完成后发布必达，因此连接建立时不重放）
+pub struct SnapshotCache {
+    snapshots: HashMap<String, Vec<u8>>,
 }
 
-/// 发布本地模型能力（SupportedModel 列表 + 层位图）到 models topic，并通知 TUI 刷新
-pub async fn publish_models(
-    peer_manager: &dyn Peer_Management_Capability,
-    network: &dyn crate::network::Network_Capability,
-    event_bus: &EventBus,
-) {
-    use crate::event_bus::Bus_Event;
+impl SnapshotCache {
+    /// 创建空快照缓存
+    pub fn New() -> Self {
+        Self {
+            snapshots: HashMap::new(),
+        }
+    }
 
-    let local = match peer_manager.Get_Local_Peer().await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
+    /// 发布时更新快照（覆盖该 topic 最近一次 payload）
+    pub fn Update(&mut self, topic: &str, payload: Vec<u8>) {
+        self.snapshots.insert(topic.to_string(), payload);
+    }
 
-    let _ = network
-        .publish_gossipsub(TOPIC_MODELS, Build_Models_Payload(&local))
-        .await;
-
-    let models_display: Vec<serde_json::Value> = local
-        .supported_models
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "file_name": m.file_name,
-                "layer_range": m.layer_range(),
-            })
-        })
-        .collect();
-
-    event_bus.Publish(Bus_Event::State {
-        payload: serde_json::json!({
-            "type": "peer_info_updated",
-            "peer_id": local.peer_id.to_string(),
-            "peer_name": "",
-            "is_local": true,
-            "models": models_display,
-            "sessions": [],
-        }).to_string(),
-    });
+    /// 按 topic 取快照（精准重放用）
+    pub fn Get(&self, topic: &str) -> Option<Vec<u8>> {
+        self.snapshots.get(topic).cloned()
+    }
 }
 
-/// 发布本地会话状态（SessionSummary 列表）到 sessions topic，并通知 TUI 刷新
-pub async fn publish_sessions(
-    peer_manager: &dyn Peer_Management_Capability,
-    network: &dyn crate::network::Network_Capability,
-    event_bus: &EventBus,
-) {
-    use crate::event_bus::Bus_Event;
-
-    let local = match peer_manager.Get_Local_Peer().await {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-
-    let _ = network
-        .publish_gossipsub(TOPIC_SESSIONS, Build_Sessions_Payload(&local))
-        .await;
-
-    let sessions_display: Vec<serde_json::Value> = local
-        .sessions
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "session_id": s.session_id,
-                "model_id": s.model_id,
-                "occupied_slots": s.occupied_slots,
-                "total_slots": s.total_slots,
-            })
-        })
-        .collect();
-
-    event_bus.Publish(Bus_Event::State {
-        payload: serde_json::json!({
-            "type": "peer_info_updated",
-            "peer_id": local.peer_id.to_string(),
-            "peer_name": "",
-            "is_local": true,
-            "models": [],
-            "sessions": sessions_display,
-        }).to_string(),
-    });
+impl Default for SnapshotCache {
+    fn default() -> Self {
+        Self::New()
+    }
 }

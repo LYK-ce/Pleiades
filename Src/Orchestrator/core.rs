@@ -1,5 +1,6 @@
 // Presented by KeJi
-// Date ： 2026-05-16
+// Created Date ： 2026-05-16
+// Modified Date ： 2026-08-08
 
 mod branch_user;
 mod branch_command;
@@ -186,20 +187,57 @@ impl Core {
 
     // ─── Flush 管理 ────────────────────────────────────────
 
-    /// 执行 flush + 广播本地节点信息（GossipSub models/sessions topic），返回结果文本
+    /// 执行 flush + 广播本地节点信息（GossipSub peer-info/models/sessions topic），返回结果文本
     pub async fn do_flush(caps: &Capabilities) -> String {
         match caps.storage.Flush().await {
             Ok((added, removed)) => {
-                // 模型文件变更 → 广播 peer-info + models + sessions topic
-                crate::network::publish_peer_info(
-                    &*caps.peer_manager, &*caps.network, &caps.event_bus
-                ).await;
-                crate::network::publish_models(
-                    &*caps.peer_manager, &*caps.network, &caps.event_bus
-                ).await;
-                crate::network::publish_sessions(
-                    &*caps.peer_manager, &*caps.network, &caps.event_bus
-                ).await;
+                // 模型文件变更 → 业务层构造 payload + publish_gossipsub 广播 3 topic
+                if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
+                    let _ = caps.network.publish_gossipsub(
+                        crate::network::TOPIC_PEER_INFO,
+                        crate::peer_management::PeerManager::Build_Peer_Info_Payload(&local),
+                    ).await;
+                    let _ = caps.network.publish_gossipsub(
+                        crate::network::TOPIC_MODELS,
+                        crate::peer_management::PeerManager::Build_Models_Payload(&local),
+                    ).await;
+                    let _ = caps.network.publish_gossipsub(
+                        crate::network::TOPIC_SESSIONS,
+                        crate::peer_management::PeerManager::Build_Sessions_Payload(&local),
+                    ).await;
+
+                    // 本地 TUI 刷新：models 事件已由 Storage::Flush() 内部 Sync_Models_To_Peer_Manager 发；
+                    // name/sessions 事件原由 publish_* 内部发，此处显式补发（gossipsub 不回流本机）
+                    let peer_id_str = local.peer_id.to_string();
+                    caps.event_bus.Publish(crate::event_bus::Bus_Event::State {
+                        payload: serde_json::json!({
+                            "type": "peer_info_updated",
+                            "peer_id": peer_id_str.clone(),
+                            "peer_name": local.name,
+                            "is_local": true,
+                            "models": [],
+                            "sessions": [],
+                        }).to_string(),
+                    });
+                    let sessions_display: Vec<serde_json::Value> = local.sessions.iter().map(|s| {
+                        serde_json::json!({
+                            "session_id": s.session_id,
+                            "model_id": s.model_id,
+                            "occupied_slots": s.occupied_slots,
+                            "total_slots": s.total_slots,
+                        })
+                    }).collect();
+                    caps.event_bus.Publish(crate::event_bus::Bus_Event::State {
+                        payload: serde_json::json!({
+                            "type": "peer_info_updated",
+                            "peer_id": peer_id_str,
+                            "peer_name": "",
+                            "is_local": true,
+                            "models": [],
+                            "sessions": sessions_display,
+                        }).to_string(),
+                    });
+                }
                 format!("flush 完成: 新增 {} 个, 移除 {} 个", added, removed)
             }
             Err(e) => format!("flush 失败: {}", e),

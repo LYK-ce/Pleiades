@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Created Date ： 2026-04-24
+//Modified Date ： 2026-08-08
 
 //! 网络层模块
 //!
@@ -78,8 +79,8 @@ pub use session_stream::protocol::{
     Write_Session_Handshake, Read_Session_Handshake,
     write_session_frame, read_session_frame,
 };
-// GossipSub 业务状态广播（re-export 保持调用方不变）
+// GossipSub 业务 topic 常量与快照缓存（payload 构建在业务层 PeerManagement）
 pub use Gossipsub::{
     TOPIC_PEER_INFO, TOPIC_MODELS, TOPIC_SESSIONS,
-    publish_peer_info, publish_models, publish_sessions,
+    SnapshotCache,
 };
