@@ -31,24 +31,6 @@ impl Network_Service {
                 }
             }
 
-            NodeCommand::Broadcast { data_type, payload } => {
-                info!("广播数据 | type={:?} | size={} bytes", data_type, payload.len());
-                if let Ok(peer_infos) = self.peer_handle.Get_All_Peers().await {
-                    for peer_info in peer_infos {
-                        if peer_info.local {
-                            continue;
-                        }
-                        let request = Network_Data { data_type, payload: payload.clone() };
-                        // fire-and-forget：不注册 oneshot，不等待 Response（Task 9_1）
-                        self.swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_request(&peer_info.peer_id, request);
-                    }
-                } else {
-                    warn!("广播失败：获取节点列表失败");
-                }
-            }
             NodeCommand::PutRecord { key, value } => {
                 let record_key = kad::RecordKey::new(&key);
                 let record = kad::Record {
@@ -77,7 +59,7 @@ impl Network_Service {
                     Ok(msg_id) => debug!("gossipsub 发布成功: topic={} id={:?}", topic, msg_id),
                     Err(e) => {
                         // 无订阅者属正常情况（PublishError::NoPeersSubscribedToTopic）
-                        warn!("gossipsub 发布失败 ({}): {:?}", topic, e);
+                        debug!("gossipsub 发布失败 ({}): {:?}", topic, e);
                     }
                 }
                 // 快照更新：无论是否有订阅者都更新——快照是"最近状态"，

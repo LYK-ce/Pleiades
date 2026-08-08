@@ -25,6 +25,10 @@ pub const TOPIC_PEER_INFO: &str = "pleiades/peer-info";
 pub const TOPIC_MODELS: &str = "pleiades/models";
 /// sessions topic：会话状态（SessionSummary 列表）
 pub const TOPIC_SESSIONS: &str = "pleiades/sessions";
+/// robot pose topic：ORION 位姿帧（10Hz 高频遥测，Task 12）
+pub const TOPIC_ROBOT_POSE: &str = "pleiades/robot/pose";
+/// robot map topic：ORION 地图帧（增量/全量，状态快照，Task 12）
+pub const TOPIC_ROBOT_MAP: &str = "pleiades/robot/map";
 
 // ===== 快照缓存（通用消息层机制，类似 MQTT retained message） =====
 

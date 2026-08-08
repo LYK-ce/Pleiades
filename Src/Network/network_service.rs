@@ -382,6 +382,8 @@ impl Network_Service {
             gossipsub::IdentTopic::new(super::TOPIC_PEER_INFO),
             gossipsub::IdentTopic::new(super::TOPIC_MODELS),
             gossipsub::IdentTopic::new(super::TOPIC_SESSIONS),
+            gossipsub::IdentTopic::new(super::TOPIC_ROBOT_POSE),
+            gossipsub::IdentTopic::new(super::TOPIC_ROBOT_MAP),
         ];
         for t in &topics {
             if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(t) {

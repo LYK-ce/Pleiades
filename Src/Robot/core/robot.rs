@@ -28,7 +28,7 @@ use crate::robot::slam::{self, OccupancyGrid, RobotPose};
 use std::time::Instant;
 
 use crate::event_bus::{Bus_Event, EventBus};
-use crate::network::{DataType, NodeHandle};
+use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
     encode_frame, encode_map_delta, encode_pose, now_boot_ms, sysid_from_multihash,
     COMPID_ROBOT, MapDeltaEntry, MSGID_MAP_DELTA, MSGID_POSE, PoseData,
@@ -223,7 +223,7 @@ async fn state_notifier(
                     };
                     // ORION 协议：位姿帧广播（2026-08-07 协议统一，替代散装 JSON）
                     let frame = encode_frame(MSGID_POSE, sysid, COMPID_ROBOT, &encode_pose(&pose));
-                    if let Err(e) = nh.Broadcast(DataType::Robot, frame) {
+                    if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_POSE, frame).await {
                         warn!("[Robot] 位姿广播失败: {e}");
                     }
                 }
@@ -292,7 +292,7 @@ async fn slam_task(
                             // ORION 协议：地图增量帧广播（2026-08-07 协议统一，替代散装 JSON）
                             let payload = encode_map_delta(now_boot_ms(), &entries);
                             let frame = encode_frame(MSGID_MAP_DELTA, sysid, COMPID_ROBOT, &payload);
-                            if let Err(e) = nh.Broadcast(DataType::Robot, frame) {
+                            if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_MAP, frame).await {
                                 warn!("[Robot] 地图增量广播失败: {e}");
                             }
                         }

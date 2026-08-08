@@ -70,11 +70,6 @@ pub enum NodeCommand {
     Dial { addr: Multiaddr },
     /// 断开连接
     Disconnect { peer: PeerId },
-    /// 广播到所有已知节点（fire-and-forget，不等待 Response，Task 9_1）
-    Broadcast {
-        data_type: DataType,
-        payload: Vec<u8>,
-    },
     /// 停止节点
     Stop,
 }
@@ -141,15 +136,6 @@ impl NodeHandle {
         Ok(result)
     }
 
-    /// 广播到所有已知节点（fire-and-forget，立即返回，不等待 Response）
-    ///
-    /// 由 Network_Service 事件循环遍历 peer 列表逐个发送（Task 9_1）。
-    pub fn Broadcast(&self, data_type: DataType, payload: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.cmd_tx
-            .try_send(NodeCommand::Broadcast { data_type, payload })
-            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
-        Ok(())
-    }
 
     /// 回复入站请求（通过 request_id）
     ///
@@ -204,6 +190,17 @@ impl NodeHandle {
             topic: topic.to_string(),
             payload,
         }).await?;
+        Ok(())
+    }
+
+    /// 发布消息到 GossipSub topic（同步 fire-and-forget 版本：channel 满即丢弃，不等待）
+    pub fn Gossipsub_Publish_Try(&self, topic: &str, payload: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.cmd_tx
+            .try_send(NodeCommand::GossipsubPublish {
+                topic: topic.to_string(),
+                payload,
+            })
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
         Ok(())
     }
 

@@ -192,21 +192,8 @@ impl Network_Service {
                             }
                         }
                         DataType::Robot => {
-                            // Task 9_1：机器人数据原样转发 robot_bus，不解析
-                            // 2026-08-07 协议统一：ORION 帧为二进制，走 StreamRaw（原始字节），
-                            // 不再 from_utf8_lossy（会损坏二进制帧）
-                            let _ = self.robot_bus.Publish(Bus_Event::StreamRaw {
-                                payload: request.payload,
-                            });
-                            // 回最小响应闭合协议状态机（防发送方 30s 超时风暴）
-                            let response = Network_Data {
-                                data_type: DataType::Robot,
-                                payload: b"OK".to_vec(),
-                            };
-                            if let Err(e) = self.swarm.behaviour_mut()
-                                .request_response.send_response(channel, response) {
-                                error!("Robot 入站回复失败: {:?}", e);
-                            }
+                            // Robot 广播已迁移 gossipsub topic（Task 12），RR 通道不再承载
+                            warn!("收到 DataType::Robot 消息（已废弃，走 gossipsub），忽略 from {}", peer);
                         }
                         DataType::Info => {
                             // Info 类型已废弃（业务状态改走 GossipSub），仅记录日志
@@ -391,6 +378,10 @@ impl Network_Service {
                                 "sessions": sessions_display,
                             }).to_string(),
                         });
+                    }
+                    super::TOPIC_ROBOT_POSE | super::TOPIC_ROBOT_MAP => {
+                        // ORION 二进制帧（位姿/地图），不做 JSON 解析，直接透传 robot_bus（Task 12：由 RR 广播迁移到 gossipsub）
+                        let _ = self.robot_bus.Publish(Bus_Event::StreamRaw { payload: message.data });
                     }
                     _ => { debug!("未知 gossipsub topic: {}", message.topic); }
                 }
