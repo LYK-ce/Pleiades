@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-05-16
+//Created Date ： 2026-05-16
+//Modified Date ： 2026-08-08
 
 //! 命令处理器
 //!
@@ -53,13 +54,16 @@ impl Network_Service {
             }
             NodeCommand::GossipsubPublish { topic, payload } => {
                 let topic_hash = gossipsub::TopicHash::from_raw(topic.clone());
-                match self.swarm.behaviour_mut().gossipsub.publish(topic_hash, payload) {
+                match self.swarm.behaviour_mut().gossipsub.publish(topic_hash, payload.clone()) {
                     Ok(msg_id) => debug!("gossipsub 发布成功: topic={} id={:?}", topic, msg_id),
                     Err(e) => {
                         // 无订阅者属正常情况（PublishError::NoPeersSubscribedToTopic）
                         warn!("gossipsub 发布失败 ({}): {:?}", topic, e);
                     }
                 }
+                // 快照更新：无论是否有订阅者都更新——快照是"最近状态"，
+                // 新节点订阅 topic 时按 topic 精准重放即可
+                self.snapshot_cache.Update(&topic, payload);
             }
             NodeCommand::Dial { addr } => {
                 info!("尝试连接: {}", addr);

@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-04-29
+//Created Date ： 2026-04-29
+//Modified Date ： 2026-08-08
 
 //! 网络服务核心模块
 //! 负责Swarm管理、连接管理、事件处理
@@ -56,6 +57,7 @@ use super::capability::{Network_Inbound_Event, Network_Service_Capability};
 use super::file_stream::protocol::FILE_STREAM_PROTOCOL;
 use super::tensor_stream::protocol::TENSOR_STREAM_PROTOCOL;
 use super::tensor_stream::rendezvous::RendezvousMap;
+use super::Gossipsub::SnapshotCache;
 use super::bandwidth_stream::protocol::{
     BANDWIDTH_STREAM_PROTOCOL,
     Receive_And_Count, Write_Bandwidth_Result,
@@ -170,6 +172,8 @@ pub struct Network_Service {
 
     /// 张量流双向匹配器（与 Network_Service_Capability 共享）
     pub(crate) rendezvous: Arc<RendezvousMap>,
+    /// GossipSub 快照缓存（最近发布状态，对方订阅 topic 时按 topic 精准重放）
+    pub(crate) snapshot_cache: SnapshotCache,
 }
 
 impl Network_Service {
@@ -335,6 +339,7 @@ impl Network_Service {
             bandwidth_accept_control,
             session_accept_control,
             rendezvous,
+            snapshot_cache: SnapshotCache::New(),
         };
 
         // 添加引导节点

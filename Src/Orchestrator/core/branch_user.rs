@@ -1,5 +1,6 @@
 // Presented by KeJi
-// Date ： 2026-05-19
+// Created Date ： 2026-05-19
+// Modified Date ： 2026-08-08
 
 //! B1: 用户命令路由。
 //!
@@ -155,11 +156,23 @@ impl Core {
                             format!("名称已设置为 {}，但持久化失败: {}", name, e)
                         } else {
                             // 广播新的节点名称（GossipSub peer-info topic）
-                            crate::network::publish_peer_info(
-                                &*self.capabilities.peer_manager,
-                                &*self.capabilities.network,
-                                &self.capabilities.event_bus,
-                            ).await;
+                            if let Ok(local) = self.capabilities.peer_manager.Get_Local_Peer().await {
+                                let _ = self.capabilities.network.publish_gossipsub(
+                                    crate::network::TOPIC_PEER_INFO,
+                                    crate::peer_management::PeerManager::Build_Peer_Info_Payload(&local),
+                                ).await;
+                                // 本地 TUI 刷新（gossipsub 不回流本机，显式发布）
+                                self.capabilities.event_bus.Publish(Bus_Event::State {
+                                    payload: serde_json::json!({
+                                        "type": "peer_info_updated",
+                                        "peer_id": local.peer_id.to_string(),
+                                        "peer_name": local.name,
+                                        "is_local": true,
+                                        "models": [],
+                                        "sessions": [],
+                                    }).to_string(),
+                                });
+                            }
                             format!("节点名称已设置为: {}", name)
                         }
                     }
@@ -396,7 +409,31 @@ impl Core {
                     }
 
                     // 广播本地会话状态（GossipSub sessions topic + EventBus → TUI）
-                    crate::network::publish_sessions(&*caps.peer_manager, &*caps.network, &caps.event_bus).await;
+                    if let Ok(local) = caps.peer_manager.Get_Local_Peer().await {
+                        let _ = caps.network.publish_gossipsub(
+                            crate::network::TOPIC_SESSIONS,
+                            crate::peer_management::PeerManager::Build_Sessions_Payload(&local),
+                        ).await;
+                        // 本地 TUI 刷新（gossipsub 不回流本机，显式发布）
+                        let sessions_display: Vec<serde_json::Value> = local.sessions.iter().map(|s| {
+                            serde_json::json!({
+                                "session_id": s.session_id,
+                                "model_id": s.model_id,
+                                "occupied_slots": s.occupied_slots,
+                                "total_slots": s.total_slots,
+                            })
+                        }).collect();
+                        caps.event_bus.Publish(crate::event_bus::Bus_Event::State {
+                            payload: serde_json::json!({
+                                "type": "peer_info_updated",
+                                "peer_id": local.peer_id.to_string(),
+                                "peer_name": "",
+                                "is_local": true,
+                                "models": [],
+                                "sessions": sessions_display,
+                            }).to_string(),
+                        });
+                    }
 
                     caps.event_bus.Publish(crate::event_bus::Bus_Event::Notify {
                         level: crate::event_bus::NotifyLevel::Info,

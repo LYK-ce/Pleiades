@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-05-16
+//Created Date ： 2026-05-16
+//Modified Date ： 2026-08-08
 
 //! Swarm 事件处理器
 //!
@@ -42,8 +43,6 @@ impl Network_Service {
                 );
                 self.peer_handle.Upsert_Peer(peer_info).await.ok();
 
-                // 连接建立后发布本地业务状态（gossipsub 无历史回放，新 peer 只能收到订阅后的消息）
-                self.publish_local_state_to_gossipsub().await;
 
                 self.event_bus.Publish(Bus_Event::State {
                     payload: serde_json::json!({
@@ -267,32 +266,6 @@ impl Network_Service {
         }
     }
 
-    /// 发布本地业务状态到全部 GossipSub topic（连接建立 / 对方订阅时调用）
-    ///
-    /// gossipsub 无历史回放，新 peer 只能收到订阅后的消息；
-    /// 因此在连接建立与收到 Subscribed 事件时主动发布一次，确保新 peer 能拿到本机状态。
-    async fn publish_local_state_to_gossipsub(&mut self) {
-        use crate::network::Gossipsub::{
-            Build_Models_Payload, Build_Peer_Info_Payload, Build_Sessions_Payload,
-            TOPIC_MODELS, TOPIC_PEER_INFO, TOPIC_SESSIONS,
-        };
-
-        let Ok(local) = self.peer_handle.Get_Local_Peer().await else { return };
-
-        let _ = self.swarm.behaviour_mut().gossipsub.publish(
-            gossipsub::TopicHash::from_raw(TOPIC_PEER_INFO),
-            Build_Peer_Info_Payload(&local),
-        );
-        let _ = self.swarm.behaviour_mut().gossipsub.publish(
-            gossipsub::TopicHash::from_raw(TOPIC_MODELS),
-            Build_Models_Payload(&local),
-        );
-        let _ = self.swarm.behaviour_mut().gossipsub.publish(
-            gossipsub::TopicHash::from_raw(TOPIC_SESSIONS),
-            Build_Sessions_Payload(&local),
-        );
-    }
-
     /// 处理 Identify 事件（连接建立后自动交换的协议级元信息）
     pub(super) async fn Handle_Identify_Event(&mut self, event: identify::Event) {
         match event {
@@ -405,10 +378,17 @@ impl Network_Service {
                     _ => { debug!("未知 gossipsub topic: {}", message.topic); }
                 }
             }
-            gossipsub::Event::Subscribed { peer_id, .. } => {
-                // 对方订阅 topic：补发本地业务状态（弥补 gossipsub 无历史回放）
-                debug!("节点订阅 gossipsub topic: {}", peer_id);
-                self.publish_local_state_to_gossipsub().await;
+            gossipsub::Event::Subscribed { peer_id, topic } => {
+                // 对方订阅 topic：按 topic 精准重放快照（快照机制，类似 MQTT retained message）
+                // gossipsub 只投递给已订阅者，订阅完成后发布必达；
+                // 连接建立时不重放——对方可能尚未完成订阅。
+                debug!("节点订阅 gossipsub topic: {} (peer: {})", topic, peer_id);
+                if let Some(payload) = self.snapshot_cache.Get(topic.as_str()) {
+                    let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                        gossipsub::TopicHash::from_raw(topic.as_str().to_string()),
+                        payload,
+                    );
+                }
             }
             gossipsub::Event::Unsubscribed { peer_id, .. } => {
                 debug!("节点退订 gossipsub topic: {}", peer_id);

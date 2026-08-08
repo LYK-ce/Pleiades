@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date : 2026-05-13
-//Modified Date ： 2026-06-15
+//Modified Date ： 2026-08-08
 
 //! 节点管理器核心组件
 //!
@@ -34,6 +34,29 @@ impl PeerManager {
         }
     }
 
+    // ===== 业务层 payload 构建（GossipSub 广播用，纯函数） =====
+
+    /// 构造 peer-info 消息 payload：`{"peer_id": "...", "name": "..."}`
+    pub fn Build_Peer_Info_Payload(local: &PeerInfo) -> Vec<u8> {
+        serde_json::json!({
+            "peer_id": local.peer_id.to_string(),
+            "name": local.name,
+        }).to_string().into_bytes()
+    }
+
+    /// 构造 models 消息 payload：`Vec<SupportedModel>` JSON
+    pub fn Build_Models_Payload(local: &PeerInfo) -> Vec<u8> {
+        serde_json::to_string(&local.supported_models)
+            .unwrap_or_else(|_| "[]".to_string())
+            .into_bytes()
+    }
+
+    /// 构造 sessions 消息 payload：`Vec<SessionSummary>` JSON
+    pub fn Build_Sessions_Payload(local: &PeerInfo) -> Vec<u8> {
+        serde_json::to_string(&local.sessions)
+            .unwrap_or_else(|_| "[]".to_string())
+            .into_bytes()
+    }
     /// 添加或覆盖节点信息，返回 true=更新，false=新增
     /// 添加或覆盖节点信息，返回 true=更新，false=新增
     pub(crate) async fn upsert_peer(&self, mut peer_info: PeerInfo) -> bool {
