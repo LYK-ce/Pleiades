@@ -66,7 +66,7 @@
 | async 背压 vs try_send | `.await` 阻塞概率≈0（15 条/秒 vs channel 容量 100）；选⑦可保留满则丢弃语义 |
 | 无订阅者日志刷屏 | 选⑥降 debug 解决 |
 | 二进制透传 | ✅ `message.data` 原样（Signed 模式下签名独立字段，不污染 payload） |
-| Strict validation 短板 | ⚠️ 已知：代码未调用 `report_message_validation_result`，3+ 节点 gossip 只传 1 跳不 fan-out（LAN 全互联无影响；peer-info/models/sessions 同受限）——**记入问题池，不本次处理** |
+| 消息验证 | ✅ 无问题（2026-08-09 人类核查纠正）：`Config::validate_messages` 默认 **false**（config.rs:517）→ 收到即自动验证并转发（behaviour.rs:1732/1881），3+ 节点 fan-out 正常；`report_message_validation_result` 仅在 `validate_messages(true)` 时才需调用（config.rs:801 文档）——0 处调用完全正确。`validation_mode=Strict` 唯一实际作用：要求签名消息（Signed 已满足）。**未来防恶意注入**才需开启 `validate_messages()` + 验收表态 |
 | 帧大小 | KB 级 << 1MiB 默认上限；未来 map 全量超限时单独调大 map topic 的 max_transmit_size |
 | t07 集成测试 | 不引用 Broadcast/DataType::Robot，删旧路径不影响（该测试相对 merge 后代码本就过期，与本任务无关） |
 | 快照机制 | Task 20 SnapshotCache 对 map topic 自动生效（新节点订阅即拿最近地图快照）；pose 高频流快照意义小但无害 |

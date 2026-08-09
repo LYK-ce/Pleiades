@@ -29,7 +29,7 @@
 **编译验证**：`cargo check` ✅ + `cargo build --release --bin orion-robot` ✅（26 个存量警告不变）
 
 **遗留**：
-- Strict validation 短板（3+ 节点 gossip 不 fan-out）→ 记入 robot_review_problem.md 待处理
+- ~~Strict validation 短板~~（2026-08-09 人类核查纠正：`validate_messages` 默认 false，fan-out 正常，误报已更正，详见 task_12 文档）
 - 双车联调验证（验证计划见 task_12 文档）待实车/测试环境执行
 
 ## 依赖关系
