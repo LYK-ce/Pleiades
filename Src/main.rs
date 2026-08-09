@@ -123,9 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let core = Core::new(capabilities.clone(), user_cmd_rx, inbound_rx, net_event_rx);
     info!("Orchestrator Core 初始化完成");
 
-    // 启动时后台 flush
-    Core::spawn_initial_flush(capabilities.clone());
-
     // ══════════════════════════════════════════════════════
     // Phase 6: 启动运行时
     // ══════════════════════════════════════════════════════
@@ -140,6 +137,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pleiades::cli::spawn_stdout_subscriber(&event_bus);
         pleiades::cli::spawn_stdin_repl(user_cmd_tx.clone());
         info!("进入 Orchestrator 主循环 (CLI 模式)");
+        // 先订阅再 flush：本机 peer_info_updated 一次性事件必须被订阅者收到（broadcast 无重放）
+        core.spawn_initial_flush();
         core.run().await;
     } else {
         let event_rx = event_bus.Subscribe();
@@ -147,6 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TUI_Loop(event_rx, user_cmd_tx);
         });
         info!("进入 Orchestrator 主循环");
+        // 先订阅再 flush：本机 peer_info_updated 一次性事件必须被 TUI 收到（broadcast 无重放）
+        core.spawn_initial_flush();
         core.run().await;
     }
 

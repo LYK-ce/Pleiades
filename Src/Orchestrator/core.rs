@@ -244,8 +244,12 @@ impl Core {
         }
     }
 
-    /// 启动时后台触发初始 flush（fire-and-forget）
-    pub fn spawn_initial_flush(caps: Arc<Capabilities>) {
+    /// 后台触发初始 flush（fire-and-forget）
+    ///
+    /// 必须在 EventBus 订阅者就位后调用：本机 peer_info_updated 是一次性事件，
+    /// broadcast 无历史重放，先订阅再 flush 才能保证 TUI/CLI 收到（2026-08-09 修复）。
+    pub fn spawn_initial_flush(&self) {
+        let caps = self.capabilities.clone();
         tokio::spawn(async move {
             let text = Self::do_flush(&caps).await;
             tracing::info!("初始 {}", text);
