@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-06
-//Modified Date ： 2026-08-06
+//Modified Date ： 2026-08-09
 
 //! 启动组装层（Task 9_2）
 //!
@@ -59,6 +59,9 @@ impl CoreBootstrap {
             TUI_Loop(event_rx, self.user_cmd_tx);
         });
         info!("进入 Orchestrator 主循环");
+
+        // 先订阅再 flush：本机 peer_info_updated 一次性事件必须被 TUI 收到（broadcast 无重放，2026-08-09 与 ML_review 同步修复）
+        self.core.spawn_initial_flush();
 
         self.core.run().await;
         info!("Pleiades 已退出");
@@ -167,8 +170,6 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     let core = Core::new(capabilities.clone(), user_cmd_rx, inbound_rx, net_event_rx);
     info!("Orchestrator Core 初始化完成");
 
-    // 启动时后台 flush
-    Core::spawn_initial_flush(capabilities.clone());
 
     Ok(CoreBootstrap { config, event_bus, robot_bus, node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
 }
