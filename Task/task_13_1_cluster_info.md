@@ -8,7 +8,7 @@
 
 ## 目标
 
-1. **入站数据接入**：gossipsub 入站 POSE 帧从"仅打印"升级为 `ClusterInfo` 表（按 peer_id 动态建表 + stale 超时），使"其他车"数据真正可消费
+1. **入站数据接入**：gossipsub 入站 POSE 帧从"仅打印"升级为 `ClusterInfo` 表（按 peer_id 动态建表），使"其他车"数据真正可消费
 2. **POSE 意图扩展**：广播本车 subtarget（D* 寻路下一格），接收方存入表——为后续"寻路时把车当障碍注入"（P0）铺数据基础
 
 ## 背景
@@ -22,8 +22,8 @@
 | 议题 | 决策 |
 |---|---|
 | 模块结构 | 新建 `Src/Robot/core/cluster/`（`mod.rs` + `consumer.rs` + `cluster_info.rs`） |
-| 表模型 | **单表** `ClusterInfo`（RemoteRobotInfo），键 = 完整 peer_id；**stale 标记保留不删**；不做"离线车障碍表"（避免过度设计，语义留给消费端） |
-| 表语义 | 活跃车 = 动态障碍；stale 车 = 按最后位置当障碍（断电车仍物理存在）——未来 P0 寻路注入时统一处理 |
+| 表模型 | **单表** `ClusterInfo`（RemoteRobotInfo），键 = 完整 peer_id；**本阶段不做超时处理**（last_seen 仅记录、不触发任何动作，超时语义留未来消费端）；不做"离线车障碍表"（避免过度设计） |
+| 表语义 | 活跃车 = 动态障碍；数据陈旧的车 = 按最后位置当障碍（断电车仍物理存在）——语义留未来 P0 寻路注入时消费端统一处理 |
 | 意图状态 | `ExecuteState`（替代初议 IntentState）：`sub_target: Option<(i32,i32)>`，放 `state.rs` 与 RobotState/LidarState 并列 |
 | 写者语义 | **executor 写**（sub_target 是 executor 维护的）：`step()` 增加 `&mut ExecuteState` 参数，结尾统一同步 `self.sub_target`；executor 不持有 Arc |
 | 意图字段 | subtarget = D* 下一格（格坐标 i32×2）；**第一版只做 1 格**（k 格 + 时间窗留扩展字段，multi_robot_control §8 待决策 1 已定） |
@@ -41,7 +41,7 @@
 | 2 | `Src/Robot/core/state.rs` | 新增 `ExecuteState { sub_target: Option<(i32,i32)> }`（Default） |
 | 3 | `Src/Robot/core/executor.rs` | `step()` 签名加 `intent_state: &mut ExecuteState`；结尾 `intent_state.sub_target = self.sub_target;` |
 | 4 | `Src/Robot/core/cluster/mod.rs` | 模块声明 + re-export |
-| 5 | `Src/Robot/core/cluster/cluster_info.rs` | `ClusterInfo` 结构（peer_id/x/y/yaw/vx/vy/time_boot_ms/last_seen/sub_target）+ 表 `ClusterInfoTable`（Arc<RwLock<HashMap<Vec<u8>, ClusterInfo>>>）+ `is_stale()`（0.5s 起步，常量可调）+ 单测 |
+| 5 | `Src/Robot/core/cluster/cluster_info.rs` | `ClusterInfo` 结构（peer_id/x/y/yaw/vx/vy/time_boot_ms/last_seen/sub_target）+ 表 `ClusterInfoTable`（Arc<RwLock<HashMap<Vec<u8>, ClusterInfo>>>）+ 基础单测（写入/覆盖/查询，**不做超时判定**） |
 | 6 | `Src/Robot/core/cluster/consumer.rs` | `cluster_consumer` task：订阅 robot_bus → `decode_frame` → 过滤本车（本地 peer_id 比对）→ `decode_pose` → 写表 → debug 日志；CancellationToken 生命周期；单测（可测部分） |
 | 7 | `Src/Robot/core/robot.rs` | ① `launch`：创建 `ExecuteState` + `ClusterInfoTable`，spawn `cluster_consumer`（同 state_notifier 模式）；② `state_notifier`：读 execute_state → POSE 帧带 valid+sub 字段；③ `main_loop`：**移除 robot_bus 订阅打印分支**（broadcast 双订阅：consumer 接管）；④ auto_tick：`executor.step(..., &mut *execute_state.write().await)`；⑤ `Pose` 广播结构加 sub_target（pose_tx 消费方 WS 同步） |
 | 8 | `Src/WebSocket/server.rs` | pose 转发 `PoseData` 组装带 sub_target（WS 下行帧与 gossip 链路一致） |
@@ -69,7 +69,7 @@ POSE payload（msgid=1）新：33B
 1. `messages.rs`：POSE 扩展 + 测试
 2. `state.rs`：`ExecuteState`
 3. `executor.rs`：step 参数化
-4. `cluster/`：cluster_info.rs（表+stale+单测）→ consumer.rs → mod.rs
+4. `cluster/`：cluster_info.rs（表+单测，无超时逻辑）→ consumer.rs → mod.rs
 5. `robot.rs`：launch/spawn + state_notifier 组帧 + main_loop 移除打印 + auto_tick 传参
 6. `server.rs`：WS 下行带 sub_target
 7. `cargo check` + `cargo test --lib robot`（protocol + cluster）+ `cargo build --release --bin orion-robot`
@@ -82,12 +82,12 @@ POSE payload（msgid=1）新：33B
 2. **broadcast 双订阅**：main_loop 打印分支必须移除，否则重复处理（tokio broadcast 是广播非竞争消费）
 3. **subtarget None 编码**：valid=0 时接收方必须忽略 sub 坐标（约定好，测试覆盖）
 4. **锁时序**：consumer 写表 vs 未来读——RwLock 粒度；auto_tick 增加 execute_state 写锁（与现有锁无交叉，无死锁风险）
-5. **time_boot_ms 跨车不可比**：表内仅作数据标签，新鲜度一律用本地 `last_seen`（Instant）
+5. **time_boot_ms 跨车不可比**：表内仅作数据标签；`last_seen` 本阶段只记录不消费（超时处理留后续，人类 2026-08-10 决策）
 
-## 待决策点
+## 待决策点（已定 2026-08-10）
 
-1. stale 超时时长：0.5s 起步（设计文档建议值），实车联调后按丢包情况调整
-2. WS 下行带 subtarget：**建议带**（Pictor 可显示意图）——已并入实施计划，如有异议可改
+1. ✅ 超时处理：**不做**——超时就超时，不删除不标记不淘汰；`last_seen` 仅记录供未来消费端使用
+2. ✅ WS 下行带 subtarget：**带**（Pictor 可显示意图）——已并入实施计划
 
 ---
 

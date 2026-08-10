@@ -23,7 +23,7 @@
 
 **范围**：POSE 扩展(33B) + ExecuteState + cluster 模块（表/consumer）+ state_notifier 组帧 + main_loop 移除打印 + WS 下行同步。
 
-**待人类拍板**：stale 超时（0.5s 起步）；WS 带 subtarget（建议带）。
+**已拍板（2026-08-10）**：① 超时处理**不做**——超时就超时，不删除/标记/淘汰，last_seen 仅记录供未来消费端；② WS 下行**带** subtarget（Pictor 可显示意图）。
 
 ## 依赖关系
 
