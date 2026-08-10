@@ -23,11 +23,12 @@ use super::mode::OpMode;
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::types::CarType;
-use crate::robot::core::state::{LidarState, RobotState};
+use crate::robot::core::state::{ExecuteState, LidarState, RobotState};
 use crate::robot::slam::{self, OccupancyGrid, RobotPose};
 use std::time::Instant;
 
-use crate::event_bus::{Bus_Event, EventBus};
+use crate::event_bus::EventBus;
+use crate::robot::core::cluster::{cluster_consumer, ClusterInfoTable};
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
     encode_frame, encode_map_delta, encode_pose, now_boot_ms,
@@ -41,6 +42,8 @@ pub struct Pose {
     pub x: f32, pub y: f32, pub z: f32,
     pub yaw: f32,
     pub vx: f32, pub vy: f32,
+    /// 本车意图：D* 寻路下一格（Task 13_1，WS 下行带）
+    pub sub_target: Option<(i32, i32)>,
 }
 
 /// 地图增量广播消息
@@ -64,6 +67,8 @@ pub struct Robot {
     pub map_tx: broadcast::Sender<Vec<MapDelta>>,
     pub op_mode: Arc<RwLock<OpMode>>,
     pub mission_queue: Arc<RwLock<MissionQueue>>,
+    /// 集群信息表（Task 13_1：远端车状态，consumer 写 / 未来消费端读）
+    pub cluster_table: Arc<ClusterInfoTable>,
     cancel: CancellationToken,
 }
 
@@ -106,6 +111,12 @@ impl Robot {
         let op_mode = Arc::new(RwLock::new(OpMode::default()));
         let mission_queue = Arc::new(RwLock::new(MissionQueue::default()));
 
+        // 3.1 执行器意图状态（Task 13_1：executor 写，state_notifier 读）
+        let execute_state = Arc::new(RwLock::new(ExecuteState::default()));
+
+        // 3.2 集群信息表（Task 13_1：入站 POSE → 表）
+        let cluster_table = Arc::new(ClusterInfoTable::new());
+
         // 4. spawn STM32 Device
         let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?;
 
@@ -143,8 +154,10 @@ impl Robot {
         let notifier_name = peer_name.clone();
         // Task 13 阶段一：peer_id 为常量，launch 时算一次传闭包（顺带修 P3#9 每拍重算）
         let notifier_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes());
+        // Task 13_1：execute_state 供组帧带意图
+        let notifier_exec = execute_state.clone();
         tokio::spawn(async move {
-            state_notifier(notifier_state, notifier_tx, notifier_handle, notifier_name, notifier_peer_id, notifier_cancel).await;
+            state_notifier(notifier_state, notifier_tx, notifier_handle, notifier_name, notifier_peer_id, notifier_exec, notifier_cancel).await;
         });
 
         // 6. spawn SLAM task
@@ -162,28 +175,37 @@ impl Robot {
             slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_cancel).await;
         });
 
-        // 7. 命令通道
+        // 7. 集群入站消费者（Task 13_1：robot_bus → ClusterInfo 表，独立 task 数据面）
+        let consumer_bus = robot_bus.clone();
+        let consumer_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default();
+        let consumer_table = cluster_table.clone();
+        let consumer_cancel = cancel.clone();
+        tokio::spawn(async move {
+            cluster_consumer(consumer_bus, consumer_peer_id, consumer_table, consumer_cancel).await;
+        });
+
+        // 8. 命令通道
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
 
-        // 8. spawn 主循环
+        // 9. spawn 主循环
         let loop_cancel = cancel.clone();
         let loop_op_mode = op_mode.clone();
         let loop_mission = mission_queue.clone();
         let loop_robot_state = robot_state.clone();
         let loop_lidar_state = lidar_state.clone();
         let loop_grid = grid.clone();
-        let loop_robot_bus = robot_bus.clone();
+        let loop_execute_state = execute_state.clone();
         tokio::spawn(async move {
             main_loop(
                 stm32, lidar, cmd_rx,
                 loop_op_mode, loop_mission,
                 loop_robot_state, loop_lidar_state, loop_grid,
-                loop_robot_bus,
+                loop_execute_state,
                 loop_cancel,
             ).await;
         });
 
-        Ok(Self { robot_cmd_tx: cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, op_mode, mission_queue, cancel })
+        Ok(Self { robot_cmd_tx: cmd_tx, robot_state, lidar_state, grid, pose_tx, map_tx, op_mode, mission_queue, cluster_table, cancel })
     }
 
     /// 优雅退出
@@ -202,6 +224,7 @@ async fn state_notifier(
     node_handle: Option<Arc<NodeHandle>>,
     peer_name: String,
     local_peer_id: Option<Vec<u8>>,
+    execute_state: Arc<RwLock<ExecuteState>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -209,12 +232,15 @@ async fn state_notifier(
         select! {
             _ = interval.tick() => {
                 let s = state.read().await;
+                // Task 13_1：意图状态（executor 写），两把读锁无交叉
+                let es = execute_state.read().await;
                 let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {
                     time_boot_ms,
                     x: s.x, y: s.y, z: 0.0,
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
+                    sub_target: es.sub_target,
                 });
 
                 // Task 9_2：位姿广播到集群（fire-and-forget，Network 只搬运字节）
@@ -225,6 +251,10 @@ async fn state_notifier(
                         x: s.x, y: s.y,
                         vx: s.vx, vy: s.vy,
                         yaw: s.attitude.yaw,
+                        // Task 13_1：意图广播（下一格）；无任务 valid=false
+                        valid: es.sub_target.is_some(),
+                        sub_gx: es.sub_target.map(|(gx, _)| gx).unwrap_or(0),
+                        sub_gy: es.sub_target.map(|(_, gy)| gy).unwrap_or(0),
                     };
                     // ORION 协议：位姿帧广播（2026-08-07 协议统一，替代散装 JSON）
                     let frame = encode_frame(MSGID_POSE, peer_id, COMPID_ROBOT, &encode_pose(&pose));
@@ -326,7 +356,7 @@ async fn main_loop(
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
     grid: Arc<RwLock<OccupancyGrid>>,
-    robot_bus: Option<Arc<EventBus>>,
+    execute_state: Arc<RwLock<ExecuteState>>,
     cancel: CancellationToken,
 ) {
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
@@ -335,27 +365,8 @@ async fn main_loop(
     let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
-    let mut robot_rx = robot_bus.as_ref().map(|b| b.Subscribe());
-
     loop {
         select! {
-            robot_ev = recv_robot_event(&mut robot_rx) => {
-                // Task 9_2：入站机器人数据暂不处理，仅打印（融合/避障将来做）
-                // 2026-08-07 协议统一：入站为 ORION 帧（StreamRaw），解码帧头打印摘要
-                if let Some(Bus_Event::StreamRaw { payload }) = robot_ev {
-                    match crate::robot::core::protocol::decode_frame(&payload) {
-                        Some(f) => {
-                            // Task 13 阶段一：sysid 为完整 peer_id，日志取前 8 字节 hex
-                            let sysid_hex: String = f.sysid.iter().take(8).map(|b| format!("{b:02x}")).collect();
-                            info!(
-                                "[Robot] 收到远端 ORION 帧: msgid={} sysid={} compid={} payload_len={}",
-                                f.msgid, sysid_hex, f.compid, f.payload.len()
-                            );
-                        }
-                        None => warn!("[Robot] 收到无法解析的 ORION 帧 ({} 字节)", payload.len()),
-                    }
-                }
-            }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(Command::Mode(m)) => {
@@ -413,7 +424,12 @@ async fn main_loop(
                 let ls = lidar_state.read().await.clone();
                 let g = { let guard = grid.read().await; (*guard).clone() };
 
-                executor.step(&stm32, &rs, &ls, &g, &mut *mission_queue.write().await);
+                // Task 13_1：execute_state 由 executor 写（step 包装层同步 sub_target）
+                executor.step(
+                    &stm32, &rs, &ls, &g,
+                    &mut *mission_queue.write().await,
+                    &mut *execute_state.write().await,
+                );
 
                 next_tick += Duration::from_millis(auto_tick_ms);
                 if next_tick <= Instant::now() {
@@ -439,21 +455,6 @@ async fn main_loop(
     stm32.shutdown();
 
     info!("Robot 主循环已退出");
-}
-
-/// robot_bus 订阅接收（None 时永远 pending；Lagged 打印警告后继续，无忙循环）
-async fn recv_robot_event(rx: &mut Option<broadcast::Receiver<Bus_Event>>) -> Option<Bus_Event> {
-    match rx.as_mut() {
-        Some(rx) => match rx.recv().await {
-            Ok(ev) => Some(ev),
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!("[Robot] robot_bus 订阅落后 {n} 条");
-                None
-            }
-            Err(broadcast::error::RecvError::Closed) => None,
-        },
-        None => std::future::pending().await,
-    }
 }
 
 // ============================================================

@@ -12,7 +12,7 @@ use super::frame::MAGIC;
 // 数据结构
 // ============================================================
 
-/// ORION_POSE 载荷（msgid 1，24 字节）
+/// ORION_POSE 载荷（msgid 1，33 字节，Task 13_1：意图广播扩展）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoseData {
     pub time_boot_ms: u32,
@@ -21,6 +21,11 @@ pub struct PoseData {
     pub vx: f32,
     pub vy: f32,
     pub yaw: f32,
+    /// 意图有效标志（Task 13_1）：false = 无当前任务/子目标
+    pub valid: bool,
+    /// 意图：D* 寻路下一格（网格坐标），valid=false 时忽略
+    pub sub_gx: i32,
+    pub sub_gy: i32,
 }
 
 /// ORION_MAP_DELTA 条目（9 字节）
@@ -50,21 +55,24 @@ pub struct MissionItem {
 // ORION_POSE (msgid 1)
 // ============================================================
 
-/// 编码位姿：time_boot_ms + x/y/vx/vy/yaw（24 字节）
+/// 编码位姿：time_boot_ms + x/y/vx/vy/yaw + valid + sub_gx/sub_gy（33 字节，Task 13_1）
 pub fn encode_pose(pose: &PoseData) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(24);
+    let mut buf = Vec::with_capacity(33);
     buf.extend_from_slice(&pose.time_boot_ms.to_be_bytes());
     buf.extend_from_slice(&pose.x.to_be_bytes());
     buf.extend_from_slice(&pose.y.to_be_bytes());
     buf.extend_from_slice(&pose.vx.to_be_bytes());
     buf.extend_from_slice(&pose.vy.to_be_bytes());
     buf.extend_from_slice(&pose.yaw.to_be_bytes());
+    buf.push(pose.valid as u8);
+    buf.extend_from_slice(&pose.sub_gx.to_be_bytes());
+    buf.extend_from_slice(&pose.sub_gy.to_be_bytes());
     buf
 }
 
-/// 解码位姿 payload（需恰好 24 字节）
+/// 解码位姿 payload（需恰好 33 字节，Task 13_1）
 pub fn decode_pose(payload: &[u8]) -> Option<PoseData> {
-    if payload.len() != 24 {
+    if payload.len() != 33 {
         return None;
     }
     Some(PoseData {
@@ -74,6 +82,9 @@ pub fn decode_pose(payload: &[u8]) -> Option<PoseData> {
         vx: f32::from_be_bytes(payload[12..16].try_into().ok()?),
         vy: f32::from_be_bytes(payload[16..20].try_into().ok()?),
         yaw: f32::from_be_bytes(payload[20..24].try_into().ok()?),
+        valid: payload[24] != 0,
+        sub_gx: i32::from_be_bytes(payload[25..29].try_into().ok()?),
+        sub_gy: i32::from_be_bytes(payload[29..33].try_into().ok()?),
     })
 }
 
@@ -244,11 +255,18 @@ mod tests {
             vx: 0.3,
             vy: 0.0,
             yaw: 1.5708,
+            valid: true,
+            sub_gx: 130,
+            sub_gy: 128,
         };
         let encoded = encode_pose(&p);
-        assert_eq!(encoded.len(), 24);
+        assert_eq!(encoded.len(), 33);
         assert_eq!(decode_pose(&encoded).unwrap(), p);
-        assert!(decode_pose(&encoded[..20]).is_none()); // 长度不符
+        // valid=false（无意图）时 sub 坐标仍往返
+        let p2 = PoseData { valid: false, sub_gx: 0, sub_gy: 0, ..p };
+        assert_eq!(decode_pose(&encode_pose(&p2)).unwrap(), p2);
+        // 长度不符（旧版 24B 帧）拒绝
+        assert!(decode_pose(&encoded[..24]).is_none());
     }
 
     #[test]
@@ -295,7 +313,7 @@ mod tests {
     #[test]
     fn test_frame_with_message() {
         // 帧 + 消息组合：编码一条 POSE 消息并解码
-        let p = PoseData { time_boot_ms: 1, x: 64.0, y: 64.0, vx: 0.0, vy: 0.0, yaw: 0.0 };
+        let p = PoseData { time_boot_ms: 1, x: 64.0, y: 64.0, vx: 0.0, vy: 0.0, yaw: 0.0, valid: false, sub_gx: 0, sub_gy: 0 };
         let payload = encode_pose(&p);
         // Task 13 阶段一：sysid 为变长字节（测试用单字节身份）
         let frame = super::super::frame::encode_frame(

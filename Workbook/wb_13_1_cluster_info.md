@@ -29,3 +29,21 @@
 
 - 前置：Task 13 阶段一（peer_id 身份，commit b7fa822）
 - 后续：P0（pathfinder 障碍注入接口，task_13 阶段）依赖本任务的表
+
+---
+
+## 2026-08-10 实施完成 ✅
+
+**改动 9 文件**：
+- `protocol/messages.rs`：PoseData +valid/sub_gx/sub_gy，encode/decode 24B→33B，测试更新
+- `core/state.rs`：ExecuteState（sub_target）
+- `core/executor.rs`：step 拆 wrapper+step_impl，签名 +&mut ExecuteState，结尾统一同步 sub_target
+- `core/cluster/`（新）：mod.rs + cluster_info.rs（ClusterInfo/ClusterInfoTable 单表，无超时逻辑）+ consumer.rs（cluster_consumer：robot_bus→decode→本车过滤→写表；5 单测）
+- `core/robot.rs`：launch 建 execute_state+cluster_table、spawn cluster_consumer（步骤7）；state_notifier 读 execute_state 组帧（Pose 带 sub_target + PoseData valid/sub）；main_loop 移除 robot_bus 订阅打印（双订阅问题解决）+ auto_tick 传 execute_state；Pose 结构 +sub_target；Robot 结构 +cluster_table
+- `WebSocket/server.rs`：pose 下行帧带 valid/sub（Pictor 可显示意图）
+
+**验证**：cargo check ✅ / cargo test --lib robot 55/55 ✅（+8 新测试）/ orion-robot release ✅
+
+**文档**：orion_protocol.md §3.1（POSE 33B 布局 + 意图语义）、multi_robot_control.md §8-1 标记已定、task_13_1 状态✅
+
+**遗留**：双车联调（对方位姿+意图入库验证）；P0 寻路障碍注入（消费 cluster_table）

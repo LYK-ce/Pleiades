@@ -10,6 +10,7 @@
 //! - mission.rs：任务队列
 //! - executor.rs：自动任务执行器（Idle / Turning / Moving）
 //! - robot.rs：Robot::launch() + 主 select! 循环
+//! - cluster/：集群数据面（Task 13_1：入站 POSE 消费 + 远端车信息表）
 
 pub mod command;
 pub mod protocol;
@@ -18,3 +19,4 @@ pub mod executor;
 pub mod mission;
 pub mod mode;
 pub mod robot;
+pub mod cluster;

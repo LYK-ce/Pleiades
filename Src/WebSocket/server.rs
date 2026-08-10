@@ -61,6 +61,10 @@ pub async fn run(
                         x: p.x, y: p.y,
                         vx: p.vx, vy: p.vy,
                         yaw: p.yaw,
+                        // Task 13_1：意图广播（下一格），与 gossip 链路一致
+                        valid: p.sub_target.is_some(),
+                        sub_gx: p.sub_target.map(|(gx, _)| gx).unwrap_or(0),
+                        sub_gy: p.sub_target.map(|(_, gy)| gy).unwrap_or(0),
                     };
                     let frame = encode_frame(MSGID_POSE, &pose_peer, COMPID_ROBOT, &encode_pose(&pose));
                     let _ = pose_feed.send(frame);

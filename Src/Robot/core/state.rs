@@ -92,3 +92,17 @@ pub struct LidarState {
     /// 最新扫描结果
     pub scan: Option<LaserScan>,
 }
+
+// ============================================================
+// ExecuteState — 执行器意图（Task 13_1）
+// ============================================================
+
+/// 执行器意图状态（由 Executor 写入，state_notifier 读取用于意图广播）
+///
+/// 写者 = Executor（`step()` 参数 `&mut ExecuteState`，结尾统一同步）；
+/// 读者 = state_notifier（100ms 组帧）。单一写入者不变式与 RobotState 同源。
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteState {
+    /// D* 寻路当前子目标（网格坐标）；None = 无任务/空闲
+    pub sub_target: Option<(i32, i32)>,
+}

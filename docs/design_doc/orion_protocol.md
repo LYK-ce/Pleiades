@@ -140,7 +140,9 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | 16 | `vy` | f32 |
 | 20 | `yaw` | f32 |
 
-来源映射：`x/y` 直接映射 `RobotState.{x, y}`（全局世界坐标）、`{vx, vy}`、`attitude.yaw`，**无坐标变换**；`time_boot_ms` 由开机基准时间换算（`now_boot_ms()`，替代原 `Pose.ts` unix 秒，字段类型 f64 → u32）。
+来源映射：`x/y` 直接映射 `RobotState.{x, y}`（全局世界坐标）、`{vx, vy}`、`attitude.yaw`，**无坐标变换**；`time_boot_ms` 由开机基准时间换算（`now_boot_ms()`，替代原 `Pose.ts` unix 秒，字段类型 f64 → u32）；`valid/sub_gx/sub_gy` 映射 `ExecuteState.sub_target`（Executor 写，`state_notifier` 读，Task 13_1）。
+
+> 意图语义（2026-08-10 决策）：subtarget = 本车 D* 寻路**下一格**（第一版 1 格，k 格 + 时间窗留扩展字段）；接收方存入 `ClusterInfo.sub_target`，用于窄路口意图判断/未来寻路障碍注入。`valid=0`（无任务/空闲）时接收方必须忽略 sub 坐标。
 
 > 时间戳语义（2026-08-07 决策）：`time_boot_ms` 为**本机单调时间**（开机起算），仅作数据时间标签/显示/调试用；分布式系统无全局统一时钟，**不做跨车时间比较**（数据新鲜度由 libp2p 超时/心跳判断）。
 频率：10Hz（沿用 `state_notifier` 节奏）。

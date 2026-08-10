@@ -16,7 +16,7 @@ use crate::robot::core::command::Mission;
 use crate::robot::core::mission::MissionQueue;
 use crate::robot::slam::pathfinder::DStarLite;
 use crate::robot::slam::{OccupancyGrid, CELL_RESOLUTION};
-use crate::robot::core::state::{LidarState, RobotState};
+use crate::robot::core::state::{ExecuteState, LidarState, RobotState};
 
 /// 执行器状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,24 @@ impl Executor {
     }
 
     /// 每 tick 调用一次（仅 Auto 模式）
+    ///
+    /// Task 13_1：`execute_state` 为执行器意图（sub_target），
+    /// 包装层在 step_impl 返回后统一同步——覆盖 step 内部所有 return 路径。
     pub fn step(
+        &mut self,
+        stm32: &STM32Device,
+        robot_state: &RobotState,
+        lidar_state: &LidarState,
+        grid: &OccupancyGrid,
+        mission_queue: &mut MissionQueue,
+        execute_state: &mut ExecuteState,
+    ) {
+        self.step_impl(stm32, robot_state, lidar_state, grid, mission_queue);
+        execute_state.sub_target = self.sub_target;
+    }
+
+    /// step 主体（私有实现，不含意图同步；Task 13_1 拆出以便包装同步）
+    fn step_impl(
         &mut self,
         stm32: &STM32Device,
         robot_state: &RobotState,
