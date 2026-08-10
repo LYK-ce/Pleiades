@@ -8,11 +8,9 @@
 //!
 //! - `frame.rs`   帧编解码（magic/len/seq/sysid/compid/msgid/payload/checksum）
 //! - `messages.rs` 5 条消息的 payload 编解码
-//! - `sysid.rs`   peer_id → sysid 派生
 
 pub mod frame;
 pub mod messages;
-pub mod sysid;
 
 pub use frame::{decode_frame, encode_frame, Frame};
 pub use messages::{
@@ -22,7 +20,6 @@ pub use messages::{
     ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,
     ACTION_SWITCH_TO_MANUAL, MISSION_GOTO, ManualControl, MapDeltaEntry, MissionItem, PoseData,
 };
-pub use sysid::sysid_from_multihash;
 
 /// 消息 ID 常量（与协议文档 §3 一致）
 pub const MSGID_POSE: u16 = 1;

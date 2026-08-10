@@ -30,7 +30,7 @@ use std::time::Instant;
 use crate::event_bus::{Bus_Event, EventBus};
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
-    encode_frame, encode_map_delta, encode_pose, now_boot_ms, sysid_from_multihash,
+    encode_frame, encode_map_delta, encode_pose, now_boot_ms,
     COMPID_ROBOT, MapDeltaEntry, MSGID_MAP_DELTA, MSGID_POSE, PoseData,
 };
 
@@ -141,8 +141,10 @@ impl Robot {
         let notifier_tx = pose_tx.clone();
         let notifier_handle = node_handle.clone();
         let notifier_name = peer_name.clone();
+        // Task 13 阶段一：peer_id 为常量，launch 时算一次传闭包（顺带修 P3#9 每拍重算）
+        let notifier_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes());
         tokio::spawn(async move {
-            state_notifier(notifier_state, notifier_tx, notifier_handle, notifier_name, notifier_cancel).await;
+            state_notifier(notifier_state, notifier_tx, notifier_handle, notifier_name, notifier_peer_id, notifier_cancel).await;
         });
 
         // 6. spawn SLAM task
@@ -154,8 +156,10 @@ impl Robot {
         
         let slam_handle = node_handle.clone();
         let slam_name = peer_name.clone();
+        // Task 13 阶段一：同 state_notifier，peer_id 一次计算
+        let slam_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes());
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_cancel).await;
         });
 
         // 7. 命令通道
@@ -197,6 +201,7 @@ async fn state_notifier(
     pose_tx: broadcast::Sender<Pose>,
     node_handle: Option<Arc<NodeHandle>>,
     peer_name: String,
+    local_peer_id: Option<Vec<u8>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -213,8 +218,8 @@ async fn state_notifier(
                 });
 
                 // Task 9_2：位姿广播到集群（fire-and-forget，Network 只搬运字节）
-                if let Some(nh) = &node_handle {
-                    let sysid = sysid_from_multihash(&nh.Get_Local_Peer_Id().to_bytes());
+                // Task 13 阶段一：帧身份 = 完整 peer_id（launch 时一次计算）
+                if let (Some(nh), Some(peer_id)) = (&node_handle, &local_peer_id) {
                     let pose = PoseData {
                         time_boot_ms,
                         x: s.x, y: s.y,
@@ -222,7 +227,7 @@ async fn state_notifier(
                         yaw: s.attitude.yaw,
                     };
                     // ORION 协议：位姿帧广播（2026-08-07 协议统一，替代散装 JSON）
-                    let frame = encode_frame(MSGID_POSE, sysid, COMPID_ROBOT, &encode_pose(&pose));
+                    let frame = encode_frame(MSGID_POSE, peer_id, COMPID_ROBOT, &encode_pose(&pose));
                     if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_POSE, frame).await {
                         warn!("[Robot] 位姿广播失败: {e}");
                     }
@@ -247,6 +252,7 @@ async fn slam_task(
     map_tx: broadcast::Sender<Vec<MapDelta>>,
     node_handle: Option<Arc<NodeHandle>>,
     peer_name: String,
+    local_peer_id: Option<Vec<u8>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -284,14 +290,14 @@ async fn slam_task(
                         let _ = map_tx.send(typed.clone());
 
                         // Task 9_2：地图增量广播到集群（有 delta 才发）
-                        if let Some(nh) = &node_handle {
-                            let sysid = sysid_from_multihash(&nh.Get_Local_Peer_Id().to_bytes());
+                        // Task 13 阶段一：帧身份 = 完整 peer_id（launch 时一次计算）
+                        if let (Some(nh), Some(peer_id)) = (&node_handle, &local_peer_id) {
                             let entries: Vec<MapDeltaEntry> = typed.iter().map(|d| MapDeltaEntry {
                                 gx: d.gx, gy: d.gy, state: d.state,
                             }).collect();
                             // ORION 协议：地图增量帧广播（2026-08-07 协议统一，替代散装 JSON）
                             let payload = encode_map_delta(now_boot_ms(), &entries);
-                            let frame = encode_frame(MSGID_MAP_DELTA, sysid, COMPID_ROBOT, &payload);
+                            let frame = encode_frame(MSGID_MAP_DELTA, peer_id, COMPID_ROBOT, &payload);
                             if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_MAP, frame).await {
                                 warn!("[Robot] 地图增量广播失败: {e}");
                             }
@@ -338,10 +344,14 @@ async fn main_loop(
                 // 2026-08-07 协议统一：入站为 ORION 帧（StreamRaw），解码帧头打印摘要
                 if let Some(Bus_Event::StreamRaw { payload }) = robot_ev {
                     match crate::robot::core::protocol::decode_frame(&payload) {
-                        Some(f) => info!(
-                            "[Robot] 收到远端 ORION 帧: msgid={} sysid={} compid={} payload_len={}",
-                            f.msgid, f.sysid, f.compid, f.payload.len()
-                        ),
+                        Some(f) => {
+                            // Task 13 阶段一：sysid 为完整 peer_id，日志取前 8 字节 hex
+                            let sysid_hex: String = f.sysid.iter().take(8).map(|b| format!("{b:02x}")).collect();
+                            info!(
+                                "[Robot] 收到远端 ORION 帧: msgid={} sysid={} compid={} payload_len={}",
+                                f.msgid, sysid_hex, f.compid, f.payload.len()
+                            );
+                        }
                         None => warn!("[Robot] 收到无法解析的 ORION 帧 ({} 字节)", payload.len()),
                     }
                 }

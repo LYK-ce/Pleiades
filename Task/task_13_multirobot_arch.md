@@ -1,6 +1,6 @@
 # Task 13: Multi-Robot Control（多车协同控制）
 
-> 状态：进行中——**阶段一（协议调整：sysid → 完整 peer_id）已定案，待实施**
+> 状态：进行中——**阶段一（协议调整：sysid → 完整 peer_id）✅ 已实施（2026-08-10）**
 > 创建日期：2026-08-10
 > 最后更新：2026-08-10
 > 设计文档：`docs/design_doc/multi_robot_control.md`（多车协同总设计）
@@ -113,8 +113,18 @@
 
 1. ✅ 方案 A（u8 长度前缀 + 变长）——已定
 2. ✅ 上行空身份（sysid_len=0）+ compid=200——已定（Pictor 无 peer_id）
-3. ⏳ 日志身份格式：前 8 字节 hex vs 完整 hex vs base58（建议前 8 字节 hex，调试够用）
-4. ⏳ 是否顺带把 WS 下行改为订阅 robot_bus 复用已编码帧（更彻底消除双链路身份不一致，但改动面更大）——本期先做"填 peer_id"，该优化留后续
+3. ✅ 日志身份格式：前 8 字节 hex（已实施）
+4. ⏳ 是否顺带把 WS 下行改为订阅 robot_bus 复用已编码帧（更彻底消除双链路身份不一致，但改动面更大）——本期已做"填 peer_id"，该优化留后续
+
+## 实施记录（2026-08-10）
+
+**改动文件（6 个）**：`frame.rs`（结构+动态偏移+4 测试重写+新增空身份测试）、`sysid.rs`（删除）、`protocol/mod.rs`（re-export 同步）、`robot.rs`（launch 一次取 peer_id 传闭包+2 处 encode_frame+打印 hex）、`WebSocket/mod.rs`+`server.rs`（peer_id 注入链，3 处下行帧填真实身份）、`bootstrap.rs`（launch 前取 peer_id）、`messages.rs`（测试同步）。
+
+**验证**：`./build.sh check` ✅（26 存量警告不变）→ `cargo test --lib robot::core::protocol` ✅ 10/10 → `cargo build --release --bin orion-robot` ✅
+
+**文档**：`orion_protocol.md` §1/§2/§4 已同步（帧布局、差异表、4.2 重写为完整 peer_id）
+
+**遗留**：双车联调（日志验证对方完整 peer_id 短 hex）+ Pictor 外部仓库帧解析同步
 
 ---
 

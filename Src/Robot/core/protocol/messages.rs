@@ -297,16 +297,17 @@ mod tests {
         // 帧 + 消息组合：编码一条 POSE 消息并解码
         let p = PoseData { time_boot_ms: 1, x: 64.0, y: 64.0, vx: 0.0, vy: 0.0, yaw: 0.0 };
         let payload = encode_pose(&p);
+        // Task 13 阶段一：sysid 为变长字节（测试用单字节身份）
         let frame = super::super::frame::encode_frame(
             super::super::MSGID_POSE,
-            7,
+            &[7],
             super::super::COMPID_ROBOT,
             &payload,
         );
         assert_eq!(frame[0], MAGIC);
         let decoded = super::super::frame::decode_frame(&frame).unwrap();
         assert_eq!(decoded.msgid, super::super::MSGID_POSE);
-        assert_eq!(decoded.sysid, 7);
+        assert_eq!(decoded.sysid, vec![7]);
         assert_eq!(decode_pose(&decoded.payload).unwrap(), p);
     }
 }

@@ -215,6 +215,9 @@ pub async fn robot_bootstrap(
         lidar_port.as_deref().unwrap_or("None")
     );
 
+    // Task 13 阶段一：本车 peer_id 常量，WS 下行帧身份与 gossip 链路一致（launch 前取，node_handle 随后 move 进 launch）
+    let local_peer_id = node_handle.Get_Local_Peer_Id().to_bytes();
+
     let robot = Robot::launch(
         &serial_port, baudrate, car_type,
         lidar_port.as_deref(), lidar_baudrate,
@@ -230,6 +233,7 @@ pub async fn robot_bootstrap(
         &ws_bind, &peer_name, robot.robot_cmd_tx.clone(),
         robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
         robot.grid.clone(),
+        local_peer_id,
     );
     info!("WebSocket 遥控服务已启动: ws://{ws_bind}");
     info!("打开 Tool/robot_control.html 开始遥控");

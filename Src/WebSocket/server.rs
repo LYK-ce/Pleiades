@@ -34,6 +34,7 @@ pub async fn run(
     pose_rx: broadcast::Receiver<Pose>,
     map_rx: broadcast::Receiver<Vec<MapDelta>>,
     grid: Arc<RwLock<OccupancyGrid>>,
+    local_peer_id: Vec<u8>,
 ) {
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
@@ -47,9 +48,10 @@ pub async fn run(
     // 本地 broadcast：汇总 ORION 帧字节 (pose + map_delta)
     let (feed_tx, _) = broadcast::channel::<Vec<u8>>(32);
 
-    // pose 转发（ORION_POSE 帧）
+    // pose 转发（ORION_POSE 帧，Task 13 阶段一：sysid = 本车 peer_id）
     let pose_feed = feed_tx.clone();
     let mut pose_rx2 = pose_rx.resubscribe();
+    let pose_peer = local_peer_id.clone();
     tokio::spawn(async move {
         loop {
             match pose_rx2.recv().await {
@@ -60,7 +62,7 @@ pub async fn run(
                         vx: p.vx, vy: p.vy,
                         yaw: p.yaw,
                     };
-                    let frame = encode_frame(MSGID_POSE, 0, COMPID_ROBOT, &encode_pose(&pose));
+                    let frame = encode_frame(MSGID_POSE, &pose_peer, COMPID_ROBOT, &encode_pose(&pose));
                     let _ = pose_feed.send(frame);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -69,9 +71,10 @@ pub async fn run(
         }
     });
 
-    // map_delta 转发（ORION_MAP_DELTA 帧）
+    // map_delta 转发（ORION_MAP_DELTA 帧，Task 13 阶段一：sysid = 本车 peer_id）
     let map_feed = feed_tx.clone();
     let mut map_rx2 = map_rx.resubscribe();
+    let map_peer = local_peer_id.clone();
     tokio::spawn(async move {
         loop {
             match map_rx2.recv().await {
@@ -80,7 +83,7 @@ pub async fn run(
                         .map(|d| MapDeltaEntry { gx: d.gx, gy: d.gy, state: d.state })
                         .collect();
                     let payload = encode_map_delta(now_boot_ms(), &entries);
-                    let frame = encode_frame(MSGID_MAP_DELTA, 0, COMPID_ROBOT, &payload);
+                    let frame = encode_frame(MSGID_MAP_DELTA, &map_peer, COMPID_ROBOT, &payload);
                     let _ = map_feed.send(frame);
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -108,8 +111,9 @@ pub async fn run(
                 let vid = vehicle_id.clone();
                 let addr = bind_addr.clone();
                 let g = grid.clone();
+                let conn_peer = local_peer_id.clone();
                 tokio::spawn(async move {
-                    handle_connection(ws, tx, feed, vid, addr, peer_addr.to_string(), g).await;
+                    handle_connection(ws, tx, feed, vid, addr, peer_addr.to_string(), g, conn_peer).await;
                 });
             }
             Err(e) => error!("[WS] accept 错误: {e}"),
@@ -125,6 +129,7 @@ async fn handle_connection(
     bind_addr: String,
     peer: String,
     grid: Arc<RwLock<OccupancyGrid>>,
+    local_peer_id: Vec<u8>,
 ) {
     // hello：连接握手（过渡期保留，唯一 JSON 消息）
     let hello = serde_json::json!({
@@ -147,7 +152,7 @@ async fn handle_connection(
             CELL_RESOLUTION,
             data.as_ref(),
         );
-        let frame = encode_frame(MSGID_MAP_FULL, 0, COMPID_ROBOT, &payload);
+        let frame = encode_frame(MSGID_MAP_FULL, &local_peer_id, COMPID_ROBOT, &payload);
         info!("[WS] {peer} 发送 map_full: {} 字节", frame.len());
         let _ = ws.send(Message::Binary(frame.into())).await;
     }

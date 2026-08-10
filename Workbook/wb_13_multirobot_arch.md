@@ -38,6 +38,18 @@
 
 **待实施**：步骤见 task_13 文档（frame.rs → sysid.rs → robot.rs → bootstrap/WS → 测试 → 编译 → 文档 → 联调）
 
+---
+
+## 2026-08-10 阶段一实施完成 ✅
+
+**改动 6 文件**：frame.rs（Frame.sysid: Vec<u8> + sysid_len 前缀 + 动态偏移 + 测试）、sysid.rs 删除、protocol/mod.rs、robot.rs（launch 一次取 peer_id 传闭包，修 P3#9；打印前 8 字节 hex）、WebSocket mod/server（peer_id 注入链，3 处下行填真实身份）、bootstrap.rs、messages.rs 测试。
+
+**验证**：check ✅ / protocol 测试 10/10 ✅ / orion-robot release ✅
+
+**文档**：orion_protocol.md §1/§2/§4 同步（含差异表、4.2 重写）
+
+**遗留**：双车联调（对方完整 peer_id 短 hex 验证）、Pictor 外部仓库同步、WS 复用 robot_bus 优化（待决策点 4）
+
 ## 依赖关系
 
 - 前置：gossip 基础设施（ML_review 已 merge：bd0ec43/387ad72）

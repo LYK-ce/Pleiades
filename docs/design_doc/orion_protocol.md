@@ -28,7 +28,7 @@
 |---|---|
 | 传输层 | 统一为 **libp2p**（车↔车、车↔控制终端均走现有 P2P 网络；WebSocket 后续退役） |
 | 协议方向 | **MAVLink 风格帧 + 按需扩展**：帧结构参考 MAVLink v2，但 len 字段放宽为 4 字节（原始 255B payload 上限为串口时代遗产，无法承载全量栅格地图，予以废弃）；消息定义风格参考 MAVLink，内容全部自定义（`ORION_` 前缀） |
-| 身份识别 | 网络层身份（libp2p peer_id）即车辆系统身份（Orion 由网络层系统拓展而来）；sysid 仅作形式字段 |
+| 身份识别 | 网络层身份（libp2p peer_id）即车辆系统身份；**帧内 sysid = 完整 peer_id**（2026-08-10 升级，见 §4） |
 | 心跳 | **不做**（libp2p 存活检测已覆盖） |
 | 命令应答 | **不做**（传输层已有"收到"确认） |
 
@@ -64,11 +64,11 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 帧结构参考 MAVLink v2，按需扩展如下：
 
 ```
-┌─────────┬───────┬─────┬────────┬─────────┬────────┬──────────────┬──────────┐
-│  magic  │  len  │ seq │ sysid  │ compid  │ msgid  │   payload    │ checksum │
-│  0x4F   │ u32   │ u8  │ u8     │ u8      │ u16    │ 0~4G 字节    │ u16      │
-│  (1B)   │       │     │        │         │        │              │          │
-└─────────┴───────┴─────┴────────┴─────────┴────────┴──────────────┴──────────┘
+┌─────────┬───────┬─────┬───────────┬──────────┬─────────┬────────┬──────────────┬──────────┐
+│  magic  │  len  │ seq │ sysid_len │  sysid   │ compid  │ msgid  │   payload    │ checksum │
+│  0x4F   │ u32   │ u8  │ u8        │ N 字节   │ u8      │ u16    │ 0~4G 字节    │ u16      │
+│  (1B)   │       │     │           │          │         │        │              │          │
+└─────────┴───────┴─────┴───────────┴──────────┴─────────┴────────┴──────────────┴──────────┘
 ```
 
 | 字段 | 长度 | 说明 |
@@ -76,7 +76,8 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | `magic` | 1B | 固定 `0x4F`（'O' = Orion）。自定义标识——len 已非标准，保留 MAVLink `0xFD` 会令标准解析器误认 |
 | `len` | 4B | payload 字节数（uint32，上限约 4GB）。**放宽自 MAVLink v2 的 1 字节（255B 上限）**——原始限制是串口时代紧凑设计，无法承载全量栅格地图（65536 cell），予以废弃 |
 | `seq` | 1B | **保留字段，第一版恒填 0**——libp2p/TCP 可靠传输，无需丢包检测；未来跑串口/无线等不可靠链路时再启用计数 |
-| `sysid` | 1B | 系统 ID（派生规则见 §4） |
+| `sysid_len` | 1B | sysid 字节数（u8，上限 255）；**0 = 无身份**（控制终端上行命令，配合 compid=200） |
+| `sysid` | N | 发送方**完整 libp2p PeerId 二进制**（multihash，Ed25519 下 38B；2026-08-10 起由 1B 末字节升级为完整身份，见 §4） |
 | `compid` | 1B | 组件 ID（约定见 §4） |
 | `msgid` | 2B | 消息 ID（本条消息类型，见 §3；65536 种，留足扩展空间） |
 | `payload` | N | 消息内容（按 msgid 定义解析） |
@@ -89,7 +90,8 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | magic | `0xFD` | `0x4F` |
 | len | 1B（≤255） | **4B（≤4G）** |
 | incompat/compat flags | 2B | 移除（自研网络无需要） |
-| seq / sysid / compid | 各 1B | 各 1B（保留） |
+| seq / compid | 各 1B | 各 1B（保留） |
+| sysid | 1B（≤255 系统） | **变长（sysid_len + 完整 peer_id）**——MAVLink 的 1B 是"域内编址"，本协议用于"身份"，需完整 peer_id |
 | msgid | 3B | 2B |
 | 扩展签名 | 可选 13B | 移除 |
 
@@ -280,17 +282,19 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 
 ### 4.1 身份层次
 
-Orion 中**网络层身份（libp2p peer_id）即车辆系统身份**——车即节点，无第二层身份。MAVLink 帧内 sysid **不参与路由**，仅作为形式字段（帧格式完整性 + 日志可读）。
+Orion 中**网络层身份（libp2p peer_id）即车辆系统身份**——车即节点，无第二层身份。帧内 `sysid` 承载**完整 peer_id**（2026-08-10 升级），接收方直接以 sysid 识别发送方；`sysid` **不参与路由**（libp2p 负责投递），仅作身份标识。
 
-### 4.2 sysid 派生
+### 4.2 sysid = 完整 peer_id（2026-08-10 升级，Task 13 阶段一）
 
 ```
-sysid = peer_id 的 multihash 字节数组最后一字节（0~255）
+sysid = libp2p PeerId 的 multihash 字节数组（Ed25519 下 38B）
+帧内格式：sysid_len(1B) + sysid(N 字节)
 ```
 
-- **确定性**：同一辆车恒得同一 sysid，无需配置
-- **碰撞容忍**：不同车可能碰撞（1/256），因不参与路由，无影响
-- 实现：解析 libp2p `PeerId` → `as_bytes()` 取末字节
+- **身份语义**：sysid 即车辆身份（车 = libp2p 节点），接收方无需额外映射即可识别发送方；无碰撞（此前 1B 末字节方案 1/256 碰撞率，仅适合"编址"不适合"身份"，已废弃）
+- **地面站上行**：sysid_len = 0（空身份）+ compid = 200，识别为终端命令；Pictor 迁移 libp2p 后天然获得 peer_id，自动升级
+- **本车过滤**：gossipsub 默认自环回流本机消息，接收端用 sysid 与本地 peer_id 比对过滤本车数据
+- 实现：`PeerId::to_bytes()`（Vec<u8>）直接入帧；`encode_frame(msgid, &peer_id, compid, payload)`
 
 ### 4.3 compid 约定
 

@@ -18,6 +18,8 @@ use crate::robot::core::robot::{Pose, MapDelta};
 use crate::robot::slam::OccupancyGrid;
 
 /// 启动 WebSocket 遥控服务器
+///
+/// - `local_peer_id`: 本车完整 peer_id 二进制（Task 13 阶段一：WS 下行帧身份与 gossip 链路一致）
 pub fn start(
     bind_addr: &str,
     vehicle_id: &str,
@@ -25,10 +27,11 @@ pub fn start(
     pose_rx: broadcast::Receiver<Pose>,
     map_rx: broadcast::Receiver<Vec<MapDelta>>,
     grid: Arc<RwLock<OccupancyGrid>>,
+    local_peer_id: Vec<u8>,
 ) {
     let addr = bind_addr.to_string();
     let id = vehicle_id.to_string();
     tokio::spawn(async move {
-        server::run(addr, id, robot_cmd_tx, pose_rx, map_rx, grid).await;
+        server::run(addr, id, robot_cmd_tx, pose_rx, map_rx, grid, local_peer_id).await;
     });
 }
