@@ -48,6 +48,22 @@
 
 **不受影响（已确认）**：`slam_task`、`pathfinder.rs`、`WebSocket/protocol.rs`（入站命令不解析 POSE）、`swarm_events.rs`/`command_handler.rs`（字节透传）。
 
+## 协议变更（POSE 扩展，orion_protocol.md §3.1 同步）
+
+```
+POSE payload（msgid=1）旧：24B
+  time_boot_ms(4) | x(4) | y(4) | vx(4) | vy(4) | yaw(4)
+
+POSE payload（msgid=1）新：33B
+  time_boot_ms(4) | x(4) | y(4) | vx(4) | vy(4) | yaw(4) | valid(1) | sub_gx(4) | sub_gy(4)
+  └─ 意图广播（Task 13_1）：subtarget = D* 寻路下一格（格坐标）
+     valid=0 → 无当前任务/无子目标，接收方忽略 sub 坐标
+```
+
+- `orion_protocol.md` §3.1：POSE 消息表加 3 字段（valid/sub_gx/sub_gy），注明意图语义（下一格，k 格留扩展）与 valid=0 约定
+- `multi_robot_control.md` §8 待决策 1：标记已定（下一格）
+- ⚠️ 协议版本不兼容（24B→33B，decode 长度校验拒绝旧帧）——整车/全端同步升级，双车联调时"旧帧被拒"属预期行为
+
 ## 实施步骤（顺序）
 
 1. `messages.rs`：POSE 扩展 + 测试
