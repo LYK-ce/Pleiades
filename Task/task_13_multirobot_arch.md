@@ -128,8 +128,9 @@
 
 ---
 
-# 后续阶段（待与人类讨论，逐项确认后填充）
+# 后续阶段
 
+- **阶段二（Cluster Info）→ 已拆分为 `Task/task_13_1_cluster_info.md`（设计收敛，待实施）**
 - P0：DStarLite 动态障碍接口（问题池 P1）
 - P1：任务消息协议 + `pleiades/robot/task` topic + 确定性分配
 - P2~P6：散布 / 障碍注入 / 冲突检测避碰 / 点云过滤 / 僵持协商
