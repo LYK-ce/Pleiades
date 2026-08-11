@@ -28,12 +28,12 @@ pub struct PoseData {
     pub sub_gy: i32,
 }
 
-/// ORION_MAP_DELTA 条目（9 字节）
+/// ORION_MAP_DELTA 条目（9 字节；Task 13_2：state 三态 → delta 数值差分）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapDeltaEntry {
     pub gx: i32,
     pub gy: i32,
-    pub state: u8,
+    pub delta: i8,
 }
 
 /// ORION_MANUAL_CONTROL 载荷（msgid 4，3 字节）
@@ -119,7 +119,7 @@ pub fn encode_map_full(
 // ORION_MAP_DELTA (msgid 3)
 // ============================================================
 
-/// 编码增量地图：time_boot_ms + count + entries（每项 gx i32 + gy i32 + state i8）
+/// 编码增量地图：time_boot_ms + count + entries（每项 gx i32 + gy i32 + delta i8）
 ///
 /// `count` 字段为 u16，协议上限 **65535** 条目/帧（超出会截断导致接收端校验失败）
 pub fn encode_map_delta(time_boot_ms: u32, entries: &[MapDeltaEntry]) -> Vec<u8> {
@@ -130,7 +130,7 @@ pub fn encode_map_delta(time_boot_ms: u32, entries: &[MapDeltaEntry]) -> Vec<u8>
     for e in entries {
         buf.extend_from_slice(&e.gx.to_be_bytes());
         buf.extend_from_slice(&e.gy.to_be_bytes());
-        buf.push(e.state);
+        buf.push(e.delta as u8); // i8 位模式直传（与 log-odds 字节一致）
     }
     buf
 }
@@ -152,7 +152,7 @@ pub fn decode_map_delta(payload: &[u8]) -> Option<(u32, Vec<MapDeltaEntry>)> {
         entries.push(MapDeltaEntry {
             gx: i32::from_be_bytes(body[off..off + 4].try_into().ok()?),
             gy: i32::from_be_bytes(body[off + 4..off + 8].try_into().ok()?),
-            state: body[off + 8],
+            delta: body[off + 8] as i8,
         });
     }
     Some((time_boot_ms, entries))
@@ -271,15 +271,20 @@ mod tests {
 
     #[test]
     fn test_map_delta_roundtrip() {
+        // Task 13_2：delta i8 差分语义（含负值、clamp 边界值）
         let entries = vec![
-            MapDeltaEntry { gx: 130, gy: 128, state: 100 },
-            MapDeltaEntry { gx: -5, gy: 300, state: 0 },
-            MapDeltaEntry { gx: 0, gy: 0, state: 255 },
+            MapDeltaEntry { gx: 130, gy: 128, delta: 3 },
+            MapDeltaEntry { gx: -5, gy: 300, delta: -1 },
+            MapDeltaEntry { gx: 0, gy: 0, delta: 8 },
+            MapDeltaEntry { gx: 7, gy: 9, delta: -8 },
+            MapDeltaEntry { gx: 11, gy: 12, delta: 2 }, // clamp 边界 6→8 的 Δ=+2
         ];
         let encoded = encode_map_delta(42, &entries);
         let (ts, decoded) = decode_map_delta(&encoded).unwrap();
         assert_eq!(ts, 42);
         assert_eq!(decoded, entries);
+        // 9B/项：布局不变
+        assert_eq!(encoded.len(), 6 + 9 * entries.len());
         // 空 entries 合法（count=0）
         let empty = encode_map_delta(1, &[]);
         assert_eq!(decode_map_delta(&empty).unwrap().1.len(), 0);

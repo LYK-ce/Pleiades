@@ -9,6 +9,7 @@
 //! - state_notifier: 100ms → 读 robot_state → 广播 Pose
 //! - SLAM task: 200ms → 读 lidar_state → update grid → 广播 map_delta
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -24,7 +25,7 @@ use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::types::CarType;
 use crate::robot::core::state::{ExecuteState, LidarState, RobotState};
-use crate::robot::slam::{self, OccupancyGrid, RobotPose};
+use crate::robot::slam::{self, OccupancyGrid, RobotPose, Delta};
 use std::time::Instant;
 
 use crate::event_bus::EventBus;
@@ -46,12 +47,12 @@ pub struct Pose {
     pub sub_target: Option<(i32, i32)>,
 }
 
-/// 地图增量广播消息
+/// 地图增量广播消息（Task 13_2：state 三态 → delta 数值差分）
 #[derive(Debug, Clone)]
 pub struct MapDelta {
     pub gx: i32,
     pub gy: i32,
-    pub state: u8,
+    pub delta: i8,
 }
 
 /// Robot — 机器人系统中枢
@@ -286,6 +287,11 @@ async fn slam_task(
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
+    // Task 13_2：跨帧聚合缓冲（Δ≠0 才广播）+ 发送节流（模 5 = 1s 一次）
+    // 聚合按格累加净变化（真实差分，不做 ±8 clamp——窗口内净变化上界 ±16 在 i8 内，
+    // 且每 5 帧必 clear，不会无限增长；接收方应用时再 clamp ±8 完成精确重放）
+    let mut frame_count: u32 = 0;
+    let mut pending: HashMap<(i32, i32), i8> = HashMap::new();
     loop {
         select! {
             _ = interval.tick() => {
@@ -313,17 +319,23 @@ async fn slam_task(
                 if !scan_points.is_empty() {
                     let mut g = grid.write().await;
                     let deltas = slam::update(&mut *g, &pose, &scan_points);
-                    if !deltas.is_empty() {
-                        let typed: Vec<MapDelta> = deltas.iter().map(|d| MapDelta {
-                            gx: d.gx, gy: d.gy, state: d.state,
-                        }).collect();
-                        let _ = map_tx.send(typed.clone());
+                    // 聚合：每帧 Δ 累加进 pending（真实差分）
+                    accumulate_pending(&mut pending, &deltas);
+                }
 
-                        // Task 9_2：地图增量广播到集群（有 delta 才发）
+                // 节流：每 5 帧（1s）发送一次，WS 与 gossip 两条链路一致
+                frame_count = frame_count.wrapping_add(1);
+                if frame_count % 5 == 0 {
+                    let out = drain_pending(&mut pending);
+
+                    if !out.is_empty() {
+                        let _ = map_tx.send(out.clone());
+
+                        // Task 9_2：地图增量广播到集群（Δ≠0 才发）
                         // Task 13 阶段一：帧身份 = 完整 peer_id（launch 时一次计算）
                         if let (Some(nh), Some(peer_id)) = (&node_handle, &local_peer_id) {
-                            let entries: Vec<MapDeltaEntry> = typed.iter().map(|d| MapDeltaEntry {
-                                gx: d.gx, gy: d.gy, state: d.state,
+                            let entries: Vec<MapDeltaEntry> = out.iter().map(|d| MapDeltaEntry {
+                                gx: d.gx, gy: d.gy, delta: d.delta,
                             }).collect();
                             // ORION 协议：地图增量帧广播（2026-08-07 协议统一，替代散装 JSON）
                             let payload = encode_map_delta(now_boot_ms(), &entries);
@@ -487,5 +499,87 @@ async fn dispatch(stm32: &STM32Device, lidar: &Option<LidarDevice>, cmd: ManualC
                 }
             }
         }
+    }
+}
+
+/// 聚合纯函数：把一帧的 deltas 累加进 pending（Task 13_2）
+///
+/// 累加**真实差分**（不做 ±8 clamp）：窗口（5 帧）内净变化上界 ±16（own 从 −8 冲到 +8），
+/// 在 i8 范围内；且 pending 每 5 帧 drain 清空，不会无限增长。
+/// 接收方应用时再 clamp ±8，完成"发送方 own 轨迹精确重放"。
+fn accumulate_pending(pending: &mut HashMap<(i32, i32), i8>, deltas: &[Delta]) {
+    for d in deltas {
+        let v = pending.entry((d.gx, d.gy)).or_insert(0);
+        *v = v.saturating_add(d.delta);
+    }
+}
+
+/// 收集纯函数：取出 Δ≠0 项（净变化为 0 的格子不广播），并清空 pending
+fn drain_pending(pending: &mut HashMap<(i32, i32), i8>) -> Vec<MapDelta> {
+    let out: Vec<MapDelta> = pending
+        .iter()
+        .filter(|(_, &delta)| delta != 0)
+        .map(|(&(gx, gy), &delta)| MapDelta { gx, gy, delta })
+        .collect();
+    pending.clear();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_accumulate_drain_basic() {
+        let mut pending = HashMap::new();
+        let deltas = vec![
+            Delta { gx: 1, gy: 1, delta: 3 },
+            Delta { gx: 2, gy: 2, delta: -1 },
+        ];
+        accumulate_pending(&mut pending, &deltas);
+        let out = drain_pending(&mut pending);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|d| d.gx == 1 && d.delta == 3));
+        assert!(out.iter().any(|d| d.gx == 2 && d.delta == -1));
+        assert!(pending.is_empty(), "drain 后必须清空");
+    }
+
+    #[test]
+    fn test_accumulate_preserves_exact_differential() {
+        // 回归锁定：own 从 −8 连续命中 5 帧 → 窗口净变化 +15
+        // 必须保留真实差分（不能被 clamp 截断成 +8），接收方才能精确重放
+        let mut pending = HashMap::new();
+        let deltas: Vec<Delta> = (0..5).map(|_| Delta { gx: 9, gy: 9, delta: 3 }).collect();
+        accumulate_pending(&mut pending, &deltas);
+        let out = drain_pending(&mut pending);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].delta, 15, "窗口净变化 +15 必须保留");
+    }
+
+    #[test]
+    fn test_accumulate_net_zero_filtered() {
+        // 窗口内 +3 与 −1×3 抵消 → 净 0 → 不广播
+        let mut pending = HashMap::new();
+        let deltas = vec![
+            Delta { gx: 5, gy: 5, delta: 3 },
+            Delta { gx: 5, gy: 5, delta: -1 },
+            Delta { gx: 5, gy: 5, delta: -1 },
+            Delta { gx: 5, gy: 5, delta: -1 },
+        ];
+        accumulate_pending(&mut pending, &deltas);
+        let out = drain_pending(&mut pending);
+        assert!(out.is_empty(), "净变化 0 的格子不应广播");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn test_accumulate_negative_saturation_safe() {
+        // 窗口反向净变化 −5 也保留（不截断）
+        let mut pending = HashMap::new();
+        let deltas: Vec<Delta> = (0..5).map(|_| Delta { gx: 7, gy: 7, delta: -1 }).collect();
+        accumulate_pending(&mut pending, &deltas);
+        let out = drain_pending(&mut pending);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].delta, -5);
     }
 }

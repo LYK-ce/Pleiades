@@ -11,6 +11,6 @@ pub mod lidar_mapper;
 pub mod odometry;
 pub mod pathfinder;
 
-pub use grid::{CellState, Delta, OccupancyGrid, CELL_RESOLUTION, CHUNK_SIZE};
+pub use grid::{CellState, Delta, OccupancyGrid, CELL_RESOLUTION, CHUNK_SIZE, FREE_CLAMP, OCCUPIED_CLAMP};
 pub use lidar_mapper::{update, RobotPose};
 pub use pathfinder::DStarLite;

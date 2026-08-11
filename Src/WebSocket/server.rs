@@ -84,7 +84,7 @@ pub async fn run(
             match map_rx2.recv().await {
                 Ok(deltas) => {
                     let entries: Vec<MapDeltaEntry> = deltas.iter()
-                        .map(|d| MapDeltaEntry { gx: d.gx, gy: d.gy, state: d.state })
+                        .map(|d| MapDeltaEntry { gx: d.gx, gy: d.gy, delta: d.delta })
                         .collect();
                     let payload = encode_map_delta(now_boot_ms(), &entries);
                     let frame = encode_frame(MSGID_MAP_DELTA, &map_peer, COMPID_ROBOT, &payload);
@@ -143,10 +143,12 @@ async fn handle_connection(
     });
     let _ = ws.send(Message::Text(hello.to_string())).await;
 
-    // 发送全量地图（ORION_MAP_FULL 帧）
+    // 发送全量地图（ORION_MAP_FULL 帧；Task 13_2：复用 msgid=2，data 从三态改为 log-odds i8）
+    // 数据源 = own 表（本车观测累积贡献；单车场景 own==chunk，多车时避免把远端增量重复计入 Σ own）
     {
         let g = grid.read().await;
-        let data = g.chunk.state_bytes();
+        let data = g.own_log_odds_bytes();
+        let data_u8: Vec<u8> = data.iter().map(|&v| v as u8).collect(); // i8/u8 位模式一致
         let payload = encode_map_full(
             now_boot_ms(),
             g.chunk.origin_gx,
@@ -154,10 +156,10 @@ async fn handle_connection(
             CHUNK_SIZE as u16,
             CHUNK_SIZE as u16,
             CELL_RESOLUTION,
-            data.as_ref(),
+            &data_u8,
         );
         let frame = encode_frame(MSGID_MAP_FULL, &local_peer_id, COMPID_ROBOT, &payload);
-        info!("[WS] {peer} 发送 map_full: {} 字节", frame.len());
+        info!("[WS] {peer} 发送 map_full(log-odds): {} 字节", frame.len());
         let _ = ws.send(Message::Binary(frame.into())).await;
     }
 

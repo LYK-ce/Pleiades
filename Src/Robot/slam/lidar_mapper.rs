@@ -54,8 +54,10 @@ pub fn update(
         if egx == robot_gx && egy == robot_gy {
             continue;
         }
-        if let Some((true, state)) = grid.update(egx, egy, true) {
-            deltas.push(Delta { gx: egx, gy: egy, state });
+        if let Some((_, _, delta)) = grid.update(egx, egy, true) {
+            if delta != 0 {
+                deltas.push(Delta { gx: egx, gy: egy, delta });
+            }
         }
         updated.insert((egx, egy));
     }
@@ -79,8 +81,10 @@ pub fn update(
             if !updated.insert((cgx, cgy)) {
                 continue; // 每帧每格最多一次 miss
             }
-            if let Some((true, state)) = grid.update(cgx, cgy, false) {
-                deltas.push(Delta { gx: cgx, gy: cgy, state });
+            if let Some((_, _, delta)) = grid.update(cgx, cgy, false) {
+                if delta != 0 {
+                    deltas.push(Delta { gx: cgx, gy: cgy, delta });
+                }
             }
         }
     }
@@ -209,15 +213,18 @@ mod tests {
         assert_eq!(grid.state(center_gx, center_gy), Some(CellState::Unknown as u8));
 
 
-        // 前 2 圈：终点 +3×2=6 ≤ 6，无 delta
-        for _ in 0..2 {
+        // Δ 语义（Task 13_2）：每圈终点格都有 Δ=+3 → deltas 非空（原三态语义下前 2 圈为空）
+        for i in 0..2 {
             let deltas = update(&mut grid, &pose, &points);
-            assert!(deltas.is_empty());
+            assert!(!deltas.is_empty(), "第 {} 圈终点应有 Δ", i + 1);
+            // 终点格 Δ=+3，射线途经格 Δ=−1
+            assert!(deltas.iter().any(|d| d.gx == center_gx + 1 && d.gy == center_gy && d.delta == 3));
         }
 
-        // 第 3 圈：终点 +3×3=9 → 夹断 8 > 6 → Occupied
+        // 第 3 圈：终点 +3×3=9 → 夹断 8 > 6 → Occupied；clamp 边界 Δ=+2
         let deltas = update(&mut grid, &pose, &points);
-        assert!(!deltas.is_empty(), "第 3 圈终点越过阈值");
+        assert!(!deltas.is_empty());
+        assert!(deltas.iter().any(|d| d.gx == center_gx + 1 && d.gy == center_gy && d.delta == 2));
         assert_eq!(grid.state(center_gx + 1, center_gy), Some(CellState::Occupied as u8));
     }
 }

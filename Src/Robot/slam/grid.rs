@@ -21,8 +21,8 @@ pub const CELL_RESOLUTION: f32 = 0.5;
 /// log-odds 参数
 const OCCUPIED_INCREMENT: i8 = 3;
 const FREE_DECREMENT: i8 = 1;
-const OCCUPIED_CLAMP: i8 = 8;
-const FREE_CLAMP: i8 = -8;
+pub const OCCUPIED_CLAMP: i8 = 8;
+pub const FREE_CLAMP: i8 = -8;
 const OCCUPIED_THRESHOLD: i8 = 6;
 const FREE_THRESHOLD: i8 = -6;
 
@@ -38,12 +38,12 @@ pub enum CellState {
     Unknown = -1,
 }
 
-/// 变化的格子
+/// 变化的格子（Task 13_2：state 三态 → delta 数值差分）
 #[derive(Debug, Clone)]
 pub struct Delta {
     pub gx: i32,
     pub gy: i32,
-    pub state: u8,
+    pub delta: i8,
 }
 
 /// 一个 Chunk: 256×256 cells（i8 log-odds 概率分）
@@ -74,8 +74,9 @@ impl Chunk {
     }
 
     /// 概率更新：occupied=true → +3 (夹断+8), false → -1 (夹断-8)
-    /// 返回 (宏观状态是否变化, 旧宏观状态)
-    pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8)> {
+    /// 返回 (宏观状态是否变化, 新宏观状态, Δ = new_log − old_log)
+    /// （Task 13_2：Δ 用于差分广播；clamp 边界处 Δ 可能非 ±3，如 6→8 时 Δ=+2）
+    pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8, i8)> {
         let lx = gx - self.origin_gx;
         let ly = gy - self.origin_gy;
         if lx < 0 || lx >= CHUNK_SIZE as i32 || ly < 0 || ly >= CHUNK_SIZE as i32 {
@@ -92,7 +93,24 @@ impl Chunk {
         };
 
         let new_state = log_to_state(self.cells[idx]);
-        Some((old_state != new_state, new_state))
+        let delta = self.cells[idx] - old_log;
+        Some((old_state != new_state, new_state, delta))
+    }
+
+    /// 整表原始 log-odds（i8）导出（own 上传 / 对账下发数据源）
+    pub fn log_odds_bytes(&self) -> Box<[i8; CHUNK_SIZE * CHUNK_SIZE]> {
+        self.cells.clone()
+    }
+
+    /// 整表 log-odds（i8）导入（对账下发替换用）；长度非法返回 false
+    pub fn set_log_odds(&mut self, data: &[i8]) -> bool {
+        if data.len() != CHUNK_SIZE * CHUNK_SIZE {
+            return false;
+        }
+        let mut cells = Box::new([0i8; CHUNK_SIZE * CHUNK_SIZE]);
+        cells.copy_from_slice(data);
+        self.cells = cells;
+        true
     }
 
     /// 读取宏观状态
@@ -121,25 +139,56 @@ fn log_to_state(log: i8) -> u8 {
     }
 }
 
-/// 占据栅格地图（当前单 Chunk）
+/// 占据栅格地图
+///
+/// Task 13_2 双表结构：
+/// - `chunk`（merged）: 本车观测 + 远端增量（当前单车场景 = own）
+/// - `own`（own 表）  : 本车观测累积贡献（对账上传的数据源）
 #[derive(Clone)]
 pub struct OccupancyGrid {
     pub chunk: Chunk,
+    pub own: Chunk,
 }
 
 impl OccupancyGrid {
     pub fn new() -> Self {
-        Self { chunk: Chunk::new(0, 0) }
+        Self {
+            chunk: Chunk::new(0, 0),
+            own: Chunk::new(0, 0),
+        }
     }
 
-    /// 概率更新
-    pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8)> {
-        self.chunk.update(gx, gy, occupied)
+    /// 概率更新：同时更新 own（本车贡献）与 chunk（merged）
+    /// 返回 (宏观状态是否变化, 新宏观状态, Δ = own 的数值差分)
+    pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8, i8)> {
+        let own_result = self.own.update(gx, gy, occupied)?;
+        let chunk_result = self.chunk.update(gx, gy, occupied)?;
+        Some((chunk_result.0, chunk_result.1, own_result.2))
     }
 
-    /// 读取宏观状态
+    /// 读取宏观状态（merged）
     pub fn state(&self, gx: i32, gy: i32) -> Option<u8> {
         self.chunk.state(gx, gy)
+    }
+
+    /// merged 整表 log-odds 导出
+    pub fn log_odds_bytes(&self) -> Box<[i8; CHUNK_SIZE * CHUNK_SIZE]> {
+        self.chunk.log_odds_bytes()
+    }
+
+    /// merged 整表导入（对账下发替换）
+    pub fn set_log_odds(&mut self, data: &[i8]) -> bool {
+        self.chunk.set_log_odds(data)
+    }
+
+    /// own 表整表 log-odds 导出（对账上传 / WS full map 数据源）
+    pub fn own_log_odds_bytes(&self) -> Box<[i8; CHUNK_SIZE * CHUNK_SIZE]> {
+        self.own.log_odds_bytes()
+    }
+
+    /// own 表整表导入
+    pub fn set_own_log_odds(&mut self, data: &[i8]) -> bool {
+        self.own.set_log_odds(data)
     }
 
 }
@@ -176,30 +225,101 @@ mod tests {
         let mut chunk = Chunk::new(0, 0);
 
         // 1 次命中：0+3=3，≤6 → Unknown
-        let (changed, old) = chunk.update(100, 200, true).unwrap();
+        let (changed, old, delta) = chunk.update(100, 200, true).unwrap();
         assert!(!changed);
         assert_eq!(old, CellState::Unknown as u8);
+        assert_eq!(delta, 3);
         assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
 
         // 2 次命中：6，6>6 否 → 仍 Unknown
-        let (changed, _) = chunk.update(100, 200, true).unwrap(); // 6
+        let (changed, _, delta) = chunk.update(100, 200, true).unwrap(); // 6
         assert!(!changed);
+        assert_eq!(delta, 3);
         assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
 
-        // 第 3 次命中：9 → 夹断 8，8 > 6 → Occupied
-        let (changed, _) = chunk.update(100, 200, true).unwrap(); // 8(clamp)
+        // 第 3 次命中：9 → 夹断 8，8 > 6 → Occupied；Δ = 8−6 = +2（clamp 吃掉 1）
+        let (changed, _, delta) = chunk.update(100, 200, true).unwrap(); // 8(clamp)
         assert!(changed);
+        assert_eq!(delta, 2);
         assert_eq!(chunk.state(100, 200), Some(CellState::Occupied as u8));
 
         // 1 次漏打：8-1=7，>6 → 仍 Occupied
-        let (changed, _) = chunk.update(100, 200, false).unwrap();
+        let (changed, _, delta) = chunk.update(100, 200, false).unwrap();
         assert!(!changed);
+        assert_eq!(delta, -1);
         assert_eq!(chunk.state(100, 200), Some(CellState::Occupied as u8));
 
         // 第 2 次漏打：7-1=6，6>6 否 → Unknown
-        let (changed, _) = chunk.update(100, 200, false).unwrap();
+        let (changed, _, _) = chunk.update(100, 200, false).unwrap();
         assert!(changed);
         assert_eq!(chunk.state(100, 200), Some(CellState::Unknown as u8));
+    }
+
+    #[test]
+    fn test_delta_saturation_zero() {
+        // 饱和格再更新：Δ = 0
+        let mut chunk = Chunk::new(0, 0);
+        for _ in 0..20 { chunk.update(50, 50, true); }
+        let (_, _, delta) = chunk.update(50, 50, true).unwrap();
+        assert_eq!(delta, 0, "饱和 +8 后命中 Δ 应为 0");
+
+        for _ in 0..20 { chunk.update(60, 60, false); }
+        let (_, _, delta) = chunk.update(60, 60, false).unwrap();
+        assert_eq!(delta, 0, "饱和 -8 后掠过 Δ 应为 0");
+    }
+
+    #[test]
+    fn test_grid_own_sync() {
+        // OccupancyGrid::update 同时更新 own 与 chunk（单车场景二者一致）
+        let mut grid = OccupancyGrid::new();
+        grid.update(10, 10, true).unwrap();
+        assert_eq!(grid.own.get(10, 10).unwrap(), 3);
+        assert_eq!(grid.chunk.get(10, 10).unwrap(), 3);
+        // Δ 来自 own 的差分
+        let (_, _, delta) = grid.update(10, 10, true).unwrap();
+        assert_eq!(delta, 3);
+        assert_eq!(grid.own.get(10, 10).unwrap(), 6);
+    }
+
+    #[test]
+    fn test_log_odds_roundtrip() {
+        let mut chunk = Chunk::new(0, 0);
+        chunk.update(1, 1, true).unwrap();
+        chunk.update(1, 1, true).unwrap();
+        chunk.update(2, 2, false).unwrap();
+        chunk.update(2, 2, false).unwrap();
+        chunk.update(2, 2, false).unwrap();
+
+        let bytes = chunk.log_odds_bytes();
+        assert_eq!(bytes.len(), CHUNK_SIZE * CHUNK_SIZE);
+        assert_eq!(bytes[1 * CHUNK_SIZE + 1], 6);   // (1,1) 两次命中
+        assert_eq!(bytes[2 * CHUNK_SIZE + 2], -3);  // (2,2) 三次掠过
+        assert_eq!(bytes[0], 0);                     // 未观测保持 0
+
+        // roundtrip
+        let mut chunk2 = Chunk::new(0, 0);
+        assert!(chunk2.set_log_odds(bytes.as_ref()));
+        assert_eq!(chunk2.get(1, 1).unwrap(), 6);
+        assert_eq!(chunk2.get(2, 2).unwrap(), -3);
+
+        // 长度非法拒绝
+        assert!(!chunk2.set_log_odds(&[0i8; 10]));
+        assert_eq!(chunk2.get(1, 1).unwrap(), 6, "失败时不应修改内容");
+    }
+
+    #[test]
+    fn test_grid_own_log_odds_api() {
+        let mut grid = OccupancyGrid::new();
+        grid.update(5, 5, true).unwrap();
+        grid.update(5, 5, true).unwrap();
+        let own_bytes = grid.own_log_odds_bytes();
+        assert_eq!(own_bytes[5 * CHUNK_SIZE + 5], 6);
+        let merged_bytes = grid.log_odds_bytes();
+        assert_eq!(merged_bytes[5 * CHUNK_SIZE + 5], 6);
+        // set_log_odds 替换 merged
+        let data = vec![0i8; CHUNK_SIZE * CHUNK_SIZE];
+        assert!(grid.set_log_odds(&data));
+        assert_eq!(grid.chunk.get(5, 5).unwrap(), 0);
     }
 
     #[test]

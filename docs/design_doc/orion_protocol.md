@@ -159,7 +159,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | `width` | uint16 | 栅格宽（cell 数），当前 256 |
 | `height` | uint16 | 栅格高（cell 数），当前 256 |
 | `resolution` | float | 分辨率（米/cell），当前 0.5 |
-| `data` | int8[width×height] | 每 cell 一字节：**0 = free, 100 = occupied, 255 = unknown**（与内部一致） |
+| `data` | int8[width×height] | 每 cell 一字节：**log-odds 原始值（i8，−8~+8）**（Task 13_2：由三态改为原始 log-odds；接收方按阈值 ±6 派生三态） |
 
 **payload 布局**（大端）：
 
@@ -175,7 +175,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 
 **总大小 = 20 + width×height 字节**（256×256 时 = 65556 字节）
 
-状态编码：内部三态已统一为 **0/100/255**（`CellState` 枚举 `[repr(i8)]`，`Unknown = -1`，u8 线上为 255），full 与 delta 编码一致，**零映射直传**。
+状态编码（2026-08-11 变更，Task 13_2）：data 从三态（0/100/255）改为 **log-odds 原始值 i8（clamp ±8）**——接收方（Pictor）需按阈值派生三态：`>+6 Occupied，<−6 Free，其余 Unknown`。⚠️ 复用 msgid=2，与车端同批升级，无兼容过渡期。
 
 发送时机：控制终端/其他车连接建立后发送一次；后续按需重发（协议层不做主动周期推送）。
 
@@ -195,7 +195,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 |---|---|---|
 | `gx` | int32 | 全局网格坐标 X（绝对坐标，无需 chunk） |
 | `gy` | int32 | 全局网格坐标 Y（绝对坐标，无需 chunk） |
-| `state` | int8 | 0 = free, 100 = occupied, 255 = unknown（与内部一致，直传） |
+| `delta` | int8 | **log-odds 数值差分**（+3/−1 等，clamp 后；Task 13_2：由三态改为 Δ） |
 
 **payload 布局**（大端）：
 
@@ -205,12 +205,12 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | 4 | `count` | u16 |
 | 6 | `entries[count]` | 每项 9 字节（见下） |
 
-`entries[i]` 布局（9 字节）：`gx` i32 [0..4) + `gy` i32 [4..8) + `state` i8 [8..9)
+`entries[i]` 布局（9 字节）：`gx` i32 [0..4) + `gy` i32 [4..8) + `delta` i8 [8..9)
 
 **总大小 = 6 + 9×count 字节**
 
-来源映射：`slam::update` 返回的 `Vec<Delta{gx,gy,state}>`。
-频率：有变化时发送（沿用 `slam_task` 200ms 节奏，≤5Hz）。
+来源映射（2026-08-11，Task 13_2）：`slam::update` 返回的 `Vec<Delta{gx,gy,delta}>`，slam_task 跨帧聚合净变化（**不做 ±8 clamp，发真实差分**；接收方应用时 clamp ±8 完成精确重放）。
+频率：每 5 帧（1s）发送一次（slam_task 模 5 节流，WS 与 gossip 链路一致）。
 
 ### 3.4 ORION_MANUAL_CONTROL（msgid 4）— 手动命令 + 模式切换
 
