@@ -21,8 +21,8 @@ use tokio::sync::RwLock;
 use super::protocol::parse_orion_frame;
 use crate::robot::core::command::{Command, ManualCmd};
 use crate::robot::core::protocol::{
-    encode_frame, encode_map_delta, encode_map_full, encode_pose, now_boot_ms,
-    COMPID_ROBOT, MSGID_MAP_DELTA, MSGID_MAP_FULL, MSGID_POSE, MapDeltaEntry, PoseData,
+    decode_frame, decode_map_full, encode_frame, encode_map_delta, encode_map_full, encode_pose,
+    now_boot_ms, COMPID_ROBOT, MSGID_MAP_DELTA, MSGID_MAP_FULL, MSGID_POSE, MapDeltaEntry, PoseData,
 };
 use crate::robot::core::robot::{MapDelta, Pose};
 use crate::robot::slam::{CELL_RESOLUTION, CHUNK_SIZE, OccupancyGrid};
@@ -185,8 +185,13 @@ async fn handle_connection(
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(Message::Binary(bytes)) => {
-                if let Some(cmd) = parse_orion_frame(&bytes) {
-                    let _ = robot_cmd_tx.send(cmd).await;
+                // Task 13_2：终端→车 MAP_FULL（新车初始化全量）就地处理，不经过命令通道
+                if let Some(frame) = decode_frame(&bytes) {
+                    if frame.msgid == MSGID_MAP_FULL {
+                        handle_map_full(&frame, &grid, &peer).await;
+                    } else if let Some(cmd) = parse_orion_frame(&frame) {
+                        let _ = robot_cmd_tx.send(cmd).await;
+                    }
                 }
             }
             Ok(Message::Close(_)) => break,
@@ -198,9 +203,35 @@ async fn handle_connection(
         }
     }
 
+
     feed_handle.abort();
     if robot_cmd_tx.send(Command::Manual(ManualCmd::Stop)).await.is_err() {
         warn!("[WS] {peer} 断开时无法发送 Stop");
     }
     tracing::info!("[WS] {peer} 已断开，自动停车");
+}
+
+/// 终端→车 MAP_FULL：替换 merged（own 保留——own = 本车观测贡献，对账上报数据源）
+///
+/// Task 13_2 方案二：新车接入终端 → 终端下发全局全量 → set_log_odds 替换 merged。
+/// 元数据（origin/size/resolution）不符或解析失败 → warn 忽略，不 panic。
+async fn handle_map_full(
+    frame: &crate::robot::core::protocol::Frame,
+    grid: &Arc<RwLock<OccupancyGrid>>,
+    peer: &str,
+) {
+    let Some((_ts, ogx, ogy, w, h, res, data)) = decode_map_full(&frame.payload) else {
+        warn!("[WS] {peer} MAP_FULL 帧解析失败 ({} 字节)", frame.payload.len());
+        return;
+    };
+    if ogx != 0 || ogy != 0 || w as usize * h as usize != CHUNK_SIZE * CHUNK_SIZE
+        || (res - CELL_RESOLUTION).abs() > 1e-6
+    {
+        warn!("[WS] {peer} MAP_FULL 元数据不符 (origin=({ogx},{ogy}) size={w}x{h} res={res})，已忽略");
+        return;
+    }
+    let mut g = grid.write().await;
+    if g.set_log_odds(&data[..]) {
+        info!("[WS] {peer} 全量地图替换完成（{} 格）", data.len());
+    }
 }

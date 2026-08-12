@@ -1,8 +1,8 @@
 # Task 13_2: CRDT 地图（多车地图一致性）
 
-> 状态：🔵 方案讨论中 + 三步已实施（2026-08-11：对账方案定为**终端聚合（方案 C）**；实施步骤 1~3 已完成，4~5 待实施）
+> 状态：🟢 **方案收敛（2026-08-12：简化版定案——不做周期对账；新车初始化 = 终端下发全量）+ 步骤 4 已实施**，步骤 5 挂起
 > 创建日期：2026-08-10
-> 最后更新：2026-08-11
+> 最后更新：2026-08-12
 > 父任务：`Task/task_13_multirobot_arch.md`
 > 问题池：`Task/robot_review_problem.md`
 > 设计参考：`docs/design_doc/multi_robot_map.md`（§6 我们的方案）、`docs/design_doc/multi_robot_control.md`（坐标系约定）、`调研报告_分布式地图一致性方案.md`、`调研报告_增量补充_多机地图CRDT同步.md`
@@ -164,13 +164,44 @@
 - ⚠️ **步骤 2 与 3 必须同批发布**：WS 的 MAP_DELTA（msgid=3）与 MAP_FULL（msgid=2）同一协议族，分开发布会导致终端拿到"三态 full + Δ delta"无法叠加
 - ⚠️ Pictor 升级与车端同批（复用 msgid=2 无兼容过渡期）
 
-### 后续步骤（待讨论）
+### 方案二定案：新车初始化 = 终端下发全量（2026-08-12）
 
-4. 入站处理：`consumer.rs` 放行 MAP_DELTA/MAP_FULL，Δ → merged 累加，FULL → merged 替换
-5. 终端聚合对账（方案 C）：WS 侧收集各车 own → `clamp(Σ own)` → 下发全量替换 merged
-6. 单测：增量重放 / 饱和吸收 / 整表 roundtrip / 协议 roundtrip / 终端聚合全流程 / consumer 入站
-7. 文档同步：`orion_protocol.md` §3
-8. `cargo check` + `cargo test --lib robot` + build
+**问题**：晚启动/新接入的车收不到入网前其他车的 gossip Δ（gossipsub 不重放历史）→ 缺历史贡献，必须靠 FULL 初始化。
+
+**选型对比**：
+
+| 维度 | 方案一：车对车广播 FULL | **方案二：终端下发全量（选定）** |
+|---|---|---|
+| 权威性 | ❌ 无权威——各车 merged 各有偏差，新车收 N 份选哪份？ | ✅ 单一权威——终端是全局视图持有者（Σ 各车 own + Δ 流） |
+| 实现门槛 | ❌ gossipsub 无点对点请求-响应；Robot 层无"新车加入"事件；需新消息类型 | ✅ 复用 msgid=2；车端零件现成（decode_map_full + set_log_odds） |
+| 消息量 | ❌ N 车同时广播 64KB×N | ✅ 一次 64KB |
+| 架构一致性 | 偏离方案 C 终端中心 | ✅ 与方案 C 一致 |
+
+**链路**：新车接入 WS → 终端把全局图（Σ 各车 own + Δ 流）→ `MAP_FULL` 下发 → 车端 WS 入站就地处理（`decode_map_full` → `set_log_odds` 替换 merged，own 保留）→ 已实施（`server.rs` `handle_map_full`）。
+
+**方向语义**：车→终端 = 接入时上报 own 整表（现有）；**终端→车 = 新车接入下发全量（新增）**；车↔车无 FULL（车启动=入网、own 从 0 开始、Δ 流即完整历史）。
+
+**降级**：终端不在线时新车无法初始化全量（收 Δ 流缺历史）→ 已知边界 #3。
+
+**Pictor 配合**：新车接入事件 → 编码下发全局全量（encode_map_full）；解析升级同批发布。
+
+### 后续步骤
+
+4. ✅ **入站处理（2026-08-12 实施完成）**：`consumer.rs` 放行 MAP_DELTA → `OccupancyGrid::apply_delta` 累加 merged（只写 chunk，own 不碰）；MAP_FULL 走 WS 入站就地处理（`decode_map_full` → `set_log_odds` 替换 merged）
+5. ⏸️ **终端聚合对账（方案 C）挂起**（2026-08-12 人类决定）：不做周期对账；新车初始化改为**方案二（终端下发全局全量）**；对账后续再考虑
+
+#### 已知边界（2026-08-12 收敛，接受并标注）
+
+| # | 场景 | 后果 | 缓解 |
+|---|---|---|---|
+| 1 | 重连/车重启 | 终端侧 own 重复计数（双倍） | 后续终端按 peer_id 记账 |
+| 2 | 丢包 | 偏差永久残留（无对账兜底） | 后续周期对账 |
+| 3 | 终端不在线 | 新车无法初始化全量（降级：收 Δ 流缺历史） | 标注 |
+| 4 | 晚启动车 | 缺入网前历史 Δ | 方案二：接入终端时下发全量补全 |
+| 5 | FULL 替换吞在途 Δ | 替换瞬间的在途增量被抹除（若对方格饱和则跨多轮才愈合） | 首版接受，后续对账周期取小值 |
+6. ✅ **单测（2026-08-12）**：增量重放（apply_delta ×4）/ 整表 roundtrip（decode_map_full）/ consumer 入站（MAP_DELTA 应用 + own 不变 + 未知 msgid）；终端聚合全流程留步骤 5
+7. ✅ **文档同步（2026-08-12）**：`orion_protocol.md` §3.2（接收语义/方向语义）、本任务状态、wb_13_2
+8. ✅ **验证（2026-08-12）**：`cargo check`（27 存量警告不变）+ `cargo test --lib robot` **69/69** + `cargo build --release --bin orion-robot` ✅
 
 ---
 

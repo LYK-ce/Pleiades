@@ -109,7 +109,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | msgid | 消息 | 方向 | 频率/时机 |
 |---|---|---|---|
 | 1 | `ORION_POSE` | 车 → 集群/终端 | 10Hz 广播 |
-| 2 | `ORION_MAP_FULL` | 车 → 集群/终端 | 连接建立时 / 按需 |
+| 2 | `ORION_MAP_FULL` | 车 → 集群/终端；**终端 → 车（新车初始化）** | 连接建立时 / 按需 |
 | 3 | `ORION_MAP_DELTA` | 车 → 集群/终端 | 地图有变化时（≤5Hz） |
 | 4 | `ORION_MANUAL_CONTROL` | 终端/集群 → 车 | 事件驱动 |
 | 5 | `ORION_TASK_SET` | 终端/集群 → 车 | 事件驱动 |
@@ -178,6 +178,10 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 状态编码（2026-08-11 变更，Task 13_2）：data 从三态（0/100/255）改为 **log-odds 原始值 i8（clamp ±8）**——接收方（Pictor）需按阈值派生三态：`>+6 Occupied，<−6 Free，其余 Unknown`。⚠️ 复用 msgid=2，与车端同批升级，无兼容过渡期。
 
 发送时机：控制终端/其他车连接建立后发送一次；后续按需重发（协议层不做主动周期推送）。
+
+**接收语义（2026-08-12 实施，Task 13_2 方案二）**：车端 WS 入站识别 msgid=2 **就地处理**（不经过命令通道）——`decode_map_full` 宽松校验（仅结构性长度 20+width×height），origin/width/height/resolution 读出不校验（当前全系统恒 origin=(0,0)、256×256、0.5m，多 chunk/偏移场景留后续）；校验通过后 `set_log_odds` 整表替换 merged（**own 保留**——own = 本车观测贡献，对账上报数据源）。终端下发时机：**新车接入 WS 时**（初始化全量，弥补新车收不到历史 gossip Δ 的缺口）。⚠️ **时序约定（Pictor 必须遵守）**：终端须等**收到新车 own 上报之后**再下发 FULL——否则下发的全局图不含新车贡献，新车 merged 将被覆盖、丢失自身初始观测（先 own 后 FULL，缺一不可）。
+
+**方向语义（2026-08-12 收敛）**：车→终端 = 接入时上报 own 整表（现有）；终端→车 = 新车接入时下发全局全量（新增）；**车↔车无 FULL**（车启动=入网、own 从 0 开始、Δ 流即完整历史）。
 
 ### 3.3 ORION_MAP_DELTA（msgid 3）— 地图增量
 

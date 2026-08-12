@@ -180,9 +180,11 @@ impl Robot {
         let consumer_bus = robot_bus.clone();
         let consumer_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default();
         let consumer_table = cluster_table.clone();
+        // Task 13_2：入站 MAP_DELTA 应用需要 grid（只写 merged）
+        let consumer_grid = grid.clone();
         let consumer_cancel = cancel.clone();
         tokio::spawn(async move {
-            cluster_consumer(consumer_bus, consumer_peer_id, consumer_table, consumer_cancel).await;
+            cluster_consumer(consumer_bus, consumer_peer_id, consumer_table, consumer_grid, consumer_cancel).await;
         });
 
         // 8. 命令通道

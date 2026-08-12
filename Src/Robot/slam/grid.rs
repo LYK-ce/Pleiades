@@ -97,6 +97,21 @@ impl Chunk {
         Some((old_state != new_state, new_state, delta))
     }
 
+    /// 单格应用任意 Δ（入站增量 / 对账应用；Task 13_2）
+    ///
+    /// `merged += delta`，clamp ±8（与 update 相同的边界）；越界返回 false 不修改。
+    pub fn apply_delta(&mut self, gx: i32, gy: i32, delta: i8) -> bool {
+        let lx = gx - self.origin_gx;
+        let ly = gy - self.origin_gy;
+        if lx < 0 || lx >= CHUNK_SIZE as i32 || ly < 0 || ly >= CHUNK_SIZE as i32 {
+            return false;
+        }
+        let idx = ly as usize * CHUNK_SIZE + lx as usize;
+        let old = self.cells[idx];
+        self.cells[idx] = old.saturating_add(delta).clamp(FREE_CLAMP, OCCUPIED_CLAMP);
+        true
+    }
+
     /// 整表原始 log-odds（i8）导出（own 上传 / 对账下发数据源）
     pub fn log_odds_bytes(&self) -> Box<[i8; CHUNK_SIZE * CHUNK_SIZE]> {
         self.cells.clone()
@@ -189,6 +204,14 @@ impl OccupancyGrid {
     /// own 表整表导入
     pub fn set_own_log_odds(&mut self, data: &[i8]) -> bool {
         self.own.set_log_odds(data)
+    }
+
+    /// 应用远端增量：**只写 merged（chunk），own 不动**（Task 13_2）
+    ///
+    /// own = 本车观测累积贡献（对账上传数据源），混入他人贡献会导致终端 Σ 双倍计数，
+    /// 故入站 Δ 一律走本方法，禁止直接调用 `update()`（那是双表观测语义）。
+    pub fn apply_delta(&mut self, gx: i32, gy: i32, delta: i8) -> bool {
+        self.chunk.apply_delta(gx, gy, delta)
     }
 
 }
@@ -320,6 +343,48 @@ mod tests {
         let data = vec![0i8; CHUNK_SIZE * CHUNK_SIZE];
         assert!(grid.set_log_odds(&data));
         assert_eq!(grid.chunk.get(5, 5).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_apply_delta_accumulate() {
+        // 任意 Δ 累加（非固定 +3/-1）
+        let mut grid = OccupancyGrid::new();
+        assert!(grid.apply_delta(10, 10, 3));
+        assert_eq!(grid.chunk.get(10, 10).unwrap(), 3);
+        assert!(grid.apply_delta(10, 10, 2));
+        assert_eq!(grid.chunk.get(10, 10).unwrap(), 5);
+        assert!(grid.apply_delta(10, 10, -1));
+        assert_eq!(grid.chunk.get(10, 10).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_apply_delta_clamp() {
+        // clamp ±8：与 update 相同的边界语义
+        let mut grid = OccupancyGrid::new();
+        for _ in 0..10 { grid.apply_delta(50, 50, 3); }
+        assert_eq!(grid.chunk.get(50, 50).unwrap(), 8);
+        for _ in 0..10 { grid.apply_delta(50, 50, -3); }
+        assert_eq!(grid.chunk.get(50, 50).unwrap(), -8);
+    }
+
+    #[test]
+    fn test_apply_delta_out_of_bounds() {
+        let mut grid = OccupancyGrid::new();
+        assert!(!grid.apply_delta(-1, 0, 3));
+        assert!(!grid.apply_delta(256, 0, 3));
+        assert!(!grid.apply_delta(0, 256, 3));
+        // 越界不修改任何内容
+        assert_eq!(grid.chunk.get(0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_apply_delta_does_not_touch_own() {
+        // 远端增量只写 merged，own 必须保持本车观测值（CRDT 双倍计数防线）
+        let mut grid = OccupancyGrid::new();
+        grid.update(5, 5, true).unwrap(); // own=3, chunk=3
+        grid.apply_delta(5, 5, 3);        // 远端 Δ
+        assert_eq!(grid.chunk.get(5, 5).unwrap(), 6);
+        assert_eq!(grid.own.get(5, 5).unwrap(), 3, "own 不得被远端增量污染");
     }
 
     #[test]

@@ -9,15 +9,16 @@
 
 use crate::robot::core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
 use crate::robot::core::protocol::{
-    decode_frame, decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP,
+    decode_manual_control, decode_task_set, Frame, ACTION_BACKWARD, ACTION_BEEP,
     ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP,
     ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, MISSION_GOTO,
     MSGID_MANUAL_CONTROL, MSGID_TASK_SET,
 };
 
 /// 解析 ORION 帧 → 内部命令（WS 入站：终端 → 车）
-pub fn parse_orion_frame(bytes: &[u8]) -> Option<Command> {
-    let frame = decode_frame(bytes)?;
+///
+/// Task 13_2：改收 `&Frame`（调用方已 decode，避免 65KB MAP_FULL 帧二次解析）
+pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
     match frame.msgid {
         MSGID_MANUAL_CONTROL => {
             let mc = decode_manual_control(&frame.payload)?;

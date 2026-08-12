@@ -14,7 +14,7 @@ pub mod messages;
 
 pub use frame::{decode_frame, encode_frame, Frame};
 pub use messages::{
-    decode_manual_control, decode_map_delta, decode_pose, decode_task_set,
+    decode_manual_control, decode_map_delta, decode_map_full, decode_pose, decode_task_set,
     encode_manual_control, encode_map_delta, encode_map_full, encode_pose, encode_task_set,
     ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT,
     ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,

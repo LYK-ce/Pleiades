@@ -7,6 +7,7 @@
 //! 所有数值大端（BE）。坐标/计数为 i32，与内部类型一致。
 
 use super::frame::MAGIC;
+use crate::robot::slam::CHUNK_SIZE;
 
 // ============================================================
 // 数据结构
@@ -113,6 +114,33 @@ pub fn encode_map_full(
     buf.extend_from_slice(&resolution.to_be_bytes());
     buf.extend_from_slice(data);
     buf
+}
+
+/// 解码全量地图 payload（与 `encode_map_full` 对称，Task 13_2）
+///
+/// 布局：`time_boot_ms(4) | origin_gx(4) | origin_gy(4) | width(2) | height(2) | resolution(4) | data(65536)`
+/// data 为 i8 log-odds 的 u8 位模式（与编码零转换，逐字节 `as i8`）。
+///
+/// 宽松校验（2026-08-12 决策）：仅做结构性长度检查（20 + 65536）；
+/// origin/width/height/resolution 读出但不校验——当前全系统 origin 恒 (0,0)、256×256、0.5m，
+/// 多 chunk / 偏移 origin 场景留后续完善。
+pub fn decode_map_full(
+    payload: &[u8],
+) -> Option<(u32, i32, i32, u16, u16, f32, Box<[i8; CHUNK_SIZE * CHUNK_SIZE]>)> {
+    if payload.len() != 20 + CHUNK_SIZE * CHUNK_SIZE {
+        return None;
+    }
+    let time_boot_ms = u32::from_be_bytes(payload[0..4].try_into().ok()?);
+    let origin_gx = i32::from_be_bytes(payload[4..8].try_into().ok()?);
+    let origin_gy = i32::from_be_bytes(payload[8..12].try_into().ok()?);
+    let width = u16::from_be_bytes(payload[12..14].try_into().ok()?);
+    let height = u16::from_be_bytes(payload[14..16].try_into().ok()?);
+    let resolution = f32::from_be_bytes(payload[16..20].try_into().ok()?);
+    let mut data = Box::new([0i8; CHUNK_SIZE * CHUNK_SIZE]);
+    for (i, &b) in payload[20..].iter().enumerate() {
+        data[i] = b as i8; // u8 位模式 → i8，数值语义在接收方（阈值 ±6 派生三态）
+    }
+    Some((time_boot_ms, origin_gx, origin_gy, width, height, resolution, data))
 }
 
 // ============================================================
@@ -313,6 +341,33 @@ mod tests {
         let empty = encode_task_set(&[]);
         assert_eq!(empty.len(), 1);
         assert!(decode_task_set(&empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_map_full_roundtrip() {
+        use crate::robot::slam::CHUNK_SIZE;
+        // 构造带非零值的整表，验证位模式往返
+        let mut data = Box::new([0i8; CHUNK_SIZE * CHUNK_SIZE]);
+        data[0] = 3;
+        data[100] = -8;
+        data[65535] = 8;
+        let data_u8: Vec<u8> = data.iter().map(|&v| v as u8).collect();
+        let payload = encode_map_full(42, 0, 0, 256, 256, 0.5, &data_u8);
+        assert_eq!(payload.len(), 20 + CHUNK_SIZE * CHUNK_SIZE);
+
+        let (ts, ogx, ogy, w, h, res, decoded) = decode_map_full(&payload).unwrap();
+        assert_eq!(ts, 42);
+        assert_eq!((ogx, ogy), (0, 0));
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(res, 0.5);
+        assert_eq!(decoded[0], 3);
+        assert_eq!(decoded[100], -8);
+        assert_eq!(decoded[65535], 8);
+
+        // 长度非法（过短 / 空 / 截断）拒绝
+        assert!(decode_map_full(&payload[..100]).is_none());
+        assert!(decode_map_full(&[]).is_none());
+        assert!(decode_map_full(&payload[..payload.len() - 1]).is_none());
     }
 
     #[test]
