@@ -203,13 +203,23 @@
 7. ✅ **文档同步（2026-08-12）**：`orion_protocol.md` §3.2（接收语义/方向语义）、本任务状态、wb_13_2
 8. ✅ **验证（2026-08-12）**：`cargo check`（27 存量警告不变）+ `cargo test --lib robot` **69/69** + `cargo build --release --bin orion-robot` ✅
 
+### 实施记录（步骤 4，2026-08-12）
+
+**改动文件（7 个代码 + 3 个文档）**：`grid.rs`（apply_delta + 包装 + 4 测试）、`messages.rs`（decode_map_full + 测试）、`protocol/mod.rs`（re-export）、`consumer.rs`（grid 参数 + MAP_DELTA 分支 + 测试改造 6 个）、`robot.rs`（spawn 传 grid）、`WebSocket/protocol.rs`（parse_orion_frame 改收 &Frame）、`WebSocket/server.rs`（入站 msgid==2 就地处理 handle_map_full）；文档：本任务、wb_13_2、orion_protocol.md §3.2（含"先 own 后 FULL"时序约定）。
+
+**验证**：`cargo check` ✅（27 存量警告，无新增）→ `cargo test --lib robot` **69/69** → `cargo build --release --bin orion-robot` ✅
+
+**Commit**：`1e712a8`（Pleiades-Orion，已推送 origin）
+
+**遗留**：① Pictor 端同步（帧解析升级 4 项 + 全局图维护/新车下发 2 项，外部仓库，需人类协调）；② 双车联调（车对车增量互通 + 新车接入初始化验证）；③ 步骤 5（周期对账）挂起
+
 ---
 
 ## 待决策
 
-1. ~~增量广播是否保留~~ → **已定：保留高频增量 + 低频对账（方案 C）**（2026-08-11）；对账周期仍待定（候选 5s~30s）
-2. **截断上限**：±8（保持现状，间距=2 动态性最好）vs ±20（更保守）
-3. **msgid 复用 vs 新增**：MAP_FULL 改 i8 后复用 msgid=2 会影响 WS/Pictor 旧解析，倾向新增 msgid
+1. ✅ ~~增量广播/周期对账~~ → **已定（2026-08-12）**：保留高频增量；**不做周期对账**（挂起，后续再考虑）；新车初始化 = 终端下发全量（方案二）
+2. ✅ **截断上限**：±8 保持现状（间距=2 动态性最好）——已实施
+3. ✅ **msgid 复用**：复用 msgid=2（2026-08-11 已定并实施），Pictor 需按新语义解析，无兼容过渡期
 4. **D\* 对 Unknown 的策略**（与地图一致性正交，见 `multi_robot_map.md` §6.5）：当路（现状）/ 当墙 / 中间值
 5. **终端对账细节**：如何感知车队成员、对账触发时机、对账与增量的时序交互（替换瞬间的在途增量）
 
