@@ -47,3 +47,9 @@
 **文档**：orion_protocol.md §3.1（POSE 33B 布局 + 意图语义）、multi_robot_control.md §8-1 标记已定、task_13_1 状态✅
 
 **遗留**：双车联调（对方位姿+意图入库验证）；P0 寻路障碍注入（消费 cluster_table）
+
+---
+
+## 2026-08-12 归档 📦
+
+Task 13_1 归档：✅ 已实施（commit 44ca15c）+ 归档；Pictor 端同步 ✅（人类确认）；双车联调待做。

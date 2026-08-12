@@ -1,8 +1,8 @@
 # Task 13: Multi-Robot Control（多车协同控制）
 
-> 状态：进行中——**阶段一（协议调整：sysid → 完整 peer_id）✅ 已实施（2026-08-10）**
+> 状态：📦 **已归档（2026-08-12）**——阶段一（sysid→完整 peer_id）✅；阶段二拆分为 task_13_1/13_2 均完成；Pictor 端同步已完成；双车联调待做（晚些进行）
 > 创建日期：2026-08-10
-> 最后更新：2026-08-10
+> 最后更新：2026-08-12
 > 设计文档：`docs/design_doc/multi_robot_control.md`（多车协同总设计）
 > 问题池：`Task/robot_review_problem.md`
 

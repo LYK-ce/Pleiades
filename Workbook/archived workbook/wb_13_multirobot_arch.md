@@ -55,3 +55,14 @@
 - 前置：gossip 基础设施（ML_review 已 merge：bd0ec43/387ad72）
 - 边界：本阶段全部改动在 `Src/Robot/` + `Src/WebSocket/` + `Src/bootstrap.rs`（本分支职责内）；不碰 Network/EventBus
 - 跨仓库：Pictor（GodotProject）帧解析需同步升级
+
+---
+
+## 2026-08-12 归档 📦
+
+Task 13 系列归档（task_13 / 13_1 / 13_2 + 对应 wb 移入 archived）：
+- 阶段一（sysid→peer_id）✅ commit b7fa822
+- Task 13_1（Cluster Info + POSE 意图）✅ commit 44ca15c
+- Task 13_2（CRDT 地图）✅ commit 1e712a8 / 25ba453（步骤 5 周期对账挂起）
+- **Pictor 端同步 ✅（人类 2026-08-12 确认完成）**
+- **双车联调待做**（晚些进行）
