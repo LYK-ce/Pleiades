@@ -53,7 +53,11 @@
 Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**（连接机制 + `hello` 握手消息，`hello` 仅发送一次，成本可忽略）。
 
 - **WS 消息 payload 已迁移为 ORION 帧**（2026-08-07 实施）：pose / map_delta / map_full / 命令全部为二进制 ORION 帧，旧 JSON 协议（`cmd/action` 三层命令、`type:pose` 遥测）**已移除**
-- `hello` 为唯一保留的 JSON 消息（连接握手）
+- `hello` 为唯一保留的 JSON 消息（连接握手），当前字段：`type` / `vehicle_id`(peer_name) / `address`
+- ✅ **已实施（2026-08-12，Task 14）**：`hello` 增加 `peer_id` 字段——本车完整 peer_id（`PeerId::to_bytes()` 原始字节，hex 编码下发）
+  - 动机：群发任务（`ORION_TASK_SET` members 列表）需要终端持有每辆参与车的 peer_id 字节，且必须与车端排序所用字节表示完全一致；此前终端只能从下行帧头 `sysid` 间接解析，无显式身份宣告通道
+  - 现状：终端连接即得车身份（hex 解码回原始字节），`members` 原样回填车端字节，杜绝字节表示不一致导致的序号错位
+  - `hello` 完整字段：`type` / `vehicle_id`(peer_name) / `address` / `peer_id`（76 hex 字符，Ed25519 38B）
 - **`Tool/robot_control.html` 已废弃**（旧 JSON 协议，不再维护；主力地面站为 Pictor）
 - Pictor 完成 libp2p 接入后，WS 链路与 `hello` 一并退役
 
@@ -249,16 +253,22 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 
 映射：`ORION_MANUAL_CONTROL` → `Command::Manual(ManualCmd::*)` / `Command::Mode(ModeCmd::*)`。
 
-### 3.5 ORION_TASK_SET（msgid 5）— 任务队列替换
+### 3.5 ORION_TASK_SET（msgid 5）— 任务队列（Task 14：members 群发扩展）
 
 **整体替换语义**（非追加）：收到即丢弃当前任务队列（含正在执行的任务，立即中断），装载新队列从头执行。
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `count` | uint8 | 任务数；**0 = 取消全部任务（停车待命）**；**协议上限 255 任务/帧** |
-| `missions` | 结构数组 | 每项 9 字节（见下） |
+**payload 布局**（大端，Task 14 起）：
 
-`missions[i]`：
+| 偏移 | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | `mission_count` | uint8 | 任务数；**协议上限 255 任务/帧** |
+| 1 | `member_count` | uint8 | 参与车辆数（见三分支语义） |
+| 2 | `members[member_count]` | 变长数组 | 每项 = `len` u8 + `peer_id`（完整 libp2p PeerId 二进制，与帧头 sysid 同构） |
+| ... | `missions[mission_count]` | 结构数组 | 每项 9 字节（见下） |
+
+`members[i]` 布局：`len` u8 [0..1) + `peer_id` [1..1+len)
+
+`missions[i]` 布局（9 字节）：`type` u8 [0..1) + `x` f32 [1..5) + `y` f32 [5..9)
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -266,21 +276,21 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | `x` | float | 目标点 X（全局世界坐标，米） |
 | `y` | float | 目标点 Y（全局世界坐标，米） |
 
-**payload 布局**（大端）：
+**总大小 = 2 + Σ(1+len(member_i)) + 9×mission_count 字节**
 
-| 偏移 | 字段 | 类型 |
+**三分支语义**（Task 14 定稿 2026-08-12）：
+
+| member_count | 语义 | 处理 |
 |---|---|---|
-| 0 | `count` | u8 |
-| 1 | `missions[count]` | 每项 9 字节（见下） |
+| `0` | **取消全部任务**（老 count=0 语义） | 空队列替换，车停车待命；mission_count 忽略 |
+| `1` | **单车任务**（老行为） | `missions` 直接替换本地队列，逐项执行（未知 type 过滤丢弃） |
+| `> 1` | **群发任务**（每车自算散布） | 取 missions 中**第一个 `Goto`** 为目标点，members 名单随任务下发；每车确认自己在名单内 → 确定性分配自算散布位置（见 multi_robot_control.md §4），不在名单 → 忽略 |
 
-`missions[i]` 布局（9 字节）：`type` u8 [0..1) + `x` f32 [1..5) + `y` f32 [5..9)
-
-**总大小 = 1 + 9×count 字节**
-
-行为约束（2026-08-07 决策）：
+行为约束（2026-08-07 + 2026-08-12 决策）：
 - **替换**：新队列到达即替换旧队列，不合并、不追加
 - **立即中断**：正在执行的任务立即终止（`executor.reset()` + `stm32.stop()`），从新队列第一个任务开始
-- **空队列 = 取消**：`count = 0` 即取消全部任务，车停车待命
+- **成员身份校验**：群发任务每车校验自己 `PeerId::to_bytes()` 是否在 members（字节一致，帧内为终端原样回填）；排序用字节升序，不信任帧序
+- ⚠️ **同批升级无过渡期**：本布局于 Task 14 变更（加入 member_count + members 段），车端与 Pictor 必须同批上线；旧帧（1+9n 布局）不再兼容（长度恰好匹配的旧帧会被解析为 member_count=0 → 取消，语义安全）
 
 ---
 

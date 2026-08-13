@@ -11,11 +11,11 @@
 
 | # | 位置 | 问题 | 建议 | 来源 |
 |---|---|---|---|---|
-| 🔴 P1 | `Src/Robot/slam/pathfinder.rs` `mark_obstacle` | 未强制置 ∞，仅重读概率栅格——需 4 次 LiDAR 命中才 Occupied，动态障碍 D* 不知情，急停后仍可能反复撞 | mark_obstacle 直接置 cost=∞（DStarLite 内部 `obstacles: HashSet`，cost() 先查集合）或同步写 grid | task_8 / wb_8 待办 #2 |
-| 🟠 P3 | `Src/Robot/slam/pathfinder.rs` `compute_shortest_path` | 无迭代上限/watchdog，极端地图可拖垮 50ms auto_tick | 加 MAX_ITERS 迭代上限/时间预算，超限降级 | task_8 / wb_8 待办 #3 |
+| 🔴 P1 | `Src/Robot/core/planning/pathfinder.rs` `mark_obstacle` | 未强制置 ∞，仅重读概率栅格——需 4 次 LiDAR 命中才 Occupied，动态障碍 D* 不知情，急停后仍可能反复撞 | mark_obstacle 直接置 cost=∞（DStarLite 内部 `obstacles: HashSet`，cost() 先查集合）或同步写 grid | task_8 / wb_8 待办 #2 |
+| 🟠 P3 | `Src/Robot/core/planning/pathfinder.rs` `compute_shortest_path` | 无迭代上限/watchdog，极端地图可拖垮 50ms auto_tick | 加 MAX_ITERS 迭代上限/时间预算，超限降级 | task_8 / wb_8 待办 #3 |
 | 🟠 P6 | `Src/Robot/core/executor.rs` | goal 格为 Occupied 时任务永不完成也不失败 | 目标格不可达时明确失败并报错 | task_8 / wb_8 待办 #5 |
 | 🟠 P7 | `Src/Robot/core/executor.rs` | D* 规划失败仅 warn!（task_8 Q6 要求 error!） | 提升为 error! | task_8 / wb_8 待办 #5 |
-| 🟠 N10 | `Src/Robot/slam/pathfinder.rs` | 零单元测试（wb_8 已给出 17 场景清单，未落地） | 补全单元测试 | wb_10 新发现 / task_11 A 组 |
+| 🟠 N10 | `Src/Robot/core/planning/pathfinder.rs` | 零单元测试（wb_8 已给出 17 场景清单，未落地） | 补全单元测试 | wb_10 新发现 / task_11 A 组 |
 | 🟡 N8 | 实车 | 路径偏差（待实车数据分析定位） | 收集数据后分析 | wb_10 新发现 |
 
 ## 二、性能（task_11 完善方向 B，源自 task_10 承接 + wb_10 新发现）

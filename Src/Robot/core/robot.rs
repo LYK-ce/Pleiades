@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-06
+//Modified Date ： 2026-08-13
 
 //! Robot 主循环
 //!
@@ -29,7 +29,8 @@ use crate::robot::slam::{self, OccupancyGrid, RobotPose, Delta};
 use std::time::Instant;
 
 use crate::event_bus::EventBus;
-use crate::robot::core::cluster::{cluster_consumer, ClusterInfoTable};
+use crate::robot::core::cluster::{cluster_consumer, cluster_table_cleaner, ClusterInfoTable};
+use crate::robot::core::planning::cluster_to_obstacle_cells;
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
     encode_frame, encode_map_delta, encode_pose, now_boot_ms,
@@ -187,6 +188,13 @@ impl Robot {
             cluster_consumer(consumer_bus, consumer_peer_id, consumer_table, consumer_grid, consumer_cancel).await;
         });
 
+        // 7.1 集群表维护（周期清理失联车：2s 周期 / 2s 超时，Task 15）
+        let cleaner_table = cluster_table.clone();
+        let cleaner_cancel = cancel.clone();
+        tokio::spawn(async move {
+            cluster_table_cleaner(cleaner_table, cleaner_cancel).await;
+        });
+
         // 8. 命令通道
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
 
@@ -198,12 +206,18 @@ impl Robot {
         let loop_lidar_state = lidar_state.clone();
         let loop_grid = grid.clone();
         let loop_execute_state = execute_state.clone();
+        // Task 15：动态障碍注入需要读集群表
+        let loop_cluster_table = cluster_table.clone();
+        // Task 14：群发任务分配需要本车 peer_id（单机无 node_handle 时空 vec）
+        let loop_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default();
         tokio::spawn(async move {
             main_loop(
                 stm32, lidar, cmd_rx,
                 loop_op_mode, loop_mission,
                 loop_robot_state, loop_lidar_state, loop_grid,
                 loop_execute_state,
+                loop_cluster_table,
+                loop_peer_id,
                 loop_cancel,
             ).await;
         });
@@ -371,6 +385,8 @@ async fn main_loop(
     lidar_state: Arc<RwLock<LidarState>>,
     grid: Arc<RwLock<OccupancyGrid>>,
     execute_state: Arc<RwLock<ExecuteState>>,
+    cluster_table: Arc<ClusterInfoTable>,
+    own_peer_id: Vec<u8>,
     cancel: CancellationToken,
 ) {
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
@@ -437,12 +453,18 @@ async fn main_loop(
                 let rs = robot_state.read().await.clone();
                 let ls = lidar_state.read().await.clone();
                 let g = { let guard = grid.read().await; (*guard).clone() };
+                // Task 15：无脑读全量快照（超时剔除由独立表维护 task 负责）
+                let others = cluster_table.snapshot().await;
+                let dynamic_obstacles: Vec<(i32, i32)> =
+                    cluster_to_obstacle_cells(&others).into_iter().collect();
 
                 // Task 13_1：execute_state 由 executor 写（step 包装层同步 sub_target）
                 executor.step(
                     &stm32, &rs, &ls, &g,
+                    &dynamic_obstacles,
                     &mut *mission_queue.write().await,
                     &mut *execute_state.write().await,
+                    &own_peer_id,
                 );
 
                 next_tick += Duration::from_millis(auto_tick_ms);

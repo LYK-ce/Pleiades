@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-08-07
+//Modified Date ： 2026-08-12
 
 //! WebSocket 服务器核心
 //!
@@ -136,10 +136,13 @@ async fn handle_connection(
     local_peer_id: Vec<u8>,
 ) {
     // hello：连接握手（过渡期保留，唯一 JSON 消息）
+    // Task 14：peer_id 字段 = 本车完整 peer_id hex（终端构造群发任务 members 的身份来源）
+    let peer_hex: String = local_peer_id.iter().map(|b| format!("{:02x}", b)).collect();
     let hello = serde_json::json!({
         "type": "hello",
         "vehicle_id": vehicle_id,
-        "address": format!("ws://{bind_addr}")
+        "address": format!("ws://{bind_addr}"),
+        "peer_id": peer_hex,
     });
     let _ = ws.send(Message::Text(hello.to_string())).await;
 

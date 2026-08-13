@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-12
 
 //! Robot 核心
 //!
@@ -11,6 +11,7 @@
 //! - executor.rs：自动任务执行器（Idle / Turning / Moving）
 //! - robot.rs：Robot::launch() + 主 select! 循环
 //! - cluster/：集群数据面（Task 13_1：入站 POSE 消费 + 远端车信息表）
+//! - planning/：规划层（assignment 任务分配 + pathfinder D* 寻路，Task 14）
 
 pub mod command;
 pub mod protocol;
@@ -20,3 +21,4 @@ pub mod mission;
 pub mod mode;
 pub mod robot;
 pub mod cluster;
+pub mod planning;

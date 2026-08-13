@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-08-03
+//Modified Date ： 2026-08-13
 
 //! Executor — 自动任务执行器
 //!
@@ -14,7 +14,8 @@ use tracing::{info, warn};
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::core::command::Mission;
 use crate::robot::core::mission::MissionQueue;
-use crate::robot::slam::pathfinder::DStarLite;
+use crate::robot::core::planning::pathfinder::DStarLite;
+use crate::robot::core::planning::assignment;
 use crate::robot::slam::{OccupancyGrid, CELL_RESOLUTION};
 use crate::robot::core::state::{ExecuteState, LidarState, RobotState};
 
@@ -79,11 +80,14 @@ impl Executor {
     }
 
     /// 问 D* 下一格：更新 start 到当前位置，返回下一格网格坐标
-    fn query_next_sub_target(&mut self, wx: f32, wy: f32, grid: &OccupancyGrid) -> Option<(i32, i32)> {
+    fn query_next_sub_target(&mut self, wx: f32, wy: f32, grid: &OccupancyGrid, dynamic_obstacles: &[(i32, i32)]) -> Option<(i32, i32)> {
         let current_gx = (wx / CELL_RESOLUTION).floor() as i32;
         let current_gy = (wy / CELL_RESOLUTION).floor() as i32;
         self.pathfinder.as_mut().and_then(|pf| {
+            // Task 15：先 move_to（更新 km/start），再注入动态障碍（update_vertex 用新 km 算 key），
+            // 最后 next_step。若顺序颠倒，set 入队的 key 会被 move_to 改变 km 后当 stale 丢弃。
             pf.move_to((current_gx, current_gy));
+            pf.set_dynamic_obstacles(dynamic_obstacles, grid);
             pf.next_step(grid)
         })
     }
@@ -108,10 +112,12 @@ impl Executor {
         robot_state: &RobotState,
         lidar_state: &LidarState,
         grid: &OccupancyGrid,
+        dynamic_obstacles: &[(i32, i32)],
         mission_queue: &mut MissionQueue,
         execute_state: &mut ExecuteState,
+        own_peer_id: &[u8],
     ) {
-        self.step_impl(stm32, robot_state, lidar_state, grid, mission_queue);
+        self.step_impl(stm32, robot_state, lidar_state, grid, dynamic_obstacles, mission_queue, own_peer_id);
         execute_state.sub_target = self.sub_target;
     }
 
@@ -122,7 +128,9 @@ impl Executor {
         robot_state: &RobotState,
         lidar_state: &LidarState,
         grid: &OccupancyGrid,
+        dynamic_obstacles: &[(i32, i32)],
         mission_queue: &mut MissionQueue,
+        own_peer_id: &[u8],
     ) {
         // ① 感知：当前位置 + 航向
         // ① 感知：当前位置（世界坐标，直读 RobotState）+ 航向
@@ -160,9 +168,9 @@ impl Executor {
 
         // ③ 状态机
         match self.state {
-            ExecState::Idle => self.step_idle(stm32, wx, wy, yaw, grid, mission_queue),
+            ExecState::Idle => self.step_idle(stm32, wx, wy, yaw, grid, dynamic_obstacles, mission_queue, own_peer_id),
             ExecState::Turning => self.step_turning(stm32, wx, wy, yaw),
-            ExecState::Moving => self.step_moving(stm32, wx, wy, yaw, grid),
+            ExecState::Moving => self.step_moving(stm32, wx, wy, yaw, grid, dynamic_obstacles),
         }
     }
 
@@ -173,7 +181,9 @@ impl Executor {
         stm32: &STM32Device,
         wx: f32, wy: f32, yaw: f32,
         grid: &OccupancyGrid,
+        dynamic_obstacles: &[(i32, i32)],
         mission_queue: &mut MissionQueue,
+        own_peer_id: &[u8],
     ) {
         // 检查是否到达 goal
         if let Some((gx, gy)) = self.goal {
@@ -191,14 +201,30 @@ impl Executor {
         // 没有 goal → pop 下一个 Mission
         if self.goal.is_none() {
             match mission_queue.pop_next() {
-                Some(Mission::Goto(x, y)) => {
-                    info!("[Executor] 新任务: Goto({:.2}, {:.2})", x, y);
-                    self.goal = Some((x, y));
+                Some(Mission::Goto { x, y, members }) => {
+                    info!(
+                        "[Executor] 新任务: Goto({:.2}, {:.2}){}",
+                        x, y,
+                        if members.is_empty() { "" } else { "（群发）" }
+                    );
+                    // Task 14：群发任务（members 非空）经 assignment 自算本车散布位置；
+                    // 单车（members 空）直接以目标点为 goal（老行为）。
+                    let goal = match assignment::group_goto_mission((x, y), &members, own_peer_id, grid) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            warn!("[Executor] 群发任务分配失败: {e:?}，跳过此任务");
+                            self.goal = None;
+                            self.sub_target = None;
+                            self.pathfinder = None;
+                            return;
+                        }
+                    };
+                    self.goal = Some(goal);
                     self.sub_target = None;
                     let start_gx = (wx / CELL_RESOLUTION).floor() as i32;
                     let start_gy = (wy / CELL_RESOLUTION).floor() as i32;
-                    let goal_gx = (x / CELL_RESOLUTION).floor() as i32;
-                    let goal_gy = (y / CELL_RESOLUTION).floor() as i32;
+                    let goal_gx = (goal.0 / CELL_RESOLUTION).floor() as i32;
+                    let goal_gy = (goal.1 / CELL_RESOLUTION).floor() as i32;
                     self.pathfinder = Some(DStarLite::new(
                         (start_gx, start_gy),
                         (goal_gx, goal_gy),
@@ -226,7 +252,7 @@ impl Executor {
                 }
             }
 
-            let next = self.query_next_sub_target(wx, wy, grid);
+            let next = self.query_next_sub_target(wx, wy, grid, dynamic_obstacles);
             match next {
                 Some((sx, sy)) => {
                     info!("[Executor] sub_target=({sx}, {sy})");
@@ -295,7 +321,7 @@ impl Executor {
 
     // ─── Moving：等到 sub_target ────────
 
-    fn step_moving(&mut self, stm32: &STM32Device, wx: f32, wy: f32, yaw: f32, grid: &OccupancyGrid) {
+    fn step_moving(&mut self, stm32: &STM32Device, wx: f32, wy: f32, yaw: f32, grid: &OccupancyGrid, dynamic_obstacles: &[(i32, i32)]) {
         let (st_x, st_y) = match self.sub_target {
             Some(st) => st,
             None => {
@@ -310,7 +336,7 @@ impl Executor {
 
         if dist < self.config.sub_target_threshold_m {
             // 到达当前 sub_target：先问 D* 下一格
-            match self.query_next_sub_target(wx, wy, grid) {
+            match self.query_next_sub_target(wx, wy, grid, dynamic_obstacles) {
                 Some((nx, ny)) => {
                     let n_wx = Self::cell_center_world(nx);
                     let n_wy = Self::cell_center_world(ny);

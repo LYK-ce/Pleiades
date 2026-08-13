@@ -52,6 +52,20 @@ pub struct MissionItem {
     pub y: f32,
 }
 
+/// ORION_TASK_SET 载荷（Task 14：members 群发扩展）
+///
+/// 协议布局：mission_count u8 + member_count u8 + members[](len u8 + peer_id) + missions[]
+/// - member_count == 0 → 取消全部任务（老 count=0 取消语义）
+/// - member_count == 1 → 单车任务（missions 直接替换本地队列）
+/// - member_count > 1  → 群发任务（每车自算散布位置，取第一个 Goto 为目标点）
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskSetPayload {
+    /// 参与车辆 peer_id 列表（帧序；排序由分配层负责）
+    pub members: Vec<Vec<u8>>,
+    /// 任务列表（MISSION_GOTO 等）
+    pub missions: Vec<MissionItem>,
+}
+
 // ============================================================
 // ORION_POSE (msgid 1)
 // ============================================================
@@ -228,15 +242,22 @@ pub fn decode_manual_control(payload: &[u8]) -> Option<ManualControl> {
 /// mission type（协议文档 §3.5）
 pub const MISSION_GOTO: u8 = 0;
 
-/// 编码任务队列替换：count + missions（每项 type u8 + x f32 + y f32）
-/// count = 0 表示取消全部任务（停车待命）
+/// 编码任务队列：mission_count + member_count + members[] + missions[]
 ///
-/// `count` 字段为 u8，协议上限 **255** 任务/帧（超出会截断导致接收端校验失败）
-pub fn encode_task_set(missions: &[MissionItem]) -> Vec<u8> {
-    debug_assert!(missions.len() <= u8::MAX as usize, "task_set 任务数超出 u8 上限");
-    let mut buf = Vec::with_capacity(1 + 9 * missions.len());
-    buf.push(missions.len() as u8);
-    for m in missions {
+/// member_count == 0 表示取消全部任务（停车待命）。
+/// `mission_count` / `member_count` 为 u8，协议上限 255（超出会截断导致接收端校验失败）。
+pub fn encode_task_set(payload: &TaskSetPayload) -> Vec<u8> {
+    debug_assert!(payload.missions.len() <= u8::MAX as usize, "task_set 任务数超出 u8 上限");
+    debug_assert!(payload.members.len() <= u8::MAX as usize, "task_set 成员数超出 u8 上限");
+    let mut buf = Vec::with_capacity(2 + 9 * payload.missions.len());
+    buf.push(payload.missions.len() as u8);
+    buf.push(payload.members.len() as u8);
+    for m in &payload.members {
+        debug_assert!(m.len() <= u8::MAX as usize, "peer_id 超出 u8 上限");
+        buf.push(m.len() as u8);
+        buf.extend_from_slice(m);
+    }
+    for m in &payload.missions {
         buf.push(m.mission_type);
         buf.extend_from_slice(&m.x.to_be_bytes());
         buf.extend_from_slice(&m.y.to_be_bytes());
@@ -244,26 +265,45 @@ pub fn encode_task_set(missions: &[MissionItem]) -> Vec<u8> {
     buf
 }
 
-/// 解码任务队列 payload
-pub fn decode_task_set(payload: &[u8]) -> Option<Vec<MissionItem>> {
-    if payload.is_empty() {
+/// 解码任务队列 payload（Task 14 布局）
+///
+/// 校验：长度 ≥ 2；members 每项 `off+len` 越界 → None（防恶意帧）；missions 剩余严格 `9×mission_count`。
+pub fn decode_task_set(payload: &[u8]) -> Option<TaskSetPayload> {
+    if payload.len() < 2 {
         return None;
     }
-    let count = payload[0] as usize;
-    let body = &payload[1..];
-    if body.len() != 9 * count {
+    let mission_count = payload[0] as usize;
+    let member_count = payload[1] as usize;
+    let mut off = 2usize;
+
+    let mut members = Vec::with_capacity(member_count);
+    for _ in 0..member_count {
+        if off >= payload.len() {
+            return None;
+        }
+        let len = payload[off] as usize;
+        off += 1;
+        if off + len > payload.len() {
+            return None;
+        }
+        members.push(payload[off..off + len].to_vec());
+        off += len;
+    }
+
+    let body = &payload[off..];
+    if body.len() != 9 * mission_count {
         return None;
     }
-    let mut missions = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = i * 9;
+    let mut missions = Vec::with_capacity(mission_count);
+    for i in 0..mission_count {
+        let o = i * 9;
         missions.push(MissionItem {
-            mission_type: body[off],
-            x: f32::from_be_bytes(body[off + 1..off + 5].try_into().ok()?),
-            y: f32::from_be_bytes(body[off + 5..off + 9].try_into().ok()?),
+            mission_type: body[o],
+            x: f32::from_be_bytes(body[o + 1..o + 5].try_into().ok()?),
+            y: f32::from_be_bytes(body[o + 5..o + 9].try_into().ok()?),
         });
     }
-    Some(missions)
+    Some(TaskSetPayload { members, missions })
 }
 
 // ============================================================
@@ -329,18 +369,77 @@ mod tests {
     }
 
     #[test]
-    fn test_task_set_roundtrip() {
-        let missions = vec![
-            MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 },
-            MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0 },
-        ];
-        let encoded = encode_task_set(&missions);
+    fn test_task_set_roundtrip_single() {
+        // 单车（member_count=1）：missions 多个任务
+        let payload = TaskSetPayload {
+            members: vec![vec![7]],
+            missions: vec![
+                MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0 },
+            ],
+        };
+        let encoded = encode_task_set(&payload);
+        // 布局：mission_count(1) + member_count(1) + members(1+1) + missions(9*2) = 2 + 2 + 18
+        assert_eq!(encoded.len(), 2 + 2 + 18);
         let decoded = decode_task_set(&encoded).unwrap();
-        assert_eq!(decoded, missions);
-        // 空任务 = 取消（count=0）
-        let empty = encode_task_set(&[]);
-        assert_eq!(empty.len(), 1);
-        assert!(decode_task_set(&empty).unwrap().is_empty());
+        assert_eq!(decoded.members, payload.members);
+        assert_eq!(decoded.missions, payload.missions);
+    }
+
+    #[test]
+    fn test_task_set_roundtrip_group() {
+        // 群发（member_count=3）：变长 peer_id（38B multihash 风格）
+        let members: Vec<Vec<u8>> = vec![vec![7u8; 38], vec![1, 2, 3], vec![9u8; 2]];
+        let payload = TaskSetPayload {
+            members: members.clone(),
+            missions: vec![MissionItem { mission_type: MISSION_GOTO, x: 64.0, y: 64.0 }],
+        };
+        let encoded = encode_task_set(&payload);
+        let decoded = decode_task_set(&encoded).unwrap();
+        assert_eq!(decoded.members, members);
+        assert_eq!(decoded.missions, payload.missions);
+    }
+
+    #[test]
+    fn test_task_set_cancel() {
+        // member_count=0 = 取消全部任务（mission_count=0）
+        let payload = TaskSetPayload { members: vec![], missions: vec![] };
+        let encoded = encode_task_set(&payload);
+        assert_eq!(encoded, vec![0, 0]);
+        let decoded = decode_task_set(&encoded).unwrap();
+        assert!(decoded.members.is_empty() && decoded.missions.is_empty());
+    }
+
+    #[test]
+    fn test_task_set_decode_reject_malformed() {
+        // 长度 < 2（含旧格式 [0] 取消帧）→ None
+        assert!(decode_task_set(&[]).is_none());
+        assert!(decode_task_set(&[0]).is_none());
+        // members 内 len 越界 → None
+        assert!(decode_task_set(&[0, 1, 200]).is_none());
+        assert!(decode_task_set(&[0, 1, 3, 1, 2]).is_none());
+        // missions 字节不足 → None
+        assert!(decode_task_set(&[1, 0, 0, 0]).is_none());
+        // 旧格式 [count, missions...]（无 member_count 段）的语义安全性：
+        // [1, 0, 9B...] / [2, 0, 18B...] 在新解析下 mission_count=n、member_count=0 →
+        // 结构合法（长度恰好匹配时），但 WS 层按 member_count==0 → 取消处理 → 不会执行旧帧任务，语义安全
+        let old_two = [2u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let parsed = decode_task_set(&old_two).unwrap();
+        assert!(parsed.members.is_empty());
+        assert_eq!(parsed.missions.len(), 2, "长度恰好匹配的旧帧结构可解析，语义由上层判（取消）");
+    }
+
+    #[test]
+    fn test_task_set_members_empty_is_single() {
+        // member_count=1 且 members 恰好 1 条时,mission_count>0 正常解析
+        let payload = TaskSetPayload {
+            members: vec![vec![5]],
+            missions: vec![MissionItem { mission_type: MISSION_GOTO, x: 1.0, y: 2.0 }],
+        };
+        let encoded = encode_task_set(&payload);
+        let decoded = decode_task_set(&encoded).unwrap();
+        assert_eq!(decoded.members.len(), 1);
+        assert_eq!(decoded.missions.len(), 1);
     }
 
     #[test]

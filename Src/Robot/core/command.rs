@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-12
 
 //! Robot 统一命令定义
 //!
@@ -46,9 +46,12 @@ pub enum AutoCmd {
 }
 
 /// 任务单元
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Mission {
     /// 前往目标点（世界坐标，米）
-    Goto(f32, f32),
+    ///
+    /// Task 14：`members` 非空 = 群发任务——executor 执行时经 `assignment` 自算散布位置；
+    /// `members` 空 = 老单车语义（直接以 (x, y) 为目标）。
+    Goto { x: f32, y: f32, members: Vec<Vec<u8>> },
     // 未来: Patrol, Explore, ...
 }

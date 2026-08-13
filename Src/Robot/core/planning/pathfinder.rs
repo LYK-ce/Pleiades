@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-31
-//Modified Date ： 2026-08-01
+//Modified Date ： 2026-08-13
 
 //! D* Lite 增量路径规划器
 //!
@@ -8,7 +8,7 @@
 //! 4 连通网格，Manhattan 距离启发式。
 //! 障碍通过 mark_obstacle() 增量修补，无需每次从头搜索。
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
 use tracing::{info, warn};
 
@@ -62,6 +62,8 @@ pub struct DStarLite {
     start: (i32, i32),
     /// 目标位置（网格坐标）
     goal: (i32, i32),
+    /// 他车动态障碍格（Task 15：每次寻路前由 executor 注入；footprint = 1 格）
+    dynamic_obstacles: HashSet<(i32, i32)>,
 }
 
 impl DStarLite {
@@ -74,6 +76,7 @@ impl DStarLite {
             km: 0.0,
             start,
             goal,
+            dynamic_obstacles: HashSet::new(),
         };
         slf.initialize();
         info!("[D*] 创建规划器: start=({},{}) goal=({},{})", start.0, start.1, goal.0, goal.1);
@@ -129,6 +132,28 @@ impl DStarLite {
         self.update_vertex(cell, grid);
     }
 
+    /// 注入最新他车动态障碍格（Task 15）
+    ///
+    /// 对 old/new 集合做 diff，仅对变更格触发局部修补（先邻居、后自身，
+    /// 复用 mark_obstacle 的修补机制）。集合未变时直接返回，零开销。
+    pub fn set_dynamic_obstacles(&mut self, cells: &[(i32, i32)], grid: &OccupancyGrid) {
+        let new: HashSet<(i32, i32)> = cells.iter().copied().collect();
+        if new == self.dynamic_obstacles {
+            return;
+        }
+        // 先置换为 new，使修补期间的 cost() 能看到最新障碍集合（否则新增格查不到、邻居 rhs 偏低）
+        let old = std::mem::replace(&mut self.dynamic_obstacles, new);
+        let changed: Vec<(i32, i32)> = old.symmetric_difference(&self.dynamic_obstacles).copied().collect();
+        for cell in changed {
+            for n in Self::neighbors(cell) {
+                if self.has_rhs(n) {
+                    self.update_vertex(n, grid);
+                }
+            }
+            self.update_vertex(cell, grid);
+        }
+    }
+
     // ─── 私有核心算法 ─────────────────────────────
 
     /// 初始化：清空队列，goal rhs=0，入队
@@ -162,6 +187,9 @@ impl DStarLite {
 
     /// 移动代价：Free/Unknown=1，Occupied=∞，出界=∞
     fn cost(&self, grid: &OccupancyGrid, _from: (i32, i32), to: (i32, i32)) -> f32 {
+        if self.dynamic_obstacles.contains(&to) {
+            return f32::MAX;
+        }
         if to.0 < 0 || to.0 >= CHUNK_SIZE as i32
             || to.1 < 0 || to.1 >= CHUNK_SIZE as i32
         {
@@ -270,5 +298,70 @@ impl DStarLite {
                 return Some((key, cell));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cost_hits_dynamic_obstacle() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (5, 5));
+        // 初始无动态障碍，Free/Unknown 格代价 1.0
+        assert_eq!(pf.cost(&grid, (0, 0), (2, 2)), 1.0);
+        // 注入障碍后，该格代价为 ∞
+        pf.set_dynamic_obstacles(&[(2, 2)], &grid);
+        assert_eq!(pf.cost(&grid, (0, 0), (2, 2)), f32::MAX);
+        // 非障碍格不受影响
+        assert_eq!(pf.cost(&grid, (0, 0), (3, 3)), 1.0);
+    }
+
+    #[test]
+    fn test_set_dynamic_obstacles_remove_restores() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (5, 5));
+        pf.set_dynamic_obstacles(&[(2, 2)], &grid);
+        assert_eq!(pf.cost(&grid, (0, 0), (2, 2)), f32::MAX);
+        // 移除后恢复为普通格
+        pf.set_dynamic_obstacles(&[], &grid);
+        assert_eq!(pf.cost(&grid, (0, 0), (2, 2)), 1.0);
+    }
+
+    #[test]
+    fn test_set_dynamic_obstacles_idempotent() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (5, 5));
+        pf.set_dynamic_obstacles(&[(2, 2)], &grid);
+        // 相同集合重复调用不 panic，结果不变
+        pf.set_dynamic_obstacles(&[(2, 2)], &grid);
+        assert_eq!(pf.cost(&grid, (0, 0), (2, 2)), f32::MAX);
+    }
+
+    #[test]
+    fn test_next_step_avoids_injected_obstacle() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (0, 2));
+        // 无障碍时必经格 (0,1)
+        assert_eq!(pf.next_step(&grid), Some((0, 1)));
+        // 注入 (0,1) 障碍后，不应再返回 (0,1)
+        pf.set_dynamic_obstacles(&[(0, 1)], &grid);
+        let step = pf.next_step(&grid);
+        assert_ne!(step, Some((0, 1)), "注入障碍后不应返回障碍格");
+        assert!(step.is_some(), "绕行路径应存在");
+    }
+
+    #[test]
+    fn test_next_step_avoids_obstacle_after_move_to() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (0, 3));
+        // 走一步到 (0,1)（模拟车移动，更新 km/start）
+        pf.move_to((0, 1));
+        // 注入下一必经格 (0,2) 障碍
+        pf.set_dynamic_obstacles(&[(0, 2)], &grid);
+        let step = pf.next_step(&grid);
+        assert_ne!(step, Some((0, 2)), "move_to 后注入障碍应被绕开");
+        assert!(step.is_some(), "绕行路径应存在");
     }
 }

@@ -499,30 +499,36 @@ impl SessionManager {
 
 机器人控制系统（`Pleiades-Orion` 分支）。采用多 Device 独立 State 架构。
 
-**文件结构**:
+**文件结构**（2026-08-12 更新）：
 ```
 Src/Robot/
 ├── mod.rs              ← 模块入口 + public export
-├── state.rs            ← RobotState (STM32) + LidarState (LiDAR)
-├── websocket.rs        ← WebSocket 遥控服务 (10Hz 遥测)
 ├── core/
-│   ├── command.rs      ← Command 枚举（Forward/Stop/StartLidarScan 等）
-│   └── robot.rs        ← Robot::launch() + 主 select! 循环
-└── control/
-    ├── types.rs        ← CarType 枚举
-    ├── serial/port.rs  ← spawn_port(): 通用 TX+RX tokio task
-    └── device/
-        ├── stm32/      ← STM32 底盘驱动
-        │   ├── mod.rs       ← STM32Device
-        │   ├── constants.rs ← 协议常量
-        │   └── protocol.rs  ← 帧构建 + 状态机 + 传感器解析
-        └── lidar/      ← YDLIDAR Tmini 驱动
-            ├── mod.rs       ← LidarDevice
-            ├── constants.rs ← tmini 协议常量
-            ├── types.rs     ← LaserPoint / LaserScan
-            ├── parser.rs    ← feed_byte 状态机 + 点云解析
-            └── checksum.rs  ← XOR 校验和
+│   ├── robot.rs        ← Robot::launch() + 主 select! 循环 + state_notifier/slam_task
+│   ├── command.rs      ← 三层命令（Mode/Manual/Auto）+ Mission（Goto{x,y,members}）
+│   ├── state.rs        ← RobotState + LidarState + ExecuteState
+│   ├── executor.rs     ← 自动任务执行器（Idle/Turning/Moving + D* Lite）
+│   ├── mission.rs      ← MissionQueue（FIFO，replace 替换语义）
+│   ├── mode.rs         ← OpMode（Manual/Auto）
+│   ├── protocol/       ← ORION 协议（frame.rs 帧编解码 + messages.rs 消息 payload）
+│   ├── cluster/        ← 集群数据面（ClusterInfoTable + consumer，Task 13_1）
+│   └── planning/       ← 规划层（Task 14）
+│       ├── assignment.rs  ← 群发 Goto 散布位置确定性分配
+│       └── pathfinder.rs  ← D* Lite 路径规划（自 slam/ 迁入）
+├── slam/               ← 感知/建图层
+│   ├── grid.rs         ← OccupancyGrid（own/merged 双表，log-odds）
+│   ├── lidar_mapper.rs ← 点云→栅格 + Bresenham 射线
+│   └── odometry.rs     ← 世界坐标积分
+├── control/
+│   ├── types.rs        ← CarType 枚举
+│   ├── serial/port.rs  ← spawn_port(): 通用 TX+RX tokio task
+│   └── device/
+│       ├── stm32/      ← STM32 底盘驱动
+│       └── lidar/      ← YDLIDAR Tmini 驱动
+└── (WebSocket 独立于 Src/WebSocket/，非 robot 子模块)
 ```
+
+**分层语义**：`slam` = 感知/建图（产生地图）；`planning` = 决策（消费地图：assignment 任务分配 + pathfinder 寻路）；`executor` = 执行（走/停 + 让行）。
 
 **核心结构**:
 ```rust
@@ -542,22 +548,22 @@ pub struct Robot {
 - `LidarState` 由 LiDAR 维护（scan: LaserScan）
 - 上层命令（WS/Lua/LLM）通过 `cmd_tx` 统一发送 `Command`
 
-**启动流程** (Phase 5.6):
+**启动流程**（2026-08-12 更新，经 `bootstrap::robot_bootstrap` Phase 1~6）：
 ```rust
-let robot = Robot::launch(
-    "/dev/myserial", 115200, CarType::X3Plus,
-    lidar_port, lidar_baudrate,  // 可选
-)?;
-spawn_robot_ws_server(9090, event_bus, robot.cmd_tx, robot.robot_state);
+// bootstrap.rs：读配置 → Robot::launch(port, baudrate, car_type, lidar_port, lidar_baudrate,
+//   origin, node_handle, robot_bus, peer_name) → websocket::start(ws_bind, peer_name, ...)
+let robot = Robot::launch(...)?;
+crate::websocket::start(&ws_bind, &peer_name, robot.robot_cmd_tx.clone(), ...);
+// WS 服务端（每车一个）在 Src/WebSocket/server.rs，经 parse_orion_frame 解析 ORION 帧命令
 ```
 
-**Command**:
+**Command**（2026-08-12 更新）：
 ```rust
-pub enum Command {
-    Forward(i16), Backward(i16), SpinLeft(i16), SpinRight(i16),
-    Stop, Beep(u16),
-    StartLidarScan, StopLidarScan,
+pub enum Command { Mode(ModeCmd), Manual(ManualCmd), Auto(AutoCmd) }
+pub enum Mission {
+    Goto { x: f32, y: f32, members: Vec<Vec<u8>> },  // members 非空 = 群发（Task 14）
 }
+pub enum AutoCmd { Set(Vec<Mission>) }  // member_count>1 时 Set 内为群发任务
 ```
 
 **测试**:
