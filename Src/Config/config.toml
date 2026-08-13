@@ -1,0 +1,37 @@
+# Pleiades 配置文件（树莓派实例：STM32=/dev/ttyUSB0，雷达=/dev/ttyUSB1）
+#
+# 注意：运行时读取的是「运行目录/.config/config.toml」，本文件是仓库内的实例配置，
+# 拉取后执行：  mkdir -p .config && cp Src/Config/config.toml .config/config.toml
+
+[Log]
+level = "info"
+log_file_path = "Log/"
+
+[Network]
+LAN = true
+WAN = false
+Transport_Protocol = "TCP"
+cleanup_interval = 300
+timeout_interval = 300
+heartbeat_interval = 60
+heartbeat_timeout = 10
+request_response_timeout = 300
+
+[Storage]
+workspace_dir = "Pleiades_Workspace"
+quota_gb = 0
+kvcache_dir = ".kvcache"
+
+[Identity]
+# 车名 = peer_name，多车时每辆必须唯一（树莓派用 robot-pi，Jetson 请另改）
+peer_name = "robot-pi"
+
+[Robot]
+ws_bind = "0.0.0.0:9090"
+# STM32 底盘串口
+serial_port = "/dev/ttyUSB0"
+baudrate = 115200
+car_type = "X3Plus" # X3 / X3Plus / X1 / R2
+# LiDAR 串口（留空则禁用）
+lidar_port = "/dev/ttyUSB1"
+lidar_baudrate = 230400
