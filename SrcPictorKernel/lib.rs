@@ -1,17 +1,15 @@
 //Presented by KeJi
 //Created Date ： 2026-08-15
-//Modified Date ： 2026-08-15
+//Modified Date ： 2026-08-16
 
 //! Pictor Kernel — Pleiades × Godot GDExtension 桥（Task 16）
 //!
 //! Godot 通过 `.gdextension` 加载本 `.so`（`libpictor_kernel.so`），
-//! 在进程内运行 Pleiades 无头逻辑层（libp2p 网络 / ORION 协议 / 地图合并），
-//! 通过信号（上行）与 handle（下行）跟 Godot 表现层交互。
+//! 在进程内运行 Pleiades 无头逻辑层（libp2p 网络）。桥是**哑管道**，不解析、不合并业务数据：
 //!
-//! - 出站（Godot → 车）：`send_command`（Godot 拼好 ORION 帧，`Send_Data_Try` 转发）
-//! - 入站（车 → Godot）：后台同步 task → `out_queue` → `poll()` 排空并 emit 信号（方案 B）
-//! - 生命周期：`ready` 起后台线程（core_bootstrap + GroundStation + run_headless），
-//!   `exit_tree` 置停机标志并 join。
+//! - 下行（Godot → 车）：`send_command`（Godot 拼好 ORION 帧，`Send_Data_Try` 转发）
+//! - 上行（车 → Godot）：订阅 `robot_bus` 转发原始 ORION 帧 + 订阅 `event_bus` 转发 peer 事件
+//! - 生命周期：`ready` 起后台线程（core_bootstrap + run_headless），`exit_tree` 停机并 join。
 
 use godot::prelude::*;
 use std::collections::VecDeque;
@@ -20,24 +18,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use pleiades::event_bus::Bus_Event;
+use pleiades::event_bus::{Bus_Event, EventBus};
 use pleiades::network::{DataType, NodeHandle};
-use pleiades::robot::core::cluster::ClusterInfoTable;
-use pleiades::robot::core::ground_station::GroundStation;
-use pleiades::robot::slam::OccupancyGrid;
 
 /// 桥事件（后台线程 → 主线程 `poll()` 排空）
 enum BridgeEvent {
     KernelReady,
-    Pose {
-        peer_id: String,
-        x: f32,
-        y: f32,
-        yaw: f32,
-        vx: f32,
-        vy: f32,
-    },
-    Map {
+    /// 原始 ORION 帧（POSE / MAP_DELTA / MAP_FULL，由 Godot 侧解码）
+    RobotFrame {
         data: Vec<u8>,
     },
     PeerDiscovered {
@@ -103,11 +91,9 @@ impl PleiadesKernel {
     #[signal]
     fn kernel_ready();
 
+    /// 原始 ORION 帧（Godot 侧用现有 `MessageParser.parse_orion_frame` 解码并分发）
     #[signal]
-    fn pose_received(peer_id: GString, x: f32, y: f32, yaw: f32, vx: f32, vy: f32);
-
-    #[signal]
-    fn map_updated(data: PackedByteArray);
+    fn robot_frame(data: PackedByteArray);
 
     #[signal]
     fn peer_discovered(peer_id: GString);
@@ -151,20 +137,9 @@ impl PleiadesKernel {
                 BridgeEvent::KernelReady => {
                     self.signals().kernel_ready().emit();
                 }
-                BridgeEvent::Pose {
-                    peer_id,
-                    x,
-                    y,
-                    yaw,
-                    vx,
-                    vy,
-                } => {
-                    let peer = GString::from(peer_id.as_str());
-                    self.signals().pose_received().emit(&peer, x, y, yaw, vx, vy);
-                }
-                BridgeEvent::Map { data } => {
+                BridgeEvent::RobotFrame { data } => {
                     let pba = PackedByteArray::from(data);
-                    self.signals().map_updated().emit(&pba);
+                    self.signals().robot_frame().emit(&pba);
                 }
                 BridgeEvent::PeerDiscovered { peer_id } => {
                     let peer = GString::from(peer_id.as_str());
@@ -209,25 +184,17 @@ impl PleiadesKernel {
                     }
                 };
 
-                let local_peer_id = boot.node_handle.Get_Local_Peer_Id().to_bytes();
                 let _ = node_handle.set(boot.node_handle.clone());
 
-                // GroundStation 消费侧（遥测 → 表 + 地图）
-                let gs = GroundStation::launch(boot.robot_bus.clone(), local_peer_id);
-
-                // 遥测/地图 同步 task → out_queue
+                // 上行 1：robot_bus 原始帧转发 → out_queue
                 {
-                    let (q, s, t, g) = (
-                        out_queue.clone(),
-                        shutdown.clone(),
-                        gs.table.clone(),
-                        gs.grid.clone(),
-                    );
+                    let (q, s) = (out_queue.clone(), shutdown.clone());
+                    let rx = boot.robot_bus.Subscribe();
                     tokio::spawn(async move {
-                        sync_loop(q, s, t, g).await;
+                        robot_forward_loop(q, s, rx).await;
                     });
                 }
-                // 节点事件 task（event_bus）→ out_queue
+                // 上行 2：event_bus peer 事件 → out_queue
                 {
                     let (q, s) = (out_queue.clone(), shutdown.clone());
                     let rx = boot.event_bus.Subscribe();
@@ -272,47 +239,33 @@ fn peer_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// base58 字符串 → hex 字符串（统一 peer 事件与 pose 的 peer_id 编码，Task 16）
+/// base58 字符串 → hex 字符串（统一 peer 事件的 peer_id 编码，Task 16）
 fn base58_to_hex(s: &str) -> Option<String> {
     let peer: libp2p::PeerId = s.parse().ok()?;
     Some(peer_hex(&peer.to_bytes()))
 }
 
-/// 遥测/地图同步 task（后台 runtime）：周期读 table/grid → out_queue
-async fn sync_loop(
+/// robot_bus 原始帧转发 task：订阅 robot_bus → 转发原始 ORION 帧（不解析）
+async fn robot_forward_loop(
     out_queue: Arc<Mutex<VecDeque<BridgeEvent>>>,
     shutdown: Arc<AtomicBool>,
-    table: Arc<ClusterInfoTable>,
-    grid: Arc<tokio::sync::RwLock<OccupancyGrid>>,
+    mut rx: tokio::sync::broadcast::Receiver<Bus_Event>,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
-        interval.tick().await;
         if shutdown.load(Ordering::SeqCst) {
             return;
         }
-
-        // 位姿（按车发）
-        for info in table.snapshot().await {
-            out_queue.lock().unwrap().push_back(BridgeEvent::Pose {
-                peer_id: peer_hex(&info.peer_id),
-                x: info.x,
-                y: info.y,
-                yaw: info.yaw,
-                vx: info.vx,
-                vy: info.vy,
-            });
+        match rx.recv().await {
+            Ok(Bus_Event::StreamRaw { payload }) => {
+                out_queue
+                    .lock()
+                    .unwrap()
+                    .push_back(BridgeEvent::RobotFrame { data: payload });
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
         }
-
-        // 地图（合并全量 log-odds，i8 → u8 位模式）
-        let data: Vec<u8> = grid
-            .read()
-            .await
-            .log_odds_bytes()
-            .iter()
-            .map(|&v| v as u8)
-            .collect();
-        out_queue.lock().unwrap().push_back(BridgeEvent::Map { data });
     }
 }
 
@@ -330,7 +283,7 @@ async fn event_loop(
             Ok(Bus_Event::State { payload }) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                     let ty = v["type"].as_str().unwrap_or("");
-                    // 统一为 hex：event_bus 里的 peer_id 是 base58，转成 hex 与 pose/send_command 一致
+                    // 统一为 hex：event_bus 里的 peer_id 是 base58，转成 hex 与 send_command 一致
                     let Some(peer_id) = base58_to_hex(v["peer_id"].as_str().unwrap_or("")) else {
                         continue;
                     };
@@ -369,8 +322,7 @@ async fn event_loop(
     }
 }
 
-
-/// GDExtension 入口点声明（生成 entry_symbol = `pictor_kernel_init`，供 .gdextension 引用）
+/// GDExtension 入口点声明（生成 entry_symbol = `gdext_rust_init`，供 .gdextension 引用）
 struct PictorKernelExtension;
 
 #[gdextension]

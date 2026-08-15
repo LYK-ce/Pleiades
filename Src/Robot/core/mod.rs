@@ -15,7 +15,6 @@
 
 pub mod command;
 pub mod command_consumer;
-pub mod ground_station;
 pub mod protocol;
 pub mod state;
 pub mod executor;

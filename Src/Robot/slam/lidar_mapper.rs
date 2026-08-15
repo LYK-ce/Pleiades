@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-08-15
+//Modified Date ： 2026-08-16
 
 //! LiDAR 点云 → 占据栅格更新
 //!
@@ -17,6 +17,11 @@ use super::grid::{
     world_to_grid, CellState, Delta, OccupancyGrid, CELL_RESOLUTION, CHUNK_SIZE,
     DYNAMIC_OBSTACLE_DECAY,
 };
+
+/// LiDAR 探测最大有效距离（米）：超过此距离噪声大、精度低，过滤掉（2026-08-16 由 12m 收紧到 5m）
+const LIDAR_MAX_RANGE: f32 = 5.0;
+/// LiDAR 最小有效距离（米）：超近距离反射噪声
+const LIDAR_MIN_RANGE: f32 = 0.1;
 
 /// 车辆位姿
 pub struct RobotPose {
@@ -38,8 +43,8 @@ pub fn update(
 
     let mut endpoints: HashSet<(i32, i32)> = HashSet::new();
     for &(angle, range) in scan_points {
-        if range < 0.1 || range > 12.0 {
-            // Tmini 有效量程 0.1~12m，过滤无效/噪声点
+        if range < LIDAR_MIN_RANGE || range > LIDAR_MAX_RANGE {
+            // 有效量程 0.1~5m，过滤无效/噪声点（远距离精度低）
             continue;
         }
         let (wx, wy) = laser_to_world(pose, angle, range);
@@ -200,19 +205,19 @@ mod tests {
     fn test_endpoint_not_erased_by_through_ray() {
         let mut grid = OccupancyGrid::new();
         let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
-        // 近端点 (130,128)（1m）+ 远端点 (140,128)（6m）
-        // 远射线 (128→140) 经过 (130,128)：旧代码会用它的 miss 抵消近端点（回归测试）
-        let points = vec![(0.0, 1.0), (0.0, 6.0)];
+        // 近端点 (130,128)（1m）+ 远端点 (134,128)（3m）
+        // 远射线 (128→134) 经过 (130,128)：旧代码会用它的 miss 抵消近端点（回归测试）
+        let points = vec![(0.0, 1.0), (0.0, 3.0)];
         for _ in 0..3 {
             update(&mut grid, &pose, &points, &std::collections::HashSet::new());
         }
         // 近端点格：3 圈 +3×3=9 → Occupied（不被穿行射线抵消）
         assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
         // 远端点格：也是端点 → Occupied
-        assert_eq!(grid.state(140, 128), Some(CellState::Occupied as u8));
+        assert_eq!(grid.state(134, 128), Some(CellState::Occupied as u8));
         // 两端点之间的格：射线被 (130,128) 截断 → 保持 Unknown
         assert_eq!(grid.state(131, 128), Some(CellState::Unknown as u8));
-        assert_eq!(grid.state(135, 128), Some(CellState::Unknown as u8));
+        assert_eq!(grid.state(132, 128), Some(CellState::Unknown as u8));
     }
 
     #[test]

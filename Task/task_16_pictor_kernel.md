@@ -218,29 +218,23 @@ Godot 启动 → dlopen .so → 注册 PleiadesKernel 类
 
 **订阅时序**：GroundStation 同步层须在 `run_headless()`（内含 `spawn_initial_flush`）之前订阅 `event_bus` / `robot_bus`，否则漏掉初始一次性事件（broadcast 无重放）。
 
-### 3.4 地面站消费侧（GroundStation + 同步层）✅ 已确认
+### 3.4 地面站消费侧（桥 = 哑管道，直接转发）✅ 已定稿（2026-08-16 简化）
 
-**结论**：GroundStation 复用 `cluster_consumer` 消费 `robot_bus` 遥测；同步层监听 `event_bus` + `robot_bus`，把数据经"信号 + 主线程 poll"交给 Godot。
+**结论**：桥**不解析、不合并**业务数据——直接订阅 `robot_bus` 把原始 ORION 帧转发给 Godot，订阅 `event_bus` 转发 peer 事件。Godot 侧用现有 `message_parser` / `map_accumulator` 解码、合并、渲染（与现在 WS 的 `_read_packets` 一致，只换传输）。
 
-**要同步的数据（两套视图并存）**：
+> **变更记录（2026-08-16）**：原方案是"GroundStation 复用 `cluster_consumer` + `OccupancyGrid` 在 Rust 侧合并地图再发信号"，但 (1) 把 Godot 侧组件塞进了 pleiades（车端编译也被带入）；(2) 与下行"Godot 拼帧、桥只转发"不对称。故**拆掉 GroundStation**，桥退化成纯哑管道，上下行对称。
 
-| 视图 | 数据源 | 目标信号 | 说明 |
-|---|---|---|---|
-| 节点列表（网络面板） | `event_bus`（mDNS+连接） | `peer_connected` / `peer_disconnected` | 收拢所有 node（车+地面站），复刻 TUI network_panel |
-| 节点名字 | `event_bus`（peer-info gossip） | `peer_info_updated` | `peer_connected` 不带名字，名字单独来 |
-| 地图车（位姿） | `robot_bus` → `cluster_consumer` → `ClusterInfoTable` | `pose_received`（按车发） | 车在哪 / 朝向 |
-| 合并地图 | `robot_bus` → `cluster_consumer` → `OccupancyGrid` | `map_updated`（全量+增量） | 合并已在 Rust，Godot 直接渲染 |
+**要同步的数据**：
 
-**节点 ≠ 车（两套视图）**：
-- 节点列表 = peer 层（mDNS+连接），不管车还是地面站都进列表。
-- 地图车 = pose，只有发 pose 的（车）才画在地图上。
-- 不做 node_type 区分（YAGNI；将来需要时用"has pose"现成信号，不必改 config）。
+| 数据源 | 目标信号 | 说明 |
+|---|---|---|
+| `robot_bus`（ORION 原始帧） | `robot_frame`（原样转发） | POSE / MAP_FULL / MAP_DELTA，Godot 解码 |
+| `event_bus`（State JSON） | `peer_*` 系列 | 节点上/下线、节点名（统一 hex） |
 
-**结构（三个小块）**：
+**结构（两个转发 task，全在 pictor-kernel 里）**：
 
-- ① `cluster_consumer`（**复用**）：订阅 `robot_bus` → 解码 → `ClusterInfoTable` + `OccupancyGrid`。
-- ② 事件监听（新 task）：订阅 `event_bus` → 解析 State JSON 的 `type`（`peer_connected`/`peer_disconnected`/`peer_discovered`/`peer_info_updated`）。
-- ③ 转发（sync task）：读 ①② 的产出 → 塞入线程安全队列 → Godot `poll()` 排空并 emit 信号。
+- ① `robot_forward_loop`：订阅 `robot_bus` → `StreamRaw` 原始帧原样 → 塞队列 → `robot_frame` 信号。
+- ② `event_loop`：订阅 `event_bus` → 解析 State `type` → `peer_*` 信号（peer_id 统一转 hex）。
 
 **跨线程发信号决策（A/B/C）**：
 
@@ -250,13 +244,11 @@ Godot 启动 → dlopen .so → 注册 PleiadesKernel 类
 | B. 信号 + 主线程 poll ✅ | 后台塞 channel；Godot `_process` 调 `poll()`，`poll()` 在主线程排空队列并 emit 信号 | Godot 侧多一次 `poll()`；零 unsoundness |
 | C. 纯 pull（不走信号） | Godot 轮询拿数据自己刷新 | 放弃 Godot 信号惯用法 |
 
-**决策：采用 B**。Godot 侧仍是纯正信号连接（`pose_received.connect(...)` 等），只是信号发射点落在主线程的 `poll()` 里，不开 `experimental-threads`。
+**决策：采用 B**。信号发射点落在主线程的 `poll()` 里，不开 `experimental-threads`。
 
-**GroundStation 位置**：放 pleiades（`Src/Robot/` 下，与 `cluster_consumer` 同层）——消费逻辑是通用机器人域、可单测；桥只做"读快照 + 发信号"。
+**信号粒度（最终）**：
 
-**信号粒度（已确认，与现有 WS 模型保持一致）**：
-- pose：**按车发** `pose_received(peer_id, pose)`——复刻现有 `EventBus.pose_received`（`renderer_2d._on_pose` 几乎不动，只换 vehicle_id→peer_id）。
-- map：**全量 + 增量**——保持现有 `map_full`（初始化）+ `map_delta`（更新）两套；合并从 Godot 挪到 Rust，Rust 发"合并后的全量/增量"。
+- `robot_frame`：原始 ORION 帧（POSE / MAP_FULL / MAP_DELTA），Godot 用 `parse_orion_frame` 解码、按 msgid 分发；增量地图由 Godot 侧 `map_accumulator` 累加（开销小，非全量）。
 
 ### 3.5 桥类 PleiadesKernel（`SrcPictorKernel/lib.rs`）✅ 已确认
 
@@ -280,10 +272,10 @@ struct PleiadesKernel {
 
 | 信号 | 参数 | 来源 |
 |---|---|---|
-| `ready` | — | 后台 core_bootstrap 完成、NodeHandle 就绪 |
-| `pose_received` | `peer_id: String, x, y, yaw, vx, vy` | ClusterInfoTable 快照（按车发） |
-| `map_updated` | `data: PackedByteArray` | OccupancyGrid（全量 + 增量） |
-| `peer_connected` / `peer_disconnected` | `peer_id: String` | event_bus（mDNS+连接） |
+| `kernel_ready` | — | 后台 core_bootstrap 完成、NodeHandle 就绪 |
+| `robot_frame` | `data: PackedByteArray` | robot_bus 原始 ORION 帧（原样转发） |
+| `peer_discovered` / `peer_left` | `peer_id: String` | event_bus（mDNS 发现/过期） |
+| `peer_connected` / `peer_disconnected` | `peer_id: String` | event_bus（TCP 连接） |
 | `peer_info_updated` | `peer_id: String, peer_name: String` | event_bus（peer-info gossip） |
 
 **handle（下行，Godot → Rust）**：
@@ -291,15 +283,14 @@ struct PleiadesKernel {
 | handle | 参数 | 说明 |
 |---|---|---|
 | `send_command` | `peer_id: String, frame: PackedByteArray` | hex→PeerId → `Send_Data_Try`（同步，立即返回 bool） |
-| `get_peers` | — | 返回节点列表快照（Godot 初始化用） |
 | `poll` | — | 主线程排空 `out_queue` → emit 信号 |
 
 注：方案 B 下 `send_command` 同步返回 bool，故 guide 里的 `cmd_result` 信号可省略（结果即返回值）。
 
 **生命周期**：
 
-- `_ready`：`std::thread::spawn` 后台线程（`Runtime + core_bootstrap + GroundStation + run_headless`）；就绪后填 `node_handle` + 发 `ready`。
-- 后台同步 task：周期读 table/grid/event_bus → 塞 `out_queue`。
+- `_ready`：`std::thread::spawn` 后台线程（`Runtime + core_bootstrap + run_headless`）；就绪后填 `node_handle` + 发 `kernel_ready`。
+- 后台转发 task：`robot_forward_loop`（robot_bus）+ `event_loop`（event_bus）→ 塞 `out_queue`。
 - Godot `_process`：调 `poll()` → 排空队列 → emit 信号。
 - `_exit_tree`：置 `shutdown` → 后台优雅停机 → `join` 线程 → 卸载。
 
@@ -314,7 +305,6 @@ struct PleiadesKernel {
 | `SrcPictorKernel/Cargo.toml` | 桥 crate 清单（cdylib + pleiades + godot）✅ 已建 |
 | `SrcPictorKernel/lib.rs` | PleiadesKernel 类 + 信号 + handle + poll ✅ 骨架已建，待填 |
 | `Src/Robot/core/command_consumer.rs` | 命令帧 → Command（`decode_frame` + `parse_orion_frame`） |
-| `Src/Robot/core/ground_station.rs` | GroundStation 消费侧（table + grid + spawn `cluster_consumer`） |
 
 **修改**：
 
@@ -352,7 +342,6 @@ Orion/                                   workspace 根
 │   │   └── core/
 │   │       ├── robot.rs                 + command_consumer spawn
 │   │       ├── command_consumer.rs      【新】命令入站消费
-│   │       ├── ground_station.rs        【新】地面站消费侧
 │   │       ├── protocol/                + parse_orion_frame 迁入
 │   │       └── cluster/ ...             （照旧，被复用）
 │   └── WebSocket/                       退役（可暂留调试）
