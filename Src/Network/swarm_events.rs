@@ -192,8 +192,22 @@ impl Network_Service {
                             }
                         }
                         DataType::Robot => {
-                            // Robot 广播已迁移 gossipsub topic（Task 12），RR 通道不再承载
-                            warn!("收到 DataType::Robot 消息（已废弃，走 gossipsub），忽略 from {}", peer);
+                            // 命令帧 → 车端命令通道（unicast，不混入 robot_bus 遥测广播，Task 16）
+                            if let Err(e) = self.robot_cmd_frame_tx.send(request.payload).await {
+                                warn!("robot 命令通道发送失败: {e}");
+                            }
+                            // 回 ACK 闭环 request-response（协议卫生；发送方 Send_Data_Try 不读回执）
+                            let response = Network_Data {
+                                data_type: DataType::Robot,
+                                payload: b"OK".to_vec(),
+                            };
+                            if let Err(e) = self.swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_response(channel, response)
+                            {
+                                error!("Robot 入站回复失败: {:?}", e);
+                            }
                         }
                         DataType::Info => {
                             // Info 类型已废弃（业务状态改走 GossipSub），仅记录日志

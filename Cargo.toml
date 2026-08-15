@@ -1,6 +1,10 @@
 #Presented by KeJi
 #Date: 2026-03-12
 
+[workspace]
+members = [".", "SrcPictorKernel"]
+resolver = "2"
+
 [package]
 name = "Pleiades"
 version = "0.1.0"

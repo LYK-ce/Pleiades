@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use crate::event_bus::EventBus;
 use crate::robot::core::cluster::{cluster_consumer, cluster_table_cleaner, ClusterInfoTable};
+use crate::robot::core::command_consumer::command_consumer;
 use crate::robot::core::planning::cluster_to_obstacle_cells;
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
@@ -90,6 +91,7 @@ impl Robot {
         origin: (f32, f32),
         node_handle: Option<Arc<NodeHandle>>,
         robot_bus: Option<Arc<EventBus>>,
+        robot_cmd_frame_rx: Option<mpsc::Receiver<Vec<u8>>>,
         peer_name: String,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
@@ -199,6 +201,15 @@ impl Robot {
 
         // 8. 命令通道
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
+
+        // 8.1 命令入站消费者（request-response 命令帧 → Command，Task 16）
+        if let Some(cmd_frame_rx) = robot_cmd_frame_rx {
+            let consumer_tx = cmd_tx.clone();
+            let consumer_cancel = cancel.clone();
+            tokio::spawn(async move {
+                command_consumer(cmd_frame_rx, consumer_tx, consumer_cancel).await;
+            });
+        }
 
         // 9. spawn 主循环
         let loop_cancel = cancel.clone();

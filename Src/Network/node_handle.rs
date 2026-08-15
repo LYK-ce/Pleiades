@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-04-24
+//Created Date ： 2026-04-24
+//Modified Date ： 2026-08-15
 
 //! 网络节点对外 API 句柄模块
 //!
@@ -136,6 +137,30 @@ impl NodeHandle {
         Ok(result)
     }
 
+
+    /// 发送数据（同步 fire-and-forget：channel 满即丢弃，不等待 Response）
+    ///
+    /// 与 `Send_Data` 的区别：`response_tx = None`，不等待对方回复；
+    /// 供需要从同步上下文（如 Godot 主线程）发命令的场景使用（Task 16）。
+    ///
+    /// # Returns
+    /// `Ok(())` = 已入队；`Err` = 队列满/关闭（不代表对方未收到）。
+    pub fn Send_Data_Try(
+        &self,
+        peer: &PeerId,
+        data_type: DataType,
+        payload: Vec<u8>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.cmd_tx
+            .try_send(NodeCommand::SendData {
+                peer: *peer,
+                data_type,
+                payload,
+                response_tx: None,
+            })
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
+        Ok(())
+    }
 
     /// 回复入站请求（通过 request_id）
     ///

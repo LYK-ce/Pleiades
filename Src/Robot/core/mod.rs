@@ -14,6 +14,8 @@
 //! - planning/：规划层（assignment 任务分配 + pathfinder D* 寻路，Task 14）
 
 pub mod command;
+pub mod command_consumer;
+pub mod ground_station;
 pub mod protocol;
 pub mod state;
 pub mod executor;

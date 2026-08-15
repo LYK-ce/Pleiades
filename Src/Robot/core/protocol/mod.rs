@@ -11,8 +11,10 @@
 
 pub mod frame;
 pub mod messages;
+pub mod command_decode;
 
 pub use frame::{decode_frame, encode_frame, Frame};
+pub use command_decode::parse_orion_frame;
 pub use messages::{
     decode_manual_control, decode_map_delta, decode_map_full, decode_pose, decode_task_set,
     encode_manual_control, encode_map_delta, encode_map_full, encode_pose, encode_task_set,

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-06
+//Modified Date ： 2026-08-15
 
 //! Orion Robot — Jetson 车载完整节点
 //!
@@ -48,17 +48,19 @@ fn parse_origin(args: Vec<String>) -> (f32, f32) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 完整 bootstrap（含 tracing 日志初始化）
-    let boot = core_bootstrap().await?;
+    let mut boot = core_bootstrap().await?;
     info!("Core bootstrap 完成");
 
     let origin = parse_origin(std::env::args().skip(1).collect());
     info!("初始世界坐标 origin = ({}, {})", origin.0, origin.1);
 
     // Robot + 网络数据面（launch 内 main_loop/slam/notifier 后台跑）
+    let robot_cmd_frame_rx = boot.robot_cmd_frame_rx.take().expect("robot_cmd_frame_rx 未初始化");
     let robot = robot_bootstrap(
         &boot.config,
         Arc::new(boot.node_handle.clone()),
         boot.robot_bus.clone(),
+        robot_cmd_frame_rx,
         origin,
     ).await?;
 

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-06
-//Modified Date ： 2026-08-09
+//Modified Date ： 2026-08-15
 
 //! 启动组装层（Task 9_2）
 //!
@@ -34,6 +34,8 @@ pub struct CoreBootstrap {
     pub config: Pleiades_Config,
     pub event_bus: Arc<EventBus>,
     pub robot_bus: Arc<EventBus>,
+    /// 车端命令入站通道接收端（Task 16：core_bootstrap 创建，robot_bootstrap 转交 Robot::launch）
+    pub robot_cmd_frame_rx: Option<mpsc::Receiver<Vec<u8>>>,
     pub node_handle: NodeHandle,
     pub network_service: Network_Service,
     pub core: Core,
@@ -45,6 +47,18 @@ pub struct CoreBootstrap {
 impl CoreBootstrap {
     /// 启动运行时（network 事件循环 + TUI + Core 主循环），阻塞直到退出
     pub async fn run(self) {
+        self.run_internal(true).await;
+    }
+
+    /// 启动运行时（无头：network 事件循环 + Core 主循环，不启动 TUI），阻塞直到退出
+    ///
+    /// 供 GDExtension 桥（pictor-kernel）等无 TUI 场景使用（Task 16）。
+    pub async fn run_headless(self) {
+        self.run_internal(false).await;
+    }
+
+    /// 内部实现：`with_tui` 决定是否 spawn TUI
+    async fn run_internal(self, with_tui: bool) {
         // network 事件循环（Task 9_2 决策 #2：内部 spawn，调用方不用管）
         let mut network_service = self.network_service;
         tokio::spawn(async move {
@@ -53,14 +67,16 @@ impl CoreBootstrap {
             }
         });
 
-        // TUI 模式（两个入口一致；CLI 模式已去除——`cli` 参数与 orion-robot 位置参数冲突，人类 2026-08-06 决策）
-        let event_rx = self.event_bus.Subscribe();
-        tokio::task::spawn_blocking(move || {
-            TUI_Loop(event_rx, self.user_cmd_tx);
-        });
-        info!("进入 Orchestrator 主循环");
+        if with_tui {
+            // TUI 模式（两个入口一致；CLI 模式已去除——`cli` 参数与 orion-robot 位置参数冲突，人类 2026-08-06 决策）
+            let event_rx = self.event_bus.Subscribe();
+            tokio::task::spawn_blocking(move || {
+                TUI_Loop(event_rx, self.user_cmd_tx);
+            });
+        }
+        info!("进入 Orchestrator 主循环（{}）", if with_tui { "TUI" } else { "headless" });
 
-        // 先订阅再 flush：本机 peer_info_updated 一次性事件必须被 TUI 收到（broadcast 无重放，2026-08-09 与 ML_review 同步修复）
+        // 先订阅再 flush：本机 peer_info_updated 一次性事件必须被订阅者收到（broadcast 无重放，2026-08-09 与 ML_review 同步修复）
         self.core.spawn_initial_flush();
 
         self.core.run().await;
@@ -110,6 +126,8 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
 
     let event_bus = Arc::new(EventBus::New(1024));
     let robot_bus = Arc::new(EventBus::New(1024));
+    // 车端命令入站通道（request-response DataType::Robot 命令帧，Task 16）
+    let (robot_cmd_frame_tx, robot_cmd_frame_rx) = mpsc::channel::<Vec<u8>>(64);
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = Get_Peer_Name(&config);
@@ -151,7 +169,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     };
 
     let (network_service, node_handle, inbound_rx, net_capability, net_event_rx)
-        = Network_Service::Init(net_cfg, keypair, peer_capability_for_network, event_bus.clone(), robot_bus.clone()).await?;
+        = Network_Service::Init(net_cfg, keypair, peer_capability_for_network, event_bus.clone(), robot_bus.clone(), robot_cmd_frame_tx).await?;
     info!("Network 服务初始化完成");
 
     // ══════════════════════════════════════════════════════
@@ -171,7 +189,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     info!("Orchestrator Core 初始化完成");
 
 
-    Ok(CoreBootstrap { config, event_bus, robot_bus, node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
+    Ok(CoreBootstrap { config, event_bus, robot_bus, robot_cmd_frame_rx: Some(robot_cmd_frame_rx), node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
 }
 
 /// Robot bootstrap：读取 [Robot] 段配置 → Robot::launch（注入 node_handle/robot_bus）→ WS 遥控
@@ -183,6 +201,7 @@ pub async fn robot_bootstrap(
     config: &Pleiades_Config,
     node_handle: Arc<NodeHandle>,
     robot_bus: Arc<EventBus>,
+    robot_cmd_frame_rx: mpsc::Receiver<Vec<u8>>,
     origin: (f32, f32),
 ) -> Result<Robot, String> {
     let r = config.Robot.as_ref();
@@ -224,6 +243,7 @@ pub async fn robot_bootstrap(
         origin,
         Some(node_handle),
         Some(robot_bus),
+        Some(robot_cmd_frame_rx),
         peer_name.clone(),
     ).await?;
     info!("Robot 已启动");

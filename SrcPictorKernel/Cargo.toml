@@ -1,0 +1,27 @@
+#Presented by KeJi
+#Created Date ： 2026-08-15
+#Modified Date ： 2026-08-15
+
+[package]
+name = "pictor-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pictor_kernel"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pleiades 无头逻辑层（libp2p 网络 / ORION 协议 / 地图合并 / LLM）
+pleiades = { path = "..", package = "Pleiades" }
+# Godot GDExtension 绑定（gdext）；api-4-7 匹配 Pictor 的 Godot 4.7
+godot = { version = "0.5", features = ["api-4-7"] }
+# 后台 tokio runtime（无头节点 + 同步 task）
+tokio = { version = "1", features = ["full"] }
+# 解析 event_bus 的 State JSON（peer 事件）
+serde_json = "1.0"
+# peer_id hex ↔ bytes 转换
+hex = "0.4"
+# PeerId 类型（与 pleiades 同版本，cargo 自动统一）
+libp2p = "0.56"
