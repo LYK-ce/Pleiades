@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-13
+//Modified Date ： 2026-08-15
 
 //! Robot 主循环
 //!
@@ -173,8 +173,10 @@ impl Robot {
         let slam_name = peer_name.clone();
         // Task 13 阶段一：同 state_notifier，peer_id 一次计算
         let slam_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes());
+        // Task 15 C 节：LiDAR 掩蔽需要读集群表（他车位置）
+        let slam_table = cluster_table.clone();
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_table, slam_cancel).await;
         });
 
         // 7. 集群入站消费者（Task 13_1：robot_bus → ClusterInfo 表，独立 task 数据面）
@@ -300,6 +302,7 @@ async fn slam_task(
     node_handle: Option<Arc<NodeHandle>>,
     peer_name: String,
     local_peer_id: Option<Vec<u8>>,
+    cluster_table: Arc<ClusterInfoTable>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -333,8 +336,13 @@ async fn slam_task(
                 };
 
                 if !scan_points.is_empty() {
+                    // Task 15 C 节：锁外读集群表 → 他车格掩蔽集合（避免持 grid 写锁时再拿 cluster 锁）
+                    let masked = {
+                        let others = cluster_table.snapshot().await;
+                        cluster_to_obstacle_cells(&others)
+                    };
                     let mut g = grid.write().await;
-                    let deltas = slam::update(&mut *g, &pose, &scan_points);
+                    let deltas = slam::update(&mut *g, &pose, &scan_points, &masked);
                     // 聚合：每帧 Δ 累加进 pending（真实差分）
                     accumulate_pending(&mut pending, &deltas);
                 }

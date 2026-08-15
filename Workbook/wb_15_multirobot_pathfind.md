@@ -39,3 +39,22 @@
 - 架构文档 §3.10 文件结构补 cluster_obstacles / maintenance（可选）
 
 - 结束时间：2026-08-13
+
+## 2026-08-15 LiDAR 掩蔽方案定稿 + 实施（补充，已完成）
+
+- 问题：LiDAR 360° 会把其他小车当实体障碍扫到并标 Occupied（间歇），导致地图抖动/跨车污染/幽灵障碍
+- 定稿（人类逐项确认）：
+  - 分层：他车格不进静态地图；他车位置权威来源 = POSE → ClusterInfoTable
+  - 作用位置：接收方本地每帧（slam::update 内部），非发送方广播
+  - 抵消力度 -3（=OCCUPIED_INCREMENT）：中和 +3，他车格稳定 ≤5（Unknown），永不 Occupied；净 0 不广播；能清历史残留
+  - 两条硬约束：-3 与 hit 同写锁；走 update 双写（own+chunk），不用 apply_delta
+  - footprint 1 格（复用 cluster_to_obstacle_cells）
+- 涉及 3 文件：grid.rs（decay 减量接口 + DYNAMIC_OBSTACLE_DECAY）/ lidar_mapper.rs（masked 参数）/ robot.rs（slam_task 接 cluster_table）
+- 实施步骤 Step 7~10 见 task 文档
+- 开始实施：2026-08-15
+- 实施完成：2026-08-15
+  - Step 7：grid.rs 加 `decay(gx, gy, amount)`（Chunk + OccupancyGrid 双写）+ `DYNAMIC_OBSTACLE_DECAY` 常量 + 4 单测
+  - Step 8：lidar_mapper.rs `update` 加 `masked` 参数 + hit 后 -3 抵消 + 3 单测；5 处旧测试调用点同步加 `&HashSet::new()`
+  - Step 9：robot.rs `slam_task` 加 `cluster_table` 参数 + 锁外读 snapshot 转 masked + launch 传参
+  - Step 10 验证：cargo check 通过；slam 28 全绿；全量 223 passed + 1 failed（vm::engine::test_sandbox_os_blocked 既有环境失败，与本次无关）
+- 遗留：实车双车联调（LiDAR 掩蔽实车验证：两车相向/交错，确认他车格不被标 Occupied）

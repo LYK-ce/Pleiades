@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-08-15
 
 //! LiDAR 点云 → 占据栅格更新
 //!
@@ -13,7 +13,10 @@
 
 use std::collections::HashSet;
 
-use super::grid::{world_to_grid, CellState, Delta, OccupancyGrid, CELL_RESOLUTION, CHUNK_SIZE};
+use super::grid::{
+    world_to_grid, CellState, Delta, OccupancyGrid, CELL_RESOLUTION, CHUNK_SIZE,
+    DYNAMIC_OBSTACLE_DECAY,
+};
 
 /// 车辆位姿
 pub struct RobotPose {
@@ -27,6 +30,7 @@ pub fn update(
     grid: &mut OccupancyGrid,
     pose: &RobotPose,
     scan_points: &[(f32, f32)], // (angle_rad, range_m)，雷达坐标系
+    masked: &HashSet<(i32, i32)>, // 动态障碍掩蔽格（他车所在格，Task 15 C 节）
 ) -> Vec<Delta> {
     // 1. 坐标转换 + 去重终点格子
     let robot_gx = (pose.x / CELL_RESOLUTION).floor() as i32;
@@ -85,6 +89,17 @@ pub fn update(
                 if delta != 0 {
                     deltas.push(Delta { gx: cgx, gy: cgy, delta });
                 }
+            }
+        }
+    }
+
+    // 4. 动态障碍掩蔽（Task 15 C 节）：对「他车格」做 -DYNAMIC_OBSTACLE_DECAY 抵消
+    //    - 中和 LiDAR 的 +3，他车格稳定在 Unknown（log ≤ 5），永不 Occupied；
+    //    - 也能清历史残留（+8 被 clamp 顶住后 -3 真实降 3 → 5）。
+    for &(mgx, mgy) in masked {
+        if let Some((_, _, delta)) = grid.decay(mgx, mgy, DYNAMIC_OBSTACLE_DECAY) {
+            if delta != 0 {
+                deltas.push(Delta { gx: mgx, gy: mgy, delta });
             }
         }
     }
@@ -173,7 +188,7 @@ mod tests {
         // 近处端点 (130,128)（1m）挡住后方
         let points = vec![(0.0, 1.0)];
         for _ in 0..3 {
-            update(&mut grid, &pose, &points);
+            update(&mut grid, &pose, &points, &std::collections::HashSet::new());
         }
         // 端点格 3 次命中 → Occupied
         assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
@@ -189,7 +204,7 @@ mod tests {
         // 远射线 (128→140) 经过 (130,128)：旧代码会用它的 miss 抵消近端点（回归测试）
         let points = vec![(0.0, 1.0), (0.0, 6.0)];
         for _ in 0..3 {
-            update(&mut grid, &pose, &points);
+            update(&mut grid, &pose, &points, &std::collections::HashSet::new());
         }
         // 近端点格：3 圈 +3×3=9 → Occupied（不被穿行射线抵消）
         assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
@@ -215,16 +230,60 @@ mod tests {
 
         // Δ 语义（Task 13_2）：每圈终点格都有 Δ=+3 → deltas 非空（原三态语义下前 2 圈为空）
         for i in 0..2 {
-            let deltas = update(&mut grid, &pose, &points);
+            let deltas = update(&mut grid, &pose, &points, &std::collections::HashSet::new());
             assert!(!deltas.is_empty(), "第 {} 圈终点应有 Δ", i + 1);
             // 终点格 Δ=+3，射线途经格 Δ=−1
             assert!(deltas.iter().any(|d| d.gx == center_gx + 1 && d.gy == center_gy && d.delta == 3));
         }
 
         // 第 3 圈：终点 +3×3=9 → 夹断 8 > 6 → Occupied；clamp 边界 Δ=+2
-        let deltas = update(&mut grid, &pose, &points);
+        let deltas = update(&mut grid, &pose, &points, &std::collections::HashSet::new());
         assert!(!deltas.is_empty());
         assert!(deltas.iter().any(|d| d.gx == center_gx + 1 && d.gy == center_gy && d.delta == 2));
         assert_eq!(grid.state(center_gx + 1, center_gy), Some(CellState::Occupied as u8));
+    }
+
+    #[test]
+    fn test_masked_decay_neutralizes_hit() {
+        let mut grid = OccupancyGrid::new();
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        // 端点 (130,128)（1m）被 mask 为他车格
+        let points = vec![(0.0, 1.0)];
+        let masked: std::collections::HashSet<(i32, i32)> = [(130, 128)].into_iter().collect();
+        // 多圈 hit + 每圈 -3 抵消：端点格永远不达 Occupied
+        for _ in 0..5 {
+            update(&mut grid, &pose, &points, &masked);
+        }
+        assert_eq!(grid.state(130, 128), Some(CellState::Unknown as u8));
+    }
+
+    #[test]
+    fn test_masked_decay_clears_history_occupied() {
+        let mut grid = OccupancyGrid::new();
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        let points = vec![(0.0, 1.0)];
+        // 先不加 mask，3 圈命中 → Occupied
+        for _ in 0..3 {
+            update(&mut grid, &pose, &points, &std::collections::HashSet::new());
+        }
+        assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
+        // 加 mask 后，一帧 -3 降到 5（Unknown），清历史残留
+        let masked: std::collections::HashSet<(i32, i32)> = [(130, 128)].into_iter().collect();
+        update(&mut grid, &pose, &points, &masked);
+        assert_eq!(grid.state(130, 128), Some(CellState::Unknown as u8));
+    }
+
+    #[test]
+    fn test_masked_decay_does_not_affect_unmasked() {
+        let mut grid = OccupancyGrid::new();
+        let pose = RobotPose { x: 64.0, y: 64.0, yaw: 0.0 };
+        let points = vec![(0.0, 1.0)];
+        // masked 是无关格 (200,200)，端点 (130,128) 不受影响
+        let masked: std::collections::HashSet<(i32, i32)> = [(200, 200)].into_iter().collect();
+        for _ in 0..3 {
+            update(&mut grid, &pose, &points, &masked);
+        }
+        // 端点格正常 3 圈 → Occupied（未被误掩蔽）
+        assert_eq!(grid.state(130, 128), Some(CellState::Occupied as u8));
     }
 }

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-08-04
+//Modified Date ： 2026-08-15
 
 //! 占据栅格地图 — 概率 log-odds（三态）
 //!
@@ -25,6 +25,9 @@ pub const OCCUPIED_CLAMP: i8 = 8;
 pub const FREE_CLAMP: i8 = -8;
 const OCCUPIED_THRESHOLD: i8 = 6;
 const FREE_THRESHOLD: i8 = -6;
+
+/// 动态障碍掩蔽衰减量（Task 15 C 节）：= OCCUPIED_INCREMENT，对「他车格」做 -3 抵消 LiDAR 命中
+pub const DYNAMIC_OBSTACLE_DECAY: i8 = OCCUPIED_INCREMENT;
 
 /// 格子宏观状态（供外部使用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +115,25 @@ impl Chunk {
         true
     }
 
+    /// 概率衰减：log-odds 减 `amount`（夹断 FREE_CLAMP），返回 (宏观状态是否变化, 新宏观状态, Δ)
+    ///
+    /// Task 15 C 节：动态障碍掩蔽——对「他车格」做 -DYNAMIC_OBSTACLE_DECAY 抵消 LiDAR 命中，
+    /// 中和 +3 后他车格稳定在 Unknown（log ≤ 5），永不 Occupied；也能清历史残留（+8 → 5）。
+    pub fn decay(&mut self, gx: i32, gy: i32, amount: i8) -> Option<(bool, u8, i8)> {
+        let lx = gx - self.origin_gx;
+        let ly = gy - self.origin_gy;
+        if lx < 0 || lx >= CHUNK_SIZE as i32 || ly < 0 || ly >= CHUNK_SIZE as i32 {
+            return None;
+        }
+        let idx = ly as usize * CHUNK_SIZE + lx as usize;
+        let old_log = self.cells[idx];
+        let old_state = log_to_state(old_log);
+        self.cells[idx] = old_log.saturating_sub(amount).max(FREE_CLAMP);
+        let new_state = log_to_state(self.cells[idx]);
+        let delta = self.cells[idx] - old_log;
+        Some((old_state != new_state, new_state, delta))
+    }
+
     /// 整表原始 log-odds（i8）导出（own 上传 / 对账下发数据源）
     pub fn log_odds_bytes(&self) -> Box<[i8; CHUNK_SIZE * CHUNK_SIZE]> {
         self.cells.clone()
@@ -178,6 +200,14 @@ impl OccupancyGrid {
     pub fn update(&mut self, gx: i32, gy: i32, occupied: bool) -> Option<(bool, u8, i8)> {
         let own_result = self.own.update(gx, gy, occupied)?;
         let chunk_result = self.chunk.update(gx, gy, occupied)?;
+        Some((chunk_result.0, chunk_result.1, own_result.2))
+    }
+
+    /// 概率衰减：同时更新 own（本车贡献）与 chunk（merged），返回 own 的 Δ
+    /// Task 15 C 节：动态障碍掩蔽（与 update 相同的双写语义）
+    pub fn decay(&mut self, gx: i32, gy: i32, amount: i8) -> Option<(bool, u8, i8)> {
+        let own_result = self.own.decay(gx, gy, amount)?;
+        let chunk_result = self.chunk.decay(gx, gy, amount)?;
         Some((chunk_result.0, chunk_result.1, own_result.2))
     }
 
@@ -432,5 +462,55 @@ mod tests {
         assert_eq!(world_to_grid(0.5, 0.5), (1, 1));
         assert_eq!(world_to_grid(50.0, 50.0), (100, 100));
         assert_eq!(world_to_grid(-0.1, -0.1), (-1, -1));
+    }
+
+    #[test]
+    fn test_decay_from_zero() {
+        // 0 → -3 → -6 → -8 逐帧递减（动态障碍掩蔽 -3 力度）
+        let mut chunk = Chunk::new(0, 0);
+        let (_, _, d1) = chunk.decay(10, 10, 3).unwrap();
+        assert_eq!(d1, -3);
+        assert_eq!(chunk.get(10, 10).unwrap(), -3);
+        let (_, _, d2) = chunk.decay(10, 10, 3).unwrap();
+        assert_eq!(d2, -3);
+        assert_eq!(chunk.get(10, 10).unwrap(), -6);
+        let (_, _, d3) = chunk.decay(10, 10, 3).unwrap();
+        assert_eq!(d3, -2); // -6 → clamp -8
+        assert_eq!(chunk.get(10, 10).unwrap(), -8);
+    }
+
+    #[test]
+    fn test_decay_clears_history_occupied() {
+        // 历史残留 +8（Occupied）被一次 -3 降到 5（Unknown），清历史残留
+        let mut chunk = Chunk::new(0, 0);
+        for _ in 0..3 {
+            chunk.update(10, 10, true);
+        }
+        assert_eq!(chunk.get(10, 10).unwrap(), 8);
+        let (changed, state, delta) = chunk.decay(10, 10, 3).unwrap();
+        assert_eq!(chunk.get(10, 10).unwrap(), 5);
+        assert_eq!(delta, -3);
+        assert!(changed);
+        assert_eq!(state, CellState::Unknown as u8);
+    }
+
+    #[test]
+    fn test_decay_idempotent_at_free_clamp() {
+        // 压到底 -8 后再 decay 无变化（Δ=0，不广播）
+        let mut chunk = Chunk::new(0, 0);
+        for _ in 0..4 {
+            chunk.decay(5, 5, 3);
+        }
+        assert_eq!(chunk.get(5, 5).unwrap(), -8);
+        let (changed, _, delta) = chunk.decay(5, 5, 3).unwrap();
+        assert_eq!(delta, 0);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn test_decay_out_of_bounds() {
+        let mut chunk = Chunk::new(0, 0);
+        assert!(chunk.decay(-1, 0, 3).is_none());
+        assert!(chunk.decay(256, 0, 3).is_none());
     }
 }
