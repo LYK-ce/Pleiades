@@ -1,7 +1,7 @@
 # Task 16: Pictor Kernel — Pleiades × Godot GDExtension 桥
 
 > 创建日期：2026-08-15
-> 状态：方案定稿（待实施）
+> 状态：方案定稿，Rust 侧已实施（提交 c671255）+ P0 已验证（2026-08-16）
 > 范围：Rust 侧（Orion）改动——workspace 化 + 无头模式 + 命令 request-response 路由 + 地面站消费侧 + 桥 crate `pictor-kernel`
 > 关联：`/vepfs-mlp2/c20250205/240804016/GodotProject/Pictor/docs/pleiades_godot_integration_guide.md`（集成指南）
 
@@ -396,3 +396,35 @@ Orion/                                   workspace 根
 **第 7 步：WS 退役 + e2e（对应 guide P4）**
 - 退役 `Src/WebSocket/`；断线重连验证。
 - 验证：拔网线 → 自动恢复；多车联调。
+
+
+---
+
+## 七、P0 最小测试验证（2026-08-16，另目录验证）
+
+**结论**：P0 通过 ✅——`.so` 能加载、`PleiadesKernel` 类能注册/实例化、节点挂树后后台完整 bootstrap 跑起来、干净退出（EXIT=0）。**"Pleiades 逻辑层跑在 Godot 进程里"的 P0 目标达成。**
+
+### 测试结果
+
+| 测试 | 结果 |
+|---|---|
+| `.so` 加载 + 类注册 | ✅ `PleiadesKernel 已注册` |
+| 实例化 | ✅ |
+| 挂节点 + `ready()` + 后台 bootstrap | ✅ `kernel_ready` 信号收到 + 干净退出（EXIT=0） |
+
+日志确认 bootstrap 是**完整跑起来**的：生成 peer_id（持久化到 `keypair.bin`）、libp2p 监听端口、gossipsub 订阅 5 个 topic。
+
+### 踩坑记录（4 个）
+
+1. **`.so` 缺入口符号**：`lib.rs` 缺 `#[gdextension] unsafe impl ExtensionLibrary`，gdext 不会生成入口点 → 补上（已含在提交 c671255）。
+2. **入口符号名**：gdext 0.5 的固定名是 **`gdext_rust_init`**（不是 `pictor_kernel_init`）→ `.gdextension` 的 `entry_symbol` 填 `gdext_rust_init`。
+3. **Godot 静默不加载 `.gdextension`**：符号名改对后仍 FAIL 且日志无提示 → 先跑一次 `godot --headless -e --quit` 触发文件系统扫描，扩展才被登记。⚠️ **每次新增/改动 `.gdextension` 都要先跑一次扫描。**
+4. **（遗留，未阻塞）编辑器进程 SIGABRT**：扫描完成、编辑器完全启动后崩，推测 Pleiades 完整 bootstrap 在编辑器上下文崩溃；运行时（场景/`-s`）干净 EXIT=0 不受影响，留待需要"编辑器里跑"时再查。
+
+### 待办（下次提交时处理）
+
+- `.gitignore` 补：`.config/`、`Log/`、`Pleiades_Workspace/`、`.kvcache/`（用户届时提醒）。
+
+### 下一步
+
+P1/P2 实质内容：pose/map 信号上行、`send_command` 下行（需连真车或起模拟器）。
