@@ -52,7 +52,7 @@
 
 - 来源：`event_bus` State `type = peer_discovered / peer_left`（mDNS 发现 / mDNS 过期）。
 - 时机：事件驱动。
-- `peer_id`：base58（`PeerId::to_string()`）。
+- `peer_id`：hex（完整 peer_id 原始字节的 hex 编码）。
 - 语义：发现层事件——`peer_discovered` 在连接建立**前**触发；`peer_left` 是 mDNS 缓存过期（最慢约 2 分钟），供 Godot 显示"发现中/连接中"等过渡态。
 
 ### 6. `peer_connected(peer_id: String)`
@@ -61,13 +61,13 @@
 
 - 来源：`event_bus` State `type = peer_connected / peer_disconnected`（TCP 连接建立/断开）。
 - 时机：事件驱动。
-- `peer_id`：**base58**（`PeerId::to_string()`，形如 `12D3Koo…`）。
+- `peer_id`：hex（完整 peer_id 原始字节的 hex 编码）。
 
 ### 8. `peer_info_updated(peer_id: String, peer_name: String)`
 
 - 来源：`event_bus` State `type = peer_info_updated`（peer-info gossip）。
 - 时机：事件驱动（节点上报名字后）。
-- `peer_id`：base58；`peer_name`：节点名（车名）。
+- `peer_id`：hex；`peer_name`：节点名（车名）。
 
 ---
 
@@ -87,12 +87,12 @@
 
 ---
 
-## 四、⚠️ 已知问题：peer_id 编码不统一
+## 四、peer_id 编码（已统一为 hex）
 
-- `pose_received` 的 `peer_id` = **hex**（来自 `ClusterInfoTable` 的原始字节）。
-- `peer_connected / peer_disconnected / peer_info_updated` 的 `peer_id` = **base58**（来自 `event_bus` JSON 的 `PeerId::to_string()`）。
+所有信号的 `peer_id` 统一为 **hex-of-bytes**（完整 peer_id 原始字节的 hex 编码，如 `00e9…`）。
 
-Godot 侧把「车 sprite」（hex 键）和「节点列表项」（base58 键）关联时，需要做编码转换（base58 ↔ hex ↔ bytes）。建议后续统一为 hex-of-bytes（见 task_16 3.4 决策），届时只改桥侧即可。
+- `event_bus` 里的 `peer_id` 原本是 base58（`PeerId::to_string()`），桥在 `event_loop` 里统一转成 hex（base58 → `PeerId` → `to_bytes()` → hex）再转发。
+- 因此 `peer_*` 事件、`pose_received`、`send_command` 的 peer_id 编码一致，Godot 侧无需再做 base58 ↔ hex 转换。
 
 ---
 
@@ -114,4 +114,4 @@ Godot 侧把「车 sprite」（hex 键）和「节点列表项」（base58 键�
 2. 连接 `kernel_ready` → 之后才可发命令。
 3. 连接 `pose_received` / `map_updated` 做渲染。
 4. 连接 `peer_discovered` / `peer_left` / `peer_connected` / `peer_disconnected` / `peer_info_updated` 维护节点列表。
-5. 注意 hex / base58 编码差异（第四节）。
+5. peer_id 已统一为 hex（见第四节），无需编码转换。

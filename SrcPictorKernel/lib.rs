@@ -272,6 +272,12 @@ fn peer_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// base58 字符串 → hex 字符串（统一 peer 事件与 pose 的 peer_id 编码，Task 16）
+fn base58_to_hex(s: &str) -> Option<String> {
+    let peer: libp2p::PeerId = s.parse().ok()?;
+    Some(peer_hex(&peer.to_bytes()))
+}
+
 /// 遥测/地图同步 task（后台 runtime）：周期读 table/grid → out_queue
 async fn sync_loop(
     out_queue: Arc<Mutex<VecDeque<BridgeEvent>>>,
@@ -324,7 +330,10 @@ async fn event_loop(
             Ok(Bus_Event::State { payload }) => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                     let ty = v["type"].as_str().unwrap_or("");
-                    let peer_id = v["peer_id"].as_str().unwrap_or("").to_string();
+                    // 统一为 hex：event_bus 里的 peer_id 是 base58，转成 hex 与 pose/send_command 一致
+                    let Some(peer_id) = base58_to_hex(v["peer_id"].as_str().unwrap_or("")) else {
+                        continue;
+                    };
                     match ty {
                         "peer_discovered" => out_queue
                             .lock()
