@@ -40,6 +40,12 @@ enum BridgeEvent {
     Map {
         data: Vec<u8>,
     },
+    PeerDiscovered {
+        peer_id: String,
+    },
+    PeerLeft {
+        peer_id: String,
+    },
     PeerConnected {
         peer_id: String,
     },
@@ -104,6 +110,12 @@ impl PleiadesKernel {
     fn map_updated(data: PackedByteArray);
 
     #[signal]
+    fn peer_discovered(peer_id: GString);
+
+    #[signal]
+    fn peer_left(peer_id: GString);
+
+    #[signal]
     fn peer_connected(peer_id: GString);
 
     #[signal]
@@ -153,6 +165,14 @@ impl PleiadesKernel {
                 BridgeEvent::Map { data } => {
                     let pba = PackedByteArray::from(data);
                     self.signals().map_updated().emit(&pba);
+                }
+                BridgeEvent::PeerDiscovered { peer_id } => {
+                    let peer = GString::from(peer_id.as_str());
+                    self.signals().peer_discovered().emit(&peer);
+                }
+                BridgeEvent::PeerLeft { peer_id } => {
+                    let peer = GString::from(peer_id.as_str());
+                    self.signals().peer_left().emit(&peer);
                 }
                 BridgeEvent::PeerConnected { peer_id } => {
                     let peer = GString::from(peer_id.as_str());
@@ -306,6 +326,14 @@ async fn event_loop(
                     let ty = v["type"].as_str().unwrap_or("");
                     let peer_id = v["peer_id"].as_str().unwrap_or("").to_string();
                     match ty {
+                        "peer_discovered" => out_queue
+                            .lock()
+                            .unwrap()
+                            .push_back(BridgeEvent::PeerDiscovered { peer_id }),
+                        "peer_left" => out_queue
+                            .lock()
+                            .unwrap()
+                            .push_back(BridgeEvent::PeerLeft { peer_id }),
                         "peer_connected" => out_queue
                             .lock()
                             .unwrap()

@@ -46,15 +46,24 @@
 - 数据：65536 字节（256×256 格 × 0.5m 分辨率），log-odds **i8**（-8~+8）按 u8 位模式传输。
 - 三态由显示层按阈值 ±6 派生：`>+6` 占用 / `<-6` 空闲 / 中间未知。
 
-### 4. `peer_connected(peer_id: String)`
+### 4. `peer_discovered(peer_id: String)`
 
-### 5. `peer_disconnected(peer_id: String)`
+### 5. `peer_left(peer_id: String)`
 
-- 来源：`event_bus` State `type = peer_connected / peer_disconnected`（mDNS 发现 + TCP 连接建立/断开）。
+- 来源：`event_bus` State `type = peer_discovered / peer_left`（mDNS 发现 / mDNS 过期）。
+- 时机：事件驱动。
+- `peer_id`：base58（`PeerId::to_string()`）。
+- 语义：发现层事件——`peer_discovered` 在连接建立**前**触发；`peer_left` 是 mDNS 缓存过期（最慢约 2 分钟），供 Godot 显示"发现中/连接中"等过渡态。
+
+### 6. `peer_connected(peer_id: String)`
+
+### 7. `peer_disconnected(peer_id: String)`
+
+- 来源：`event_bus` State `type = peer_connected / peer_disconnected`（TCP 连接建立/断开）。
 - 时机：事件驱动。
 - `peer_id`：**base58**（`PeerId::to_string()`，形如 `12D3Koo…`）。
 
-### 6. `peer_info_updated(peer_id: String, peer_name: String)`
+### 8. `peer_info_updated(peer_id: String, peer_name: String)`
 
 - 来源：`event_bus` State `type = peer_info_updated`（peer-info gossip）。
 - 时机：事件驱动（节点上报名字后）。
@@ -64,15 +73,15 @@
 
 ## 三、event_bus 原始事件与转发情况
 
-`event_bus` 的 State JSON 有 `type` 字段，桥只转发其中 3 种：
+`event_bus` 的 State JSON 有 `type` 字段，桥转发其中 5 种：
 
 | `type` | 是否转发 | 目标信号 | 说明 |
 |---|---|---|---|
+| `peer_discovered` | ✅ | `peer_discovered` | mDNS 发现 |
+| `peer_left` | ✅ | `peer_left` | mDNS 过期 |
 | `peer_connected` | ✅ | `peer_connected` | 连接建立 |
 | `peer_disconnected` | ✅ | `peer_disconnected` | 连接断开 |
 | `peer_info_updated` | ✅ | `peer_info_updated` | 节点名（gossip） |
-| `peer_discovered` | ❌ 不转发 | — | mDNS 发现（仅内部日志） |
-| `peer_left` | ❌ 不转发 | — | mDNS 过期 |
 
 > `event_bus` 里还有 ML_review 侧的 models / sessions 等 State 事件，均与机器人无关、不转发。
 
@@ -104,5 +113,5 @@ Godot 侧把「车 sprite」（hex 键）和「节点列表项」（base58 键�
 1. `_process` 里每帧调 `kernel.poll()`。
 2. 连接 `kernel_ready` → 之后才可发命令。
 3. 连接 `pose_received` / `map_updated` 做渲染。
-4. 连接 `peer_connected` / `peer_disconnected` / `peer_info_updated` 维护节点列表。
+4. 连接 `peer_discovered` / `peer_left` / `peer_connected` / `peer_disconnected` / `peer_info_updated` 维护节点列表。
 5. 注意 hex / base58 编码差异（第四节）。
