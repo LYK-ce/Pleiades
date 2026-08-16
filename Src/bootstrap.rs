@@ -224,18 +224,13 @@ pub async fn robot_bootstrap(
         None => Some("/dev/rplidar".to_string()),                        // 缺省
     };
     let lidar_baudrate = r.and_then(|r| r.lidar_baudrate).or(Some(230400));
-    let ws_bind = r.and_then(|r| r.ws_bind.clone())
-        .unwrap_or_else(|| "0.0.0.0:9090".to_string());
 
     let peer_name = Get_Peer_Name(config);
 
     info!(
-        "Robot 配置: port={serial_port} baud={baudrate} car={car_type:?} lidar={} ws={ws_bind} peer_name={peer_name}",
+        "Robot 配置: port={serial_port} baud={baudrate} car={car_type:?} lidar={} peer_name={peer_name}",
         lidar_port.as_deref().unwrap_or("None")
     );
-
-    // Task 13 阶段一：本车 peer_id 常量，WS 下行帧身份与 gossip 链路一致（launch 前取，node_handle 随后 move 进 launch）
-    let local_peer_id = node_handle.Get_Local_Peer_Id().to_bytes();
 
     let robot = Robot::launch(
         &serial_port, baudrate, car_type,
@@ -247,16 +242,6 @@ pub async fn robot_bootstrap(
         peer_name.clone(),
     ).await?;
     info!("Robot 已启动");
-
-    // WebSocket 遥控（vehicle_id = 车名 = peer_name）
-    crate::websocket::start(
-        &ws_bind, &peer_name, robot.robot_cmd_tx.clone(),
-        robot.pose_tx.subscribe(), robot.map_tx.subscribe(),
-        robot.grid.clone(),
-        local_peer_id,
-    );
-    info!("WebSocket 遥控服务已启动: ws://{ws_bind}");
-    info!("打开 Tool/robot_control.html 开始遥控");
 
     Ok(robot)
 }

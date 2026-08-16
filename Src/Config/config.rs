@@ -39,8 +39,6 @@ kvcache_dir = ".kvcache"
 peer_name = "new_peer"
 
 [Robot]
-# WebSocket 遥控绑定地址（默认 0.0.0.0:9090）
-ws_bind = "0.0.0.0:9090"
 # STM32 底盘串口（缺省沿用硬编码）
 serial_port = "/dev/myserial"
 baudrate = 115200
@@ -121,7 +119,6 @@ pub struct Identity_Config {
 /// [Robot] 段配置
 #[derive(Debug, Deserialize)]
 pub struct Robot_Config {
-    pub ws_bind: Option<String>,
     pub serial_port: Option<String>,
     pub baudrate: Option<u32>,
     pub car_type: Option<String>,

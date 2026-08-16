@@ -113,6 +113,3 @@ tempfile = "3.10"
 serial2 = "0.2"
 serial2-tokio = "0.1.24"
 
-# WebSocket (Robot 遥控)
-tokio-tungstenite = "0.24"
-

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use pleiades::event_bus::{Bus_Event, EventBus};
+use pleiades::event_bus::Bus_Event;
 use pleiades::network::{DataType, NodeHandle};
 
 /// 桥事件（后台线程 → 主线程 `poll()` 排空）
