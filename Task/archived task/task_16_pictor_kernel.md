@@ -1,7 +1,7 @@
 # Task 16: Pictor Kernel — Pleiades × Godot GDExtension 桥
 
 > 创建日期：2026-08-15
-> 状态：方案定稿，Rust 侧已实施（提交 c671255）+ P0 已验证（2026-08-16）
+> 状态：已完成 ✅（Rust 侧全部实施 + 桥哑管道化 + WS 退役，人类测试通过 2026-08-16）
 > 范围：Rust 侧（Orion）改动——workspace 化 + 无头模式 + 命令 request-response 路由 + 地面站消费侧 + 桥 crate `pictor-kernel`
 > 关联：`/vepfs-mlp2/c20250205/240804016/GodotProject/Pictor/docs/pleiades_godot_integration_guide.md`（集成指南）
 
@@ -414,6 +414,12 @@ Orion/                                   workspace 根
 
 - `.gitignore` 补：`.config/`、`Log/`、`Pleiades_Workspace/`、`.kvcache/`（用户届时提醒）。
 
-### 下一步
+### 八、完成记录（2026-08-16）
 
-P1/P2 实质内容：pose/map 信号上行、`send_command` 下行（需连真车或起模拟器）。
+- ✅ 人类测试通过：桥 `.so` 加载 / 类注册 / 信号 / 命令均正常。
+- 收尾提交：`5751767`（桥哑管道化 + LiDAR 5m）→ `0405047`（WS 退役）。
+
+### 后续（非本 task）
+
+- P3：Godot（Pictor）拆 WS 栈、接桥信号/handle（`robot_frame` + `peer_*` + `send_command` + `poll`）。
+- `.gitignore` 补齐（`.config/`、`Log/`、`Pleiades_Workspace/`、`.kvcache/`，待用户提醒）。
