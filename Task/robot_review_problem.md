@@ -17,6 +17,7 @@
 | 🟠 P7 | `Src/Robot/core/executor.rs` | D* 规划失败仅 warn!（task_8 Q6 要求 error!） | 提升为 error! | task_8 / wb_8 待办 #5 |
 | 🟠 N10 | `Src/Robot/core/planning/pathfinder.rs` | 零单元测试（wb_8 已给出 17 场景清单，未落地） | 补全单元测试 | wb_10 新发现 / task_11 A 组 |
 | 🟡 N8 | 实车 | 路径偏差（待实车数据分析定位） | 收集数据后分析 | wb_10 新发现 |
+| 🟠 N13 | `Src/Robot/core/planning/pathfinder.rs`（本车点机器人假设） | D* Lite 将本车当点、未处理本车 15cm footprint；他车障碍膨胀半径 < 30cm（对方 15 + 本车 15）时存在残余重叠碰撞（task_17 定稿 20cm 膨胀 → 最坏 10cm 重叠） | 可选升级：本车 footprint 感知规划（连续坐标检查 15cm 圆盘碰撞），或膨胀半径加到 30cm；先实车联调验证 10cm 残余是否真的碰撞 | task_17 讨论 / 2026-08-16 |
 
 ## 二、性能（task_11 完善方向 B，源自 task_10 承接 + wb_10 新发现）
 

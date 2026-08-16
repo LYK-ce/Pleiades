@@ -46,6 +46,7 @@ car_type = "X3Plus" # X3 / X3Plus / X1 / R2
 # LiDAR 串口（留空则不启用）
 lidar_port = "/dev/rplidar"
 lidar_baudrate = 230400
+obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
 "#;
 
 /// 默认配置目录名
@@ -124,6 +125,7 @@ pub struct Robot_Config {
     pub car_type: Option<String>,
     pub lidar_port: Option<String>,
     pub lidar_baudrate: Option<u32>,
+    pub obstacle_inflation_radius: Option<f32>,
 }
 
 /// 读取节点名称，默认 "new_peer"

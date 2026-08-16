@@ -92,6 +92,7 @@ impl Robot {
         node_handle: Option<Arc<NodeHandle>>,
         robot_bus: Option<Arc<EventBus>>,
         robot_cmd_frame_rx: Option<mpsc::Receiver<Vec<u8>>>,
+        obstacle_inflation_radius: f32,
         peer_name: String,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
@@ -178,7 +179,7 @@ impl Robot {
         // Task 15 C 节：LiDAR 掩蔽需要读集群表（他车位置）
         let slam_table = cluster_table.clone();
         tokio::spawn(async move {
-            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_table, slam_cancel).await;
+            slam_task(slam_grid, slam_robot, slam_lidar, slam_map_tx, slam_handle, slam_name, slam_peer_id, slam_table, obstacle_inflation_radius, slam_cancel).await;
         });
 
         // 7. 集群入站消费者（Task 13_1：robot_bus → ClusterInfo 表，独立 task 数据面）
@@ -231,6 +232,7 @@ impl Robot {
                 loop_execute_state,
                 loop_cluster_table,
                 loop_peer_id,
+                obstacle_inflation_radius,
                 loop_cancel,
             ).await;
         });
@@ -314,6 +316,7 @@ async fn slam_task(
     peer_name: String,
     local_peer_id: Option<Vec<u8>>,
     cluster_table: Arc<ClusterInfoTable>,
+    obstacle_inflation_radius: f32,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -350,7 +353,7 @@ async fn slam_task(
                     // Task 15 C 节：锁外读集群表 → 他车格掩蔽集合（避免持 grid 写锁时再拿 cluster 锁）
                     let masked = {
                         let others = cluster_table.snapshot().await;
-                        cluster_to_obstacle_cells(&others)
+                        cluster_to_obstacle_cells(&others, obstacle_inflation_radius)
                     };
                     let mut g = grid.write().await;
                     let deltas = slam::update(&mut *g, &pose, &scan_points, &masked);
@@ -406,6 +409,7 @@ async fn main_loop(
     execute_state: Arc<RwLock<ExecuteState>>,
     cluster_table: Arc<ClusterInfoTable>,
     own_peer_id: Vec<u8>,
+    obstacle_inflation_radius: f32,
     cancel: CancellationToken,
 ) {
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
@@ -475,7 +479,7 @@ async fn main_loop(
                 // Task 15：无脑读全量快照（超时剔除由独立表维护 task 负责）
                 let others = cluster_table.snapshot().await;
                 let dynamic_obstacles: Vec<(i32, i32)> =
-                    cluster_to_obstacle_cells(&others).into_iter().collect();
+                    cluster_to_obstacle_cells(&others, obstacle_inflation_radius).into_iter().collect();
 
                 // Task 13_1：execute_state 由 executor 写（step 包装层同步 sub_target）
                 executor.step(

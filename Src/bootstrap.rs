@@ -224,11 +224,12 @@ pub async fn robot_bootstrap(
         None => Some("/dev/rplidar".to_string()),                        // 缺省
     };
     let lidar_baudrate = r.and_then(|r| r.lidar_baudrate).or(Some(230400));
+    let obstacle_inflation_radius = r.and_then(|r| r.obstacle_inflation_radius).unwrap_or(0.2);
 
     let peer_name = Get_Peer_Name(config);
 
     info!(
-        "Robot 配置: port={serial_port} baud={baudrate} car={car_type:?} lidar={} peer_name={peer_name}",
+        "Robot 配置: port={serial_port} baud={baudrate} car={car_type:?} lidar={} infl_r={obstacle_inflation_radius} peer_name={peer_name}",
         lidar_port.as_deref().unwrap_or("None")
     );
 
@@ -239,6 +240,7 @@ pub async fn robot_bootstrap(
         Some(node_handle),
         Some(robot_bus),
         Some(robot_cmd_frame_rx),
+        obstacle_inflation_radius,
         peer_name.clone(),
     ).await?;
     info!("Robot 已启动");

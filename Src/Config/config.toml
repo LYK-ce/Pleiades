@@ -35,3 +35,4 @@ car_type = "X3Plus" # X3 / X3Plus / X1 / R2
 # LiDAR 串口（留空则禁用）
 lidar_port = "/dev/ttyUSB1"
 lidar_baudrate = 230400
+obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
