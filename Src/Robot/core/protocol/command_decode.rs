@@ -13,7 +13,7 @@ use super::{MSGID_MANUAL_CONTROL, MSGID_TASK_SET};
 use super::messages::{
     decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD,
     ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR,
-    ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, MISSION_GOTO,
+    ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, MISSION_CIRCLE, MISSION_GOTO,
 };
 
 /// 解析 ORION 帧 → 内部命令（入站：终端/地面站 → 车）
@@ -34,6 +34,7 @@ pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
                         .into_iter()
                         .filter_map(|m| match m.mission_type {
                             MISSION_GOTO => Some(Mission::Goto { x: m.x, y: m.y, members: vec![] }),
+                            MISSION_CIRCLE => Some(Mission::Circle { x: m.x, y: m.y, members: vec![] }),
                             _ => {
                                 tracing::warn!("[Cmd] 未知 mission type: {}", m.mission_type);
                                 None
@@ -42,14 +43,25 @@ pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
                         .collect();
                     Some(Command::Auto(AutoCmd::Set(list)))
                 }
-                _ => match ts.missions.into_iter().find(|m| m.mission_type == MISSION_GOTO) {
-                    Some(m) => Some(Command::Auto(AutoCmd::Set(vec![Mission::Goto {
+                _ => match ts
+                    .missions
+                    .into_iter()
+                    .find(|m| m.mission_type == MISSION_GOTO || m.mission_type == MISSION_CIRCLE)
+                {
+                    Some(m) if m.mission_type == MISSION_GOTO => {
+                        Some(Command::Auto(AutoCmd::Set(vec![Mission::Goto {
+                            x: m.x,
+                            y: m.y,
+                            members: ts.members,
+                        }])))
+                    }
+                    Some(m) => Some(Command::Auto(AutoCmd::Set(vec![Mission::Circle {
                         x: m.x,
                         y: m.y,
                         members: ts.members,
                     }]))),
                     None => {
-                        tracing::warn!("[Cmd] 群发任务无 Goto 目标");
+                        tracing::warn!("[Cmd] 群发任务无 Goto/Circle 目标");
                         None
                     }
                 },
@@ -89,7 +101,7 @@ mod tests {
     use crate::robot::core::protocol::frame::Frame;
     use crate::robot::core::protocol::MSGID_TASK_SET;
     use crate::robot::core::protocol::messages::{
-        encode_task_set, MissionItem, MISSION_GOTO, TaskSetPayload,
+        encode_task_set, MissionItem, MISSION_CIRCLE, MISSION_GOTO, TaskSetPayload,
     };
 
     fn task_set_frame(payload: &TaskSetPayload) -> Frame {
@@ -169,6 +181,31 @@ mod tests {
         assert_set(
             parse_orion_frame(&f),
             vec![Mission::Goto { x: 8.0, y: 9.0, members: vec![] }],
+        );
+    }
+
+    #[test]
+    fn test_task_set_single_circle() {
+        let f = task_set_frame(&TaskSetPayload {
+            members: vec![vec![7]],
+            missions: vec![MissionItem { mission_type: MISSION_CIRCLE, x: 64.0, y: 64.0 }],
+        });
+        assert_set(
+            parse_orion_frame(&f),
+            vec![Mission::Circle { x: 64.0, y: 64.0, members: vec![] }],
+        );
+    }
+
+    #[test]
+    fn test_task_set_group_circle() {
+        let members = vec![vec![1u8; 38], vec![2u8; 38]];
+        let f = task_set_frame(&TaskSetPayload {
+            members: members.clone(),
+            missions: vec![MissionItem { mission_type: MISSION_CIRCLE, x: 64.0, y: 64.0 }],
+        });
+        assert_set(
+            parse_orion_frame(&f),
+            vec![Mission::Circle { x: 64.0, y: 64.0, members }],
         );
     }
 }

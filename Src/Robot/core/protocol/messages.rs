@@ -241,6 +241,8 @@ pub fn decode_manual_control(payload: &[u8]) -> Option<ManualControl> {
 
 /// mission type（协议文档 §3.5）
 pub const MISSION_GOTO: u8 = 0;
+/// 围圈（Task 18）：x/y 为圆心，车在环上均匀铺开
+pub const MISSION_CIRCLE: u8 = 1;
 
 /// 编码任务队列：mission_count + member_count + members[] + missions[]
 ///

@@ -53,5 +53,10 @@ pub enum Mission {
     /// Task 14：`members` 非空 = 群发任务——executor 执行时经 `assignment` 自算散布位置；
     /// `members` 空 = 老单车语义（直接以 (x, y) 为目标）。
     Goto { x: f32, y: f32, members: Vec<Vec<u8>> },
+    /// 围圈（Task 18）：`x/y` = 圆心（世界坐标，米），`members` 非空 = 群发。
+    ///
+    /// 每车按 peer_id 排序序号在环上均匀铺开（半径写死 0.5m = 与圆心隔 1 格，见 assignment）。
+    /// 第一版到达即停、不朝圆心。
+    Circle { x: f32, y: f32, members: Vec<Vec<u8>> },
     // 未来: Patrol, Explore, ...
 }

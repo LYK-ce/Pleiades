@@ -102,6 +102,20 @@ impl Executor {
         }
     }
 
+    /// 装载新目标：设置 goal / 清 sub_target / 建 D* 路径（Goto / Circle 共用）
+    fn start_goal(&mut self, goal: (f32, f32), wx: f32, wy: f32) {
+        self.goal = Some(goal);
+        self.sub_target = None;
+        let start_gx = (wx / CELL_RESOLUTION).floor() as i32;
+        let start_gy = (wy / CELL_RESOLUTION).floor() as i32;
+        let goal_gx = (goal.0 / CELL_RESOLUTION).floor() as i32;
+        let goal_gy = (goal.1 / CELL_RESOLUTION).floor() as i32;
+        self.pathfinder = Some(DStarLite::new(
+            (start_gx, start_gy),
+            (goal_gx, goal_gy),
+        ));
+    }
+
     /// 每 tick 调用一次（仅 Auto 模式）
     ///
     /// Task 13_1：`execute_state` 为执行器意图（sub_target），
@@ -219,16 +233,26 @@ impl Executor {
                             return;
                         }
                     };
-                    self.goal = Some(goal);
-                    self.sub_target = None;
-                    let start_gx = (wx / CELL_RESOLUTION).floor() as i32;
-                    let start_gy = (wy / CELL_RESOLUTION).floor() as i32;
-                    let goal_gx = (goal.0 / CELL_RESOLUTION).floor() as i32;
-                    let goal_gy = (goal.1 / CELL_RESOLUTION).floor() as i32;
-                    self.pathfinder = Some(DStarLite::new(
-                        (start_gx, start_gy),
-                        (goal_gx, goal_gy),
-                    ));
+                    self.start_goal(goal, wx, wy);
+                }
+                Some(Mission::Circle { x, y, members }) => {
+                    info!(
+                        "[Executor] 新任务: Circle({:.2}, {:.2}){}",
+                        x, y,
+                        if members.is_empty() { "" } else { "（群发）" }
+                    );
+                    // Task 18：每车按 peer_id 排序序号在环上均匀铺开（半径 0.5m = 与圆心隔 1 格）
+                    let goal = match assignment::group_circle_mission((x, y), &members, own_peer_id, grid) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            warn!("[Executor] 围圈任务分配失败: {e:?}，跳过此任务");
+                            self.goal = None;
+                            self.sub_target = None;
+                            self.pathfinder = None;
+                            return;
+                        }
+                    };
+                    self.start_goal(goal, wx, wy);
                 }
                 None => return,
             }

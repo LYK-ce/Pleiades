@@ -505,7 +505,7 @@ Src/Robot/
 ├── mod.rs              ← 模块入口 + public export
 ├── core/
 │   ├── robot.rs        ← Robot::launch() + 主 select! 循环 + state_notifier/slam_task
-│   ├── command.rs      ← 三层命令（Mode/Manual/Auto）+ Mission（Goto{x,y,members}）
+│   ├── command.rs      ← 三层命令（Mode/Manual/Auto）+ Mission（Goto / Circle{x,y,members}）
 │   ├── state.rs        ← RobotState + LidarState + ExecuteState
 │   ├── executor.rs     ← 自动任务执行器（Idle/Turning/Moving + D* Lite）
 │   ├── mission.rs      ← MissionQueue（FIFO，replace 替换语义）
@@ -513,7 +513,7 @@ Src/Robot/
 │   ├── protocol/       ← ORION 协议（frame.rs 帧编解码 + messages.rs 消息 payload）
 │   ├── cluster/        ← 集群数据面（ClusterInfoTable + consumer，Task 13_1）
 │   └── planning/       ← 规划层（Task 14）
-│       ├── assignment.rs  ← 群发 Goto 散布位置确定性分配
+│       ├── assignment.rs  ← 群发 Goto/Circle 散布位置确定性分配
 │       └── pathfinder.rs  ← D* Lite 路径规划（自 slam/ 迁入）
 ├── slam/               ← 感知/建图层
 │   ├── grid.rs         ← OccupancyGrid（own/merged 双表，log-odds）
@@ -561,7 +561,8 @@ crate::websocket::start(&ws_bind, &peer_name, robot.robot_cmd_tx.clone(), ...);
 ```rust
 pub enum Command { Mode(ModeCmd), Manual(ManualCmd), Auto(AutoCmd) }
 pub enum Mission {
-    Goto { x: f32, y: f32, members: Vec<Vec<u8>> },  // members 非空 = 群发（Task 14）
+    Goto { x: f32, y: f32, members: Vec<Vec<u8>> },    // members 非空 = 群发（Task 14）
+    Circle { x: f32, y: f32, members: Vec<Vec<u8>> },  // 围圈：x/y 圆心，环上均匀铺开（Task 18）
 }
 pub enum AutoCmd { Set(Vec<Mission>) }  // member_count>1 时 Set 内为群发任务
 ```

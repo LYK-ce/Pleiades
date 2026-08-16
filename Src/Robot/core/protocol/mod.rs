@@ -20,8 +20,8 @@ pub use messages::{
     encode_manual_control, encode_map_delta, encode_map_full, encode_pose, encode_task_set,
     ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT,
     ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,
-    ACTION_SWITCH_TO_MANUAL, MISSION_GOTO, ManualControl, MapDeltaEntry, MissionItem, PoseData,
-    TaskSetPayload,
+    ACTION_SWITCH_TO_MANUAL, MISSION_CIRCLE, MISSION_GOTO, ManualControl, MapDeltaEntry,
+    MissionItem, PoseData, TaskSetPayload,
 };
 
 /// 消息 ID 常量（与协议文档 §3 一致）

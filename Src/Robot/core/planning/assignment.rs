@@ -32,6 +32,9 @@ pub enum AssignError {
 /// 最大枚举环数（r=1..=10 同色格共 220 + L[0] = 221 槽，≈5m 半径）
 const MAX_RING: i32 = 10;
 
+/// circle 命令：圆心与车格之间隔 1 格（0.5m）→ 车落在切比雪夫距离 2 的环上
+const CIRCLE_RING_RADIUS_CELLS: i32 = 2;
+
 /// 网格坐标 → 世界坐标（格中心，与 executor `cell_center_world` 公式一致：(gx+0.5)*0.5）
 fn cell_center_world(gx: i32, gy: i32) -> (f32, f32) {
     ((gx as f32 + 0.5) * CELL_RESOLUTION, (gy as f32 + 0.5) * CELL_RESOLUTION)
@@ -132,6 +135,63 @@ pub fn group_goto_mission(
         .ok_or(AssignError::NotMember)?;
     let slots = build_slots(target, grid)?;
     slots.get(idx).copied().ok_or(AssignError::InsufficientSlots)
+}
+
+/// 构建 circle 环形散布位置列表（全局压缩，与 build_slots 同构）
+///
+/// - 圆心格 Occupied 不判失败（围住语义：圆心本身可以是障碍）
+/// - 枚举 `ring_cells(CIRCLE_RING_RADIUS_CELLS)`（16 格），过滤越界 / Occupied → 可用格列表（格中心世界坐标）
+pub fn build_circle_slots(
+    center: (f32, f32),
+    grid: &OccupancyGrid,
+) -> Result<Vec<(f32, f32)>, AssignError> {
+    let (cx, cy) = world_to_grid(center.0, center.1);
+    if cx < 0 || cx >= CHUNK_SIZE as i32 || cy < 0 || cy >= CHUNK_SIZE as i32 {
+        return Err(AssignError::OutOfBounds);
+    }
+    let mut slots = Vec::with_capacity(8 * CIRCLE_RING_RADIUS_CELLS as usize);
+    for (dx, dy) in ring_cells(CIRCLE_RING_RADIUS_CELLS) {
+        let gx = cx + dx;
+        let gy = cy + dy;
+        if gx < 0 || gx >= CHUNK_SIZE as i32 || gy < 0 || gy >= CHUNK_SIZE as i32 {
+            continue;
+        }
+        if grid.state(gx, gy) == Some(CellState::Occupied as u8) {
+            continue;
+        }
+        slots.push(cell_center_world(gx, gy));
+    }
+    Ok(slots)
+}
+
+/// 计算本车在 circle 群发任务中的目标点（环上均匀铺开）
+///
+/// - `members` 空 → 单车语义：环的第一个位置
+/// - `members` 非空 → 排序（字节升序）→ 序号 i → 均匀铺开 `idx = i * len / n`
+pub fn group_circle_mission(
+    center: (f32, f32),
+    members: &[Vec<u8>],
+    own_peer_id: &[u8],
+    grid: &OccupancyGrid,
+) -> Result<(f32, f32), AssignError> {
+    let slots = build_circle_slots(center, grid)?;
+    if members.is_empty() {
+        return slots.first().copied().ok_or(AssignError::InsufficientSlots);
+    }
+    let mut sorted: Vec<&Vec<u8>> = members.iter().collect();
+    sorted.sort();
+    let idx = sorted
+        .iter()
+        .position(|m| m.as_slice() == own_peer_id)
+        .ok_or(AssignError::NotMember)?;
+    let n = sorted.len();
+    if n > slots.len() {
+        return Err(AssignError::InsufficientSlots);
+    }
+    slots
+        .get(idx * slots.len() / n)
+        .copied()
+        .ok_or(AssignError::InsufficientSlots)
 }
 
 #[cfg(test)]
@@ -286,5 +346,80 @@ mod tests {
             assert_eq!(wx, (gx as f32 + 0.5) * 0.5);
             assert_eq!(wy, (gy as f32 + 0.5) * 0.5);
         }
+    }
+    #[test]
+    fn test_circle_single_first_position() {
+        // 圆心 (64,64) → 格 (128,128)，环第一格 (0,-2) → (128,126) 北
+        let g = OccupancyGrid::new();
+        let own = vec![1u8];
+        let r = group_circle_mission((64.0, 64.0), &[], &own, &g).unwrap();
+        assert_eq!(r, cell_center_world(128, 126));
+    }
+
+    #[test]
+    fn test_circle_two_opposite_diameter() {
+        let g = OccupancyGrid::new();
+        let a = vec![1u8];
+        let b = vec![2u8];
+        let members = vec![a.clone(), b.clone()];
+        let ga = group_circle_mission((64.0, 64.0), &members, &a, &g).unwrap();
+        let gb = group_circle_mission((64.0, 64.0), &members, &b, &g).unwrap();
+        assert_eq!(ga, cell_center_world(128, 126)); // 北
+        assert_eq!(gb, cell_center_world(128, 130)); // 南（直径另一端）
+    }
+
+    #[test]
+    fn test_circle_four_cardinal() {
+        let g = OccupancyGrid::new();
+        let a = vec![1u8];
+        let b = vec![2u8];
+        let c = vec![3u8];
+        let d = vec![4u8];
+        let members = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        assert_eq!(group_circle_mission((64.0, 64.0), &members, &a, &g).unwrap(), cell_center_world(128, 126)); // 北
+        assert_eq!(group_circle_mission((64.0, 64.0), &members, &b, &g).unwrap(), cell_center_world(130, 128)); // 东
+        assert_eq!(group_circle_mission((64.0, 64.0), &members, &c, &g).unwrap(), cell_center_world(128, 130)); // 南
+        assert_eq!(group_circle_mission((64.0, 64.0), &members, &d, &g).unwrap(), cell_center_world(126, 128)); // 西
+    }
+
+    #[test]
+    fn test_circle_obstacle_skip() {
+        // 北格 (128,126) 被占 → 顺延到下一格 (129,126)
+        let g = grid_with_obstacles(&[(128, 126)]);
+        let own = vec![1u8];
+        let r = group_circle_mission((64.0, 64.0), &[], &own, &g).unwrap();
+        assert_eq!(r, cell_center_world(129, 126));
+    }
+
+    #[test]
+    fn test_circle_center_occupied_ok() {
+        // 圆心格障碍 → 不失败（围住语义），环格正常分配
+        let g = grid_with_obstacles(&[(128, 128)]);
+        let own = vec![1u8];
+        let r = group_circle_mission((64.0, 64.0), &[], &own, &g).unwrap();
+        assert_eq!(r, cell_center_world(128, 126));
+    }
+
+    #[test]
+    fn test_circle_not_member() {
+        let g = OccupancyGrid::new();
+        let members = vec![vec![1u8], vec![2u8]];
+        let r = group_circle_mission((64.0, 64.0), &members, &[9u8], &g);
+        assert_eq!(r, Err(AssignError::NotMember));
+    }
+
+    #[test]
+    fn test_circle_out_of_bounds() {
+        let g = OccupancyGrid::new();
+        assert_eq!(build_circle_slots((200.0, 200.0), &g), Err(AssignError::OutOfBounds));
+    }
+
+    #[test]
+    fn test_circle_determinism() {
+        let g = grid_with_obstacles(&[(128, 126), (130, 128)]);
+        let members = vec![vec![9u8; 38], vec![3u8; 38], vec![7u8; 38], vec![1u8; 38]];
+        let a = group_circle_mission((64.0, 64.0), &members, &vec![3u8; 38], &g).unwrap();
+        let b = group_circle_mission((64.0, 64.0), &members, &vec![3u8; 38], &g).unwrap();
+        assert_eq!(a, b);
     }
 }
