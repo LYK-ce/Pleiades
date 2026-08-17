@@ -74,6 +74,8 @@
 |---|---|---|---|---|
 | 🔴 N11 | `Src/Network/network_service.rs` behaviour 配置 | **identify 缺失**：libp2p 栈未启用 identify（节点自我介绍/协议能力协商标准件），自研 Info 交换替代（ConnectionEstablished 时逐 peer `send_data(Info)` 等待回执，swarm_events.rs L69-84）——无法自动协商协议能力；gossipsub 上线后新老版本节点混合时，节点需知道对方支持哪些协议；identify 零配置、连接建立即自动交换 | `PleiadesNetworkBehaviour` 增 `identify::Behaviour`；与自定义 Info 交换**共存**：identify 管协议层协商，Info 管业务字段（能力/模型分片） | 2026-08-08 讨论 |
 | 🟠 N12 | `Cargo.toml` libp2p features | **gossipsub 缺失**（广播依赖 request-response 模拟，详见 task_12） | features 加 `"gossipsub"`，按 task_12 实施 | 2026-08-08 讨论 |
+| 🔴 N14 | `Src/Network/network_service.rs`（mDNS 节点发现） | 节点发现 100% 依赖 mDNS 组播，且用默认参数（query_interval=5min / ttl=6min / enable_ipv6=false）；无静态兜底（bootstrap_peers 空、listen_port=0、Kademlia 仅 WAN 时 bootstrap）。实车 3 车：一辆秒级发现、一辆等很久、一辆一直未发现 → cluster_table 空 → 动态障碍不注入 → 互相碰撞 | ① mDNS 调参（query 20s / ttl 60s）✅ 已实施 ② 固定 listen_port + bootstrap_peers 静态 dial 兜底（顺带修 bootstrap 解析 `PeerId::random()` bug）③ 实车确认同网段 / 无 AP 客户端隔离 | 2026-08-17 实车 |
+
 ## 八、已解决 ✅（保留追溯，避免重复处理）
 
 | # | 位置 | 说明 | 解决方式 |

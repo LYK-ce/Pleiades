@@ -231,9 +231,13 @@ impl Network_Service {
                 yamux::Config::default,
             )?
             .with_behaviour(|key| {
-                // 创建mDNS行为
+                // 创建mDNS行为（缩短 query_interval/ttl：加速局域网发现 + 丢包快速自愈，Task 19）
                 let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
+                    mdns::Config {
+                        ttl: Duration::from_secs(60),
+                        query_interval: Duration::from_secs(20),
+                        enable_ipv6: false,
+                    },
                     key.public().to_peer_id(),
                 )?;
 
