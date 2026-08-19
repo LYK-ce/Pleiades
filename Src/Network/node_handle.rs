@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-04-24
-//Modified Date ： 2026-08-15
+//Modified Date ： 2026-08-18
 
 //! 网络节点对外 API 句柄模块
 //!
@@ -65,10 +65,14 @@ pub enum NodeCommand {
     PutRecord { key: Vec<u8>, value: Vec<u8> },
     /// DHT读取
     GetRecord { key: Vec<u8> },
+    /// DHT 查询 provider 列表（节点发现），结果通过 oneshot 回传
+    GetProviders { reply: oneshot::Sender<Result<Vec<PeerId>, String>> },
     /// GossipSub 发布（广播业务状态到 topic）
     GossipsubPublish { topic: String, payload: Vec<u8> },
     /// 主动连接
     Dial { addr: Multiaddr },
+    /// 按 PeerId 主动连接
+    DialPeer { peer: PeerId },
     /// 断开连接
     Disconnect { peer: PeerId },
     /// 停止节点
@@ -196,10 +200,28 @@ impl NodeHandle {
         self.cmd_tx.send(NodeCommand::GetRecord { key }).await?;
         Ok(())
     }
+    /// 查询 DHT provider 列表（节点发现），带超时
+    pub async fn Get_Providers(&self) -> Result<Vec<PeerId>, Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(NodeCommand::GetProviders { reply: tx }).await?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(self.response_timeout),
+            rx,
+        ).await
+            .map_err(|_| format!("DHT get_providers timeout ({}s)", self.response_timeout))?
+            .map_err(|_| "DHT reply channel closed")?
+            .map_err(|e| -> Box<dyn Error + Send + Sync> { e.into() })?;
+        Ok(result)
+    }
 
     /// 主动连接到指定地址
     pub async fn Dial(&self, addr: Multiaddr) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.cmd_tx.send(NodeCommand::Dial { addr }).await?;
+        Ok(())
+    }
+    /// 按 PeerId 主动连接（swarm 从 Kademlia 路由表解析地址）
+    pub async fn Dial_Peer(&self, peer: &PeerId) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.cmd_tx.send(NodeCommand::DialPeer { peer: *peer }).await?;
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-04-29
-//Modified Date ： 2026-08-08
+//Modified Date ： 2026-08-18
 
 //! 网络服务核心模块
 //! 负责Swarm管理、连接管理、事件处理
@@ -77,6 +77,8 @@ pub struct NetworkConfig {
     pub transport_protocol: String,
     /// 监听端口 (0表示随机)
     pub listen_port: u16,
+    /// DHT 节点发现命名空间
+    pub dht_namespace: String,
     /// 引导节点地址列表
     pub bootstrap_peers: Vec<String>,
     /// 清理间隔（秒）
@@ -98,6 +100,7 @@ impl Default for NetworkConfig {
             wan_enabled: false,
             transport_protocol: "TCP".to_string(),
             listen_port: 0,
+            dht_namespace: crate::network::DHT::DEFAULT_NODE_NAMESPACE.to_string(),
             bootstrap_peers: Vec::new(),
             cleanup_interval: 300,    // 默认300秒
             timeout_interval: 300,    // 默认300秒
@@ -178,6 +181,8 @@ pub struct Network_Service {
     pub(crate) rendezvous: Arc<RendezvousMap>,
     /// GossipSub 快照缓存（最近发布状态，对方订阅 topic 时按 topic 精准重放）
     pub(crate) snapshot_cache: SnapshotCache,
+    /// 进行中的 DHT get_providers 查询跟踪（QueryId → 结果回传通道）
+    pub(crate) provider_queries: crate::network::DHT::ProviderQueryTracker,
 }
 
 impl Network_Service {
@@ -352,16 +357,22 @@ impl Network_Service {
             session_accept_control,
             rendezvous,
             snapshot_cache: SnapshotCache::New(),
+            provider_queries: crate::network::DHT::ProviderQueryTracker::new(),
         };
 
         // 添加引导节点
         for addr_str in &node.config.bootstrap_peers {
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                // 从 Multiaddr 末尾 /p2p/<PeerId> 提取真实 PeerId（替代 PeerId::random）
+                let peer_id = match addr.iter().last() {
+                    Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
+                    _ => {
+                        warn!("bootstrap 地址缺少 /p2p/<PeerId> 后缀，跳过: {}", addr);
+                        continue;
+                    }
+                };
                 info!("添加引导节点: {}", addr);
-                node.swarm.behaviour_mut().kademlia.add_address(
-                    &PeerId::random(), // TODO: 从地址中提取PeerId
-                    addr,
-                );
+                node.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
         }
 
@@ -378,13 +389,18 @@ impl Network_Service {
         self.swarm.listen_on(listen_addr)?;
         info!("开始监听网络连接");
 
-        // 2. 启动Kademlia引导
-        if self.config.wan_enabled {
+        // 2. 启动Kademlia引导（仅当配置了种子节点时）
+        if !self.config.bootstrap_peers.is_empty() {
             if let Err(e) = self.swarm.behaviour_mut().kademlia.bootstrap() {
                 warn!("Kademlia引导失败: {}", e);
             }
         }
 
+        // 2.4 自注册为 Pleiades 节点 provider（供 get_providers 发现）
+        crate::network::DHT::start_providing(
+            &mut self.swarm.behaviour_mut().kademlia,
+            &self.config.dht_namespace,
+        );
         // 2.5 订阅 GossipSub 业务状态 topic（IdentTopic = 原始字符串 topic，与默认配置一致）
         let topics = [
             gossipsub::IdentTopic::new(super::TOPIC_PEER_INFO),

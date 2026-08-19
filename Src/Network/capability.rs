@@ -1,5 +1,6 @@
 //Presented by KeJi
 //Date ： 2026-04-24
+//Modified Date ： 2026-08-18
 
 //! Network Capability 模块
 //!
@@ -143,6 +144,14 @@ pub trait Network_Capability: Send + Sync {
     /// # 参数
     /// - `addr`: 目标节点的 Multiaddr 地址
     async fn dial(&self, addr: Multiaddr) -> Result<(), Network_Error>;
+    /// 按 PeerId 主动连接（swarm 从 Kademlia 路由表解析地址）
+    ///
+    /// 与 `dial(addr)` 的区别：只需 PeerId，地址由 swarm 从已学到的
+    /// Kademlia 路由表 / identify 信息中解析。配合 `discover_peers()` 使用。
+    ///
+    /// # 参数
+    /// - `peer`: 目标节点 ID
+    async fn dial_by_peer_id(&self, peer: PeerId) -> Result<(), Network_Error>;
 
     /// 断开与指定节点的连接
     ///
@@ -294,6 +303,8 @@ pub trait Network_Capability: Send + Sync {
     /// # 参数
     /// - `key`: 键（原始字节）
     async fn get_record(&self, key: Vec<u8>) -> Result<(), Network_Error>;
+    /// DHT 节点发现：查询全网 Pleiades 节点的 PeerId 列表（按需调用）
+    async fn discover_peers(&self) -> Result<Vec<PeerId>, Network_Error>;
 
     // ========================================
     // 节点信息
@@ -467,6 +478,12 @@ impl Network_Capability for Network_Service_Capability {
             .await
             .map_err(|e| Network_Error::ConnectionFailed(e.to_string()))
     }
+    async fn dial_by_peer_id(&self, peer: PeerId) -> Result<(), Network_Error> {
+        self.node_handle
+            .Dial_Peer(&peer)
+            .await
+            .map_err(|e| Network_Error::ConnectionFailed(e.to_string()))
+    }
 
     async fn disconnect(&self, peer: PeerId) -> Result<(), Network_Error> {
         self.node_handle
@@ -593,6 +610,12 @@ impl Network_Capability for Network_Service_Capability {
             .Get_Record(key)
             .await
             .map_err(|e| Network_Error::ChannelClosed(e.to_string()))
+    }
+    async fn discover_peers(&self) -> Result<Vec<PeerId>, Network_Error> {
+        self.node_handle
+            .Get_Providers()
+            .await
+            .map_err(|e| Network_Error::Timeout(e.to_string()))
     }
 
     // ========================================

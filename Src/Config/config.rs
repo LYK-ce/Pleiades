@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date : 2026-04-09
-//Modified Date ： 2026-08-06
+//Modified Date ： 2026-08-18
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -23,6 +23,13 @@ log_file_path = "Log/"
 LAN = true
 WAN = false
 Transport_Protocol = "TCP" # TCP/QUIC
+# p2p 监听端口，0 = 随机（种子节点建议固定端口）
+listen_port = 0
+# DHT 节点发现命名空间（同一集群的所有节点必须一致，区分大小写）
+dht_namespace = "pleiades-nodes"
+# DHT 种子节点列表（完整 Multiaddr，必须带 /p2p/<PeerId> 后缀）
+# 留空 = 不启用 DHT bootstrap（仅靠 mDNS）
+bootstrap_peers = []
 # 节点管理相关配置
 cleanup_interval = 300
 timeout_interval = 300
@@ -102,6 +109,9 @@ pub struct Network_Config {
     pub heartbeat_interval: Option<u64>,
     pub heartbeat_timeout: Option<u64>,
     pub request_response_timeout: Option<u64>,
+    pub listen_port: Option<u16>,               // p2p 监听端口，0=随机
+    pub bootstrap_peers: Option<Vec<String>>,   // DHT 种子节点列表
+    pub dht_namespace: Option<String>,          // DHT 节点发现命名空间
 }
 
 /// [Storage] 段配置

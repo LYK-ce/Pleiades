@@ -158,8 +158,10 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
             lan_enabled:        n.and_then(|n| n.LAN).unwrap_or(true),
             wan_enabled:        n.and_then(|n| n.WAN).unwrap_or(false),
             transport_protocol: n.and_then(|n| n.Transport_Protocol.clone()).unwrap_or_else(|| "TCP".to_string()),
-            listen_port:        0,
-            bootstrap_peers:    Vec::new(),
+            listen_port:        n.and_then(|n| n.listen_port).unwrap_or(0),
+            dht_namespace:       n.and_then(|n| n.dht_namespace.clone())
+                                    .unwrap_or_else(|| crate::network::DHT::DEFAULT_NODE_NAMESPACE.to_string()),
+            bootstrap_peers:     n.and_then(|n| n.bootstrap_peers.clone()).unwrap_or_default(),
             cleanup_interval:   n.and_then(|n| n.cleanup_interval).unwrap_or(300),
             timeout_interval:   n.and_then(|n| n.timeout_interval).unwrap_or(300),
             heartbeat_interval: n.and_then(|n| n.heartbeat_interval).unwrap_or(60),

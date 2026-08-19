@@ -1,12 +1,12 @@
 //Presented by KeJi
 //Created Date ： 2026-05-16
-//Modified Date ： 2026-08-08
+//Modified Date ： 2026-08-18
 
 //! 命令处理器
 //!
 //! Network_Service 的命令通道事件处理方法。
 
-use libp2p::{gossipsub, kad};
+use libp2p::gossipsub;
 use tracing::{debug, error, info, warn};
 
 use super::network_service::Network_Service;
@@ -32,26 +32,26 @@ impl Network_Service {
             }
 
             NodeCommand::PutRecord { key, value } => {
-                let record_key = kad::RecordKey::new(&key);
-                let record = kad::Record {
-                    key: record_key,
+                crate::network::DHT::put_record(
+                    &mut self.swarm.behaviour_mut().kademlia,
+                    &key,
                     value,
-                    publisher: Some(self.local_peer_id),
-                    expires: None,
-                };
-                if let Err(e) = self.swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .put_record(record, kad::Quorum::One) {
-                    error!("DHT写入失败: {:?}", e);
-                } else {
-                    info!("DHT写入: {:?}", key);
-                }
+                    self.local_peer_id,
+                );
             }
             NodeCommand::GetRecord { key } => {
-                let record_key = kad::RecordKey::new(&key);
-                self.swarm.behaviour_mut().kademlia.get_record(record_key);
-                info!("DHT查询: {:?}", key);
+                crate::network::DHT::get_record(
+                    &mut self.swarm.behaviour_mut().kademlia,
+                    &key,
+                );
+            }
+            NodeCommand::GetProviders { reply } => {
+                let qid = crate::network::DHT::get_providers(
+                    &mut self.swarm.behaviour_mut().kademlia,
+                    &self.config.dht_namespace,
+                );
+                self.provider_queries.register(qid, reply);
+                info!("DHT 查询 provider 列表: query_id={:?}", qid);
             }
             NodeCommand::GossipsubPublish { topic, payload } => {
                 let topic_hash = gossipsub::TopicHash::from_raw(topic.clone());
@@ -69,6 +69,12 @@ impl Network_Service {
             NodeCommand::Dial { addr } => {
                 info!("尝试连接: {}", addr);
                 if let Err(e) = self.swarm.dial(addr) {
+                    error!("连接失败: {:?}", e);
+                }
+            }
+            NodeCommand::DialPeer { peer } => {
+                info!("按 PeerId 连接: {}", peer);
+                if let Err(e) = self.swarm.dial(peer) {
                     error!("连接失败: {:?}", e);
                 }
             }
