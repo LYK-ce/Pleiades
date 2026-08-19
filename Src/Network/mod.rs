@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-04-24
-//Modified Date ： 2026-08-08
+//Modified Date ： 2026-08-18
 
 //! 网络层模块
 //!
@@ -48,6 +48,8 @@ mod command_handler;
 mod swarm_events;
 #[path = "Gossipsub/mod.rs"]
 pub mod Gossipsub;
+#[path = "DHT/mod.rs"]
+pub mod DHT;
 
 // 重新导出常用类型
 pub use capability::{Network_Capability, Network_Error, Network_Inbound_Event, Network_Service_Capability};

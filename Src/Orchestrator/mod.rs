@@ -1,5 +1,6 @@
 // Presented by KeJi
 // Date ： 2026-05-16
+// Modified Date ： 2026-08-18
 
 pub mod core;
 pub mod job;
@@ -58,6 +59,7 @@ pub(crate) mod test_utils {
         async fn send_data(&self, _peer: libp2p::PeerId, _dt: DataType, _payload: Vec<u8>) -> Result<Network_Data, Network_Error> { unimplemented!("stub") }
         async fn send_response(&self, _id: u64, _dt: DataType, _payload: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn dial(&self, _addr: libp2p::Multiaddr) -> Result<(), Network_Error> { unimplemented!("stub") }
+        async fn dial_by_peer_id(&self, _peer: libp2p::PeerId) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn disconnect(&self, _peer: libp2p::PeerId) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn open_file_stream(&self, _peer: libp2p::PeerId) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn send_file_data(&self, _s: &mut libp2p::Stream, _p: &std::path::Path) -> Result<(), Network_Error> { unimplemented!("stub") }
@@ -68,6 +70,7 @@ pub(crate) mod test_utils {
         async fn open_session_stream(&self, _peer: &libp2p::PeerId, _session_id: u64) -> Result<libp2p::Stream, Network_Error> { unimplemented!("stub") }
         async fn put_record(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn get_record(&self, _key: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
+        async fn discover_peers(&self) -> Result<Vec<libp2p::PeerId>, Network_Error> { unimplemented!("stub") }
         fn get_local_peer_id(&self) -> libp2p::PeerId { libp2p::PeerId::random() }
         async fn publish_gossipsub(&self, _topic: &str, _payload: Vec<u8>) -> Result<(), Network_Error> { unimplemented!("stub") }
         async fn test_bandwidth(&self, _peer: libp2p::PeerId) -> Result<u64, Network_Error> { Ok(0) }

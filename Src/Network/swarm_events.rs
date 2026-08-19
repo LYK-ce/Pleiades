@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-05-16
-//Modified Date ： 2026-08-08
+//Modified Date ： 2026-08-18
 
 //! Swarm 事件处理器
 //!
@@ -124,41 +124,9 @@ impl Network_Service {
         }
     }
 
-    /// 处理Kademlia事件
-    ///
-    /// DHT 结果不再通过 event_sender 通知上层。
-    /// 未来通过 orchestrator_event_tx 或 Capability oneshot 模式投递结果。
+    /// 处理Kademlia事件（委托 DHT 模块）
     pub(super) async fn Handle_Kademlia_Event(&mut self, event: kad::Event) {
-        match event {
-            kad::Event::OutboundQueryProgressed { result, .. } => match result {
-                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(peer_record))) => {
-                    info!("DHT记录查询成功: {:?}", peer_record.record.key);
-                }
-                kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. })) => {
-                    debug!("DHT记录查询完成，无更多记录");
-                }
-                kad::QueryResult::GetRecord(Err(e)) => {
-                    warn!("DHT记录查询失败: {:?}", e);
-                }
-                kad::QueryResult::PutRecord(Ok(_)) => {
-                    info!("DHT记录写入成功");
-                }
-                kad::QueryResult::PutRecord(Err(e)) => {
-                    error!("DHT记录写入失败: {:?}", e);
-                }
-                kad::QueryResult::Bootstrap(Ok(_)) => {
-                    info!("Kademlia引导成功");
-                }
-                kad::QueryResult::Bootstrap(Err(e)) => {
-                    warn!("Kademlia引导失败: {:?}", e);
-                }
-                _ => {}
-            },
-            kad::Event::RoutingUpdated { peer, .. } => {
-                debug!("路由表更新: {}", peer);
-            }
-            _ => {}
-        }
+        crate::network::DHT::handle_event(event, &mut self.provider_queries);
     }
 
     /// 处理请求响应事件
