@@ -30,6 +30,18 @@
 ## 顺带分析（未动手）
 "flush 后置 → gossipsub 首轮广播不再空投"**不成立**：network Start() 已 spawn 但 gossipsub 3 topic 订阅在其内部，首轮 publish 仍可能 NoPeersSubscribedToTopic。真正兜底 = Task 20 快照机制（已实测 B/C 后启动拿到 A 快照）。
 
+## 双卡 2 节点验证（2026-08-09，修复后）✅ 全部通过
+
+| 验证项 | 结果 | 证据 |
+|--------|------|------|
+| A 本机条目 🏠 | ✅ 核心验证 | A TUI 显示 "🏠 A#SPbB 本机" |
+| B 本机条目 🏠 | ✅ 核心验证 | B TUI 显示 "🏠 node-b#3Dt8 本机" |
+| flush 时序（修复生效） | ✅ | A 日志：03:00:32.086 进入主循环（Subscribe 完成）→ 03:00:39.816 初始 flush 完成（严格在后） |
+| 快照机制回归 | ✅ | A 收到 B 的 3 模型；B 的 PeerManager 含 A#SPbB [模型(4)]（dp 滚动确认；TUI 子行不显示为 R3 已知显示问题） |
+| 双卡推理回归 | ✅ | pipeline 流水线就绪（B GPU:0 13.53s + GPU:1 13.10s）→ API :8080 → curl 返回正常回复 |
+| quit 退出 | ✅ | 进程数 0 |
+
 ## 状态
-- ✅ 实施完成 + 编译通过
-- 待办：推送（等用户确认）；robot 分支（Pleiades-Orion）按同方案实施
+- ✅ 实施完成 + 编译通过 + 双卡 2 节点验证通过（本机条目稳定显示）
+- 已推送 d518092（ML_review）
+- 待办：robot 分支（Pleiades-Orion）按同方案实施（需切分支，用户另行指示）
