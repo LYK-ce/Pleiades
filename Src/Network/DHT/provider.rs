@@ -16,7 +16,7 @@ use super::node_namespace_key;
 /// 自注册为 namespace 的 provider（供 get_providers 发现）
 pub fn start_providing(kademlia: &mut kad::Behaviour<MemoryStore>, namespace: &str) {
     match kademlia.start_providing(node_namespace_key(namespace)) {
-        Ok(_query_id) => tracing::info!("DHT 自注册成功: {}", namespace),
+        Ok(_query_id) => tracing::info!("DHT 自注册查询已发起: {}", namespace),
         Err(e) => tracing::warn!("DHT 自注册失败: {:?}", e),
     }
 }

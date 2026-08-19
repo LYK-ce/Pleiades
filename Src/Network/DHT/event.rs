@@ -45,6 +45,18 @@ pub fn handle_event(event: kad::Event, queries: &mut ProviderQueryTracker) {
                 tracing::warn!("DHT 查询 provider 失败: {:?}", e);
                 queries.finish_err(&id, format!("{:?}", e));
             }
+            kad::QueryResult::StartProviding(Ok(_)) => {
+                tracing::info!("DHT provider 自注册成功");
+            }
+            kad::QueryResult::StartProviding(Err(e)) => {
+                tracing::warn!("DHT provider 自注册失败: {:?}", e);
+            }
+            kad::QueryResult::RepublishProvider(Ok(_)) => {
+                tracing::debug!("DHT provider 重新发布成功");
+            }
+            kad::QueryResult::RepublishProvider(Err(e)) => {
+                tracing::warn!("DHT provider 重新发布失败: {:?}", e);
+            }
             _ => {}
         },
         kad::Event::RoutingUpdated { peer, .. } => {
