@@ -62,7 +62,7 @@ pub struct DStarLite {
     start: (i32, i32),
     /// 目标位置（网格坐标）
     goal: (i32, i32),
-    /// 他车动态障碍格（Task 15：每次寻路前由 executor 注入；footprint = 1 格）
+    /// 他车动态障碍格（Task 15：每次寻路前由 GoalService 注入；footprint = 1 格）
     dynamic_obstacles: HashSet<(i32, i32)>,
 }
 

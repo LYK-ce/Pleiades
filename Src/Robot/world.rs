@@ -69,6 +69,8 @@ impl World {
     /// 寻路：move_to 当前位置 → 注入动态障碍 → next_step，返回下一格或 None
     ///
     /// 先读 grid（await）再锁 D*（同步），避免 std Mutex 守卫跨 await（!Send）。
+    /// 注意：grid 读锁会持有到 next_step 结束（含 D* compute_shortest_path 重算，可能数 ms），
+    /// 期间会阻塞 SLAM/MAP_DELTA 的 grid 写锁——单调用者 + 50ms 节拍下可接受。
     pub async fn get_path(
         &self,
         wx: f32,

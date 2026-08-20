@@ -99,9 +99,9 @@ pub struct LidarState {
 // ExecuteState — 执行器意图（Task 13_1）
 // ============================================================
 
-/// 执行器意图状态（由 Executor 写入，state_notifier 读取用于意图广播）
+/// 执行器意图状态（由 main_loop 写入，state_notifier 读取用于意图广播）
 ///
-/// 写者 = Executor（`step()` 参数 `&mut ExecuteState`，结尾统一同步）；
+/// 写者 = main_loop（每 auto_tick 同步 GoalService 的 sub_target）；
 /// 读者 = state_notifier（100ms 组帧）。单一写入者不变式与 RobotState 同源。
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteState {

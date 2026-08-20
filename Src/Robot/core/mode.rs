@@ -9,7 +9,7 @@
 pub enum OpMode {
     /// 手动遥控模式：接收 WS/Lua 发来的 ManualCmd
     Manual,
-    /// 自动任务模式：Executor 消费 Mission 队列自主决策
+    /// 自动任务模式：Lua 决策脚本消费 Mission 队列自主决策
     Auto,
 }
 

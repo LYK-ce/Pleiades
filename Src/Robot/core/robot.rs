@@ -41,9 +41,9 @@ use crate::robot::core::protocol::{
     COMPID_ROBOT, MSGID_POSE, PoseData,
 };
 
-/// 急停距离阈值（米，与 ExecutorConfig.obstacle_threshold_m 一致）
+/// 急停距离阈值（米）
 const OBSTACLE_THRESHOLD_M: f32 = 0.3;
-/// 到达判定阈值（米，与 ExecutorConfig.arrival_threshold_m 一致）
+/// 到达判定阈值（米）
 const ARRIVAL_THRESHOLD_M: f32 = 0.3;
 
 /// 位姿广播消息
@@ -119,7 +119,7 @@ impl Robot {
         let op_mode = Arc::new(RwLock::new(OpMode::default()));
         let mission_queue = Arc::new(RwLock::new(MissionQueue::default()));
 
-        // 3.1 执行器意图状态（Task 13_1：executor 写，state_notifier 读）
+        // 3.1 意图状态（Task 13_1：main_loop 写，state_notifier 读）
         let execute_state = Arc::new(RwLock::new(ExecuteState::default()));
 
         // 3.2 集群信息表（Task 13_1：入站 POSE → 表）
@@ -292,7 +292,7 @@ async fn state_notifier(
         select! {
             _ = interval.tick() => {
                 let s = state.read().await;
-                // Task 13_1：意图状态（executor 写），两把读锁无交叉
+                // Task 13_1：意图状态（main_loop 写），两把读锁无交叉
                 let es = execute_state.read().await;
                 let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {

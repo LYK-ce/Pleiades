@@ -50,7 +50,7 @@ pub enum AutoCmd {
 pub enum Mission {
     /// 前往目标点（世界坐标，米）
     ///
-    /// Task 14：`members` 非空 = 群发任务——executor 执行时经 `assignment` 自算散布位置；
+    /// Task 14：`members` 非空 = 群发任务——GoalService 执行时经 `assignment` 自算散布位置；
     /// `members` 空 = 老单车语义（直接以 (x, y) 为目标）。
     Goto { x: f32, y: f32, members: Vec<Vec<u8>> },
     /// 围圈（Task 18）：`x/y` = 圆心（世界坐标，米），`members` 非空 = 群发。

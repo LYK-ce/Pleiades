@@ -35,7 +35,7 @@ const MAX_RING: i32 = 10;
 /// circle 命令：圆心与车格之间隔 1 格（0.5m）→ 车落在切比雪夫距离 2 的环上
 const CIRCLE_RING_RADIUS_CELLS: i32 = 2;
 
-/// 网格坐标 → 世界坐标（格中心，与 executor `cell_center_world` 公式一致：(gx+0.5)*0.5）
+/// 网格坐标 → 世界坐标（格中心，与 GoalService/car.lua 的格中心公式一致：(gx+0.5)*0.5）
 fn cell_center_world(gx: i32, gy: i32) -> (f32, f32) {
     ((gx as f32 + 0.5) * CELL_RESOLUTION, (gy as f32 + 0.5) * CELL_RESOLUTION)
 }
@@ -339,8 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_center_matches_executor_formula() {
-        // 与 executor::cell_center_world((gx+0.5)*0.5) 交叉断言
+    fn test_cell_center_matches_goal_formula() {
+        // 与 GoalService/car.lua 的格中心公式 (gx+0.5)*0.5 交叉断言
         for (gx, gy) in [(100, 100), (127, 127), (200, 50)] {
             let (wx, wy) = cell_center_world(gx, gy);
             assert_eq!(wx, (gx as f32 + 0.5) * 0.5);

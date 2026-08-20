@@ -61,6 +61,7 @@ baudrate = 230400
 
 [Robot.flight_ctrl]
 enabled = false # 飞控开关（机，未来）
+# connection = "/dev/ttyS0" # 飞控连接方式（MAVLink 串口/UDP，未来 task）
 "#;
 
 /// 默认配置目录名
@@ -164,6 +165,8 @@ pub struct LidarConfig {
 #[derive(Debug, Deserialize)]
 pub struct FlightCtrlConfig {
     pub enabled: Option<bool>,
+    /// 连接方式（如串口 /dev/ttyS0 或 MAVLink UDP 地址），未来 task 用
+    pub connection: Option<String>,
 }
 
 /// 读取节点名称，默认 "new_peer"

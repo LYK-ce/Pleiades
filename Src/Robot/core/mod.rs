@@ -8,7 +8,7 @@
 //! - state.rs：全局状态（RobotState + LidarState）
 //! - mode.rs：运行模式（Manual / Auto）
 //! - mission.rs：任务队列
-//! - executor.rs：自动任务执行器（Idle / Turning / Moving）
+//! - goal.rs：目标服务（到达检测 + 任务切换 + 寻路）
 //! - robot.rs：Robot::launch() + 主 select! 循环
 //! - cluster/：集群数据面（Task 13_1：入站 POSE 消费 + 远端车信息表）
 //! - planning/：规划层（assignment 任务分配 + pathfinder D* 寻路，Task 14）
