@@ -29,7 +29,37 @@
 - **验证**：`./build.sh check` 通过；`./build.sh test -p Pleiades --lib robot` 122 passed / 0 failed；`./build.sh test --bin orion-robot` 3 passed
 - 注意：`cargo check` 需用 `./build.sh check`（nvcc 需 gcc-12，build.sh 注入 PATH）；之前 `cargo clean` 后直接 `cargo test` 曾撞 GCC13 报错
 
+### 步骤 2：MotionDevice trait（纯重构）—— 完成
+
+- 新增 `Src/Robot/device.rs`：`MotionDevice` trait（move_forward/backward/turn_left/right/stop/shutdown，start 不进 trait）
+- `STM32Device` 实现 trait（move_forward→forward、turn_left→spin_left 等，内部仍 FUNC_CAR_RUN）
+- executor 的 step/step_impl/step_idle/step_turning/step_moving 由 &STM32Device → &dyn MotionDevice
+
+### 步骤 3：世界模块 —— 完成
+
+- 新增 `Src/Robot/world.rs`：`World{grid, cluster, pathfinder: Mutex<Option<DStarLite>>}` + get_cell/get_agents/get_path/set_goal/clear_goal/mark_obstacle
+- D* 从 executor 移入 World（std Mutex）；executor.query_next_sub_target 委托 world.get_path；step 变 async
+
+### 步骤 4：启动流程改造 —— 完成
+
+- config.rs：`Robot_Config` 改嵌套设备开关（chassis/lidar/flight_ctrl + enabled）+ ChassisConfig/LidarConfig/FlightCtrlConfig；config.toml/DEFAULT_CONFIG 同步
+- bootstrap.rs：读嵌套配置 + 设备开关（chassis/lidar 缺省启用、flight_ctrl 缺省禁用），遍历传参
+- robot.rs launch：chassis_enabled/lidar_enabled 开关；chassis 未启用报错
+- SLAM 归雷达：slam_task + MapDelta + accumulate/drain_pending 迁 `slam/task.rs`，LidarDevice::spawn 打包 SlamContext 内部 spawn
+
+### 步骤 5+6：Lua 决策层 + 车脚本迁移 —— 完成
+
+- 新增 `core/goal.rs`：GoalService（完整目标服务 get_path = 到达检测 + 任务切换 + 寻路）
+- capability_binding.rs：register_robot_caps 从空 stub 补全，注册 self/world/action 三表 caps（读方法 create_async_function + tokio 锁，发动作 create_function try_send）；新增 RobotCapsContext
+- robot.rs：spawn_decision_thread（专用线程 + 独立 LuaContext + 加载 car.lua + 每 50ms tick 调 on_tick）+ check_emergency_stop（Rust 侧急停）；main_loop auto_tick 改「急停 → 调 Lua on_tick → 同步意图」
+- 新增 `programs/robot/car.lua`：车决策脚本（get_path → 角偏差 → 转向/直行，无状态）
+- 删除 executor.rs（Idle/Turning/Moving 状态机取消）+ 模块声明 + re-export
+- branch_user.rs 移除旧 register_robot_caps 死代码调用
+
 ## 遗留
 
 - **地面站（Pictor）同步**：`PoseData` 33→37 字节，Pictor 的 POSE 解析需同步加 z（外部 Godot 仓库）
-- 后续步骤：2 MotionDevice trait → 3 世界模块 → 4 启动流程 → 5 Lua 决策层 → 6 车脚本迁移
+- **车行为一致性验证**：步骤 6 迁移后需实车验证「走格子/转向/直行/到达/急停」与稳定分支一致（Lua 无状态决策 vs 原状态机，行为等价性需实车联调确认）
+- **Lua 决策脚本路径硬编码**：`programs/robot/car.lua` 相对路径，后续可进 config
+- 后续 task：机脚本 + MavlinkDevice（步骤 7，等机硬件）
+- 结束时间：2026-08-20
