@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-20
-//Modified Date ： 2026-07-20
+//Modified Date ： 2026-08-20
 
 //! YDLIDAR Tmini 设备驱动
 //!
@@ -27,6 +27,8 @@ use parser::{feed_byte, parse_points, do_process_simple, ParseState};
 use types::ScanPacket;
 use crate::robot::control::serial::port;
 use crate::robot::core::state::LidarState;
+use crate::robot::slam::task::spawn_slam;
+use crate::robot::slam::SlamContext;
 
 // ============================================================
 // LidarDevice — 控制句柄
@@ -46,6 +48,7 @@ impl LidarDevice {
         port_path: &str,
         baudrate: u32,
         state: Arc<RwLock<LidarState>>,
+        slam: Option<SlamContext>,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
@@ -100,6 +103,11 @@ impl LidarDevice {
             },
             cancel.clone(),
         )?;
+
+        // Task 22：SLAM 建图 task 归雷达设备（lidar.enabled=true 就打包建图能力）
+        if let Some(ctx) = slam {
+            spawn_slam(ctx, state.clone(), cancel.clone());
+        }
 
         Ok(Self { serial_cmd_tx, cancel })
     }

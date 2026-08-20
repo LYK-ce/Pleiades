@@ -27,12 +27,18 @@ kvcache_dir = ".kvcache"
 peer_name = "robot-pi"
 
 [Robot]
-ws_bind = "0.0.0.0:9090"
-# STM32 底盘串口
-serial_port = "/dev/ttyUSB0"
+obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
+
+[Robot.chassis]
+enabled = true # 底盘开关（车默认开）
+port = "/dev/ttyUSB0"
 baudrate = 115200
 car_type = "X3Plus" # X3 / X3Plus / X1 / R2
-# LiDAR 串口（留空则禁用）
-lidar_port = "/dev/ttyUSB1"
-lidar_baudrate = 230400
-obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
+
+[Robot.lidar]
+enabled = true # 雷达开关（含 SLAM 建图）
+port = "/dev/ttyUSB1"
+baudrate = 230400
+
+[Robot.flight_ctrl]
+enabled = false # 飞控开关（机，未来）

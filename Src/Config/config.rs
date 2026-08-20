@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date : 2026-04-09
-//Modified Date ： 2026-08-18
+//Modified Date ： 2026-08-20
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -46,14 +46,21 @@ kvcache_dir = ".kvcache"
 peer_name = "new_peer"
 
 [Robot]
-# STM32 底盘串口（缺省沿用硬编码）
-serial_port = "/dev/myserial"
+obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
+
+[Robot.chassis]
+enabled = true # 底盘开关（车默认开）
+port = "/dev/myserial"
 baudrate = 115200
 car_type = "X3Plus" # X3 / X3Plus / X1 / R2
-# LiDAR 串口（留空则不启用）
-lidar_port = "/dev/rplidar"
-lidar_baudrate = 230400
-obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
+
+[Robot.lidar]
+enabled = true # 雷达开关（含 SLAM 建图）
+port = "/dev/rplidar"
+baudrate = 230400
+
+[Robot.flight_ctrl]
+enabled = false # 飞控开关（机，未来）
 "#;
 
 /// 默认配置目录名
@@ -127,15 +134,36 @@ pub struct Identity_Config {
     pub peer_name: Option<String>,
 }
 
-/// [Robot] 段配置
+/// [Robot] 段配置（Task 22：设备开关 + 遍历 spawn）
 #[derive(Debug, Deserialize)]
 pub struct Robot_Config {
-    pub serial_port: Option<String>,
+    pub chassis: Option<ChassisConfig>,
+    pub lidar: Option<LidarConfig>,
+    pub flight_ctrl: Option<FlightCtrlConfig>,
+    pub obstacle_inflation_radius: Option<f32>,
+}
+
+/// 底盘设备配置（STM32 轮式底盘）
+#[derive(Debug, Deserialize)]
+pub struct ChassisConfig {
+    pub enabled: Option<bool>,
+    pub port: Option<String>,
     pub baudrate: Option<u32>,
     pub car_type: Option<String>,
-    pub lidar_port: Option<String>,
-    pub lidar_baudrate: Option<u32>,
-    pub obstacle_inflation_radius: Option<f32>,
+}
+
+/// 雷达设备配置（YDLIDAR，含 SLAM 建图）
+#[derive(Debug, Deserialize)]
+pub struct LidarConfig {
+    pub enabled: Option<bool>,
+    pub port: Option<String>,
+    pub baudrate: Option<u32>,
+}
+
+/// 飞控设备配置（Pixhawk，未来）
+#[derive(Debug, Deserialize)]
+pub struct FlightCtrlConfig {
+    pub enabled: Option<bool>,
 }
 
 /// 读取节点名称，默认 "new_peer"

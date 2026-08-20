@@ -208,10 +208,23 @@ pub async fn robot_bootstrap(
 ) -> Result<Robot, String> {
     let r = config.Robot.as_ref();
 
-    let serial_port = r.and_then(|r| r.serial_port.clone())
+    // 设备开关（Task 22）：chassis/lidar 缺省启用，flight_ctrl 缺省禁用
+    let chassis_enabled = r.and_then(|r| r.chassis.as_ref())
+        .and_then(|c| c.enabled).unwrap_or(true);
+    let lidar_enabled = r.and_then(|r| r.lidar.as_ref())
+        .and_then(|l| l.enabled).unwrap_or(true);
+    let flight_ctrl_enabled = r.and_then(|r| r.flight_ctrl.as_ref())
+        .and_then(|f| f.enabled).unwrap_or(false);
+    if flight_ctrl_enabled {
+        warn!("[Robot] flight_ctrl 设备尚未实现（未来 task），忽略 enabled=true");
+    }
+
+    // 底盘配置
+    let chassis = r.and_then(|r| r.chassis.as_ref());
+    let serial_port = chassis.and_then(|c| c.port.clone())
         .unwrap_or_else(|| "/dev/myserial".to_string());
-    let baudrate = r.and_then(|r| r.baudrate).unwrap_or(115200);
-    let car_type = match r.and_then(|r| r.car_type.as_deref()).map(CarType::from_str) {
+    let baudrate = chassis.and_then(|c| c.baudrate).unwrap_or(115200);
+    let car_type = match chassis.and_then(|c| c.car_type.as_deref()).map(CarType::from_str) {
         Some(Some(t)) => t,
         Some(None) => {
             warn!("car_type 解析失败，回退 X3Plus");
@@ -219,25 +232,31 @@ pub async fn robot_bootstrap(
         }
         None => CarType::X3Plus,
     };
-    // LiDAR 配置三态：显式值 → 用配置；显式空串 → 禁用；字段缺失 → 缺省 /dev/rplidar（决策 #8）
-    let lidar_port = match r.and_then(|r| r.lidar_port.clone()) {
-        Some(s) if !s.trim().is_empty() => Some(s),                       // 显式配置
-        Some(_) => None,                                                  // 留空 = 禁用
-        None => Some("/dev/rplidar".to_string()),                        // 缺省
+
+    // 雷达配置：enabled=false 或 port 空串 → 禁用；字段缺失 → 缺省 /dev/rplidar（决策 #8）
+    let lidar = r.and_then(|r| r.lidar.as_ref());
+    let lidar_port = if !lidar_enabled {
+        None
+    } else {
+        match lidar.and_then(|l| l.port.clone()) {
+            Some(s) if !s.trim().is_empty() => Some(s),       // 显式配置
+            Some(_) => None,                                  // 留空 = 禁用
+            None => Some("/dev/rplidar".to_string()),         // 缺省
+        }
     };
-    let lidar_baudrate = r.and_then(|r| r.lidar_baudrate).or(Some(230400));
+    let lidar_baudrate = lidar.and_then(|l| l.baudrate).or(Some(230400));
     let obstacle_inflation_radius = r.and_then(|r| r.obstacle_inflation_radius).unwrap_or(0.2);
 
     let peer_name = Get_Peer_Name(config);
 
     info!(
-        "Robot 配置: port={serial_port} baud={baudrate} car={car_type:?} lidar={} infl_r={obstacle_inflation_radius} peer_name={peer_name}",
+        "Robot 配置: chassis={chassis_enabled}(port={serial_port} baud={baudrate} car={car_type:?}) lidar={lidar_enabled}({}) infl_r={obstacle_inflation_radius} peer_name={peer_name}",
         lidar_port.as_deref().unwrap_or("None")
     );
 
     let robot = Robot::launch(
-        &serial_port, baudrate, car_type,
-        lidar_port.as_deref(), lidar_baudrate,
+        chassis_enabled, &serial_port, baudrate, car_type,
+        lidar_enabled, lidar_port.as_deref(), lidar_baudrate,
         origin,
         Some(node_handle),
         Some(robot_bus),
