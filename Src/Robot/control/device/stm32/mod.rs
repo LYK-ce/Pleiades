@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-20
 
 //! STM32 控制板设备驱动
 //!
@@ -41,9 +41,9 @@ pub struct STM32Device {
 }
 
 impl STM32Device {
-    /// 启动 STM32 设备。`origin` 为小车初始世界坐标 (x, y)（默认 64,64），
-    /// 注入 local_state 的 x/y 作为积分起点（Task 9：RobotState 记录全局唯一坐标）。
-    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, origin: (f32, f32)) -> Result<Self, String> {
+    /// 启动 STM32 设备。`origin` 为小车初始世界坐标 (x, y, z)（默认 64,64,0），
+    /// 注入 local_state 的 x/y/z 作为积分起点（Task 9：RobotState 记录全局唯一坐标）。
+    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, origin: (f32, f32, f32)) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let mut sm: RxState = RxState::Head;
@@ -51,6 +51,7 @@ impl STM32Device {
         // 注入初始世界坐标（全局唯一坐标起点，Task 9）
         local_state.x = origin.0;
         local_state.y = origin.1;
+        local_state.z = origin.2;
         let mut last_speed_ts = Instant::now();
 
         let serial_cmd_tx = port::spawn_port(
@@ -153,13 +154,13 @@ impl STM32Device {
     ///
     /// 返回设备句柄 + 后台 task JoinHandle（用于等待处理完成）。
 
-    /// `origin`: 初始世界坐标 (x, y)，与生产 spawn 语义一致。
+    /// `origin`: 初始世界坐标 (x, y, z)，与生产 spawn 语义一致。
     pub fn spawn_mock(
         mut rx_feed: mpsc::Receiver<Vec<u8>>,
         tx_sink: mpsc::Sender<Vec<u8>>,
         car_type: CarType,
         state: Arc<RwLock<RobotState>>,
-        origin: (f32, f32),
+        origin: (f32, f32, f32),
     ) -> (Self, tokio::task::JoinHandle<()>) {
         use protocol::{feed_state_machine, update_state, RxState};
 
@@ -175,6 +176,7 @@ impl STM32Device {
             // 注入初始世界坐标（与生产 spawn 一致，Task 9）
             local_state.x = origin.0;
             local_state.y = origin.1;
+            local_state.z = origin.2;
             let mut last_speed_ts = Instant::now();
 
             loop {
@@ -236,7 +238,7 @@ mod mock_tests {
         let (tx_sink, mut tx_rx) = mpsc::channel::<Vec<u8>>(32);
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
-        let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state, (64.0, 64.0));
+        let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state, (64.0, 64.0, 0.0));
         dev.forward(50).unwrap();
 
         // 验证 TX 发出了正确的命令帧
@@ -252,7 +254,7 @@ mod mock_tests {
         let (tx_sink, _tx_rx) = mpsc::channel::<Vec<u8>>(32);
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
-        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (64.0, 64.0));
+        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (64.0, 64.0, 0.0));
 
         // 构造一条 SPEED 上报帧并喂入
         let vx = (0.250f32 * 1000.0) as i16;
@@ -279,7 +281,7 @@ mod mock_tests {
         let (tx_sink, _tx_rx) = mpsc::channel::<Vec<u8>>(32);
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
-        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (64.0, 64.0));
+        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (64.0, 64.0, 0.0));
 
         // 构造 SPEED 帧，分两次发送
         let vx = 100i16;
@@ -305,7 +307,7 @@ mod mock_tests {
         let (tx_sink, _tx_rx) = mpsc::channel::<Vec<u8>>(32);
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
-        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (66.5, 63.25));
+        let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (66.5, 63.25, 0.0));
 
         // 喂一帧 vx=0 的 SPEED 帧触发全量覆盖；无位移，x/y 应保持 origin
         let vx = 0i16;
@@ -318,5 +320,6 @@ mod mock_tests {
         let s = state.read().await;
         assert!((s.x - 66.5).abs() < 1e-3, "共享态 x 应为 origin: {}", s.x);
         assert!((s.y - 63.25).abs() < 1e-3, "共享态 y 应为 origin: {}", s.y);
+        assert!((s.z - 0.0).abs() < 1e-3, "共享态 z 应为 origin: {}", s.z);
     }
 }

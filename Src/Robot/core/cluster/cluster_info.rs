@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-10
-//Modified Date ： 2026-08-13
+//Modified Date ： 2026-08-20
 
 //! 集群信息表（Task 13_1 / Task 15 表维护）
 //!
@@ -21,6 +21,8 @@ pub struct ClusterInfo {
     /// 位姿（全局世界坐标）
     pub x: f32,
     pub y: f32,
+    /// 垂直高度 (m)
+    pub z: f32,
     pub yaw: f32,
     /// 速度
     pub vx: f32,
@@ -109,6 +111,7 @@ mod tests {
             peer_id: peer_id.to_vec(),
             x,
             y,
+            z: 0.0,
             yaw: 0.0,
             vx: 0.0,
             vy: 0.0,
@@ -153,6 +156,7 @@ mod tests {
             peer_id: peer_id.to_vec(),
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             yaw: 0.0,
             vx: 0.0,
             vy: 0.0,

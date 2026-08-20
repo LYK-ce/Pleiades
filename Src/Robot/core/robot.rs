@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-15
+//Modified Date ： 2026-08-20
 
 //! Robot 主循环
 //!
@@ -79,7 +79,7 @@ impl Robot {
     /// 启动 Robot：创建各设备独立状态，spawn Device，启动所有 task
     ///
     /// - `lidar_port` / `lidar_baudrate`: 可选 LiDAR 配置，None 则不启用
-    /// - `origin`: 小车初始世界坐标 (x, y)（默认 64,64），Task 9：RobotState 记录全局唯一坐标
+    /// - `origin`: 小车初始世界坐标 (x, y, z)（默认 64,64,0），Task 9：RobotState 记录全局唯一坐标
     /// - `node_handle` / `robot_bus`: 网络数据面（Task 9_2），None 则纯本地运行
     /// - `peer_name`: 车名（广播 payload 的 peer_name 字段 + WS vehicle_id）
     pub async fn launch(
@@ -88,7 +88,7 @@ impl Robot {
         car_type: CarType,
         lidar_port: Option<&str>,
         lidar_baudrate: Option<u32>,
-        origin: (f32, f32),
+        origin: (f32, f32, f32),
         node_handle: Option<Arc<NodeHandle>>,
         robot_bus: Option<Arc<EventBus>>,
         robot_cmd_frame_rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -104,6 +104,7 @@ impl Robot {
             let mut g = robot_state.write().await;
             g.x = origin.0;
             g.y = origin.1;
+            g.z = origin.2;
         }
         let lidar_state = Arc::new(RwLock::new(LidarState::default()));
 
@@ -269,7 +270,7 @@ async fn state_notifier(
                 let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {
                     time_boot_ms,
-                    x: s.x, y: s.y, z: 0.0,
+                    x: s.x, y: s.y, z: s.z,
                     yaw: s.attitude.yaw,
                     vx: s.vx, vy: s.vy,
                     sub_target: es.sub_target,
@@ -280,7 +281,7 @@ async fn state_notifier(
                 if let (Some(nh), Some(peer_id)) = (&node_handle, &local_peer_id) {
                     let pose = PoseData {
                         time_boot_ms,
-                        x: s.x, y: s.y,
+                        x: s.x, y: s.y, z: s.z,
                         vx: s.vx, vy: s.vy,
                         yaw: s.attitude.yaw,
                         // Task 13_1：意图广播（下一格）；无任务 valid=false

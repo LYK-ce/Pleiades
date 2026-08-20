@@ -61,6 +61,7 @@ mod tests {
             peer_id: vec![0u8],
             x,
             y,
+            z: 0.0,
             yaw: 0.0,
             vx: 0.0,
             vy: 0.0,

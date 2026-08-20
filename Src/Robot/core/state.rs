@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-29
+//Modified Date ： 2026-08-20
 
 //! 机器人全局状态
 //!
@@ -53,7 +53,7 @@ pub struct MagData {
 /// 机器人底盘传感器状态（由 STM32 维护）
 #[derive(Debug, Clone, Default)]
 pub struct RobotState {
-    /// 线速度 (m/s), vz 为角速度 (rad/s)
+    /// 线速度 (m/s), vz 为垂直速度 (m/s)（车恒 0，机写飞控垂速）
     pub vx: f32,
     pub vy: f32,
     pub vz: f32,
@@ -76,10 +76,12 @@ pub struct RobotState {
     /// 四轮编码器计数
     pub encoders: [i32; 4],
 
-    /// 全局世界坐标 (m)，启动时 = origin（默认 64,64）
+    /// 全局世界坐标 (m)，启动时 = origin（默认 64,64,0）
     /// 由 STM32 RX 回调中的 odometry::accumulate 直接积分维护
     pub x: f32,
     pub y: f32,
+    /// 垂直高度 (m)。写入者 = 设备自己：车恒写 0，机写飞控 EKF；odometry 不积分 z
+    pub z: f32,
 }
 
 // ============================================================

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-10
-//Modified Date ： 2026-08-10
+//Modified Date ： 2026-08-20
 
 //! 集群入站消费者（Task 13_1）
 //!
@@ -87,6 +87,7 @@ async fn handle_frame(
                     peer_id: frame.sysid.clone(),
                     x: pose.x,
                     y: pose.y,
+                    z: pose.z,
                     yaw: pose.yaw,
                     vx: pose.vx,
                     vy: pose.vy,
@@ -96,10 +97,11 @@ async fn handle_frame(
                 })
                 .await;
             debug!(
-                "[Cluster] 远端车 {}: ({:.2}, {:.2}) yaw={:.2} sub={:?}",
+                "[Cluster] 远端车 {}: ({:.2}, {:.2}, {:.2}) yaw={:.2} sub={:?}",
                 hex_short(&frame.sysid),
                 pose.x,
                 pose.y,
+                pose.z,
                 pose.yaw,
                 sub_target
             );
@@ -152,6 +154,7 @@ mod tests {
             time_boot_ms: 7,
             x: 10.0,
             y: 20.0,
+            z: 0.0,
             vx: 0.5,
             vy: 0.0,
             yaw: 1.0,

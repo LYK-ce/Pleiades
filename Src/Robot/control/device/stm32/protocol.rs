@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-08-20
 
 //! STM32 协议层
 //!
@@ -122,6 +122,7 @@ pub fn update_state(state: &mut RobotState, func: u8, data: &[u8]) {
             if data.len() >= 7 {
                 state.vx = i16l(&data[0..2]) as f32 / 1000.0;
                 state.vy = i16l(&data[2..4]) as f32 / 1000.0;
+                // 第三槽 = 垂直速度（车恒 0）；原「偏航角速度」语义已废弃（yaw 直接来自 IMU，不积分角速度）
                 state.vz = i16l(&data[4..6]) as f32 / 1000.0;
                 state.battery = data[6] as f32 / 10.0;
             }

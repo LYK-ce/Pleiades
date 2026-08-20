@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-06
-//Modified Date ： 2026-08-15
+//Modified Date ： 2026-08-20
 
 //! 启动组装层（Task 9_2）
 //!
@@ -204,7 +204,7 @@ pub async fn robot_bootstrap(
     node_handle: Arc<NodeHandle>,
     robot_bus: Arc<EventBus>,
     robot_cmd_frame_rx: mpsc::Receiver<Vec<u8>>,
-    origin: (f32, f32),
+    origin: (f32, f32, f32),
 ) -> Result<Robot, String> {
     let r = config.Robot.as_ref();
 
