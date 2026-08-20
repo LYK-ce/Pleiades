@@ -32,6 +32,7 @@ use crate::event_bus::EventBus;
 use crate::robot::core::cluster::{cluster_consumer, cluster_table_cleaner, ClusterInfoTable};
 use crate::robot::core::command_consumer::command_consumer;
 use crate::robot::core::planning::cluster_to_obstacle_cells;
+use crate::robot::world::World;
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP};
 use crate::robot::core::protocol::{
     encode_frame, encode_map_delta, encode_pose, now_boot_ms,
@@ -122,6 +123,9 @@ impl Robot {
 
         // 3.2 集群信息表（Task 13_1：入站 POSE → 表）
         let cluster_table = Arc::new(ClusterInfoTable::new());
+
+        // 3.3 世界模块（Task 22：静态地图 + 动态设备 + 寻路 D*）
+        let world = Arc::new(World::new(grid.clone(), cluster_table.clone()));
 
         // 4. spawn STM32 Device
         let stm32 = STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?;
@@ -223,6 +227,8 @@ impl Robot {
         let loop_execute_state = execute_state.clone();
         // Task 15：动态障碍注入需要读集群表
         let loop_cluster_table = cluster_table.clone();
+        // Task 22：世界模块（D* 寻路）
+        let loop_world = world.clone();
         // Task 14：群发任务分配需要本车 peer_id（单机无 node_handle 时空 vec）
         let loop_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default();
         tokio::spawn(async move {
@@ -232,6 +238,7 @@ impl Robot {
                 loop_robot_state, loop_lidar_state, loop_grid,
                 loop_execute_state,
                 loop_cluster_table,
+                loop_world,
                 loop_peer_id,
                 obstacle_inflation_radius,
                 loop_cancel,
@@ -409,13 +416,14 @@ async fn main_loop(
     grid: Arc<RwLock<OccupancyGrid>>,
     execute_state: Arc<RwLock<ExecuteState>>,
     cluster_table: Arc<ClusterInfoTable>,
+    world: Arc<World>,
     own_peer_id: Vec<u8>,
     obstacle_inflation_radius: f32,
     cancel: CancellationToken,
 ) {
     info!("Robot 主循环启动（同步 dispatch + auto_tick）");
 
-    let mut executor = Executor::new(ExecutorConfig::default());
+    let mut executor = Executor::new(ExecutorConfig::default(), world);
     let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
@@ -489,7 +497,7 @@ async fn main_loop(
                     &mut *mission_queue.write().await,
                     &mut *execute_state.write().await,
                     &own_peer_id,
-                );
+                ).await;
 
                 next_tick += Duration::from_millis(auto_tick_ms);
                 if next_tick <= Instant::now() {

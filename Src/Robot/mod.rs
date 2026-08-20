@@ -13,6 +13,7 @@ pub mod core;
 pub mod control;
 pub mod device;
 pub mod slam;
+pub mod world;
 
 pub use core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
 pub use core::executor::ExecutorConfig;
