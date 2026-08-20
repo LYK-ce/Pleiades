@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-28
+//Modified Date ： 2026-08-20
 
 //! Robot 模块
 //!
@@ -11,6 +11,7 @@
 
 pub mod core;
 pub mod control;
+pub mod device;
 pub mod slam;
 
 pub use core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};

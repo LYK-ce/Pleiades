@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-28
-//Modified Date ： 2026-08-13
+//Modified Date ： 2026-08-20
 
 //! Executor — 自动任务执行器
 //!
@@ -11,7 +11,7 @@
 use std::f32::consts::PI;
 use tracing::{info, warn};
 
-use crate::robot::control::device::stm32::STM32Device;
+use crate::robot::device::MotionDevice;
 use crate::robot::core::command::Mission;
 use crate::robot::core::mission::MissionQueue;
 use crate::robot::core::planning::pathfinder::DStarLite;
@@ -122,7 +122,7 @@ impl Executor {
     /// 包装层在 step_impl 返回后统一同步——覆盖 step 内部所有 return 路径。
     pub fn step(
         &mut self,
-        stm32: &STM32Device,
+        stm32: &dyn MotionDevice,
         robot_state: &RobotState,
         lidar_state: &LidarState,
         grid: &OccupancyGrid,
@@ -138,7 +138,7 @@ impl Executor {
     /// step 主体（私有实现，不含意图同步；Task 13_1 拆出以便包装同步）
     fn step_impl(
         &mut self,
-        stm32: &STM32Device,
+        stm32: &dyn MotionDevice,
         robot_state: &RobotState,
         lidar_state: &LidarState,
         grid: &OccupancyGrid,
@@ -192,7 +192,7 @@ impl Executor {
 
     fn step_idle(
         &mut self,
-        stm32: &STM32Device,
+        stm32: &dyn MotionDevice,
         wx: f32, wy: f32, yaw: f32,
         grid: &OccupancyGrid,
         dynamic_obstacles: &[(i32, i32)],
@@ -307,20 +307,20 @@ impl Executor {
 
         if delta.abs() > threshold_rad {
             if delta > 0.0 {
-                if let Err(e) = stm32.spin_right(self.config.turn_speed) { warn!("[Executor] SpinRight 失败: {e}"); }
+                if let Err(e) = stm32.turn_right(self.config.turn_speed) { warn!("[Executor] SpinRight 失败: {e}"); }
             } else {
-                if let Err(e) = stm32.spin_left(self.config.turn_speed) { warn!("[Executor] SpinLeft 失败: {e}"); }
+                if let Err(e) = stm32.turn_left(self.config.turn_speed) { warn!("[Executor] SpinLeft 失败: {e}"); }
             }
             self.state = ExecState::Turning;
         } else {
-            if let Err(e) = stm32.forward(self.config.move_speed) { warn!("[Executor] Forward 失败: {e}"); }
+            if let Err(e) = stm32.move_forward(self.config.move_speed) { warn!("[Executor] Forward 失败: {e}"); }
             self.state = ExecState::Moving;
         }
     }
 
     // ─── Turning：等待角度对齐 ────────
 
-    fn step_turning(&mut self, stm32: &STM32Device, wx: f32, wy: f32, yaw: f32) {
+    fn step_turning(&mut self, stm32: &dyn MotionDevice, wx: f32, wy: f32, yaw: f32) {
         let (st_x, st_y) = match self.sub_target {
             Some(st) => st,
             None => {
@@ -345,7 +345,7 @@ impl Executor {
 
     // ─── Moving：等到 sub_target ────────
 
-    fn step_moving(&mut self, stm32: &STM32Device, wx: f32, wy: f32, yaw: f32, grid: &OccupancyGrid, dynamic_obstacles: &[(i32, i32)]) {
+    fn step_moving(&mut self, stm32: &dyn MotionDevice, wx: f32, wy: f32, yaw: f32, grid: &OccupancyGrid, dynamic_obstacles: &[(i32, i32)]) {
         let (st_x, st_y) = match self.sub_target {
             Some(st) => st,
             None => {

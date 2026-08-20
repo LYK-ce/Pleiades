@@ -27,6 +27,7 @@ use protocol::{
 use super::super::serial::port;
 use super::super::types::CarType;
 use crate::robot::core::state::RobotState;
+use crate::robot::device::MotionDevice;
 use crate::robot::slam::odometry;
 
 // ============================================================
@@ -138,6 +139,31 @@ impl STM32Device {
     /// 读取当前传感器状态快照（async：需要持有 RwLock read guard）
     pub async fn get_state(&self) -> RobotState {
         self.state.read().await.clone()
+    }
+}
+
+// ============================================================
+// MotionDevice trait 实现（Task 22：统一运动接口）
+// ============================================================
+
+impl MotionDevice for STM32Device {
+    fn move_forward(&self, speed: i16) -> Result<(), String> {
+        self.forward(speed)
+    }
+    fn move_backward(&self, speed: i16) -> Result<(), String> {
+        self.backward(speed)
+    }
+    fn turn_left(&self, rate: i16) -> Result<(), String> {
+        self.spin_left(rate)
+    }
+    fn turn_right(&self, rate: i16) -> Result<(), String> {
+        self.spin_right(rate)
+    }
+    fn stop(&self) -> Result<(), String> {
+        STM32Device::stop(self)
+    }
+    fn shutdown(&self) {
+        STM32Device::shutdown(self)
     }
 }
 
