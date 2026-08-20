@@ -17,6 +17,10 @@ use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
+use crate::robot::core::goal::GoalService;
+use crate::robot::core::state::RobotState;
+use crate::robot::device::MotionDevice;
+use crate::robot::world::World;
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
 // ============================================================
@@ -750,10 +754,170 @@ pub fn register_network_caps(
 // 注册 Robot 能力函数
 // ============================================================
 
-/// TODO: 重写为基于 STM32Device 的绑定
-pub fn register_robot_caps(lua: &Lua) -> mlua::Result<()> {
-    let robot_table = lua.create_table()?;
-    lua.globals().set("robot", robot_table)?;
+/// Robot 决策 caps 上下文（Task 22 步骤 5）
+pub struct RobotCapsContext {
+    pub robot_state: Arc<tokio::sync::RwLock<RobotState>>,
+    pub world: Arc<World>,
+    pub goal: Arc<tokio::sync::Mutex<GoalService>>,
+    pub motion: Arc<dyn MotionDevice>,
+}
+
+/// 注册 Robot 决策 caps（self / world / action，Task 22 定稿接口）
+///
+/// - 读方法（get_position / get_cell / get_agents / get_path）用 `create_async_function` + tokio 锁
+/// - 发动作（move_forward / turn / stop）用 `create_function`（同步 try_send）
+pub fn register_robot_caps(lua: &Lua, ctx: RobotCapsContext) -> mlua::Result<()> {
+    // ─── self 表：读自我状态 ──────────────────────────────
+    let self_table = lua.create_table()?;
+    {
+        let rs = ctx.robot_state.clone();
+        self_table.set(
+            "get_position",
+            lua.create_async_function(move |_, (): ()| {
+                let rs = rs.clone();
+                async move {
+                    let s = rs.read().await;
+                    Ok((s.x, s.y, s.z))
+                }
+            })?,
+        )?;
+    }
+    {
+        let rs = ctx.robot_state.clone();
+        self_table.set(
+            "get_attitude",
+            lua.create_async_function(move |_, (): ()| {
+                let rs = rs.clone();
+                async move {
+                    let s = rs.read().await;
+                    Ok((s.attitude.roll, s.attitude.pitch, s.attitude.yaw))
+                }
+            })?,
+        )?;
+    }
+    {
+        let rs = ctx.robot_state.clone();
+        self_table.set(
+            "get_velocity",
+            lua.create_async_function(move |_, (): ()| {
+                let rs = rs.clone();
+                async move {
+                    let s = rs.read().await;
+                    Ok((s.vx, s.vy, s.vz))
+                }
+            })?,
+        )?;
+    }
+    lua.globals().set("self", self_table)?;
+
+    // ─── world 表：读世界（静态地图 / 动态设备 / 寻路）─────
+    let world_table = lua.create_table()?;
+    {
+        let w = ctx.world.clone();
+        world_table.set(
+            "get_cell",
+            lua.create_async_function(move |_, (x, y): (f32, f32)| {
+                let w = w.clone();
+                async move { Ok(w.get_cell(x, y).await) }
+            })?,
+        )?;
+    }
+    {
+        let w = ctx.world.clone();
+        world_table.set(
+            "get_agents",
+            lua.create_async_function(move |lua, (): ()| {
+                let w = w.clone();
+                async move {
+                    let agents = w.get_agents().await;
+                    let arr = lua.create_table()?;
+                    for (i, a) in agents.iter().enumerate() {
+                        let t = lua.create_table()?;
+                        t.set("x", a.x)?;
+                        t.set("y", a.y)?;
+                        t.set("z", a.z)?;
+                        t.set("yaw", a.yaw)?;
+                        t.set("vx", a.vx)?;
+                        t.set("vy", a.vy)?;
+                        arr.set(i + 1, t)?;
+                    }
+                    Ok(arr)
+                }
+            })?,
+        )?;
+    }
+    {
+        let goal = ctx.goal.clone();
+        world_table.set(
+            "get_path",
+            lua.create_async_function(move |lua, (): ()| {
+                let goal = goal.clone();
+                async move {
+                    let mut g = goal.lock().await;
+                    match g.get_path().await {
+                        Some((gx, gy)) => {
+                            let t = lua.create_table()?;
+                            t.set("gx", gx)?;
+                            t.set("gy", gy)?;
+                            Ok(Some(t))
+                        }
+                        None => Ok(None),
+                    }
+                }
+            })?,
+        )?;
+    }
+    lua.globals().set("world", world_table)?;
+
+    // ─── action 表：发统一动作（同步 try_send）──────────────
+    let action_table = lua.create_table()?;
+    {
+        let m = ctx.motion.clone();
+        action_table.set(
+            "move_forward",
+            lua.create_function(move |_, speed: i16| {
+                m.move_forward(speed).map_err(|e| mlua::Error::runtime(e))
+            })?,
+        )?;
+    }
+    {
+        let m = ctx.motion.clone();
+        action_table.set(
+            "move_backward",
+            lua.create_function(move |_, speed: i16| {
+                m.move_backward(speed).map_err(|e| mlua::Error::runtime(e))
+            })?,
+        )?;
+    }
+    {
+        let m = ctx.motion.clone();
+        action_table.set(
+            "turn_left",
+            lua.create_function(move |_, rate: i16| {
+                m.turn_left(rate).map_err(|e| mlua::Error::runtime(e))
+            })?,
+        )?;
+    }
+    {
+        let m = ctx.motion.clone();
+        action_table.set(
+            "turn_right",
+            lua.create_function(move |_, rate: i16| {
+                m.turn_right(rate).map_err(|e| mlua::Error::runtime(e))
+            })?,
+        )?;
+    }
+    {
+        let m = ctx.motion.clone();
+        action_table.set(
+            "stop",
+            lua.create_function(move |_, (): ()| {
+                m.stop().map_err(|e| mlua::Error::runtime(e))
+            })?,
+        )?;
+    }
+    lua.globals().set("action", action_table)?;
+
     Ok(())
 }
 

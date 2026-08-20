@@ -9,6 +9,7 @@
 //! - state_notifier: 100ms → 读 robot_state → 广播 Pose
 //! - SLAM task: 200ms → 读 lidar_state → update grid → 广播 map_delta
 
+use std::f32::consts::PI;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -17,26 +18,33 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::command::{AutoCmd, Command, ManualCmd, ModeCmd};
-use super::executor::{Executor, ExecutorConfig};
 use super::mission::MissionQueue;
 use super::mode::OpMode;
 use crate::robot::control::device::stm32::STM32Device;
 use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::types::CarType;
+use crate::robot::core::goal::GoalService;
 use crate::robot::core::state::{ExecuteState, LidarState, RobotState};
-use crate::robot::slam::{OccupancyGrid, MapDelta, SlamContext};
+use crate::robot::device::MotionDevice;
+use crate::robot::slam::{OccupancyGrid, MapDelta, SlamContext, CELL_RESOLUTION};
+use crate::vm::capability_binding::{register_robot_caps, RobotCapsContext};
+use crate::vm::engine::LuaContext;
 use std::time::Instant;
 
 use crate::event_bus::EventBus;
 use crate::robot::core::cluster::{cluster_consumer, cluster_table_cleaner, ClusterInfoTable};
 use crate::robot::core::command_consumer::command_consumer;
-use crate::robot::core::planning::cluster_to_obstacle_cells;
 use crate::robot::world::World;
 use crate::network::{NodeHandle, TOPIC_ROBOT_POSE};
 use crate::robot::core::protocol::{
     encode_frame, encode_pose,
     COMPID_ROBOT, MSGID_POSE, PoseData,
 };
+
+/// 急停距离阈值（米，与 ExecutorConfig.obstacle_threshold_m 一致）
+const OBSTACLE_THRESHOLD_M: f32 = 0.3;
+/// 到达判定阈值（米，与 ExecutorConfig.arrival_threshold_m 一致）
+const ARRIVAL_THRESHOLD_M: f32 = 0.3;
 
 /// 位姿广播消息
 #[derive(Debug, Clone)]
@@ -120,12 +128,38 @@ impl Robot {
         // 3.3 世界模块（Task 22：静态地图 + 动态设备 + 寻路 D*）
         let world = Arc::new(World::new(grid.clone(), cluster_table.clone()));
 
+        // 3.4 目标服务（Task 22：完整目标服务 get_path）
+        let goal_service = Arc::new(tokio::sync::Mutex::new(GoalService::new(
+            robot_state.clone(),
+            mission_queue.clone(),
+            node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default(),
+            grid.clone(),
+            cluster_table.clone(),
+            world.clone(),
+            obstacle_inflation_radius,
+            ARRIVAL_THRESHOLD_M,
+        )));
+
         // 4. spawn 底盘设备（chassis 开关）
         let stm32 = if chassis_enabled {
-            STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?
+            Arc::new(STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?)
         } else {
             return Err("chassis 未启用（当前仅支持车底盘）".to_string());
         };
+
+        // 4.1 决策线程（Lua 无状态决策，Task 22 步骤 5）
+        let (tick_tx, tick_rx) = mpsc::channel::<()>(1);
+        let motion: Arc<dyn MotionDevice> = stm32.clone();
+        spawn_decision_thread(
+            RobotCapsContext {
+                robot_state: robot_state.clone(),
+                world: world.clone(),
+                goal: goal_service.clone(),
+                motion: motion.clone(),
+            },
+            tick_rx,
+            cancel.clone(),
+        );
 
         // 4. spawn 雷达设备（lidar 开关，含 SLAM 建图）
         let lidar: Option<LidarDevice> = match (lidar_enabled, lidar_port, lidar_baudrate) {
@@ -215,24 +249,18 @@ impl Robot {
         let loop_mission = mission_queue.clone();
         let loop_robot_state = robot_state.clone();
         let loop_lidar_state = lidar_state.clone();
-        let loop_grid = grid.clone();
         let loop_execute_state = execute_state.clone();
-        // Task 15：动态障碍注入需要读集群表
-        let loop_cluster_table = cluster_table.clone();
-        // Task 22：世界模块（D* 寻路）
         let loop_world = world.clone();
-        // Task 14：群发任务分配需要本车 peer_id（单机无 node_handle 时空 vec）
-        let loop_peer_id = node_handle.as_ref().map(|nh| nh.Get_Local_Peer_Id().to_bytes()).unwrap_or_default();
+        let loop_goal = goal_service.clone();
         tokio::spawn(async move {
             main_loop(
                 stm32, lidar, cmd_rx,
                 loop_op_mode, loop_mission,
-                loop_robot_state, loop_lidar_state, loop_grid,
+                loop_robot_state, loop_lidar_state,
                 loop_execute_state,
-                loop_cluster_table,
                 loop_world,
-                loop_peer_id,
-                obstacle_inflation_radius,
+                loop_goal,
+                tick_tx,
                 loop_cancel,
             ).await;
         });
@@ -309,24 +337,21 @@ async fn state_notifier(
 // ============================================================
 
 async fn main_loop(
-    stm32: STM32Device,
+    stm32: Arc<STM32Device>,
     lidar: Option<LidarDevice>,
     mut cmd_rx: mpsc::Receiver<Command>,
     op_mode: Arc<RwLock<OpMode>>,
     mission_queue: Arc<RwLock<MissionQueue>>,
     robot_state: Arc<RwLock<RobotState>>,
     lidar_state: Arc<RwLock<LidarState>>,
-    grid: Arc<RwLock<OccupancyGrid>>,
     execute_state: Arc<RwLock<ExecuteState>>,
-    cluster_table: Arc<ClusterInfoTable>,
     world: Arc<World>,
-    own_peer_id: Vec<u8>,
-    obstacle_inflation_radius: f32,
+    goal_service: Arc<tokio::sync::Mutex<GoalService>>,
+    decision_tick_tx: mpsc::Sender<()>,
     cancel: CancellationToken,
 ) {
-    info!("Robot 主循环启动（同步 dispatch + auto_tick）");
+    info!("Robot 主循环启动（急停 + Lua 无状态决策）");
 
-    let mut executor = Executor::new(ExecutorConfig::default(), world);
     let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
 
@@ -341,12 +366,12 @@ async fn main_loop(
                                 info!("[Robot] 切换到 Manual 模式");
                                 *op_mode.write().await = OpMode::Manual;
                                 mission_queue.write().await.clear();
-                                executor.reset();
+                                goal_service.lock().await.reset();
                             }
                             ModeCmd::SwitchToAuto => {
                                 info!("[Robot] 切换到 Auto 模式");
                                 *op_mode.write().await = OpMode::Auto;
-                                executor.reset();
+                                goal_service.lock().await.reset();
                                 next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
                             }
                         }
@@ -367,7 +392,7 @@ async fn main_loop(
                                     // ORION_TASK_SET 替换语义（2026-08-07）：立即中断当前任务 + 整体替换队列
                                     let _ = stm32.stop();
                                     mission_queue.write().await.replace(list);
-                                    executor.reset();
+                                    goal_service.lock().await.reset();
                                     info!("[Robot] Auto 任务队列已替换");
                                 }
                             }
@@ -383,24 +408,21 @@ async fn main_loop(
                 }
             }
 
-            // auto_tick：仅 Auto 模式激活
+            // auto_tick：仅 Auto 模式激活（急停 + Lua 无状态决策）
             _ = tokio::time::sleep_until(next_tick.into()), if *op_mode.read().await == OpMode::Auto => {
                 let rs = robot_state.read().await.clone();
                 let ls = lidar_state.read().await.clone();
-                let g = { let guard = grid.read().await; (*guard).clone() };
-                // Task 15：无脑读全量快照（超时剔除由独立表维护 task 负责）
-                let others = cluster_table.snapshot().await;
-                let dynamic_obstacles: Vec<(i32, i32)> =
-                    cluster_to_obstacle_cells(&others, obstacle_inflation_radius).into_iter().collect();
 
-                // Task 13_1：execute_state 由 executor 写（step 包装层同步 sub_target）
-                executor.step(
-                    &stm32, &rs, &ls, &g,
-                    &dynamic_obstacles,
-                    &mut *mission_queue.write().await,
-                    &mut *execute_state.write().await,
-                    &own_peer_id,
-                ).await;
+                // 急停（Rust 侧）：前方障碍强制 stop + 标记障碍，跳过本 tick 的 Lua 决策
+                let emergency = check_emergency_stop(&ls, &rs, &*stm32, &world).await;
+                if !emergency {
+                    // 调 Lua on_tick（50ms 无状态决策）
+                    let _ = decision_tick_tx.try_send(());
+                }
+
+                // 同步意图广播（sub_target 由 GoalService 在 get_path 内更新）
+                let sub = goal_service.lock().await.sub_target();
+                *execute_state.write().await = ExecuteState { sub_target: sub };
 
                 next_tick += Duration::from_millis(auto_tick_ms);
                 if next_tick <= Instant::now() {
@@ -459,4 +481,116 @@ async fn dispatch(stm32: &STM32Device, lidar: &Option<LidarDevice>, cmd: ManualC
             }
         }
     }
+}
+
+// ============================================================
+// 急停检查（Rust 侧，Task 22 步骤 5）
+// ============================================================
+
+/// 前方障碍急停检查：LiDAR 前方距离 < 阈值 → 立即停车 + 标记障碍。
+/// 返回 true = 已触发急停（跳过本 tick 的 Lua 决策）。
+async fn check_emergency_stop(
+    lidar_state: &LidarState,
+    robot_state: &RobotState,
+    motion: &dyn MotionDevice,
+    world: &World,
+) -> bool {
+    let Some(ref scan) = lidar_state.scan else {
+        return false;
+    };
+    let closest = scan
+        .points
+        .iter()
+        .filter(|p| {
+            let a = if p.angle < 0.0 { p.angle + 2.0 * PI } else { p.angle };
+            p.range >= 0.1 && (a < PI / 4.0 || a >= 7.0 * PI / 4.0)
+        })
+        .min_by(|a, b| a.range.partial_cmp(&b.range).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(p) = closest else {
+        return false;
+    };
+
+    if p.range < OBSTACLE_THRESHOLD_M {
+        warn!("[Robot] 前方障碍 {:.2}m < {:.2}m，急停", p.range, OBSTACLE_THRESHOLD_M);
+        if let Err(e) = motion.stop() {
+            warn!("[Robot] 急停失败: {e}");
+        }
+
+        let (wx, wy) = (robot_state.x, robot_state.y);
+        let yaw = robot_state.attitude.yaw;
+        let ob_angle = yaw + p.angle;
+        let ob_wx = wx + p.range * ob_angle.cos();
+        let ob_wy = wy + p.range * ob_angle.sin();
+        let ob_gx = (ob_wx / CELL_RESOLUTION).floor() as i32;
+        let ob_gy = (ob_wy / CELL_RESOLUTION).floor() as i32;
+        world.mark_obstacle((ob_gx, ob_gy)).await;
+        return true;
+    }
+    false
+}
+
+// ============================================================
+// Lua 决策线程（Task 22 步骤 5）
+// ============================================================
+
+/// 在专用线程上运行 Lua 决策：创建独立 LuaContext → 注册 caps → 加载决策脚本 → 每 tick 调 on_tick。
+fn spawn_decision_thread(ctx: RobotCapsContext, mut tick_rx: mpsc::Receiver<()>, cancel: CancellationToken) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!("[Robot] 决策线程 runtime 创建失败: {e}");
+                return;
+            }
+        };
+        rt.block_on(async move {
+            let lua = match LuaContext::new() {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("[Robot] Lua 实例创建失败: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = register_robot_caps(&lua, ctx) {
+                warn!("[Robot] 注册 Robot caps 失败: {e}");
+                return;
+            }
+            let script = match std::fs::read_to_string("programs/robot/car.lua") {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("[Robot] 读取决策脚本失败: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = lua.load(&script).eval::<()>() {
+                warn!("[Robot] 决策脚本加载失败: {e}");
+                return;
+            }
+            let on_tick: mlua::Function = match lua.globals().get("on_tick") {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("[Robot] 脚本缺少 on_tick: {e}");
+                    return;
+                }
+            };
+            info!("[Robot] Lua 决策线程启动");
+            loop {
+                tokio::select! {
+                    r = tick_rx.recv() => {
+                        if r.is_none() {
+                            info!("[Robot] 决策 tick 通道关闭");
+                            break;
+                        }
+                        if let Err(e) = on_tick.call_async::<mlua::Value>(()).await {
+                            warn!("[Robot] on_tick 执行失败: {e}");
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        info!("[Robot] Lua 决策线程退出");
+                        break;
+                    }
+                }
+            }
+        });
+    });
 }

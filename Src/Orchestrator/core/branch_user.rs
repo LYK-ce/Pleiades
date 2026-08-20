@@ -12,7 +12,7 @@ use crate::network::DataType;
 use crate::vm::engine::LuaContext;
 use crate::vm::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
-    register_storage_caps, register_ml_caps, register_robot_caps,
+    register_storage_caps, register_ml_caps,
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
 use std::path::Path;
@@ -663,17 +663,6 @@ pub(super) fn spawn_lua_script(
                 caps.event_bus.Publish(Bus_Event::Output {
                     payload: cmd_output(
                         format!("[{}] 注册 LocalStream 能力失败: {}", label, e),
-                        true,
-                    ),
-                });
-                return;
-            }
-
-            // 3.6 注册 Robot 能力
-            if let Err(e) = register_robot_caps(&lua) {
-                caps.event_bus.Publish(Bus_Event::Output {
-                    payload: cmd_output(
-                        format!("[{}] 注册 Robot 能力失败: {}", label, e),
                         true,
                     ),
                 });

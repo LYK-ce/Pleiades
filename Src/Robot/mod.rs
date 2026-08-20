@@ -16,7 +16,6 @@ pub mod slam;
 pub mod world;
 
 pub use core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
-pub use core::executor::ExecutorConfig;
 pub use core::mode::OpMode;
 pub use core::robot::Robot;
 pub use control::types::CarType;

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-12
+//Modified Date ： 2026-08-20
 
 //! Robot 核心
 //!
@@ -17,7 +17,7 @@ pub mod command;
 pub mod command_consumer;
 pub mod protocol;
 pub mod state;
-pub mod executor;
+pub mod goal;
 pub mod mission;
 pub mod mode;
 pub mod robot;
