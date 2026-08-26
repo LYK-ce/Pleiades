@@ -272,6 +272,10 @@ impl MavlinkDevice {
 
     /// 一次性命令：起飞（固定 1.8m，纯触发，不带确认回读）。
     pub fn takeoff_send(&self) -> Result<(), String> {
+        // 起飞前确保飞控在 GUIDED（遥控器模式开关边沿触发，拨挡位即可强制接管）
+        if let Err(e) = self.set_mode_send(MODE_GUIDED) {
+            warn!("[Mavlink] takeoff 前 set_mode(GUIDED) 失败: {e}");
+        }
         // Task 22_5 修复：抑制保持 loop，避免爬升期间被零速度指令打断
         self.takeoff_pending.store(true, Ordering::SeqCst);
         self.send_message(&protocol::takeoff_msg(FC_SYSTEM_ID, FC_COMPONENT_ID))
@@ -279,6 +283,10 @@ impl MavlinkDevice {
 
     /// 一次性命令：降落（纯触发，不带确认回读）。
     pub fn land_send(&self) -> Result<(), String> {
+        // 降落前确保飞控在 GUIDED（遥控器模式开关边沿触发，拨挡位即可强制接管）
+        if let Err(e) = self.set_mode_send(MODE_GUIDED) {
+            warn!("[Mavlink] land 前 set_mode(GUIDED) 失败: {e}");
+        }
         // Task 22_5 修复：抑制保持 loop，避免降落期间被速度指令干扰
         self.takeoff_pending.store(true, Ordering::SeqCst);
         self.send_message(&protocol::land_msg(FC_SYSTEM_ID, FC_COMPONENT_ID))
