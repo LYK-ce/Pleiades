@@ -71,3 +71,9 @@
 - **yaw_offset 开机归零**（`mavlink/mod.rs`）：记录时机从「解锁后」改为「姿态流第一次建立时」（去掉 `armed` 条件，仅 `attitude_count > 0`）。修复：解锁瞬间 yaw 跳变（解锁前 yaw=飞控原始航向，解锁后跳回 0，地图乱）。改后开机机头朝即 0°，与车一致。
 - **takeoff/land 前补发 set_mode(GUIDED)**（`mavlink/mod.rs`）：`takeoff_send`/`land_send` 开头先 `set_mode(GUIDED)` 再发命令。修复：遥控器模式开关（边沿触发）停在非 GUIDED 档（如 POSHOLD=16）时，启动时发的 set_mode 被覆盖，NAV_TAKEOFF 在非 GUIDED 模式不生效 →「升一下又降」。注：不设 `FLTMODE_CH=0`，保留遥控器拨挡位强制接管能力。
 - **速度指令 type_mask 加 VZ_IGNORE**（`mavlink/protocol.rs`）：前进时垂直轴交给飞控自主锁高度（altitude hold，位置环），而非追踪 vz=0（速度环）。修复：前进前倾时速度环补油门不足导致缓慢掉高。
+
+## 已知项 / 操作约束（实机审查发现，暂不修）
+
+- **保持 loop 不检查 armed/已起飞**：保持 loop 无条件 100ms 下发水平速度，若误在「解锁前/起飞前」发 move_forward（清掉 takeoff_pending + desired 非零）再手动解锁，飞控一进 GUIDED 就会被速度指令驱动 → 地面前冲/侧翻。**暂不改代码，作为操作顺序约束：必须严格「Takeoff → 解锁 → 爬升 → 再发运动命令」**。
+- **takeoff/land/set_mode 无 ACK**：fire-and-forget，命令被拒（GPS 不足/未解锁/切模式失败）时无感知，且 takeoff 被拒会卡 takeoff_pending=true 抑制保持 loop。设计决策 #7「第一版不做 ACK」，暂不处理。
+- **HEARTBEAT 只发一次**：`heartbeat_msg()` 仅在 spawn 时发一帧，无周期发送。ArduPilot 的 GCS failsafe 默认禁用（`FS_GCS_ENABLE=0`），默认配置下不触发；与参考实现（`UAV/rust-mavlink-test`）一致，实机验证正常。仅当显式启用 `FS_GCS_ENABLE` 时才有隐患，可选加 1Hz 周期心跳，暂不加。
