@@ -43,3 +43,4 @@ baudrate = 230400
 [Robot.flight_ctrl]
 enabled = false # 飞控开关（机，未来）
 # connection = "/dev/ttyS0" # 飞控连接方式（MAVLink 串口/UDP，未来 task）
+# baudrate = 921600 # 飞控串口波特率

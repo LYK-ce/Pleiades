@@ -219,6 +219,8 @@ pub const ACTION_START_LIDAR: u8 = 6;
 pub const ACTION_STOP_LIDAR: u8 = 7;
 pub const ACTION_SWITCH_TO_MANUAL: u8 = 8;
 pub const ACTION_SWITCH_TO_AUTO: u8 = 9;
+pub const ACTION_TAKEOFF: u8 = 10; // Task 22_4：起飞
+pub const ACTION_LAND: u8 = 11;    // Task 22_4：降落
 
 /// 编码手动命令（3 字节）
 pub fn encode_manual_control(action: u8, param: i16) -> Vec<u8> {

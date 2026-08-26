@@ -12,7 +12,7 @@
 | # | 位置 | 问题 | 建议 | 来源 |
 |---|---|---|---|---|
 | 🔴 P1 | `Src/Robot/core/planning/pathfinder.rs` `mark_obstacle` | 未强制置 ∞，仅重读概率栅格——需 4 次 LiDAR 命中才 Occupied，动态障碍 D* 不知情，急停后仍可能反复撞 | mark_obstacle 直接置 cost=∞（DStarLite 内部 `obstacles: HashSet`，cost() 先查集合）或同步写 grid | task_8 / wb_8 待办 #2 |
-| 🟠 P3 | `Src/Robot/core/planning/pathfinder.rs` `compute_shortest_path` | 无迭代上限/watchdog，极端地图可拖垮 50ms auto_tick | 加 MAX_ITERS 迭代上限/时间预算，超限降级 | task_8 / wb_8 待办 #3 |
+| ✅ P3 | `Src/Robot/core/planning/pathfinder.rs` `compute_shortest_path` | 无迭代上限/watchdog，极端地图可拖垮 50ms auto_tick（**已修复**：task_22_3 加 `MAX_COMPUTE_ITERS=10000` 迭代上限，超限降级） | 加 MAX_ITERS 迭代上限/时间预算，超限降级 | task_8 / wb_8 待办 #3 |
 | 🟠 P6 | `Src/Robot/core/executor.rs` | goal 格为 Occupied 时任务永不完成也不失败 | 目标格不可达时明确失败并报错 | task_8 / wb_8 待办 #5 |
 | 🟠 P7 | `Src/Robot/core/executor.rs` | D* 规划失败仅 warn!（task_8 Q6 要求 error!） | 提升为 error! | task_8 / wb_8 待办 #5 |
 | 🟠 N10 | `Src/Robot/core/planning/pathfinder.rs` | 零单元测试（wb_8 已给出 17 场景清单，未落地） | 补全单元测试 | wb_10 新发现 / task_11 A 组 |
@@ -86,6 +86,28 @@
 | ✅ 文档偏差-2 | task_9 main.rs:125 | launch 条目已被 Robot 移除取代 | 已消失 |
 
 ---
+
+## 九、Task 22_2 Lua 三态机（2026-08-20 复查新增）
+
+| # | 位置 | 问题 | 建议 | 来源 |
+|---|---|---|---|---|
+| ✅ T22-1 | `Src/Robot/core/robot.rs` main_loop 急停分支 + `programs/robot/car.lua` 状态机 | 急停只清 Rust、未复位 Lua 状态机 → 障碍消失后卡死（**已修复**：task_22_3 单写者收敛——Lua 纯决策无状态 + main_loop 单点写 `ExecuteState` + invalidate 换代） | tick 通道改带事件类型 + Lua `on_emergency()` | task_22_2 复查 |
+| ✅ T22-2 | `Src/Robot/core/robot.rs` tick 通道 | 陈旧 tick 顶掉急停 stop（**已修复**：task_22_3 generation 代际校验 + invalidate drain，旧代际决策结果被丢弃） | 决策线程 drain 到最新事件，或 tick 加代际号 | task_22_2 复查 |
+
+## 十、Task 22_3 单写者收敛（2026-08-21 实施 + 复查新增）
+
+| # | 位置 | 问题 | 建议 | 来源 |
+|---|---|---|---|---|
+| 🟠 T23-1 | 全模块 | 关键新路径无单测：`invalidate` / `apply_action` / `DecisionResult::from_lua` / car.lua 三态机 / `compute_shortest_path` 迭代上限降级 | 补单测（FromLua 解析、invalidate 逻辑、generation 过期丢弃、迭代上限降级不 panic） | task_22_3 复查 |
+| 🟡 T23-2 | `Src/Robot/core/robot.rs` `invalidate` | 只 drain result_rx、不 drain tick_rx——换代后残留旧请求，最坏多等 50ms 恢复（无安全影响） | drain tick 通道 或 决策线程比对 gen 主动丢旧（需共享 AtomicU64 代际） | task_22_3 复查 |
+| 🟡 T23-3 | `robot.rs` 看门狗 + `pathfinder.rs` 迭代上限 | 热路径 `error!`/`warn!` 持续触发时 20Hz 刷屏 | 降频 / 只首次打 | task_22_3 复查 |
+| 🟡 T23-4 | `Src/Robot/core/robot.rs` 急停分支 | 急停持续期间每 50ms 重复 `invalidate`（stop 重复下发，幂等冗余） | 仅急停状态变化边沿调用一次 | task_22_3 复查 |
+| 🟡 T23-5 | `robot.rs` `check_emergency_stop` + `invalidate` | 急停双重 stop（check_emergency_stop 内 stop + invalidate 再 stop，幂等冗余） | 删 invalidate 内 stop 或保留并注释幂等 | task_22_3 复查 |
+| 🟡 T23-6 | `Src/VM/capability_binding.rs` FromLua | `arg` 缺省/类型错静默吞成 0（`move_forward(0)` = 无效动作） | 缺 arg 报错/warn，不静默 0 | task_22_3 复查 |
+| 🟡 T23-7 | 文件头 | `pathfinder.rs`(08-13) / `state.rs`(08-20) / `capability_binding.rs`(05-17) 日期未 bump | 更新至 08-21 | task_22_3 复查 |
+| 🟡 T23-8 | `pathfinder.rs` | D* `next_step`/`compute` 每 tick `info!` 20Hz 刷屏 | 降 `debug!`/删 | task_22_3 复查 |
+| 🟡 T23-9 | 文档 | `universal_robot_design.md` / `robot_controller.md` / `robot_arch.md` 仍描述旧 caps（`world.get_path`/`action.*`/`GoalService.sub_target`） | 标注废弃/同步 | task_22_3 复查 |
+| 🟡 T23-10 | `robot.rs` 决策线程 | `result_tx.send` 不在 `select!` 中，理论阻塞无法被 cancel 中断（当前时序不可达） | 记隐性陷阱备注；后续 send 移入 select! | task_22_3 复查 |
 
 ## 附：来源索引
 

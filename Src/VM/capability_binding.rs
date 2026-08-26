@@ -17,9 +17,7 @@ use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
 use crate::network::DataType;
 use crate::orchestrator::Capabilities;
-use crate::robot::core::goal::GoalService;
-use crate::robot::core::state::RobotState;
-use crate::robot::device::MotionDevice;
+use crate::robot::core::state::{RobotState, ExecuteState, DecisionState, MotionAction, DecisionResult};
 use crate::robot::world::World;
 use super::storage_handle::{StorageReadHandle, StorageWriteHandle};
 
@@ -754,18 +752,18 @@ pub fn register_network_caps(
 // 注册 Robot 能力函数
 // ============================================================
 
-/// Robot 决策 caps 上下文（Task 22 步骤 5）
+/// Robot 决策 caps 上下文（Task 22 步骤 5，Task 22_3：纯只读 + 共享状态）
 pub struct RobotCapsContext {
     pub robot_state: Arc<tokio::sync::RwLock<RobotState>>,
+    pub execute_state: Arc<tokio::sync::RwLock<ExecuteState>>,
     pub world: Arc<World>,
-    pub goal: Arc<tokio::sync::Mutex<GoalService>>,
-    pub motion: Arc<dyn MotionDevice>,
 }
 
-/// 注册 Robot 决策 caps（self / world / action，Task 22 定稿接口）
+/// 注册 Robot 决策 caps（Task 22_3：纯只读，无副作用）
 ///
-/// - 读方法（get_position / get_cell / get_agents / get_path）用 `create_async_function` + tokio 锁
-/// - 发动作（move_forward / turn / stop）用 `create_function`（同步 try_send）
+/// - self 表：get_state / get_position / get_attitude / get_velocity（create_async_function + tokio 读锁）
+/// - world 表：get_cell / get_agents（只读世界）
+/// - 无 action 表、无 get_path（发命令与寻路均移入 main_loop）
 pub fn register_robot_caps(lua: &Lua, ctx: RobotCapsContext) -> mlua::Result<()> {
     // ─── self 表：读自我状态 ──────────────────────────────
     let self_table = lua.create_table()?;
@@ -808,6 +806,37 @@ pub fn register_robot_caps(lua: &Lua, ctx: RobotCapsContext) -> mlua::Result<()>
             })?,
         )?;
     }
+    {
+        let es = ctx.execute_state.clone();
+        self_table.set(
+            "get_state",
+            lua.create_async_function(move |lua, (): ()| {
+                let es = es.clone();
+                async move {
+                    let s = es.read().await;
+                    let t = lua.create_table()?;
+                    let state_str = match s.state {
+                        DecisionState::Idle => "Idle",
+                        DecisionState::Turning => "Turning",
+                        DecisionState::Moving => "Moving",
+                    };
+                    t.set("state", state_str)?;
+                    match s.sub_target {
+                        Some((gx, gy)) => {
+                            let st = lua.create_table()?;
+                            st.set("gx", gx)?;
+                            st.set("gy", gy)?;
+                            t.set("sub_target", st)?;
+                        }
+                        None => {
+                            t.set("sub_target", mlua::Value::Nil)?;
+                        }
+                    }
+                    Ok(t)
+                }
+            })?,
+        )?;
+    }
     lua.globals().set("self", self_table)?;
 
     // ─── world 表：读世界（静态地图 / 动态设备 / 寻路）─────
@@ -846,79 +875,64 @@ pub fn register_robot_caps(lua: &Lua, ctx: RobotCapsContext) -> mlua::Result<()>
             })?,
         )?;
     }
-    {
-        let goal = ctx.goal.clone();
-        world_table.set(
-            "get_path",
-            lua.create_async_function(move |lua, (): ()| {
-                let goal = goal.clone();
-                async move {
-                    let mut g = goal.lock().await;
-                    match g.get_path().await {
-                        Some((gx, gy)) => {
-                            let t = lua.create_table()?;
-                            t.set("gx", gx)?;
-                            t.set("gy", gy)?;
-                            Ok(Some(t))
-                        }
-                        None => Ok(None),
-                    }
-                }
-            })?,
-        )?;
-    }
     lua.globals().set("world", world_table)?;
 
-    // ─── action 表：发统一动作（同步 try_send）──────────────
-    let action_table = lua.create_table()?;
-    {
-        let m = ctx.motion.clone();
-        action_table.set(
-            "move_forward",
-            lua.create_function(move |_, speed: i16| {
-                m.move_forward(speed).map_err(|e| mlua::Error::runtime(e))
-            })?,
-        )?;
-    }
-    {
-        let m = ctx.motion.clone();
-        action_table.set(
-            "move_backward",
-            lua.create_function(move |_, speed: i16| {
-                m.move_backward(speed).map_err(|e| mlua::Error::runtime(e))
-            })?,
-        )?;
-    }
-    {
-        let m = ctx.motion.clone();
-        action_table.set(
-            "turn_left",
-            lua.create_function(move |_, rate: i16| {
-                m.turn_left(rate).map_err(|e| mlua::Error::runtime(e))
-            })?,
-        )?;
-    }
-    {
-        let m = ctx.motion.clone();
-        action_table.set(
-            "turn_right",
-            lua.create_function(move |_, rate: i16| {
-                m.turn_right(rate).map_err(|e| mlua::Error::runtime(e))
-            })?,
-        )?;
-    }
-    {
-        let m = ctx.motion.clone();
-        action_table.set(
-            "stop",
-            lua.create_function(move |_, (): ()| {
-                m.stop().map_err(|e| mlua::Error::runtime(e))
-            })?,
-        )?;
-    }
-    lua.globals().set("action", action_table)?;
-
     Ok(())
+}
+
+// ============================================================
+// DecisionResult 的 Lua 反序列化（Task 22_3：手写，mlua 未启用 macros/serialize）
+// ============================================================
+
+fn decision_state_from_str(s: &str) -> mlua::Result<DecisionState> {
+    match s {
+        "Idle" => Ok(DecisionState::Idle),
+        "Turning" => Ok(DecisionState::Turning),
+        "Moving" => Ok(DecisionState::Moving),
+        other => Err(mlua::Error::runtime(format!("非法 state: {other}"))),
+    }
+}
+
+fn motion_action_from_str(s: &str, arg: i16) -> mlua::Result<MotionAction> {
+    match s {
+        "move_forward" => Ok(MotionAction::MoveForward(arg)),
+        "move_backward" => Ok(MotionAction::MoveBackward(arg)),
+        "turn_left" => Ok(MotionAction::TurnLeft(arg)),
+        "turn_right" => Ok(MotionAction::TurnRight(arg)),
+        "stop" => Ok(MotionAction::Stop),
+        other => Err(mlua::Error::runtime(format!("非法 action: {other}"))),
+    }
+}
+
+impl mlua::FromLua for DecisionResult {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> mlua::Result<Self> {
+        let table: mlua::Table = mlua::FromLua::from_lua(value, lua)?;
+
+        let state_str: String = table.get("state")?;
+        let state = decision_state_from_str(&state_str)?;
+
+        let sub_target: Option<(i32, i32)> = {
+            let st: Option<mlua::Table> = table.get("sub_target")?;
+            match st {
+                Some(t) => Some((t.get("gx")?, t.get("gy")?)),
+                None => None,
+            }
+        };
+
+        let action: Option<MotionAction> = {
+            let a: Option<String> = table.get("action")?;
+            match a {
+                None => None,
+                Some(s) if s == "none" => None,
+                Some(s) => {
+                    let arg: i16 = table.get("arg").unwrap_or(0);
+                    Some(motion_action_from_str(&s, arg)?)
+                }
+            }
+        };
+
+        Ok(DecisionResult { state, sub_target, action })
+    }
 }
 
 // ============================================================

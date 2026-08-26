@@ -96,15 +96,49 @@ pub struct LidarState {
 }
 
 // ============================================================
-// ExecuteState — 执行器意图（Task 13_1）
+// 决策状态机 / 动作 / 决策结果（Task 22_3 单写者收敛）
 // ============================================================
 
-/// 执行器意图状态（由 main_loop 写入，state_notifier 读取用于意图广播）
+/// 状态机状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecisionState {
+    #[default]
+    Idle,
+    Turning,
+    Moving,
+}
+
+/// 动作（带载荷，语义清晰）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionAction {
+    MoveForward(i16),
+    MoveBackward(i16),
+    TurnLeft(i16),
+    TurnRight(i16),
+    Stop,
+}
+
+/// Lua on_tick 的返回值（不含 generation，generation 为 Rust 侧记账）
+#[derive(Debug, Clone)]
+pub struct DecisionResult {
+    pub state: DecisionState,
+    pub sub_target: Option<(i32, i32)>,
+    /// None = 保持、不发命令（命令去重）
+    pub action: Option<MotionAction>,
+}
+
+// ============================================================
+// ExecuteState — 执行器状态（Task 22_3 单写者：main_loop 唯一写）
+// ============================================================
+
+/// 执行器状态（决策状态机 + 意图广播）
 ///
-/// 写者 = main_loop（每 auto_tick 同步 GoalService 的 sub_target）；
-/// 读者 = state_notifier（100ms 组帧）。单一写入者不变式与 RobotState 同源。
+/// 写者 = main_loop（应用 DecisionResult 时写；急停/任务替换/模式切换/看门狗超时统一写 Idle+None）；
+/// 读者 = state_notifier（100ms 组帧）+ Lua caps `get_state`。
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteState {
+    /// 状态机状态
+    pub state: DecisionState,
     /// D* 寻路当前子目标（网格坐标）；None = 无任务/空闲
     pub sub_target: Option<(i32, i32)>,
 }

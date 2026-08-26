@@ -8,3 +8,4 @@
 
 pub mod stm32;
 pub mod lidar;
+pub mod mavlink;

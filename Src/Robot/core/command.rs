@@ -35,6 +35,8 @@ pub enum ManualCmd {
     Beep(u16),
     StartLidarScan,
     StopLidarScan,
+    Takeoff, // Task 22_4：起飞（固定 1.8m）
+    Land,    // Task 22_4：降落
 }
 
 /// 自动任务命令

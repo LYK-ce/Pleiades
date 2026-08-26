@@ -13,7 +13,8 @@ use super::{MSGID_MANUAL_CONTROL, MSGID_TASK_SET};
 use super::messages::{
     decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD,
     ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR,
-    ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, MISSION_CIRCLE, MISSION_GOTO,
+    ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, ACTION_TAKEOFF, ACTION_LAND,
+    MISSION_CIRCLE, MISSION_GOTO,
 };
 
 /// 解析 ORION 帧 → 内部命令（入站：终端/地面站 → 车）
@@ -87,6 +88,8 @@ fn manual_action_to_command(action: u8, param: i16) -> Option<Command> {
         ACTION_STOP_LIDAR => Some(Command::Manual(ManualCmd::StopLidarScan)),
         ACTION_SWITCH_TO_MANUAL => Some(Command::Mode(ModeCmd::SwitchToManual)),
         ACTION_SWITCH_TO_AUTO => Some(Command::Mode(ModeCmd::SwitchToAuto)),
+        ACTION_TAKEOFF => Some(Command::Manual(ManualCmd::Takeoff)),
+        ACTION_LAND => Some(Command::Manual(ManualCmd::Land)),
         other => {
             tracing::warn!("[Cmd] 未知 manual action: {other}");
             None

@@ -1,11 +1,11 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-21
 
-//! 目标服务（Task 22 步骤 5）
+//! 目标服务（Task 22 步骤 5，Task 22_3 改造：get_path 移入 main_loop，不再维护 sub_target）
 //!
 //! `get_path()` = 完整目标服务：内部封装「到达检测 + 任务切换（pop + 群发分配 + 设 goal 进 D*）+ 寻路」。
-//! Lua 无状态——只看到稳定的「下一步」或 nil，不感知背后的到达检测和任务切换。
+//! 只返回「下一步格」或 None（无任务/到达/不可达）；sub_target 维护移入 `ExecuteState`（main_loop 单点写）。
 //! 急停（前方障碍强制 stop）在 Rust 侧 main_loop，不在此处。
 
 use std::sync::Arc;
@@ -33,8 +33,6 @@ pub struct GoalService {
     arrival_threshold_m: f32,
     /// 当前 Mission 最终目标（世界坐标，米）
     goal: Option<(f32, f32)>,
-    /// 当前要走的下一格（网格坐标，供意图广播）
-    sub_target: Option<(i32, i32)>,
 }
 
 impl GoalService {
@@ -59,7 +57,6 @@ impl GoalService {
             obstacle_inflation_radius,
             arrival_threshold_m,
             goal: None,
-            sub_target: None,
         }
     }
 
@@ -76,7 +73,6 @@ impl GoalService {
             if dist < self.arrival_threshold_m {
                 info!("[Goal] 到达目标 ({:.2}, {:.2})", gx, gy);
                 self.goal = None;
-                self.sub_target = None;
                 self.world.clear_goal();
                 return None;
             }
@@ -96,7 +92,6 @@ impl GoalService {
                         Ok(goal) => self.start_goal(goal, wx, wy),
                         Err(e) => {
                             warn!("[Goal] 群发任务分配失败: {e:?}，跳过此任务");
-                            self.sub_target = None;
                             return None;
                         }
                     }
@@ -111,14 +106,12 @@ impl GoalService {
                         Ok(goal) => self.start_goal(goal, wx, wy),
                         Err(e) => {
                             warn!("[Goal] 围圈任务分配失败: {e:?}，跳过此任务");
-                            self.sub_target = None;
                             return None;
                         }
                     }
                 }
                 None => {
                     // 无任务 → 无下一步
-                    self.sub_target = None;
                     return None;
                 }
             }
@@ -133,7 +126,6 @@ impl GoalService {
             if cur_gx == goal_gx && cur_gy == goal_gy {
                 info!("[Goal] 已在目标格，到达");
                 self.goal = None;
-                self.sub_target = None;
                 self.world.clear_goal();
                 return None;
             }
@@ -145,36 +137,25 @@ impl GoalService {
             cluster_to_obstacle_cells(&others, self.obstacle_inflation_radius).into_iter().collect()
         };
         match self.world.get_path(wx, wy, &dynamic_obstacles).await {
-            Some(cell) => {
-                self.sub_target = Some(cell);
-                Some(cell)
-            }
+            Some(cell) => Some(cell),
             None => {
                 warn!("[Goal] D* 不可达，跳过此任务");
                 self.goal = None;
-                self.sub_target = None;
                 self.world.clear_goal();
                 None
             }
         }
     }
 
-    /// 当前意图（下一格，供 state_notifier 广播）
-    pub fn sub_target(&self) -> Option<(i32, i32)> {
-        self.sub_target
-    }
-
     /// 外部切换模式时重置
     pub fn reset(&mut self) {
         self.goal = None;
-        self.sub_target = None;
         self.world.clear_goal();
     }
 
     /// 装载新目标：设 goal + 建 D* 路径（Goto / Circle 共用）
     fn start_goal(&mut self, goal: (f32, f32), wx: f32, wy: f32) {
         self.goal = Some(goal);
-        self.sub_target = None;
         let start_gx = (wx / CELL_RESOLUTION).floor() as i32;
         let start_gy = (wy / CELL_RESOLUTION).floor() as i32;
         let goal_gx = (goal.0 / CELL_RESOLUTION).floor() as i32;

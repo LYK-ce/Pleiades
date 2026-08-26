@@ -14,6 +14,9 @@ use tracing::{info, warn};
 
 use crate::robot::slam::{CellState, OccupancyGrid, CHUNK_SIZE};
 
+/// compute_shortest_path 最大迭代次数（P3：极端地图降级，避免拖垮 50ms tick）
+const MAX_COMPUTE_ITERS: u32 = 10_000;
+
 // ============================================================
 // Key — D* Lite 优先队列排序键 (k1, k2)
 // ============================================================
@@ -243,6 +246,11 @@ impl DStarLite {
     fn compute_shortest_path(&mut self, grid: &OccupancyGrid) {
         let mut iter = 0u32;
         loop {
+            // P3：迭代上限——极端地图降级，避免拖垮 50ms tick（get_path 在 main_loop 同步执行）
+            if iter >= MAX_COMPUTE_ITERS {
+                warn!("[D*] compute_shortest_path 超过迭代上限 {MAX_COMPUTE_ITERS}，降级（路径可能不完整）");
+                break;
+            }
             let (key, cell) = match self.pop_valid() {
                 Some(v) => v,
                 None => {
@@ -250,6 +258,7 @@ impl DStarLite {
                     break;
                 }
             };
+            iter += 1;
 
             let g = self.g_val(cell);
             let rhs = self.rhs_val(cell);
@@ -283,7 +292,6 @@ impl DStarLite {
                     }
                 }
             }
-            iter += 1;
         }
     }
 

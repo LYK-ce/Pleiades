@@ -215,9 +215,6 @@ pub async fn robot_bootstrap(
         .and_then(|l| l.enabled).unwrap_or(true);
     let flight_ctrl_enabled = r.and_then(|r| r.flight_ctrl.as_ref())
         .and_then(|f| f.enabled).unwrap_or(false);
-    if flight_ctrl_enabled {
-        warn!("[Robot] flight_ctrl 设备尚未实现（未来 task），忽略 enabled=true");
-    }
 
     // 底盘配置
     let chassis = r.and_then(|r| r.chassis.as_ref());
@@ -245,18 +242,45 @@ pub async fn robot_bootstrap(
         }
     };
     let lidar_baudrate = lidar.and_then(|l| l.baudrate).or(Some(230400));
+
+    // 飞控配置（Task 22_4）：enabled=false 或 connection 空 → 禁用；字段缺失 → None（纯车）
+    let flight_ctrl = r.and_then(|r| r.flight_ctrl.as_ref());
+    let flight_ctrl_port = if !flight_ctrl_enabled {
+        None
+    } else {
+        match flight_ctrl.and_then(|f| f.connection.clone()) {
+            Some(s) if !s.trim().is_empty() => Some(s),
+            _ => None,
+        }
+    };
+    let flight_ctrl_baudrate = flight_ctrl.and_then(|f| f.baudrate).or(Some(921600));
+    if flight_ctrl_enabled && flight_ctrl_port.is_none() {
+        warn!("[Robot] flight_ctrl.enabled=true 但 connection 未配置，忽略飞控（退化为纯车）");
+    }
+
+    // 车机互斥
+    let chassis_enabled = if flight_ctrl_port.is_some() {
+        if chassis_enabled {
+            warn!("[Robot] flight_ctrl 已启用，强制禁用 chassis（车机互斥）");
+        }
+        false
+    } else {
+        chassis_enabled
+    };
     let obstacle_inflation_radius = r.and_then(|r| r.obstacle_inflation_radius).unwrap_or(0.2);
 
     let peer_name = Get_Peer_Name(config);
 
     info!(
-        "Robot 配置: chassis={chassis_enabled}(port={serial_port} baud={baudrate} car={car_type:?}) lidar={lidar_enabled}({}) infl_r={obstacle_inflation_radius} peer_name={peer_name}",
-        lidar_port.as_deref().unwrap_or("None")
+        "Robot 配置: chassis={chassis_enabled}(port={serial_port} baud={baudrate} car={car_type:?}) lidar={lidar_enabled}({}) flight_ctrl={} infl_r={obstacle_inflation_radius} peer_name={peer_name}",
+        lidar_port.as_deref().unwrap_or("None"),
+        flight_ctrl_port.as_deref().unwrap_or("None")
     );
 
     let robot = Robot::launch(
         chassis_enabled, &serial_port, baudrate, car_type,
         lidar_enabled, lidar_port.as_deref(), lidar_baudrate,
+        flight_ctrl_port.as_deref(), flight_ctrl_baudrate,
         origin,
         Some(node_handle),
         Some(robot_bus),
