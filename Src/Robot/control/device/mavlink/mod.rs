@@ -41,6 +41,8 @@ pub struct MavlinkDevice {
     component_id: u8,
     /// 解锁时刻记录的 yaw 偏移（armed 后首帧姿态到达时记录；None = 尚未记录，Task 22_5 修复）
     yaw_offset: Arc<Mutex<Option<f32>>>,
+    /// 一次性机动（takeoff/land）进行中：抑制保持 loop 发速度指令，避免零速度打断爬升/降落（Task 22_5 修复）
+    takeoff_pending: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -104,6 +106,8 @@ impl MavlinkDevice {
         let desired_clone = desired.clone();
         let yaw_offset = Arc::new(Mutex::new(None::<f32>));
         let yaw_offset_clone = yaw_offset.clone();
+        let takeoff_pending = Arc::new(AtomicBool::new(false));
+        let takeoff_pending_clone = takeoff_pending.clone();
         let system_id = GCS_SYSTEM_ID;
         let component_id = GCS_COMPONENT_ID;
         // RX 回调里「首个 HEARTBEAT 后重发 set_mode」需要访问 TX channel（spawn_port 返回后才就绪）
@@ -218,11 +222,16 @@ impl MavlinkDevice {
         let keep_cancel = cancel.clone();
         let keep_vel_fwd = vel_fwd;
         let keep_yaw_rate = yaw_rate_deg;
+        let keep_takeoff_pending = takeoff_pending_clone.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
+                        // Task 22_5 修复：起飞/降落期间闭嘴，避免零速度打断爬升/降落
+                        if keep_takeoff_pending.load(Ordering::SeqCst) {
+                            continue;
+                        }
                         let action = keep_desired.lock().unwrap().clone();
                         let (vx, vy, vz, yaw_rate) = action_to_velocity(action, keep_vel_fwd, keep_yaw_rate);
                         let msg = protocol::velocity_msg(FC_SYSTEM_ID, FC_COMPONENT_ID, vx, vy, vz, yaw_rate);
@@ -243,6 +252,7 @@ impl MavlinkDevice {
             system_id,
             component_id,
             yaw_offset,
+            takeoff_pending,
             cancel,
         })
     }
@@ -262,11 +272,15 @@ impl MavlinkDevice {
 
     /// 一次性命令：起飞（固定 1.8m，纯触发，不带确认回读）。
     pub fn takeoff_send(&self) -> Result<(), String> {
+        // Task 22_5 修复：抑制保持 loop，避免爬升期间被零速度指令打断
+        self.takeoff_pending.store(true, Ordering::SeqCst);
         self.send_message(&protocol::takeoff_msg(FC_SYSTEM_ID, FC_COMPONENT_ID))
     }
 
     /// 一次性命令：降落（纯触发，不带确认回读）。
     pub fn land_send(&self) -> Result<(), String> {
+        // Task 22_5 修复：抑制保持 loop，避免降落期间被速度指令干扰
+        self.takeoff_pending.store(true, Ordering::SeqCst);
         self.send_message(&protocol::land_msg(FC_SYSTEM_ID, FC_COMPONENT_ID))
     }
 
@@ -291,18 +305,22 @@ impl MavlinkDevice {
 
 impl MotionDevice for MavlinkDevice {
     fn move_forward(&self) -> Result<(), String> {
+        self.takeoff_pending.store(false, Ordering::SeqCst); // 开始运动，恢复保持 loop
         *self.desired.lock().unwrap() = MotionAction::MoveForward;
         Ok(())
     }
     fn move_backward(&self) -> Result<(), String> {
+        self.takeoff_pending.store(false, Ordering::SeqCst);
         *self.desired.lock().unwrap() = MotionAction::MoveBackward;
         Ok(())
     }
     fn turn_left(&self) -> Result<(), String> {
+        self.takeoff_pending.store(false, Ordering::SeqCst);
         *self.desired.lock().unwrap() = MotionAction::TurnLeft;
         Ok(())
     }
     fn turn_right(&self) -> Result<(), String> {
+        self.takeoff_pending.store(false, Ordering::SeqCst);
         *self.desired.lock().unwrap() = MotionAction::TurnRight;
         Ok(())
     }
