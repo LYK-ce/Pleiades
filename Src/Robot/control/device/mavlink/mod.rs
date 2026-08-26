@@ -39,7 +39,7 @@ pub struct MavlinkDevice {
     /// 本机（地面站/机载计算机）身份
     system_id: u8,
     component_id: u8,
-    /// 解锁时刻记录的 yaw 偏移（armed 后首帧姿态到达时记录；None = 尚未记录，Task 22_5 修复）
+    /// 姿态流建立时记录的 yaw 偏移（首帧 ATTITUDE 到达时记录，开机机头朝 = 0；None = 尚未记录）
     yaw_offset: Arc<Mutex<Option<f32>>>,
     /// 一次性机动（takeoff/land）进行中：抑制保持 loop 发速度指令，避免零速度打断爬升/降落（Task 22_5 修复）
     takeoff_pending: Arc<AtomicBool>,
@@ -139,15 +139,15 @@ impl MavlinkDevice {
                         set_mode_resent_cb.store(true, Ordering::SeqCst);
                     }
                 }
-                // 解锁跳变：armed false→true（仅提示；yaw_offset 的实际记录见下方补记逻辑）
+                // 解锁跳变诊断：armed false→true 时若姿态流尚未建立，说明遥测异常
                 if !was_armed && local.armed {
                     if local.attitude_count == 0 {
-                        warn!("[Mavlink] 解锁时姿态流尚未建立，将在首帧姿态到达后补记 yaw_offset");
+                        warn!("[Mavlink] 解锁时姿态流尚未建立，遥测链路可能异常");
                     }
                 }
-                // Task 22_5 修复：armed 且姿态流已建立、yaw_offset 尚未记录时补记，
-                // 覆盖「解锁瞬间无姿态流 → yaw_offset 永不记录 → 坐标静默按机头朝北」的退化。
-                if local.armed && local.attitude_count > 0 {
+                // 姿态流第一次建立时记录 yaw_offset（开机机头朝 = 0，与车一致；解锁不再跳变）。
+                // 覆盖「无姿态流 → yaw_offset 永不记录 → 坐标静默按机头朝北」的退化。
+                if local.attitude_count > 0 {
                     if let Ok(mut g) = yaw_offset_clone.lock() {
                         if g.is_none() {
                             let off = local.yaw;
