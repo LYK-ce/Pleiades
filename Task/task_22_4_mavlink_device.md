@@ -145,8 +145,8 @@ fn action_to_velocity(a: MotionAction) -> (f32, f32, f32, f32) {  // (vx, vy, vz
     match a {
         MoveForward(_)  => ( VEL_FWD, 0.0, 0.0, 0.0),
         MoveBackward(_) => (-VEL_FWD, 0.0, 0.0, 0.0),
-        TurnLeft(_)     => (0.0, 0.0, 0.0,  YAW_RATE),
-        TurnRight(_)    => (0.0, 0.0, 0.0, -YAW_RATE),
+        TurnLeft(_)     => (0.0, 0.0, 0.0, -YAW_RATE),  // NED：yaw_rate 正=顺时针/右转，左转为负
+        TurnRight(_)    => (0.0, 0.0, 0.0,  YAW_RATE),
         Stop            => (0.0, 0.0, 0.0, 0.0),                  // 悬停 = 零速度
     }
 }

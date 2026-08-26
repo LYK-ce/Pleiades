@@ -39,8 +39,8 @@ pub struct MavlinkDevice {
     /// 本机（地面站/机载计算机）身份
     system_id: u8,
     component_id: u8,
-    /// 解锁时刻记录的 yaw 偏移（armed false→true 跳变读一次）
-    yaw_offset: Arc<Mutex<f32>>,
+    /// 解锁时刻记录的 yaw 偏移（armed 后首帧姿态到达时记录；None = 尚未记录，Task 22_5 修复）
+    yaw_offset: Arc<Mutex<Option<f32>>>,
     cancel: CancellationToken,
 }
 
@@ -102,7 +102,7 @@ impl MavlinkDevice {
         let robot_state_clone = robot_state.clone();
         let desired = Arc::new(Mutex::new(MotionAction::Stop));
         let desired_clone = desired.clone();
-        let yaw_offset = Arc::new(Mutex::new(0.0f32));
+        let yaw_offset = Arc::new(Mutex::new(None::<f32>));
         let yaw_offset_clone = yaw_offset.clone();
         let system_id = GCS_SYSTEM_ID;
         let component_id = GCS_COMPONENT_ID;
@@ -135,17 +135,21 @@ impl MavlinkDevice {
                         set_mode_resent_cb.store(true, Ordering::SeqCst);
                     }
                 }
-                // 解锁跳变：armed false→true，记录 yaw_offset（坐标对齐用）
+                // 解锁跳变：armed false→true（仅提示；yaw_offset 的实际记录见下方补记逻辑）
                 if !was_armed && local.armed {
-                    // 解锁跳变：仅在姿态流已建立时记录 yaw_offset（否则 yaw 仍是默认 0）
-                    if local.attitude_count > 0 {
-                        let off = local.yaw;
-                        if let Ok(mut g) = yaw_offset_clone.lock() {
-                            *g = off;
+                    if local.attitude_count == 0 {
+                        warn!("[Mavlink] 解锁时姿态流尚未建立，将在首帧姿态到达后补记 yaw_offset");
+                    }
+                }
+                // Task 22_5 修复：armed 且姿态流已建立、yaw_offset 尚未记录时补记，
+                // 覆盖「解锁瞬间无姿态流 → yaw_offset 永不记录 → 坐标静默按机头朝北」的退化。
+                if local.armed && local.attitude_count > 0 {
+                    if let Ok(mut g) = yaw_offset_clone.lock() {
+                        if g.is_none() {
+                            let off = local.yaw;
+                            *g = Some(off);
+                            info!("[Mavlink] 记录 yaw_offset = {off}");
                         }
-                        info!("[Mavlink] 检测到解锁，记录 yaw_offset = {off}");
-                    } else {
-                        warn!("[Mavlink] 解锁时姿态流尚未建立，暂不记录 yaw_offset");
                     }
                 }
                 if updated {
@@ -156,7 +160,7 @@ impl MavlinkDevice {
                     }
                     // 坐标对齐后写入 RobotState（机设备写 z = 飞控 EKF 高度）
                     if let Some(rs) = &robot_state_clone {
-                        let offset = *yaw_offset_clone.lock().unwrap();
+                        let offset = (*yaw_offset_clone.lock().unwrap()).unwrap_or(0.0);
                         let (wx, wy, yaw_world) = aligned_world_pose(
                             local.local_x,
                             local.local_y,
@@ -171,9 +175,11 @@ impl MavlinkDevice {
                             g.attitude.roll = local.roll;
                             g.attitude.pitch = local.pitch;
                             g.attitude.yaw = yaw_world;
-                            g.vx = local.local_vx;
-                            g.vy = local.local_vy;
-                            g.vz = local.local_vz;
+                            // Task 22_5 修复：速度与位置同坐标系，vx/vy 也做 yaw_offset 旋转（与 aligned_world_pose 一致）
+                            g.vx = local.local_vx * offset.cos() + local.local_vy * offset.sin();
+                            g.vy = -local.local_vx * offset.sin() + local.local_vy * offset.cos();
+                            // Task 22_5 修复：vz 统一向上为正（LOCAL_POSITION_NED 的 vz 向下为正，取反）
+                            g.vz = -local.local_vz;
                             g.battery = local.battery_voltage;
                         }
                     }
@@ -271,7 +277,7 @@ impl MavlinkDevice {
 
     /// 读取 yaw_offset（解锁时刻记录的朝向偏移）。
     pub fn get_yaw_offset(&self) -> f32 {
-        *self.yaw_offset.lock().unwrap()
+        (*self.yaw_offset.lock().unwrap()).unwrap_or(0.0)
     }
 
     pub fn shutdown(&self) {
