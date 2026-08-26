@@ -63,3 +63,11 @@
 - **Lua 决策脚本路径硬编码**：`programs/robot/car.lua` 相对路径，后续可进 config
 - 后续 task：机脚本 + MavlinkDevice（步骤 7，等机硬件）
 - 结束时间：2026-08-20
+
+## 实机调试修复（2026-08-26，task_22_4 mavlink + task_22_5 后续）
+
+无人机（DRF450 + Pixhawk 2.4.8）实机联调中陆续修复的三处：
+
+- **yaw_offset 开机归零**（`mavlink/mod.rs`）：记录时机从「解锁后」改为「姿态流第一次建立时」（去掉 `armed` 条件，仅 `attitude_count > 0`）。修复：解锁瞬间 yaw 跳变（解锁前 yaw=飞控原始航向，解锁后跳回 0，地图乱）。改后开机机头朝即 0°，与车一致。
+- **takeoff/land 前补发 set_mode(GUIDED)**（`mavlink/mod.rs`）：`takeoff_send`/`land_send` 开头先 `set_mode(GUIDED)` 再发命令。修复：遥控器模式开关（边沿触发）停在非 GUIDED 档（如 POSHOLD=16）时，启动时发的 set_mode 被覆盖，NAV_TAKEOFF 在非 GUIDED 模式不生效 →「升一下又降」。注：不设 `FLTMODE_CH=0`，保留遥控器拨挡位强制接管能力。
+- **速度指令 type_mask 加 VZ_IGNORE**（`mavlink/protocol.rs`）：前进时垂直轴交给飞控自主锁高度（altitude hold，位置环），而非追踪 vz=0（速度环）。修复：前进前倾时速度环补油门不足导致缓慢掉高。
