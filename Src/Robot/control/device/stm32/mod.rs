@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-26
 
 //! STM32 控制板设备驱动
 //!
@@ -18,8 +18,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use constants::MotionState;
-use constants::RPT_SPEED;
+use constants::{MotionState, RPT_SPEED};
 use protocol::{
     feed_state_machine, pack_beep, pack_car_run, pack_motion, pack_motor,
     pack_reset, pack_rgb, pack_rgb_effect, pack_servo, update_state, RxState,
@@ -38,13 +37,15 @@ pub struct STM32Device {
     serial_cmd_tx: mpsc::Sender<Vec<u8>>,
     state: Arc<RwLock<RobotState>>,
     car_type: CarType,
+    forward_speed: i16,
+    turn_speed: i16,
     cancel: CancellationToken,
 }
 
 impl STM32Device {
     /// 启动 STM32 设备。`origin` 为小车初始世界坐标 (x, y, z)（默认 64,64,0），
     /// 注入 local_state 的 x/y/z 作为积分起点（Task 9：RobotState 记录全局唯一坐标）。
-    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, origin: (f32, f32, f32)) -> Result<Self, String> {
+    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, origin: (f32, f32, f32), forward_speed: i16, turn_speed: i16) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let mut sm: RxState = RxState::Head;
@@ -86,7 +87,7 @@ impl STM32Device {
             cancel.clone(),
         )?;
 
-        Ok(Self { serial_cmd_tx, state, car_type, cancel })
+        Ok(Self { serial_cmd_tx, state, car_type, forward_speed, turn_speed, cancel })
     }
 
     pub fn shutdown(&self) { self.cancel.cancel(); }
@@ -147,17 +148,17 @@ impl STM32Device {
 // ============================================================
 
 impl MotionDevice for STM32Device {
-    fn move_forward(&self, speed: i16) -> Result<(), String> {
-        self.forward(speed)
+    fn move_forward(&self) -> Result<(), String> {
+        self.forward(self.forward_speed)
     }
-    fn move_backward(&self, speed: i16) -> Result<(), String> {
-        self.backward(speed)
+    fn move_backward(&self) -> Result<(), String> {
+        self.backward(self.forward_speed)
     }
-    fn turn_left(&self, rate: i16) -> Result<(), String> {
-        self.spin_left(rate)
+    fn turn_left(&self) -> Result<(), String> {
+        self.spin_left(self.turn_speed)
     }
-    fn turn_right(&self, rate: i16) -> Result<(), String> {
-        self.spin_right(rate)
+    fn turn_right(&self) -> Result<(), String> {
+        self.spin_right(self.turn_speed)
     }
     fn stop(&self) -> Result<(), String> {
         STM32Device::stop(self)
@@ -189,6 +190,7 @@ impl STM32Device {
         origin: (f32, f32, f32),
     ) -> (Self, tokio::task::JoinHandle<()>) {
         use protocol::{feed_state_machine, update_state, RxState};
+        use constants::{FORWARD_SPEED, TURN_SPEED};
 
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
@@ -249,7 +251,7 @@ impl STM32Device {
             }
         });
 
-        (Self { serial_cmd_tx, state, car_type, cancel }, handle)
+        (Self { serial_cmd_tx, state, car_type, forward_speed: FORWARD_SPEED, turn_speed: TURN_SPEED, cancel }, handle)
     }
 }
 

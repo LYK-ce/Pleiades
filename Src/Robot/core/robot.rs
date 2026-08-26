@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-21
+//Modified Date ： 2026-08-26
 
 //! Robot 主循环
 //!
@@ -8,16 +8,15 @@
 //! - main_loop: select! 收命令 → dispatch；单点执行（get_path + 写 ExecuteState + 发命令 + 急停仲裁）
 //! - state_notifier: 100ms → 读 robot_state → 广播 Pose
 //! - SLAM task: 200ms → 读 lidar_state → update grid → 广播 map_delta
-//! - Lua 决策线程: 纯决策（读状态 + next_cell → 返回 DecisionResult，零副作用）
+//! - Rust 决策器（executor）: 三状态机纯决策（读状态 + next_cell → 返回动作意图，零副作用）
 
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::command::{AutoCmd, Command, ManualCmd, ModeCmd};
 use super::mission::MissionQueue;
@@ -27,13 +26,12 @@ use crate::robot::control::device::lidar::LidarDevice;
 use crate::robot::control::device::mavlink::{MavlinkDevice, Telemetry};
 use crate::robot::control::types::CarType;
 use crate::robot::core::goal::GoalService;
+use crate::robot::core::executor::DecisionExecutor;
 use crate::robot::core::state::{
-    DecisionResult, DecisionState, ExecuteState, LidarState, MotionAction, RobotState,
+    DecisionState, ExecuteState, LidarState, MotionAction, RobotState,
 };
 use crate::robot::device::MotionDevice;
 use crate::robot::slam::{OccupancyGrid, MapDelta, SlamContext, CELL_RESOLUTION};
-use crate::vm::capability_binding::{register_robot_caps, RobotCapsContext};
-use crate::vm::engine::LuaContext;
 
 use crate::event_bus::EventBus;
 use crate::robot::core::cluster::{cluster_consumer, cluster_table_cleaner, ClusterInfoTable};
@@ -49,13 +47,7 @@ use crate::robot::core::protocol::{
 const OBSTACLE_THRESHOLD_M: f32 = 0.3;
 /// 到达判定阈值（米）
 const ARRIVAL_THRESHOLD_M: f32 = 0.3;
-/// 决策线程看门狗超时（毫秒）：超时未产出决策结果则强制停车
-const DECISION_WATCHDOG_MS: u64 = 500;
 
-/// 决策请求载荷：generation（代际号）+ 下一格（None = 无任务/到达/不可达）
-type DecisionReq = (u64, Option<(i32, i32)>);
-/// 决策结果回传：generation + DecisionResult
-type DecisionResp = (u64, DecisionResult);
 
 /// 位姿广播消息
 #[derive(Debug, Clone)]
@@ -108,6 +100,10 @@ impl Robot {
         robot_bus: Option<Arc<EventBus>>,
         robot_cmd_frame_rx: Option<mpsc::Receiver<Vec<u8>>>,
         obstacle_inflation_radius: f32,
+        forward_speed: i16,
+        turn_speed: i16,
+        vel_fwd: f32,
+        yaw_rate_deg: f32,
         peer_name: String,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
@@ -132,7 +128,7 @@ impl Robot {
         let op_mode = Arc::new(RwLock::new(OpMode::default()));
         let mission_queue = Arc::new(RwLock::new(MissionQueue::default()));
 
-        // 3.1 执行器状态（Task 22_3：main_loop 唯一写，state_notifier + Lua get_state 读）
+        // 3.1 执行器状态（main_loop 唯一写，state_notifier 读）
         let execute_state = Arc::new(RwLock::new(ExecuteState::default()));
 
         // 3.2 集群信息表（Task 13_1：入站 POSE → 表）
@@ -155,7 +151,7 @@ impl Robot {
 
         // 4. spawn 底盘设备（chassis 开关）
         let stm32: Option<Arc<STM32Device>> = if chassis_enabled {
-            Some(Arc::new(STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin)?))
+            Some(Arc::new(STM32Device::spawn(port, baudrate, car_type, robot_state.clone(), origin, forward_speed, turn_speed)?))
         } else {
             None
         };
@@ -166,7 +162,7 @@ impl Robot {
             Some(p) => {
                 let baud = flight_ctrl_baudrate.unwrap_or(921600);
                 info!("启用飞控: port={p}, baud={baud}");
-                match MavlinkDevice::spawn(p, baud, flight_state, Some(robot_state.clone()), origin) {
+                match MavlinkDevice::spawn(p, baud, flight_state, Some(robot_state.clone()), origin, vel_fwd, yaw_rate_deg) {
                     Ok(d) => Some(Arc::new(d)),
                     Err(e) => {
                         // P2#7：失败路径清理——已 spawn 的 STM32 后台任务必须 shutdown
@@ -189,19 +185,6 @@ impl Robot {
             return Err("chassis 与 flight_ctrl 至少启用一个".to_string());
         };
 
-        // 4.2 决策线程（Task 22_3：Lua 纯决策 + main_loop 单点执行）
-        let (tick_tx, tick_rx) = mpsc::channel::<DecisionReq>(1);
-        let (result_tx, result_rx) = mpsc::channel::<DecisionResp>(1);
-        spawn_decision_thread(
-            RobotCapsContext {
-                robot_state: robot_state.clone(),
-                execute_state: execute_state.clone(),
-                world: world.clone(),
-            },
-            tick_rx,
-            result_tx,
-            cancel.clone(),
-        );
 
         // 4. spawn 雷达设备（lidar 开关，含 SLAM 建图）
         let lidar: Option<LidarDevice> = match (lidar_enabled, lidar_port, lidar_baudrate) {
@@ -303,8 +286,6 @@ impl Robot {
                 loop_execute_state,
                 loop_world,
                 loop_goal,
-                tick_tx,
-                result_rx,
                 loop_cancel,
             ).await;
         });
@@ -392,16 +373,13 @@ async fn main_loop(
     execute_state: Arc<RwLock<ExecuteState>>,
     world: Arc<World>,
     goal_service: Arc<tokio::sync::Mutex<GoalService>>,
-    decision_tick_tx: mpsc::Sender<DecisionReq>,
-    mut decision_result_rx: mpsc::Receiver<DecisionResp>,
     cancel: CancellationToken,
 ) {
-    info!("Robot 主循环启动（单点执行 + Lua 纯决策）");
+    info!("Robot 主循环启动（单点执行 + Rust 决策器）");
 
     let auto_tick_ms = 50u64;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
-    let mut generation: u64 = 0;
-    let mut last_result_at: Instant = Instant::now();
+    let executor = DecisionExecutor::new();
 
     loop {
         select! {
@@ -414,13 +392,13 @@ async fn main_loop(
                                 *op_mode.write().await = OpMode::Manual;
                                 mission_queue.write().await.clear();
                                 goal_service.lock().await.reset();
-                                invalidate(&execute_state, &*motion, &mut generation, &mut decision_result_rx, &mut last_result_at).await;
+                                invalidate(&execute_state, &*motion).await;
                             }
                             ModeCmd::SwitchToAuto => {
                                 info!("[Robot] 切换到 Auto 模式");
                                 *op_mode.write().await = OpMode::Auto;
                                 goal_service.lock().await.reset();
-                                invalidate(&execute_state, &*motion, &mut generation, &mut decision_result_rx, &mut last_result_at).await;
+                                invalidate(&execute_state, &*motion).await;
                                 next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
                             }
                         }
@@ -442,7 +420,7 @@ async fn main_loop(
                                     info!("[Robot] Auto 任务队列已替换");
                                     mission_queue.write().await.replace(list);
                                     goal_service.lock().await.reset();
-                                    invalidate(&execute_state, &*motion, &mut generation, &mut decision_result_rx, &mut last_result_at).await;
+                                    invalidate(&execute_state, &*motion).await;
                                 }
                             }
                         } else {
@@ -457,45 +435,27 @@ async fn main_loop(
                 }
             }
 
-            // auto_tick：仅 Auto 模式激活（急停 + get_path + Lua 纯决策）
+            // auto_tick：仅 Auto 模式激活（急停 + get_path + Rust 决策）
             _ = tokio::time::sleep_until(next_tick.into()), if *op_mode.read().await == OpMode::Auto => {
                 let rs = robot_state.read().await.clone();
                 let ls = lidar_state.read().await.clone();
 
                 let emergency = check_emergency_stop(&ls, &rs, &*motion, &world).await;
                 if emergency {
-                    // 急停：invalidate（停车 + 清意图 + 换代 + drain），保留 goal 供绕行
-                    invalidate(&execute_state, &*motion, &mut generation, &mut decision_result_rx, &mut last_result_at).await;
+                    // 急停：invalidate（停车 + 清意图），保留 goal 供绕行
+                    invalidate(&execute_state, &*motion).await;
                 } else {
-                    // R3-B：main_loop 自己调 get_path（任务副作用在此，与 reset/invalidate 同源）
+                    // 方案二：main_loop 自己调 get_path + Rust 决策器（纯决策，无跨线程/代际/看门狗）
                     let next_cell = goal_service.lock().await.get_path().await;
 
-                    // 请求决策（带 generation + next_cell）
-                    let _ = decision_tick_tx.try_send((generation, next_cell));
-
-                    // 收结果并应用（代际校验，过期丢弃）
-                    match decision_result_rx.try_recv() {
-                        Ok((gen, result)) if gen == generation => {
-                            *execute_state.write().await = ExecuteState {
-                                state: result.state,
-                                sub_target: result.sub_target,
-                            };
-                            if let Some(action) = result.action {
-                                apply_action(&*motion, action);
-                            }
-                            last_result_at = Instant::now();
-                        }
-                        Ok(_) => { /* 过期结果，丢弃 */ }
-                        Err(TryRecvError::Empty) => { /* 决策线程还在算，保持 */ }
-                        Err(TryRecvError::Disconnected) => {
-                            // 决策线程死亡，走看门狗
-                        }
-                    }
-
-                    // 看门狗：决策线程卡死/死亡兜底（复用 invalidate：换代 + drain，保证迟到结果被丢弃）
-                    if last_result_at.elapsed() > Duration::from_millis(DECISION_WATCHDOG_MS) {
-                        error!("[Robot] 决策线程超时未产出，已强制停车");
-                        invalidate(&execute_state, &*motion, &mut generation, &mut decision_result_rx, &mut last_result_at).await;
+                    let current = execute_state.read().await.clone();
+                    let result = executor.decide(next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+                    *execute_state.write().await = ExecuteState {
+                        state: result.state,
+                        sub_target: result.sub_target,
+                    };
+                    if let Some(action) = result.action {
+                        apply_action(&*motion, action);
                     }
                 }
 
@@ -529,20 +489,13 @@ async fn main_loop(
 // 作废助手（Task 22_3：急停 / 任务替换 / 模式切换统一调用）
 // ============================================================
 
-/// 让所有在途/陈旧的决策结果作废：停车 + 清意图 + 换代 + drain + 重置看门狗。
-/// 注意：只统一「停车 + 清意图 + 换代 + drain」；mission/goal 清理由调用点保留。
+/// 作废助手（方案二）：停车 + 清意图。mission/goal 清理由调用点保留。
 async fn invalidate(
     execute_state: &Arc<RwLock<ExecuteState>>,
     motion: &dyn MotionDevice,
-    generation: &mut u64,
-    result_rx: &mut mpsc::Receiver<DecisionResp>,
-    last_result_at: &mut Instant,
 ) {
     let _ = motion.stop();
     *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
-    *generation += 1;
-    while result_rx.try_recv().is_ok() {}
-    *last_result_at = Instant::now();
 }
 
 // ============================================================
@@ -551,10 +504,10 @@ async fn invalidate(
 
 fn apply_action(motion: &dyn MotionDevice, action: MotionAction) {
     let r = match action {
-        MotionAction::MoveForward(s) => motion.move_forward(s),
-        MotionAction::MoveBackward(s) => motion.move_backward(s),
-        MotionAction::TurnLeft(r) => motion.turn_left(r),
-        MotionAction::TurnRight(r) => motion.turn_right(r),
+        MotionAction::MoveForward => motion.move_forward(),
+        MotionAction::MoveBackward => motion.move_backward(),
+        MotionAction::TurnLeft => motion.turn_left(),
+        MotionAction::TurnRight => motion.turn_right(),
         MotionAction::Stop => motion.stop(),
     };
     if let Err(e) = r {
@@ -574,10 +527,10 @@ async fn dispatch(
     cmd: ManualCmd,
 ) {
     match cmd {
-        ManualCmd::Forward(s)   => { if let Err(e) = motion.move_forward(s)   { warn!("[Robot] Forward 失败: {e}"); } }
-        ManualCmd::Backward(s)  => { if let Err(e) = motion.move_backward(s)  { warn!("[Robot] Backward 失败: {e}"); } }
-        ManualCmd::SpinLeft(s)  => { if let Err(e) = motion.turn_left(s)      { warn!("[Robot] SpinLeft 失败: {e}"); } }
-        ManualCmd::SpinRight(s) => { if let Err(e) = motion.turn_right(s)     { warn!("[Robot] SpinRight 失败: {e}"); } }
+        ManualCmd::Forward(_)   => { if let Err(e) = motion.move_forward()   { warn!("[Robot] Forward 失败: {e}"); } }
+        ManualCmd::Backward(_)  => { if let Err(e) = motion.move_backward()  { warn!("[Robot] Backward 失败: {e}"); } }
+        ManualCmd::SpinLeft(_)  => { if let Err(e) = motion.turn_left()      { warn!("[Robot] SpinLeft 失败: {e}"); } }
+        ManualCmd::SpinRight(_) => { if let Err(e) = motion.turn_right()     { warn!("[Robot] SpinRight 失败: {e}"); } }
         ManualCmd::Stop         => { if let Err(e) = motion.stop()            { warn!("[Robot] Stop 失败: {e}"); } }
         ManualCmd::Beep(ms)     => {
             match stm32 {
@@ -623,7 +576,7 @@ async fn dispatch(
 // ============================================================
 
 /// 前方障碍急停检查：LiDAR 前方距离 < 阈值 → 立即停车 + 标记障碍。
-/// 返回 true = 已触发急停（跳过本 tick 的 Lua 决策）。
+/// 返回 true = 已触发急停（跳过本 tick 的决策）。
 async fn check_emergency_stop(
     lidar_state: &LidarState,
     robot_state: &RobotState,
@@ -664,108 +617,3 @@ async fn check_emergency_stop(
     false
 }
 
-// ============================================================
-// Lua 决策线程（Task 22_3：纯决策，零副作用，回传 DecisionResult）
-// ============================================================
-
-/// 在专用线程上运行 Lua 决策：创建独立 LuaContext → 注册只读 caps → 加载脚本 →
-/// 收 tick(next_cell) → 调 on_tick → 回传 DecisionResult。
-fn spawn_decision_thread(
-    ctx: RobotCapsContext,
-    mut tick_rx: mpsc::Receiver<DecisionReq>,
-    result_tx: mpsc::Sender<DecisionResp>,
-    cancel: CancellationToken,
-) {
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!("[Robot] 决策线程 runtime 创建失败: {e}");
-                return;
-            }
-        };
-        rt.block_on(async move {
-            let lua = match LuaContext::new() {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("[Robot] Lua 实例创建失败: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = register_robot_caps(&lua, ctx) {
-                warn!("[Robot] 注册 Robot caps 失败: {e}");
-                return;
-            }
-            let script = match std::fs::read_to_string("programs/robot/car.lua") {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("[Robot] 读取决策脚本失败: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = lua.load(&script).eval::<()>() {
-                warn!("[Robot] 决策脚本加载失败: {e}");
-                return;
-            }
-            let on_tick: mlua::Function = match lua.globals().get("on_tick") {
-                Ok(f) => f,
-                Err(e) => {
-                    warn!("[Robot] 脚本缺少 on_tick: {e}");
-                    return;
-                }
-            };
-            info!("[Robot] Lua 决策线程启动");
-            loop {
-                tokio::select! {
-                    r = tick_rx.recv() => {
-                        let (gen, next_cell) = match r {
-                            Some(v) => v,
-                            None => {
-                                info!("[Robot] 决策 tick 通道关闭");
-                                break;
-                            }
-                        };
-                        // 元组 (i32,i32) 不实现 mlua IntoLua，转成命名键表
-                        let arg: Option<mlua::Table> = match next_cell {
-                            Some((gx, gy)) => {
-                                match lua.create_table().and_then(|t| {
-                                    t.set("gx", gx)?;
-                                    t.set("gy", gy)?;
-                                    Ok(t)
-                                }) {
-                                    Ok(t) => Some(t),
-                                    Err(e) => {
-                                        warn!("[Robot] 建 next_cell 表失败: {e}");
-                                        None
-                                    }
-                                }
-                            }
-                            None => None,
-                        };
-                        // 纯决策：on_tick 返回 DecisionResult，零副作用
-                        let result: DecisionResult = match on_tick.call_async::<DecisionResult>(arg).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                // R9：脚本错误回安全结果（停），不杀线程
-                                warn!("[Robot] on_tick 执行失败: {e}");
-                                DecisionResult {
-                                    state: DecisionState::Idle,
-                                    sub_target: None,
-                                    action: Some(MotionAction::Stop),
-                                }
-                            }
-                        };
-                        if result_tx.send((gen, result)).await.is_err() {
-                            info!("[Robot] 决策结果通道关闭");
-                            break;
-                        }
-                    }
-                    _ = cancel.cancelled() => {
-                        info!("[Robot] Lua 决策线程退出");
-                        break;
-                    }
-                }
-            }
-        });
-    });
-}

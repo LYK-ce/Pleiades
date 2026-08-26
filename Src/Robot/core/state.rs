@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-26
 
 //! 机器人全局状态
 //!
@@ -108,17 +108,17 @@ pub enum DecisionState {
     Moving,
 }
 
-/// 动作（带载荷，语义清晰）
+/// 动作（纯意图，无速度载荷——速度由设备层绑定，Task 22_5 D2）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MotionAction {
-    MoveForward(i16),
-    MoveBackward(i16),
-    TurnLeft(i16),
-    TurnRight(i16),
+    MoveForward,
+    MoveBackward,
+    TurnLeft,
+    TurnRight,
     Stop,
 }
 
-/// Lua on_tick 的返回值（不含 generation，generation 为 Rust 侧记账）
+/// 决策器 decide 的返回值（纯决策结果）
 #[derive(Debug, Clone)]
 pub struct DecisionResult {
     pub state: DecisionState,
@@ -133,8 +133,8 @@ pub struct DecisionResult {
 
 /// 执行器状态（决策状态机 + 意图广播）
 ///
-/// 写者 = main_loop（应用 DecisionResult 时写；急停/任务替换/模式切换/看门狗超时统一写 Idle+None）；
-/// 读者 = state_notifier（100ms 组帧）+ Lua caps `get_state`。
+/// 写者 = main_loop（应用决策结果时写；急停/任务替换/模式切换统一写 Idle+None）；
+/// 读者 = state_notifier（100ms 组帧）。
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteState {
     /// 状态机状态

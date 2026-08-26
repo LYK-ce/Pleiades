@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date : 2026-04-09
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-26
 
 #![allow(non_snake_case, non_camel_case_types)]
 
@@ -53,6 +53,8 @@ enabled = true # 底盘开关（车默认开）
 port = "/dev/myserial"
 baudrate = 115200
 car_type = "X3Plus" # X3 / X3Plus / X1 / R2
+forward_speed = 30 # 前进/后退档位（缺省 30）
+turn_speed = 10    # 原地转向档位（缺省 10）
 
 [Robot.lidar]
 enabled = true # 雷达开关（含 SLAM 建图）
@@ -63,6 +65,8 @@ baudrate = 230400
 enabled = false # 飞控开关（机，未来）
 # connection = "/dev/ttyS0" # 飞控连接方式（MAVLink 串口/UDP，未来 task）
 # baudrate = 921600 # 飞控串口波特率
+vel_fwd = 0.3      # 前进/后退速度 m/s（缺省 0.3）
+yaw_rate_deg = 15  # 转向角速度 °/s（缺省 15）
 "#;
 
 /// 默认配置目录名
@@ -152,6 +156,10 @@ pub struct ChassisConfig {
     pub port: Option<String>,
     pub baudrate: Option<u32>,
     pub car_type: Option<String>,
+    /// 前进/后退速度档位（缺省 30，Task 22_5 D2：速度由设备层绑定）
+    pub forward_speed: Option<i16>,
+    /// 原地转向速度档位（缺省 10）
+    pub turn_speed: Option<i16>,
 }
 
 /// 雷达设备配置（YDLIDAR，含 SLAM 建图）
@@ -170,6 +178,10 @@ pub struct FlightCtrlConfig {
     pub connection: Option<String>,
     /// 串口波特率（默认 921600）
     pub baudrate: Option<u32>,
+    /// 前进/后退速度 (m/s，缺省 0.3，Task 22_5 D2：速度由设备层绑定)
+    pub vel_fwd: Option<f32>,
+    /// 转向角速度 (°/s，缺省 15)
+    pub yaw_rate_deg: Option<f32>,
 }
 
 /// 读取节点名称，默认 "new_peer"

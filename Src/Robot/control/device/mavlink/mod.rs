@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-25
-//Modified Date ： 2026-08-25
+//Modified Date ： 2026-08-26
 
 //! MAVLink 飞控设备驱动（Task 22_4）
 //!
@@ -44,15 +44,15 @@ pub struct MavlinkDevice {
     cancel: CancellationToken,
 }
 
-/// 期望动作 → 速度四元组（固定速度，忽略 i16 载荷）
-fn action_to_velocity(a: MotionAction) -> (f32, f32, f32, f32) {
-    let yaw_rate = YAW_RATE_DEG.to_radians();
+/// 期望动作 → 速度四元组（速度由设备层绑定，Task 22_5 D2）
+fn action_to_velocity(a: MotionAction, vel_fwd: f32, yaw_rate_deg: f32) -> (f32, f32, f32, f32) {
+    let yaw_rate = yaw_rate_deg.to_radians();
     match a {
-        MotionAction::MoveForward(_) => (VEL_FWD, 0.0, 0.0, 0.0),
-        MotionAction::MoveBackward(_) => (-VEL_FWD, 0.0, 0.0, 0.0),
+        MotionAction::MoveForward => (vel_fwd, 0.0, 0.0, 0.0),
+        MotionAction::MoveBackward => (-vel_fwd, 0.0, 0.0, 0.0),
         // 机体系 NED：yaw_rate 正 = 顺时针/右转（与 UAV turn_degrees 一致）
-        MotionAction::TurnLeft(_) => (0.0, 0.0, 0.0, -yaw_rate),
-        MotionAction::TurnRight(_) => (0.0, 0.0, 0.0, yaw_rate),
+        MotionAction::TurnLeft => (0.0, 0.0, 0.0, -yaw_rate),
+        MotionAction::TurnRight => (0.0, 0.0, 0.0, yaw_rate),
         MotionAction::Stop => (0.0, 0.0, 0.0, 0.0), // 停 = 悬停 = 零速度
     }
 }
@@ -94,6 +94,8 @@ impl MavlinkDevice {
         state: Arc<RwLock<Telemetry>>,
         robot_state: Option<Arc<RwLock<RobotState>>>,
         origin: (f32, f32, f32),
+        vel_fwd: f32,
+        yaw_rate_deg: f32,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
@@ -208,13 +210,15 @@ impl MavlinkDevice {
         let keep_tx = serial_cmd_tx.clone();
         let keep_desired = desired_clone.clone();
         let keep_cancel = cancel.clone();
+        let keep_vel_fwd = vel_fwd;
+        let keep_yaw_rate = yaw_rate_deg;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let action = keep_desired.lock().unwrap().clone();
-                        let (vx, vy, vz, yaw_rate) = action_to_velocity(action);
+                        let (vx, vy, vz, yaw_rate) = action_to_velocity(action, keep_vel_fwd, keep_yaw_rate);
                         let msg = protocol::velocity_msg(FC_SYSTEM_ID, FC_COMPONENT_ID, vx, vy, vz, yaw_rate);
                         let bytes = protocol::serialize_message(&msg, system_id, component_id);
                         if let Err(e) = keep_tx.try_send(bytes) {
@@ -280,20 +284,20 @@ impl MavlinkDevice {
 // ============================================================
 
 impl MotionDevice for MavlinkDevice {
-    fn move_forward(&self, _speed: i16) -> Result<(), String> {
-        *self.desired.lock().unwrap() = MotionAction::MoveForward(0); // 固定速度，忽略参数
+    fn move_forward(&self) -> Result<(), String> {
+        *self.desired.lock().unwrap() = MotionAction::MoveForward;
         Ok(())
     }
-    fn move_backward(&self, _speed: i16) -> Result<(), String> {
-        *self.desired.lock().unwrap() = MotionAction::MoveBackward(0);
+    fn move_backward(&self) -> Result<(), String> {
+        *self.desired.lock().unwrap() = MotionAction::MoveBackward;
         Ok(())
     }
-    fn turn_left(&self, _rate: i16) -> Result<(), String> {
-        *self.desired.lock().unwrap() = MotionAction::TurnLeft(0);
+    fn turn_left(&self) -> Result<(), String> {
+        *self.desired.lock().unwrap() = MotionAction::TurnLeft;
         Ok(())
     }
-    fn turn_right(&self, _rate: i16) -> Result<(), String> {
-        *self.desired.lock().unwrap() = MotionAction::TurnRight(0);
+    fn turn_right(&self) -> Result<(), String> {
+        *self.desired.lock().unwrap() = MotionAction::TurnRight;
         Ok(())
     }
     fn stop(&self) -> Result<(), String> {
@@ -321,26 +325,26 @@ mod tests {
     fn test_action_to_velocity_translation() {
         // 前进/后退：固定 VEL_FWD
         assert_eq!(
-            action_to_velocity(MotionAction::MoveForward(30)),
+            action_to_velocity(MotionAction::MoveForward, VEL_FWD, YAW_RATE_DEG),
             (VEL_FWD, 0.0, 0.0, 0.0)
         );
         assert_eq!(
-            action_to_velocity(MotionAction::MoveBackward(30)),
+            action_to_velocity(MotionAction::MoveBackward, VEL_FWD, YAW_RATE_DEG),
             (-VEL_FWD, 0.0, 0.0, 0.0)
         );
         // 转向：固定 YAW_RATE
         let yaw = YAW_RATE_DEG.to_radians();
         assert_eq!(
-            action_to_velocity(MotionAction::TurnLeft(10)),
+            action_to_velocity(MotionAction::TurnLeft, VEL_FWD, YAW_RATE_DEG),
             (0.0, 0.0, 0.0, -yaw)
         );
         assert_eq!(
-            action_to_velocity(MotionAction::TurnRight(10)),
+            action_to_velocity(MotionAction::TurnRight, VEL_FWD, YAW_RATE_DEG),
             (0.0, 0.0, 0.0, yaw)
         );
         // 停：零速度（悬停）
         assert_eq!(
-            action_to_velocity(MotionAction::Stop),
+            action_to_velocity(MotionAction::Stop, VEL_FWD, YAW_RATE_DEG),
             (0.0, 0.0, 0.0, 0.0)
         );
     }

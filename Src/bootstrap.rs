@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-06
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-26
 
 //! 启动组装层（Task 9_2）
 //!
@@ -230,6 +230,10 @@ pub async fn robot_bootstrap(
         None => CarType::X3Plus,
     };
 
+    // 底盘速度（Task 22_5 D2：速度由设备层绑定，config 可调）
+    let forward_speed = chassis.and_then(|c| c.forward_speed).unwrap_or(30).clamp(0, 100);
+    let turn_speed = chassis.and_then(|c| c.turn_speed).unwrap_or(10).clamp(0, 100);
+
     // 雷达配置：enabled=false 或 port 空串 → 禁用；字段缺失 → 缺省 /dev/rplidar（决策 #8）
     let lidar = r.and_then(|r| r.lidar.as_ref());
     let lidar_port = if !lidar_enabled {
@@ -254,6 +258,10 @@ pub async fn robot_bootstrap(
         }
     };
     let flight_ctrl_baudrate = flight_ctrl.and_then(|f| f.baudrate).or(Some(921600));
+
+    // 飞控速度（Task 22_5 D2：速度由设备层绑定，config 可调）
+    let vel_fwd = flight_ctrl.and_then(|f| f.vel_fwd).unwrap_or(0.3).max(0.0);
+    let yaw_rate_deg = flight_ctrl.and_then(|f| f.yaw_rate_deg).unwrap_or(15.0).max(0.0);
     if flight_ctrl_enabled && flight_ctrl_port.is_none() {
         warn!("[Robot] flight_ctrl.enabled=true 但 connection 未配置，忽略飞控（退化为纯车）");
     }
@@ -286,6 +294,10 @@ pub async fn robot_bootstrap(
         Some(robot_bus),
         Some(robot_cmd_frame_rx),
         obstacle_inflation_radius,
+        forward_speed,
+        turn_speed,
+        vel_fwd,
+        yaw_rate_deg,
         peer_name.clone(),
     ).await?;
     info!("Robot 已启动");

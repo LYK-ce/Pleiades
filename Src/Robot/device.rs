@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-08-26
 
 //! 设备抽象层（Task 22）
 //!
@@ -17,10 +17,10 @@
 /// 底层协议翻译由各实现自己完成（车走 `FUNC_CAR_RUN`，机走 MAVLink）。
 /// `start()`（构造）不进 trait——各设备的 start 参数是各自的 config 类型，签名天然不同。
 pub trait MotionDevice: Send + Sync {
-    fn move_forward(&self, speed: i16) -> Result<(), String>;
-    fn move_backward(&self, speed: i16) -> Result<(), String>;
-    fn turn_left(&self, rate: i16) -> Result<(), String>;
-    fn turn_right(&self, rate: i16) -> Result<(), String>;
+    fn move_forward(&self) -> Result<(), String>;
+    fn move_backward(&self) -> Result<(), String>;
+    fn turn_left(&self) -> Result<(), String>;
+    fn turn_right(&self) -> Result<(), String>;
     fn stop(&self) -> Result<(), String>;
     fn shutdown(&self);
 }

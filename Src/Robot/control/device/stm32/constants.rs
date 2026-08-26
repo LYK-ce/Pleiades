@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-07-21
+//Modified Date ： 2026-08-26
 
 //! STM32 协议常量
 //!
@@ -46,3 +46,7 @@ pub const RPT_MPU_RAW: u8 = 0x0B;
 pub const RPT_IMU_ATT: u8 = 0x0C;
 pub const RPT_ENCODER: u8 = 0x0D;
 pub const RPT_ICM_RAW: u8 = 0x0E;
+
+// ─── 速度常量（Task 22_5 D2：速度由设备层绑定，Lua/决策器只给意图）──────
+pub const FORWARD_SPEED: i16 = 30; // 前进/后退档位（原 car.lua MOVE_SPEED）
+pub const TURN_SPEED: i16 = 10;    // 原地转向档位（原 car.lua TURN_SPEED）
