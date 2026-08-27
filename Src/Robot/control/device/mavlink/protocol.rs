@@ -286,7 +286,6 @@ pub fn velocity_msg(
         | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AX_IGNORE
         | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AY_IGNORE
         | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AZ_IGNORE
-        | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_VZ_IGNORE
         | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_YAW_IGNORE;
     MavMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
         time_boot_ms: 0,
