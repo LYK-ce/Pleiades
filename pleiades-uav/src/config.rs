@@ -15,6 +15,8 @@ pub struct UavConfig {
     pub base: BaseConfig,
     /// 飞控设备配置（MAVLink）
     pub flight_ctrl: Option<FlightCtrlConfig>,
+    /// 他车障碍膨胀半径（米，缺省 0.2；「天上小车」2D 寻路阶段使用）
+    pub obstacle_inflation_radius: Option<f32>,
 }
 
 /// 飞控设备配置（Pixhawk / MAVLink）

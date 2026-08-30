@@ -76,9 +76,19 @@
 - `cargo check --workspace` ✅ 0 error（base 24 警告 + ugv 42 + uav 34，主要为设备端死常量 + uav 复制的 2D 决策死代码，预期）
 - Robot 测试：base robot 53 + ugv 81 + uav 45 = 179 全绿（uav 增量来自复制 2D 决策的测试副本）
 
+## UAV 2D 决策接线 —— 完成（2026-08-30，人类拍板「天上无人小车」）
+
+- 人类决定：把无人机当作「飞在天上的无人小车」，车 2D 决策直接接进来先跑通，后续再调整。
+- `UavDeviceHandler` 接上 `GoalService` + `DecisionExecutor` + `MavlinkDevice::apply_action`：
+  - `UavConfig` 加 `obstacle_inflation_radius`（寻路动态障碍膨胀）；`new()` 加 `node_handle`（取 peer_id）
+  - `start()` spawn mavlink + goal_service（复用车的 2D 寻路/任务分配/动态障碍）
+  - `on_tick()`：寻路 → 决策 → 发动作（无急停，机无 LiDAR）
+  - `reset()`：停车 + goal_service.reset + 清意图
+- 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
+
 ### 遗留/待后续
 
-- uav 2D 决策接线 + 3D 化（未来 task）
+- uav 3D 化（真飞行逻辑：3D 寻路/高度控制/3D 避障）—— 未来 task
 - `ClusterInfo.node_type` 传播（§3.5 实施留后续）
 - 集成测试 t09/t13 stale 引用（lua→vm、GGUF_Analyze 改名，ML_review 范围）
 - 既有 `vm::engine::test_sandbox_os_blocked` 沙箱测试失败（与本次无关）

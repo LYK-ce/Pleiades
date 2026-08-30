@@ -41,6 +41,7 @@ pub async fn uav_bootstrap(
     let device: Arc<dyn DeviceHandler> = Arc::new(UavDeviceHandler::new(
         robot.clone(),
         config.clone(),
+        node_handle.clone(),
         origin,
     ));
 

@@ -93,10 +93,10 @@ pleiades-uav/                     # 🟧 bin 机设备端（独有）
     └── uav/
         ├── mod.rs
         ├── mavlink/              # MAVLink 飞控驱动（mod.rs + protocol.rs + types.rs + constants.rs）
-        ├── robot_handler.rs      # UavDeviceHandler（实现 DeviceHandler，on_tick 留待后续）
-        ├── executor.rs           # 复制车 2D 决策（先 2D 跑通，后 3D 化）
-        ├── goal.rs               # 复制车版
-        └── planning/             # 复制车版（先 2D）
+        ├── robot_handler.rs      # UavDeviceHandler（实现 DeviceHandler，on_tick 已接 2D 决策）
+        ├── executor.rs           # 车 2D 三状态机（已接线；后 3D 化）
+        ├── goal.rs               # 车 2D 目标服务（已接线）
+        └── planning/             # 车 2D 寻路（已接线；后 3D）
 
 pleiades-terminal/                # 🟧 cdylib 地面站（独有，原 SrcPictorKernel）
 └── src/
@@ -464,7 +464,7 @@ pub trait DeviceHandler: Send + Sync {
 | 实现 | crate | start() 装配 | on_tick 决策 |
 |---|---|---|---|
 | `CarDeviceHandler` | pleiades-ugv | 读 `UgvConfig` → spawn stm32 + lidar + goal_service + 决策器 | 急停 → 寻路 → 决策 → 发动作 |
-| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink | 留待后续（先 2D 跑通） |
+| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink + goal_service + 决策器 | 寻路 → 决策 → 发动作（复用车 2D，无急停） |
 
 ### 5.2 节点类型（NodeType，设计已定、传播待实施）
 
