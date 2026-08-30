@@ -1,7 +1,10 @@
 # Pleiades 配置文件（树莓派实例：STM32=/dev/ttyUSB0，雷达=/dev/ttyUSB1）
 #
 # 注意：运行时读取的是「运行目录/.config/config.toml」，本文件是仓库内的实例配置，
-# 拉取后执行：  mkdir -p .config && cp Src/Config/config.toml .config/config.toml
+# 拉取后执行：  mkdir -p .config && cp pleiades-base/src/Config/config.toml .config/config.toml
+#
+# 设备段（chassis/lidar/flight_ctrl/obstacle_inflation_radius）为顶层段（Task 23 flatten 拆分），
+# 由 pleiades-ugv / pleiades-uav 各自的 config.rs 读取；共享段（Log/Network/Storage/Identity）所有终端共用。
 
 [Log]
 level = "info"
@@ -25,11 +28,12 @@ kvcache_dir = ".kvcache"
 [Identity]
 # 车名 = peer_name，多车时每辆必须唯一（树莓派用 robot-pi，Jetson 请另改）
 peer_name = "robot-pi"
+node_type = "car"  # car=车 / uav=机 / ground_station=地面站
 
-[Robot]
+# ─── UGV（车）独有设备段 ────────────────────────────
 obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
 
-[Robot.chassis]
+[chassis]
 enabled = true # 底盘开关（车默认开）
 port = "/dev/ttyUSB0"
 baudrate = 115200
@@ -37,14 +41,15 @@ car_type = "X3Plus" # X3 / X3Plus / X1 / R2
 forward_speed = 30 # 前进/后退档位（缺省 30）
 turn_speed = 10    # 原地转向档位（缺省 10）
 
-[Robot.lidar]
+[lidar]
 enabled = true # 雷达开关（含 SLAM 建图）
 port = "/dev/ttyUSB1"
 baudrate = 230400
 
-[Robot.flight_ctrl]
-enabled = false # 飞控开关（机，未来）
-# connection = "/dev/ttyS0" # 飞控连接方式（MAVLink 串口/UDP，未来 task）
+# ─── UAV（机）独有设备段 ────────────────────────────
+[flight_ctrl]
+enabled = false # 飞控开关（机）
+# connection = "/dev/ttyAMA0" # 飞控连接方式（MAVLink 串口）
 # baudrate = 921600 # 飞控串口波特率
 vel_fwd = 0.3      # 前进/后退速度 m/s（缺省 0.3）
 yaw_rate_deg = 15  # 转向角速度 °/s（缺省 15）

@@ -214,28 +214,30 @@ async fn state_notifier(
     loop {
         select! {
             _ = interval.tick() => {
-                let s = state.read().await;
-                // Task 13_1：意图状态（main_loop 写），两把读锁无交叉
-                let es = execute_state.read().await;
+                // 先取快照并立即 drop 读锁（Task 23 review 修复：持锁跨 await 会挤压设备端
+                // RX 回调的 try_write，造成位姿抖动/滞后）
+                let (x, y, z, yaw, vx, vy, sub_target) = {
+                    let s = state.read().await;
+                    let es = execute_state.read().await;
+                    (s.x, s.y, s.z, s.attitude.yaw, s.vx, s.vy, es.sub_target)
+                };
                 let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {
                     time_boot_ms,
-                    x: s.x, y: s.y, z: s.z,
-                    yaw: s.attitude.yaw,
-                    vx: s.vx, vy: s.vy,
-                    sub_target: es.sub_target,
+                    x, y, z, yaw, vx, vy,
+                    sub_target,
                 });
 
                 // Task 9_2：位姿广播到集群（fire-and-forget，Network 只搬运字节）
                 if let (Some(nh), Some(peer_id)) = (&node_handle, &local_peer_id) {
                     let pose = PoseData {
                         time_boot_ms,
-                        x: s.x, y: s.y, z: s.z,
-                        vx: s.vx, vy: s.vy,
-                        yaw: s.attitude.yaw,
-                        valid: es.sub_target.is_some(),
-                        sub_gx: es.sub_target.map(|(gx, _)| gx).unwrap_or(0),
-                        sub_gy: es.sub_target.map(|(_, gy)| gy).unwrap_or(0),
+                        x, y, z,
+                        vx, vy,
+                        yaw,
+                        valid: sub_target.is_some(),
+                        sub_gx: sub_target.map(|(gx, _)| gx).unwrap_or(0),
+                        sub_gy: sub_target.map(|(_, gy)| gy).unwrap_or(0),
                     };
                     let frame = encode_frame(MSGID_POSE, peer_id, COMPID_ROBOT, &encode_pose(&pose));
                     if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_POSE, frame).await {
@@ -267,6 +269,9 @@ async fn main_loop(
     // 统一启动契约：设备自己决定启动哪些硬件
     if let Err(e) = device.start().await {
         warn!("[Robot] 设备启动失败: {e}");
+        // 兜底清理：设备 start 内部可能已起部分资源（Task 23 review 修复）
+        device.stop();
+        device.shutdown().await;
         return;
     }
     info!("Robot 主循环启动（base 骨架 + 设备 handler）");

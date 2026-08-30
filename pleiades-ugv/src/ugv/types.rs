@@ -1,5 +1,5 @@
 //Presented by KeJi
-//Date ： 2026-06-17
+//Created Date ： 2026-06-17
 //Modified Date ： 2026-08-06
 
 //! 设备层共用的数据类型

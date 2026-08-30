@@ -5,7 +5,7 @@
 //! pleiades-uav — 机载节点（Task 23 C3）
 //!
 //! 完整 bootstrap + Core 推理循环 + Robot 循环（mavlink 飞控驱动）。
-//! 决策/寻路/建图留待后续 task（当前仅底座 + mavlink 驱动可编译）。
+//! 决策/寻路当前复用车 2D 逻辑（「天上无人小车」，已接线）；3D 飞行逻辑留待后续 task。
 //!
 //! 用法: pleiades-uav [x y [z]]    可选初始世界坐标（默认 64 64 0）
 

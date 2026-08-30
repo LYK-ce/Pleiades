@@ -69,7 +69,9 @@ fn aligned_world_pose(
 ) -> (f32, f32, f32) {
     let wx = origin.0 + local_x * offset.cos() + local_y * offset.sin();
     let wy = origin.1 - local_x * offset.sin() + local_y * offset.cos();
-    let yaw_world = yaw - offset;
+    // Task 23 fix：NED yaw 顺时针正 → 世界逆时针正（与车 odometry/lidar_mapper 统一）。
+    // 否则 executor 的 angle_to_target（atan2 逆时针正）与机 yaw 符号相反，转向方向反转。
+    let yaw_world = offset - yaw;
     (wx, wy, yaw_world)
 }
 

@@ -102,7 +102,22 @@ impl STM32Device {
 
     pub fn forward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Forward, speed) }
     pub fn backward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Backward, speed) }
-    pub fn stop(&self) -> Result<(), String> { self.send_car_run(MotionState::Stop, 0) }
+    /// 停车（安全关键）：TX 通道短暂拥塞时有界重试，不静默丢弃（Task 23 review 修复）
+    pub fn stop(&self) -> Result<(), String> {
+        let bytes = pack_car_run(self.car_type as u8, MotionState::Stop as u8, 0);
+        for _ in 0..10 {
+            match self.serial_cmd_tx.try_send(bytes.clone()) {
+                Ok(()) => return Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Err("TX 通道关闭".to_string());
+                }
+            }
+        }
+        Err("TX 通道持续拥塞，Stop 送达失败".to_string())
+    }
     pub fn left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Left, speed) }
     pub fn right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Right, speed) }
     pub fn spin_left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinLeft, speed) }
@@ -110,24 +125,30 @@ impl STM32Device {
 
     // ─── 命令/动作解析（A6：下沉到设备，设备选择性响应）────────
     pub fn handle_manual_cmd(&self, cmd: &ManualCmd) {
-        match cmd {
-            ManualCmd::Forward(_) => { let _ = self.forward(self.forward_speed); }
-            ManualCmd::Backward(_) => { let _ = self.backward(self.forward_speed); }
-            ManualCmd::SpinLeft(_) => { let _ = self.spin_left(self.turn_speed); }
-            ManualCmd::SpinRight(_) => { let _ = self.spin_right(self.turn_speed); }
-            ManualCmd::Stop => { let _ = self.stop(); }
-            ManualCmd::Beep(ms) => { let _ = self.beep(*ms); }
-            _ => {} // 车不支持 Takeoff/Land/LiDAR 命令，忽略
+        let result = match cmd {
+            ManualCmd::Forward(_) => self.forward(self.forward_speed),
+            ManualCmd::Backward(_) => self.backward(self.forward_speed),
+            ManualCmd::SpinLeft(_) => self.spin_left(self.turn_speed),
+            ManualCmd::SpinRight(_) => self.spin_right(self.turn_speed),
+            ManualCmd::Stop => self.stop(),
+            ManualCmd::Beep(ms) => self.beep(*ms),
+            _ => return, // 车不支持 Takeoff/Land/LiDAR 命令，忽略
+        };
+        if let Err(e) = result {
+            warn!("[STM32] 手动命令下发失败: {e}");
         }
     }
 
     pub fn apply_action(&self, action: MotionAction) {
-        match action {
-            MotionAction::MoveForward => { let _ = self.forward(self.forward_speed); }
-            MotionAction::MoveBackward => { let _ = self.backward(self.forward_speed); }
-            MotionAction::TurnLeft => { let _ = self.spin_left(self.turn_speed); }
-            MotionAction::TurnRight => { let _ = self.spin_right(self.turn_speed); }
-            MotionAction::Stop => { let _ = self.stop(); }
+        let result = match action {
+            MotionAction::MoveForward => self.forward(self.forward_speed),
+            MotionAction::MoveBackward => self.backward(self.forward_speed),
+            MotionAction::TurnLeft => self.spin_left(self.turn_speed),
+            MotionAction::TurnRight => self.spin_right(self.turn_speed),
+            MotionAction::Stop => self.stop(),
+        };
+        if let Err(e) = result {
+            warn!("[STM32] 动作下发失败: {e}");
         }
     }
 

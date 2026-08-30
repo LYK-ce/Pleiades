@@ -123,7 +123,14 @@ impl DeviceHandler for CarDeviceHandler {
                     local_peer_id: Some(self.node_handle.Get_Local_Peer_Id().to_bytes()),
                     obstacle_inflation_radius,
                 };
-                let d = LidarDevice::spawn(&p, b, Some(slam_ctx))?;
+                let d = match LidarDevice::spawn(&p, b, Some(slam_ctx)) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // 雷达 spawn 失败：清理已启动的底盘，避免后台 task 泄漏（Task 23 review 修复）
+                        stm32.shutdown();
+                        return Err(e);
+                    }
+                };
                 if let Err(e) = d.start_scan().await {
                     d.shutdown();
                     stm32.shutdown();

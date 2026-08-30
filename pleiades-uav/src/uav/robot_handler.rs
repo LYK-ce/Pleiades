@@ -58,11 +58,12 @@ impl DeviceHandler for UavDeviceHandler {
         }
         let flight_ctrl = self.config.flight_ctrl.as_ref();
         let flight_ctrl_enabled = flight_ctrl.and_then(|f| f.enabled).unwrap_or(false);
-        let port = if !flight_ctrl_enabled { None } else {
-            match flight_ctrl.and_then(|f| f.connection.clone()) {
-                Some(s) if !s.trim().is_empty() => Some(s),
-                _ => None,
-            }
+        if !flight_ctrl_enabled {
+            return Err("flight_ctrl.enabled=false，飞控未启用".to_string());
+        }
+        let port = match flight_ctrl.and_then(|f| f.connection.clone()) {
+            Some(s) if !s.trim().is_empty() => Some(s),
+            _ => None,
         };
         let Some(port) = port else {
             return Err("flight_ctrl.enabled=true 但 connection 未配置".to_string());

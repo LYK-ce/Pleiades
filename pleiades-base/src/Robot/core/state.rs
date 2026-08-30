@@ -9,7 +9,7 @@
 //!
 //! 位置语义（Task 9）：`x/y` 为全局世界坐标 (m)，初值 = origin（默认 64,64），
 //! 由 `STM32Device::spawn` 注入 local_state。
-//! 单一写入者不变式：共享 RobotState 只被 STM32 RX 回调全量覆盖写，
+//! 单一写入者不变式：共享 RobotState 只被设备端 RX 回调（stm32/mavlink）全量覆盖写，
 //! 任何其他路径不得直接修改共享态字段。
 
 

@@ -169,11 +169,15 @@ pub fn decode_map_full(
 ///
 /// `count` 字段为 u16，协议上限 **65535** 条目/帧（超出会截断导致接收端校验失败）
 pub fn encode_map_delta(time_boot_ms: u32, entries: &[MapDeltaEntry]) -> Vec<u8> {
-    debug_assert!(entries.len() <= u16::MAX as usize, "map_delta 条目数超出 u16 上限");
-    let mut buf = Vec::with_capacity(6 + 9 * entries.len());
+    // 显式截断（release 下 debug_assert 无效，避免静默截断导致接收端校验失败）
+    let n = entries.len().min(u16::MAX as usize);
+    if entries.len() > n {
+        tracing::warn!("encode_map_delta: {} 条目超出 u16 上限，截断为 {n}", entries.len());
+    }
+    let mut buf = Vec::with_capacity(6 + 9 * n);
     buf.extend_from_slice(&time_boot_ms.to_be_bytes());
-    buf.extend_from_slice(&(entries.len() as u16).to_be_bytes());
-    for e in entries {
+    buf.extend_from_slice(&(n as u16).to_be_bytes());
+    for e in &entries[..n] {
         buf.extend_from_slice(&e.gx.to_be_bytes());
         buf.extend_from_slice(&e.gy.to_be_bytes());
         buf.push(e.delta as u8); // i8 位模式直传（与 log-odds 字节一致）
@@ -255,17 +259,21 @@ pub const MISSION_CIRCLE: u8 = 1;
 /// member_count == 0 表示取消全部任务（停车待命）。
 /// `mission_count` / `member_count` 为 u8，协议上限 255（超出会截断导致接收端校验失败）。
 pub fn encode_task_set(payload: &TaskSetPayload) -> Vec<u8> {
-    debug_assert!(payload.missions.len() <= u8::MAX as usize, "task_set 任务数超出 u8 上限");
-    debug_assert!(payload.members.len() <= u8::MAX as usize, "task_set 成员数超出 u8 上限");
-    let mut buf = Vec::with_capacity(2 + 9 * payload.missions.len());
-    buf.push(payload.missions.len() as u8);
-    buf.push(payload.members.len() as u8);
-    for m in &payload.members {
-        debug_assert!(m.len() <= u8::MAX as usize, "peer_id 超出 u8 上限");
-        buf.push(m.len() as u8);
-        buf.extend_from_slice(m);
+    // 显式截断（release 下 debug_assert 无效）
+    let mission_n = payload.missions.len().min(u8::MAX as usize);
+    let member_n = payload.members.len().min(u8::MAX as usize);
+    if payload.missions.len() > mission_n || payload.members.len() > member_n {
+        tracing::warn!("encode_task_set: missions {} / members {} 超出 u8 上限，截断", payload.missions.len(), payload.members.len());
     }
-    for m in &payload.missions {
+    let mut buf = Vec::with_capacity(2 + 9 * mission_n);
+    buf.push(mission_n as u8);
+    buf.push(member_n as u8);
+    for m in &payload.members[..member_n] {
+        let l = m.len().min(u8::MAX as usize);
+        buf.push(l as u8);
+        buf.extend_from_slice(&m[..l]);
+    }
+    for m in &payload.missions[..mission_n] {
         buf.push(m.mission_type);
         buf.extend_from_slice(&m.x.to_be_bytes());
         buf.extend_from_slice(&m.y.to_be_bytes());

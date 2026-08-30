@@ -60,7 +60,6 @@ async fn recv_bus(rx: &mut Option<tokio::sync::broadcast::Receiver<Bus_Event>>) 
 }
 
 /// 处理一帧入站数据（独立函数便于单测）
-/// 处理一帧入站数据（独立函数便于单测）
 async fn handle_frame(
     payload: &[u8],
     local_peer_id: &[u8],

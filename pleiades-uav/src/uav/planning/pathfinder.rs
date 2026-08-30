@@ -296,6 +296,10 @@ impl DStarLite {
     }
 
     /// 从队列弹出有效条目
+    ///
+    /// 存储 key 与当前重算 key 失配时按当前 key **重插**而非丢弃（标准 D* Lite 的 re-key）：
+    /// `move_to` 会累积 `km`，使堆内旧条目 key 失配；若直接丢弃，开阔地移动（障碍不变、
+    /// `set_dynamic_obstacles` 早退不补种）时堆被清空、`g/rhs` 冻结、寻路退化。
     fn pop_valid(&mut self) -> Option<(Key, (i32, i32))> {
         loop {
             let (key, cell) = self.u.pop()?;
@@ -305,6 +309,7 @@ impl DStarLite {
             if key.k1 == expected.k1 && key.k2 == expected.k2 {
                 return Some((key, cell));
             }
+            self.u.push((expected, cell));
         }
     }
 }
@@ -371,5 +376,15 @@ mod tests {
         let step = pf.next_step(&grid);
         assert_ne!(step, Some((0, 2)), "move_to 后注入障碍应被绕开");
         assert!(step.is_some(), "绕行路径应存在");
+    }
+
+    #[test]
+    fn test_next_step_after_move_to_without_obstacle_change() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (0, 3));
+        // 走一步到 (0,1)，模拟车跨格移动（km 变化）；不注入障碍（回归：pop_valid 不应清空堆）
+        pf.move_to((0, 1));
+        let step = pf.next_step(&grid);
+        assert_eq!(step, Some((0, 2)), "move_to 后（无障碍变化）寻路不应退化");
     }
 }

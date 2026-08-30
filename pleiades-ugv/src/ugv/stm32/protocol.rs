@@ -382,7 +382,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_update_state_encoder() {
         let mut s = RobotState::default();
         let enc = [100i32, 200, -50, 0];

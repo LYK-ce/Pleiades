@@ -86,6 +86,22 @@
   - `reset()`：停车 + goal_service.reset + 清意图
 - 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
 
+## Code Review 修复 —— 完成（2026-08-30）
+
+针对子 agent 全面 review 的修复（严重 4 + 重要中等 5 + 清理若干）：
+
+- **🔴 转向符号**（方案1，人类拍板）：`aligned_world_pose` 里 `yaw_world = offset - yaw`（NED 顺时针正 → 世界逆时针正），与车 odometry/lidar_mapper、executor 的 `atan2` 约定统一。机转向不再反。
+- **🔴 D* Lite pop_valid**：失配条目 re-key 重插（原：直接丢弃 → move_to 后 km 变化清空堆、g/rhs 冻结）；车+机同步 + 新增回归测试 `test_next_step_after_move_to_without_obstacle_change`。
+- **🔴 停车/急停吞错**：`STM32Device::stop` 改有界重试（10×10ms）；`apply_action`/`handle_manual_cmd` 失败记 warn（不再 `let _ =`）。mavlink 侧 stop 走 Mutex 本就可靠。
+- **🔴 底盘泄漏**：`LidarDevice::spawn` 失败时 `stm32.shutdown()` 再返回。
+- **🟠 state_notifier 持锁跨 await**：先取快照再 drop 读锁，再 Gossipsub_Publish。
+- **🟠 示例 config.toml**：`[Robot]` 段 → flatten 顶层（obstacle_inflation_radius/[chassis]/[lidar]/[flight_ctrl]）+ `[Identity] node_type`。
+- **🟠 协议截断**：`encode_map_delta`/`encode_task_set` 的 `debug_assert` 改运行时显式截断 + `tracing::warn`。
+- **🟠 UAV flight_ctrl 报错**：区分 enabled=false vs 缺 connection；主循环 `device.start()` 失败兜底 `stop+shutdown`。
+- **清理**：uav/main.rs、core/state.rs 过时注释；consumer.rs 重复 doc；stm32/protocol.rs 重复 #[test]；ugv/types.rs、Config/config.rs 头注释格式。
+
+验证：`cargo build --workspace` 0 error；Robot 测试 178 全绿（ugv 81/uav 46 含新回归，删重复 #[test] 修正计数）。
+
 ### 遗留/待后续
 
 - uav 3D 化（真飞行逻辑：3D 寻路/高度控制/3D 避障）—— 未来 task
