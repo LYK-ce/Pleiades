@@ -3869,6 +3869,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pleiades-sim"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pleiades-base",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "pleiades-terminal"
 version = "0.1.0"
 dependencies = [

@@ -32,7 +32,6 @@ node_type = "car"  # car=车 / uav=机 / ground_station=地面站
 
 # ─── UGV（车）独有设备段 ────────────────────────────
 obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
-simulated = false # 模拟模式：true 时无硬件、只跑决策链 + 打印动作（便于测试）
 
 [chassis]
 enabled = true # 底盘开关（车默认开）

@@ -1,0 +1,29 @@
+#Presented by KeJi
+#Created Date ： 2026-08-30
+#Modified Date ： 2026-08-30
+
+[package]
+name = "pleiades-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pleiades-sim"
+path = "src/main.rs"
+
+[dependencies]
+# 共享底座（协议/集群/状态/世界/网络/事件总线）
+pleiades-base = { path = "../pleiades-base" }
+
+# 异步运行时 + 同步原语
+tokio = { version = "1", features = ["full"] }
+
+# 日志
+tracing = "0.1"
+
+# DeviceHandler trait
+async-trait = "0.1"
+
+# 配置解析
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"

@@ -86,12 +86,14 @@
   - `reset()`：停车 + goal_service.reset + 清意图
 - 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
 
-## 模拟车 stub（SimDeviceHandler）—— 完成（2026-08-30，人类提出）
+## 模拟节点独立 crate（pleiades-sim）—— 完成（2026-08-30，人类拍板）
 
-- 新增 `pleiades-ugv/src/ugv/sim_handler.rs`：`SimDeviceHandler`（实现 `DeviceHandler`），无硬件——不 spawn stm32/lidar，`on_tick` 仍跑完整决策链（`GoalService` 寻路 + `DecisionExecutor` 三状态机），但「执行动作」只 `info!` 打印（位置/yaw/状态/动作/sub_target），不驱动硬件。
-- `UgvConfig` 加 `simulated: Option<bool>`（默认 false）；`ugv_bootstrap` 按 `simulated` 选择 `SimDeviceHandler`（模拟）或 `CarDeviceHandler`（真车）。
-- 用法：config.toml 里 `simulated = true` + 启动 `pleiades-ugv`，即可无硬件验证「命令→任务→寻路→决策→动作」整条链。
-- 已知限制：位置/航向静态（不模拟运动），决策会停在首动作重复；如需真·路径跟随测试，可后续加简单的运动积分（待定）。
+- 人类纠正：模拟不是给 ugv/uav 加 `simulated` 选项，而是**一个与 ugv/uav/terminal 并列的独立 crate `pleiades-sim`**（有自己的目录 + 专属代码）。
+- 结构：`pleiades-sim/src/{main.rs, config.rs(SimConfig), bootstrap.rs(sim_bootstrap), sim/{sim_handler.rs(SimDeviceHandler), goal.rs, executor.rs, planning/}}`；决策链（goal/executor/planning）从 ugv 复制（第三份，与 uav 同模式），`crate::ugv::`→`crate::sim::`。
+- `SimDeviceHandler` 无硬件：不 spawn stm32/lidar，`on_tick` 跑完整决策链（寻路+三状态机），动作只 `info!` 打印。
+- 用法：`cargo run -p pleiades-sim`（config.toml 只需共享段 + obstacle_inflation_radius），发 Goto 即可看决策链日志。
+- 已知限制：位置/航向静态（不模拟运动），决策停在首动作重复；如需路径跟随测试可后续加运动积分。
+- 撤销：之前误加的 `UgvConfig.simulated` + `ugv/sim_handler.rs` 已移除。
 
 ## 统一「enabled=false → 跳过设备」语义 —— 完成（2026-08-30，人类拍板）
 

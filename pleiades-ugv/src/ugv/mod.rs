@@ -17,4 +17,3 @@ pub mod goal;
 pub mod emergency_stop;
 pub mod planning;
 pub mod robot_handler;
-pub mod sim_handler;

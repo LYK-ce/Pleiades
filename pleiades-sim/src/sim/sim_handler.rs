@@ -2,11 +2,11 @@
 //Created Date ： 2026-08-30
 //Modified Date ： 2026-08-30
 
-//! 模拟车设备处理器（无硬件，用于测试决策链）
+//! 模拟设备处理器（无硬件，用于测试决策链）
 //!
-//! 与 `CarDeviceHandler` 的区别：不 spawn stm32/lidar，`on_tick` 仍跑完整决策链
-//! （`GoalService` 寻路 + `DecisionExecutor` 三状态机），但「执行动作」只打印、不驱动硬件。
-//! 便于无硬件环境下验证「命令 → 任务 → 寻路 → 决策 → 动作」整条链。
+//! 不 spawn stm32/lidar；`on_tick` 仍跑完整决策链（`GoalService` 寻路 + `DecisionExecutor`
+//! 三状态机），但「执行动作」只打印、不驱动硬件。便于无硬件环境下验证
+//! 「命令 → 任务 → 寻路 → 决策 → 动作」整条链。
 
 use std::sync::{Arc, OnceLock};
 
@@ -19,9 +19,9 @@ use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
-use crate::config::UgvConfig;
-use crate::ugv::executor::DecisionExecutor;
-use crate::ugv::goal::{GoalService, ARRIVAL_THRESHOLD_M};
+use crate::config::SimConfig;
+use crate::sim::executor::DecisionExecutor;
+use crate::sim::goal::{GoalService, ARRIVAL_THRESHOLD_M};
 
 /// start() 后初始化的「设备组」（无硬件，只有决策组件）
 struct SimInner {
@@ -31,7 +31,7 @@ struct SimInner {
 
 pub struct SimDeviceHandler {
     robot: Arc<Robot>,
-    config: UgvConfig,
+    config: SimConfig,
     node_handle: Arc<NodeHandle>,
     origin: (f32, f32, f32),
     inner: OnceLock<SimInner>,
@@ -40,7 +40,7 @@ pub struct SimDeviceHandler {
 impl SimDeviceHandler {
     pub fn new(
         robot: Arc<Robot>,
-        config: UgvConfig,
+        config: SimConfig,
         node_handle: Arc<NodeHandle>,
         origin: (f32, f32, f32),
     ) -> Self {
@@ -69,7 +69,7 @@ impl DeviceHandler for SimDeviceHandler {
 
         self.inner.set(SimInner { goal_service, executor: DecisionExecutor::new() })
             .map_err(|_| "设备已启动".to_string())?;
-        info!("[Sim] 模拟车设备启动（无硬件，只跑决策链 + 打印动作）");
+        info!("[Sim] 模拟设备启动（无硬件，只跑决策链 + 打印动作）");
         Ok(())
     }
 
