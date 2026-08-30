@@ -1,0 +1,33 @@
+#Presented by KeJi
+#Created Date ： 2026-08-30
+#Modified Date ： 2026-08-30
+
+[package]
+name = "pleiades-uav"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pleiades-uav"
+path = "src/main.rs"
+
+[dependencies]
+# 共享底座（协议/集群/状态/世界/网络/事件总线）
+pleiades-base = { path = "../pleiades-base" }
+
+# 异步运行时 + 同步原语
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+
+# 日志
+tracing = "0.1"
+
+# DeviceHandler trait
+async-trait = "0.1"
+
+# 设备配置解析
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+# MAVLink 飞控协议（机设备端）
+mavlink = { version = "0.18", default-features = false, features = ["std", "dialect-ardupilotmega", "dialect-common"] }

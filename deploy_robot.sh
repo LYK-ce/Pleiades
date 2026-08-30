@@ -1,12 +1,12 @@
 #!/bin/bash
-# orion-robot 编译 + 部署脚本
+# pleiades-ugv 编译 + 部署脚本（Task 23 C5：bin 名 orion-robot → pleiades-ugv）
 #
 # 用法:
 #   ./deploy_robot.sh                    # 编译并复制到默认工作路径
 #   ROBOT_WORK_DIR=/path ./deploy_robot.sh  # 自定义目标路径
 #
 # 功能:
-#   1. 编译 target/release/orion-robot
+#   1. 编译 target/release/pleiades-ugv
 #   2. 复制到工作路径覆盖原有 binary
 
 set -e
@@ -26,13 +26,13 @@ cd "$(dirname "$0")"
 # ─── 目标工作路径（可用环境变量覆盖）────────────
 TARGET_DIR="${ROBOT_WORK_DIR:-/home/jetson/Workspace/robot}"
 
-echo "=== cargo build --release --bin orion-robot ==="
-cargo build --release --bin orion-robot
+echo "=== cargo build --release -p pleiades-ugv ==="
+cargo build --release -p pleiades-ugv
 
 echo "=== 复制到 $TARGET_DIR ==="
 mkdir -p "$TARGET_DIR"
-cp target/release/orion-robot "$TARGET_DIR/orion-robot"
-chmod +x "$TARGET_DIR/orion-robot"
+cp target/release/pleiades-ugv "$TARGET_DIR/pleiades-ugv"
+chmod +x "$TARGET_DIR/pleiades-ugv"
 
 echo "✅ 部署完成"
-ls -la "$TARGET_DIR/orion-robot"
+ls -la "$TARGET_DIR/pleiades-ugv"
