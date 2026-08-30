@@ -5,7 +5,7 @@
 //! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler）
 //!
 //! 统一契约：`start()` 里读配置 + spawn 车自己的设备（stm32 + lidar）。
-//! 包住 stm32 + lidar + goal_service + 决策器，作为「车」的整体能力。
+//! `enabled=false` → 跳过该设备（统一跳过语义，节点照常跑；无运动设备时 on_tick 保持 Idle）。
 
 use std::sync::{Arc, OnceLock};
 
@@ -29,7 +29,8 @@ use crate::ugv::types::CarType;
 
 /// start() 后初始化的设备组
 struct CarInner {
-    stm32: Arc<STM32Device>,
+    /// 底盘（enabled=false 时为 None）
+    stm32: Option<Arc<STM32Device>>,
     lidar: Option<LidarDevice>,
     goal_service: Arc<Mutex<GoalService>>,
     executor: DecisionExecutor,
@@ -65,15 +66,6 @@ impl DeviceHandler for CarDeviceHandler {
         // 底盘配置
         let chassis = r.chassis.as_ref();
         let chassis_enabled = chassis.and_then(|c| c.enabled).unwrap_or(true);
-        let serial_port = chassis.and_then(|c| c.port.clone()).unwrap_or_else(|| "/dev/myserial".to_string());
-        let baudrate = chassis.and_then(|c| c.baudrate).unwrap_or(115200);
-        let car_type = match chassis.and_then(|c| c.car_type.as_deref()).map(CarType::from_str) {
-            Some(Some(t)) => t,
-            Some(None) => { warn!("car_type 解析失败，回退 X3Plus"); CarType::X3Plus }
-            None => CarType::X3Plus,
-        };
-        let forward_speed = chassis.and_then(|c| c.forward_speed).unwrap_or(30).clamp(0, 100);
-        let turn_speed = chassis.and_then(|c| c.turn_speed).unwrap_or(10).clamp(0, 100);
 
         // 雷达配置
         let lidar = r.lidar.as_ref();
@@ -89,17 +81,26 @@ impl DeviceHandler for CarDeviceHandler {
 
         let obstacle_inflation_radius = r.obstacle_inflation_radius.unwrap_or(0.2);
 
-        if !chassis_enabled {
-            return Err("chassis 未启用".to_string());
-        }
+        // 底盘：enabled=false → 跳过（统一跳过语义）
+        let stm32 = if chassis_enabled {
+            let serial_port = chassis.and_then(|c| c.port.clone()).unwrap_or_else(|| "/dev/myserial".to_string());
+            let baudrate = chassis.and_then(|c| c.baudrate).unwrap_or(115200);
+            let car_type = match chassis.and_then(|c| c.car_type.as_deref()).map(CarType::from_str) {
+                Some(Some(t)) => t,
+                Some(None) => { warn!("car_type 解析失败，回退 X3Plus"); CarType::X3Plus }
+                None => CarType::X3Plus,
+            };
+            let forward_speed = chassis.and_then(|c| c.forward_speed).unwrap_or(30).clamp(0, 100);
+            let turn_speed = chassis.and_then(|c| c.turn_speed).unwrap_or(10).clamp(0, 100);
 
-        info!("Robot 配置(车): port={serial_port} baud={baudrate} car={car_type:?} lidar={lidar_enabled}({}) infl_r={obstacle_inflation_radius}",
-            lidar_port.as_deref().unwrap_or("None"));
+            info!("启用底盘: port={serial_port} baud={baudrate} car={car_type:?}");
+            Some(Arc::new(STM32Device::spawn(&serial_port, baudrate, car_type, self.robot.robot_state.clone(), self.origin, forward_speed, turn_speed)?))
+        } else {
+            info!("底盘未启用（enabled=false），跳过");
+            None
+        };
 
-        // spawn 底盘
-        let stm32 = Arc::new(STM32Device::spawn(&serial_port, baudrate, car_type, self.robot.robot_state.clone(), self.origin, forward_speed, turn_speed)?);
-
-        // 目标服务
+        // 目标服务（无底盘时也创建，on_tick 无运动设备时保持 Idle，任务不消费）
         let goal_service = Arc::new(Mutex::new(GoalService::new(
             self.robot.robot_state.clone(),
             self.robot.mission_queue.clone(),
@@ -110,7 +111,7 @@ impl DeviceHandler for CarDeviceHandler {
             ARRIVAL_THRESHOLD_M,
         )));
 
-        // spawn 雷达（含 SLAM）
+        // 雷达（含 SLAM）：enabled=false / 未配置 → 跳过
         let lidar = match (lidar_port, lidar_baudrate) {
             (Some(p), Some(b)) => {
                 info!("启用 LiDAR: port={p}, baud={b}（含 SLAM 建图）");
@@ -127,13 +128,13 @@ impl DeviceHandler for CarDeviceHandler {
                     Ok(d) => d,
                     Err(e) => {
                         // 雷达 spawn 失败：清理已启动的底盘，避免后台 task 泄漏（Task 23 review 修复）
-                        stm32.shutdown();
+                        if let Some(s) = &stm32 { s.shutdown(); }
                         return Err(e);
                     }
                 };
                 if let Err(e) = d.start_scan().await {
                     d.shutdown();
-                    stm32.shutdown();
+                    if let Some(s) = &stm32 { s.shutdown(); }
                     return Err(e);
                 }
                 Some(d)
@@ -159,26 +160,35 @@ impl DeviceHandler for CarDeviceHandler {
                     if let Err(e) = l.stop_scan().await { warn!("[Robot] LiDAR 停止失败: {e}"); }
                 }
             }
-            _ => d.stm32.handle_manual_cmd(cmd),
+            _ => {
+                if let Some(s) = &d.stm32 {
+                    s.handle_manual_cmd(cmd);
+                }
+            }
         }
     }
 
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
-        let _ = d.stm32.stop();
+        if let Some(s) = &d.stm32 { let _ = s.stop(); }
         d.goal_service.lock().await.reset();
         *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
     }
 
     async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
+        let Some(stm32) = &d.stm32 else {
+            // 无底盘：无运动设备，保持 Idle（节点照常广播位姿/地图）
+            *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
+            return;
+        };
         let emergency = match &d.lidar {
-            Some(l) => check_emergency_stop(l, rs, &d.stm32, &d.goal_service).await,
+            Some(l) => check_emergency_stop(l, rs, stm32, &d.goal_service).await,
             None => false,
         };
         if emergency {
             // 急停：停车 + 清意图，保留 goal 供绕行
-            let _ = d.stm32.stop();
+            let _ = stm32.stop();
             *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
         } else {
             let next_cell = d.goal_service.lock().await.get_path().await;
@@ -189,14 +199,14 @@ impl DeviceHandler for CarDeviceHandler {
                 sub_target: result.sub_target,
             };
             if let Some(action) = result.action {
-                d.stm32.apply_action(action);
+                stm32.apply_action(action);
             }
         }
     }
 
     fn stop(&self) {
         if let Some(d) = self.inner.get() {
-            let _ = d.stm32.stop();
+            if let Some(s) = &d.stm32 { let _ = s.stop(); }
         }
     }
 
@@ -207,6 +217,6 @@ impl DeviceHandler for CarDeviceHandler {
             let _ = l.stop_scan().await;
             l.shutdown();
         }
-        d.stm32.shutdown();
+        if let Some(s) = &d.stm32 { s.shutdown(); }
     }
 }

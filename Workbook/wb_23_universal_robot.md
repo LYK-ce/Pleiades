@@ -86,6 +86,11 @@
   - `reset()`：停车 + goal_service.reset + 清意图
 - 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
 
+## 统一「enabled=false → 跳过设备」语义 —— 完成（2026-08-30，人类拍板）
+
+- 车/机 device 的 `enabled=false` 统一改为**跳过**（不再报错退出）：`CarInner.stm32`、`UavInner.mavlink` 改 `Option`；`start()` 里 `enabled=false` 不 spawn、返回 Ok；`on_tick`/`handle_manual_cmd`/`reset`/`stop`/`shutdown` 对 None 优雅处理，无运动设备时 `on_tick` 保持 Idle（节点照常跑网络/遥测）。
+- 默认值不变：`chassis.enabled`/`lidar.enabled` 默认 true，`flight_ctrl.enabled` 默认 false。
+
 ## Code Review 修复 —— 完成（2026-08-30）
 
 针对子 agent 全面 review 的修复（严重 4 + 重要中等 5 + 清理若干）：
