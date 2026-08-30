@@ -19,6 +19,8 @@ pub struct UgvConfig {
     pub lidar: Option<LidarConfig>,
     /// 他车障碍膨胀半径（米，缺省 0.2）
     pub obstacle_inflation_radius: Option<f32>,
+    /// 模拟模式：true 时用 SimDeviceHandler（无硬件，只跑决策链 + 打印动作，便于测试）
+    pub simulated: Option<bool>,
 }
 
 /// 底盘设备配置（STM32 轮式底盘）

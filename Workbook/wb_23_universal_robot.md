@@ -86,6 +86,13 @@
   - `reset()`：停车 + goal_service.reset + 清意图
 - 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
 
+## 模拟车 stub（SimDeviceHandler）—— 完成（2026-08-30，人类提出）
+
+- 新增 `pleiades-ugv/src/ugv/sim_handler.rs`：`SimDeviceHandler`（实现 `DeviceHandler`），无硬件——不 spawn stm32/lidar，`on_tick` 仍跑完整决策链（`GoalService` 寻路 + `DecisionExecutor` 三状态机），但「执行动作」只 `info!` 打印（位置/yaw/状态/动作/sub_target），不驱动硬件。
+- `UgvConfig` 加 `simulated: Option<bool>`（默认 false）；`ugv_bootstrap` 按 `simulated` 选择 `SimDeviceHandler`（模拟）或 `CarDeviceHandler`（真车）。
+- 用法：config.toml 里 `simulated = true` + 启动 `pleiades-ugv`，即可无硬件验证「命令→任务→寻路→决策→动作」整条链。
+- 已知限制：位置/航向静态（不模拟运动），决策会停在首动作重复；如需真·路径跟随测试，可后续加简单的运动积分（待定）。
+
 ## 统一「enabled=false → 跳过设备」语义 —— 完成（2026-08-30，人类拍板）
 
 - 车/机 device 的 `enabled=false` 统一改为**跳过**（不再报错退出）：`CarInner.stm32`、`UavInner.mavlink` 改 `Option`；`start()` 里 `enabled=false` 不 spawn、返回 Ok；`on_tick`/`handle_manual_cmd`/`reset`/`stop`/`shutdown` 对 None 优雅处理，无运动设备时 `on_tick` 保持 Idle（节点照常跑网络/遥测）。

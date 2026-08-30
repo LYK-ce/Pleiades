@@ -16,6 +16,7 @@ use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
 
 use crate::config::UgvConfig;
 use crate::ugv::robot_handler::CarDeviceHandler;
+use crate::ugv::sim_handler::SimDeviceHandler;
 
 /// UGV bootstrap：读配置 → Robot::new（共享）→ 构造 CarDeviceHandler → spawn 主循环
 pub async fn ugv_bootstrap(
@@ -37,13 +38,12 @@ pub async fn ugv_bootstrap(
     ).await?;
     let robot = Arc::new(robot);
 
-    // 2. 构造车设备处理器（设备自管理启动）
-    let device: Arc<dyn DeviceHandler> = Arc::new(CarDeviceHandler::new(
-        robot.clone(),
-        config.clone(),
-        node_handle.clone(),
-        origin,
-    ));
+    // 2. 构造车设备处理器（设备自管理启动；simulated=true 用模拟车，无硬件）
+    let device: Arc<dyn DeviceHandler> = if config.simulated.unwrap_or(false) {
+        Arc::new(SimDeviceHandler::new(robot.clone(), config.clone(), node_handle.clone(), origin))
+    } else {
+        Arc::new(CarDeviceHandler::new(robot.clone(), config.clone(), node_handle.clone(), origin))
+    };
 
     // 3. spawn 主循环（后台跑；boot.run() 阻塞 core 主循环）
     let run_robot = robot.clone();
