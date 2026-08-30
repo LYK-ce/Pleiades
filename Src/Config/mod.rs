@@ -14,8 +14,8 @@ pub mod config;
 pub mod identity;
 
 pub use config::{
-    Ensure_Config, Get_Peer_Name, Identity_Config, Log_Config, Network_Config, Pleiades_Config,
-    Read_Config, Set_Peer_Name, Storage_Config, Update_Config,
+    Ensure_Config, Get_Node_Type, Get_Peer_Name, Identity_Config, Log_Config, Network_Config,
+    NodeType, Pleiades_Config, Read_Config, Set_Peer_Name, Storage_Config, Update_Config,
     CONFIG_DIR, kvcache_dir,
 };
 pub use identity::Ensure_Identity;

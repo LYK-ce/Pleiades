@@ -7,7 +7,7 @@
 //! 所有数值大端（BE）。坐标/计数为 i32，与内部类型一致。
 
 use super::frame::MAGIC;
-use crate::robot::slam::CHUNK_SIZE;
+use crate::robot::core::grid::CHUNK_SIZE;
 
 // ============================================================
 // 数据结构
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_map_full_roundtrip() {
-        use crate::robot::slam::CHUNK_SIZE;
+        use crate::robot::core::grid::CHUNK_SIZE;
         // 构造带非零值的整表，验证位模式往返
         let mut data = Box::new([0i8; CHUNK_SIZE * CHUNK_SIZE]);
         data[0] = 3;

@@ -44,6 +44,7 @@ kvcache_dir = ".kvcache"
 
 [Identity]
 peer_name = "new_peer"
+node_type = "car"  # car=车 / uav=机 / ground_station=地面站
 
 [Robot]
 obstacle_inflation_radius = 0.2 # 他车障碍膨胀半径（米，20cm）
@@ -95,7 +96,7 @@ pub fn kvcache_dir() -> &'static PathBuf {
 }
 
 /// config.toml 根配置结构体
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Pleiades_Config {
     pub Log: Option<Log_Config>,
     pub Network: Option<Network_Config>,
@@ -105,14 +106,14 @@ pub struct Pleiades_Config {
 }
 
 /// [Log] 段配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Log_Config {
     pub level: Option<String>,
     pub log_file_path: Option<String>,
 }
 
 /// [Network] 段配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Network_Config {
     pub LAN: Option<bool>,
     pub WAN: Option<bool>,
@@ -128,20 +129,42 @@ pub struct Network_Config {
 }
 
 /// [Storage] 段配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Storage_Config {
     pub workspace_dir: Option<String>,
     pub kvcache_dir: Option<String>,
 }
 
 /// [Identity] 段配置
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Identity_Config {
     pub peer_name: Option<String>,
+    /// 节点类型：car=车 / uav=机 / ground_station=地面站（Task 23 §3.5）
+    pub node_type: Option<String>,
+}
+
+/// 节点类型（Task 23 §3.5：节点身份，非底盘物理状态）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeType {
+    GroundStation = 0,
+    Car = 1,
+    Uav = 2,
+}
+
+impl NodeType {
+    pub fn from_str(s: &str) -> Option<NodeType> {
+        match s {
+            "ground_station" => Some(NodeType::GroundStation),
+            "car" => Some(NodeType::Car),
+            "uav" => Some(NodeType::Uav),
+            _ => None,
+        }
+    }
 }
 
 /// [Robot] 段配置（Task 22：设备开关 + 遍历 spawn）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Robot_Config {
     pub chassis: Option<ChassisConfig>,
     pub lidar: Option<LidarConfig>,
@@ -150,7 +173,7 @@ pub struct Robot_Config {
 }
 
 /// 底盘设备配置（STM32 轮式底盘）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ChassisConfig {
     pub enabled: Option<bool>,
     pub port: Option<String>,
@@ -163,7 +186,7 @@ pub struct ChassisConfig {
 }
 
 /// 雷达设备配置（YDLIDAR，含 SLAM 建图）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LidarConfig {
     pub enabled: Option<bool>,
     pub port: Option<String>,
@@ -171,7 +194,7 @@ pub struct LidarConfig {
 }
 
 /// 飞控设备配置（Pixhawk，未来）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FlightCtrlConfig {
     pub enabled: Option<bool>,
     /// 连接方式（如串口 /dev/ttyS0 或 MAVLink UDP 地址），未来 task 用
@@ -182,6 +205,14 @@ pub struct FlightCtrlConfig {
     pub vel_fwd: Option<f32>,
     /// 转向角速度 (°/s，缺省 15)
     pub yaw_rate_deg: Option<f32>,
+}
+
+/// 读取节点类型，默认 Car（车）
+pub fn Get_Node_Type(config: &Pleiades_Config) -> NodeType {
+    config.Identity.as_ref()
+        .and_then(|i| i.node_type.as_deref())
+        .and_then(NodeType::from_str)
+        .unwrap_or(NodeType::Car)
 }
 
 /// 读取节点名称，默认 "new_peer"

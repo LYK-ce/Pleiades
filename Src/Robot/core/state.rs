@@ -12,7 +12,6 @@
 //! 单一写入者不变式：共享 RobotState 只被 STM32 RX 回调全量覆盖写，
 //! 任何其他路径不得直接修改共享态字段。
 
-use crate::robot::control::device::lidar::LaserScan;
 
 /// 姿态角（弧度）
 #[derive(Debug, Clone, Default)]
@@ -73,8 +72,6 @@ pub struct RobotState {
     /// 磁力计
     pub mag: MagData,
 
-    /// 四轮编码器计数
-    pub encoders: [i32; 4],
 
     /// 全局世界坐标 (m)，启动时 = origin（默认 64,64,0）
     /// 由 STM32 RX 回调中的 odometry::accumulate 直接积分维护
@@ -84,16 +81,6 @@ pub struct RobotState {
     pub z: f32,
 }
 
-// ============================================================
-// LidarState — LiDAR 点云
-// ============================================================
-
-/// 激光雷达扫描状态（由 LiDAR 维护）
-#[derive(Debug, Clone, Default)]
-pub struct LidarState {
-    /// 最新扫描结果
-    pub scan: Option<LaserScan>,
-}
 
 // ============================================================
 // 决策状态机 / 动作 / 决策结果（Task 22_3 单写者收敛）

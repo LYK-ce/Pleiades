@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use crate::event_bus::{Bus_Event, EventBus};
 use crate::robot::core::cluster::cluster_info::{ClusterInfo, ClusterInfoTable};
 use crate::robot::core::protocol::{decode_frame, decode_map_delta, decode_pose, MSGID_MAP_DELTA, MSGID_POSE};
-use crate::robot::slam::OccupancyGrid;
+use crate::robot::core::grid::OccupancyGrid;
 use tokio::sync::RwLock;
 
 /// 入站 POSE 消费 task（launch 中 spawn）

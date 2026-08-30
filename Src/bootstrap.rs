@@ -14,17 +14,19 @@
 use std::sync::Arc;
 
 use libp2p::PeerId;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-use crate::config::{Ensure_Config, Ensure_Identity, Get_Peer_Name, Pleiades_Config, CONFIG_DIR};
+use crate::config::{Ensure_Config, Ensure_Identity, Get_Node_Type, Get_Peer_Name, NodeType, Pleiades_Config, CONFIG_DIR};
 use crate::event_bus::EventBus;
 use crate::network::{NetworkConfig, Network_Service, NodeHandle};
 use crate::orchestrator::command::UserCommand;
 use crate::orchestrator::core::Core;
 use crate::orchestrator::Capabilities;
 use crate::peer_management::create_peer_management;
-use crate::robot::control::types::CarType;
+use crate::robot::core::robot::DeviceHandler;
+use crate::robot::ugv::robot_handler::CarDeviceHandler;
+use crate::robot::uav::robot_handler::UavDeviceHandler;
 use crate::robot::Robot;
 use crate::storage::StorageManager;
 use crate::tui::TUI_Loop;
@@ -194,10 +196,9 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     Ok(CoreBootstrap { config, event_bus, robot_bus, robot_cmd_frame_rx: Some(robot_cmd_frame_rx), node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
 }
 
-/// Robot bootstrap：读取 [Robot] 段配置 → Robot::launch（注入 node_handle/robot_bus）→ WS 遥控
+/// Robot bootstrap：读配置 → Robot::new（共享）→ 构造设备处理器（车/机按 node_type）→ spawn 主循环
 ///
-/// - 缺省值沿用原硬编码（/dev/myserial、115200、X3Plus、/dev/rplidar、230400）
-/// - car_type 解析失败 warn 回退 X3Plus（Task 9_2 决策 #8）
+/// 设备处理器只存配置，具体 spawn 哪些设备由各自的 `DeviceHandler::start()` 负责（统一契约）。
 /// - vehicle_id = peer_name = 车名，全链路统一（Task 9_2 决策 #6）
 pub async fn robot_bootstrap(
     config: &Pleiades_Config,
@@ -205,102 +206,33 @@ pub async fn robot_bootstrap(
     robot_bus: Arc<EventBus>,
     robot_cmd_frame_rx: mpsc::Receiver<Vec<u8>>,
     origin: (f32, f32, f32),
-) -> Result<Robot, String> {
-    let r = config.Robot.as_ref();
-
-    // 设备开关（Task 22）：chassis/lidar 缺省启用，flight_ctrl 缺省禁用
-    let chassis_enabled = r.and_then(|r| r.chassis.as_ref())
-        .and_then(|c| c.enabled).unwrap_or(true);
-    let lidar_enabled = r.and_then(|r| r.lidar.as_ref())
-        .and_then(|l| l.enabled).unwrap_or(true);
-    let flight_ctrl_enabled = r.and_then(|r| r.flight_ctrl.as_ref())
-        .and_then(|f| f.enabled).unwrap_or(false);
-
-    // 底盘配置
-    let chassis = r.and_then(|r| r.chassis.as_ref());
-    let serial_port = chassis.and_then(|c| c.port.clone())
-        .unwrap_or_else(|| "/dev/myserial".to_string());
-    let baudrate = chassis.and_then(|c| c.baudrate).unwrap_or(115200);
-    let car_type = match chassis.and_then(|c| c.car_type.as_deref()).map(CarType::from_str) {
-        Some(Some(t)) => t,
-        Some(None) => {
-            warn!("car_type 解析失败，回退 X3Plus");
-            CarType::X3Plus
-        }
-        None => CarType::X3Plus,
-    };
-
-    // 底盘速度（Task 22_5 D2：速度由设备层绑定，config 可调）
-    let forward_speed = chassis.and_then(|c| c.forward_speed).unwrap_or(30).clamp(0, 100);
-    let turn_speed = chassis.and_then(|c| c.turn_speed).unwrap_or(10).clamp(0, 100);
-
-    // 雷达配置：enabled=false 或 port 空串 → 禁用；字段缺失 → 缺省 /dev/rplidar（决策 #8）
-    let lidar = r.and_then(|r| r.lidar.as_ref());
-    let lidar_port = if !lidar_enabled {
-        None
-    } else {
-        match lidar.and_then(|l| l.port.clone()) {
-            Some(s) if !s.trim().is_empty() => Some(s),       // 显式配置
-            Some(_) => None,                                  // 留空 = 禁用
-            None => Some("/dev/rplidar".to_string()),         // 缺省
-        }
-    };
-    let lidar_baudrate = lidar.and_then(|l| l.baudrate).or(Some(230400));
-
-    // 飞控配置（Task 22_4）：enabled=false 或 connection 空 → 禁用；字段缺失 → None（纯车）
-    let flight_ctrl = r.and_then(|r| r.flight_ctrl.as_ref());
-    let flight_ctrl_port = if !flight_ctrl_enabled {
-        None
-    } else {
-        match flight_ctrl.and_then(|f| f.connection.clone()) {
-            Some(s) if !s.trim().is_empty() => Some(s),
-            _ => None,
-        }
-    };
-    let flight_ctrl_baudrate = flight_ctrl.and_then(|f| f.baudrate).or(Some(921600));
-
-    // 飞控速度（Task 22_5 D2：速度由设备层绑定，config 可调）
-    let vel_fwd = flight_ctrl.and_then(|f| f.vel_fwd).unwrap_or(0.3).max(0.0);
-    let yaw_rate_deg = flight_ctrl.and_then(|f| f.yaw_rate_deg).unwrap_or(15.0).max(0.0);
-    if flight_ctrl_enabled && flight_ctrl_port.is_none() {
-        warn!("[Robot] flight_ctrl.enabled=true 但 connection 未配置，忽略飞控（退化为纯车）");
-    }
-
-    // 车机互斥
-    let chassis_enabled = if flight_ctrl_port.is_some() {
-        if chassis_enabled {
-            warn!("[Robot] flight_ctrl 已启用，强制禁用 chassis（车机互斥）");
-        }
-        false
-    } else {
-        chassis_enabled
-    };
-    let obstacle_inflation_radius = r.and_then(|r| r.obstacle_inflation_radius).unwrap_or(0.2);
-
+) -> Result<Arc<Robot>, String> {
+    let node_type = Get_Node_Type(config);
     let peer_name = Get_Peer_Name(config);
 
-    info!(
-        "Robot 配置: chassis={chassis_enabled}(port={serial_port} baud={baudrate} car={car_type:?}) lidar={lidar_enabled}({}) flight_ctrl={} infl_r={obstacle_inflation_radius} peer_name={peer_name}",
-        lidar_port.as_deref().unwrap_or("None"),
-        flight_ctrl_port.as_deref().unwrap_or("None")
-    );
-
-    let robot = Robot::launch(
-        chassis_enabled, &serial_port, baudrate, car_type,
-        lidar_enabled, lidar_port.as_deref(), lidar_baudrate,
-        flight_ctrl_port.as_deref(), flight_ctrl_baudrate,
+    // 1. 创建共享状态 + 非设备 task（不含设备 spawn / goal_service / 主循环）
+    let (robot, cmd_rx) = Robot::new(
         origin,
-        Some(node_handle),
+        Some(node_handle.clone()),
         Some(robot_bus),
         Some(robot_cmd_frame_rx),
-        obstacle_inflation_radius,
-        forward_speed,
-        turn_speed,
-        vel_fwd,
-        yaw_rate_deg,
-        peer_name.clone(),
+        peer_name,
     ).await?;
-    info!("Robot 已启动");
+    let robot = Arc::new(robot);
+
+    // 2. 构造设备处理器（车/机二选一，按 node_type；设备自管理启动）
+    let device: Arc<dyn DeviceHandler> = match node_type {
+        NodeType::Car => Arc::new(CarDeviceHandler::new(robot.clone(), config.clone(), node_handle.clone(), origin)),
+        NodeType::Uav => Arc::new(UavDeviceHandler::new(robot.clone(), config.clone(), origin)),
+        NodeType::GroundStation => return Err("地面站不应调用 robot_bootstrap".to_string()),
+    };
+
+    // 3. spawn 主循环（后台跑；boot.run() 阻塞 core 主循环）
+    let run_robot = robot.clone();
+    tokio::spawn(async move {
+        run_robot.run(device, cmd_rx).await;
+    });
+    info!("Robot 已启动（node_type={node_type:?}）");
 
     Ok(robot)
 }

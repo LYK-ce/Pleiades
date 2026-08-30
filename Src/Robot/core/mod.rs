@@ -15,13 +15,13 @@
 //! - planning/：规划层（assignment 任务分配 + pathfinder D* 寻路，Task 14）
 
 pub mod command;
+pub mod grid;
+pub mod map_delta;
 pub mod command_consumer;
-pub mod executor;
 pub mod protocol;
 pub mod state;
-pub mod goal;
 pub mod mission;
 pub mod mode;
 pub mod robot;
 pub mod cluster;
-pub mod planning;
+pub mod world;
