@@ -69,9 +69,10 @@ fn aligned_world_pose(
 ) -> (f32, f32, f32) {
     let wx = origin.0 + local_x * offset.cos() + local_y * offset.sin();
     let wy = origin.1 - local_x * offset.sin() + local_y * offset.cos();
-    // Task 23 fix：NED yaw 顺时针正 → 世界逆时针正（与车 odometry/lidar_mapper 统一）。
-    // 否则 executor 的 angle_to_target（atan2 逆时针正）与机 yaw 符号相反，转向方向反转。
-    let yaw_world = offset - yaw;
+    // yaw 与位置矩阵 R(-offset) 自洽：世界系 +y=南（y 向下），航向「东→南」为顺时针正，
+    // 与 NED yaw（北→东顺时针正）同约定；前进方向经位置变换后 = (cos yaw_world, sin yaw_world)。
+    // 无需取反（早期「转向符号反」是误判：误把世界系当 y 向上）。
+    let yaw_world = yaw - offset;
     (wx, wy, yaw_world)
 }
 
@@ -390,6 +391,17 @@ mod tests {
         let (wx, wy, _) = aligned_world_pose(1.0, 0.0, 0.0, off, (64.0, 64.0));
         assert!((wx - 64.0).abs() < 1e-6);
         assert!((wy - 63.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_aligned_world_pose_yaw_matches_forward_direction() {
+        // 一致性：NED 前进方向 (cos ψ, sin ψ) 经位置变换后，应等于世界前进方向 (cos yaw_world, sin yaw_world)。
+        // 防止 yaw 与位置矩阵不自洽（曾误把 yaw 取反导致镜像）。
+        let off = 0.7f32;
+        let psi = 1.2f32;
+        let (wx, wy, yaw_world) = aligned_world_pose(psi.cos(), psi.sin(), psi, off, (0.0, 0.0));
+        assert!((wx - yaw_world.cos()).abs() < 1e-4, "前进 x 分量应与 cos(yaw_world) 一致: wx={wx}");
+        assert!((wy - yaw_world.sin()).abs() < 1e-4, "前进 y 分量应与 sin(yaw_world) 一致: wy={wy}");
     }
 
     #[test]

@@ -86,6 +86,13 @@
   - `reset()`：停车 + goal_service.reset + 清意图
 - 验证：`cargo build -p pleiades-uav` ✅ 0 error；uav 警告 34→11（2D 决策从死代码变为已接线）；uav 测试 45 全绿；`cargo build --workspace` ✅
 
+## 第二轮 review 修复：撤销「转向符号取反」（误判回归）—— 完成（2026-08-30）
+
+- 第二轮 review 发现：上一轮「yaw 取反」是**误判引入的回归**。根因：第一轮把世界系误当 y 向上，实际世界系 +y=南（y 向下），车 yaw「东→南」本就是**顺时针正**，与 NED（北→东顺时针）同约定，**无需取反**。
+- 已撤销 `aligned_world_pose` 的 `yaw_world = offset - yaw` → 回退 `yaw - offset`（与位置矩阵 R(-offset) 自洽）。
+- 新增一致性回归测试 `test_aligned_world_pose_yaw_matches_forward_direction`：验证「NED 前进方向 (cos ψ,sin ψ) 经位置变换后 == (cos yaw_world, sin yaw_world)」，防止再次把 yaw 与位置搞镜像。
+- 验证：uav 测试 47 全绿（含新测试）；`cargo build --workspace` 0 error。
+
 ## 模拟节点独立 crate（pleiades-sim）—— 完成（2026-08-30，人类拍板）
 
 - 人类纠正：模拟不是给 ugv/uav 加 `simulated` 选项，而是**一个与 ugv/uav/terminal 并列的独立 crate `pleiades-sim`**（有自己的目录 + 专属代码）。
