@@ -214,7 +214,7 @@ pub fn Ensure_Config() -> Result<(BaseConfig, PathBuf), Box<dyn std::error::Erro
             eprintln!("[Info] 已创建配置目录: {}/", CONFIG_DIR);
         }
         fs::write(&config_path, DEFAULT_CONFIG)?;
-        eprintln!("[Info] 已生成默认配置文件: {}/{}\n[Info] 设备段（chassis/lidar/flight_ctrl）请按对应设备端 crate 的模板补充", CONFIG_DIR, CONFIG_FILE);
+        eprintln!("[Info] 已生成默认配置文件: {}/{}\n[Info] 设备段（chassis/lidar/flight_ctrl）将由对应设备端 crate 启动时自动补全", CONFIG_DIR, CONFIG_FILE);
     }
 
     let config = Read_Config(&config_path)?;

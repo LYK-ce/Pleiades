@@ -3903,6 +3903,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tracing",
 ]
 
@@ -3916,6 +3917,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tracing",
 ]
 
