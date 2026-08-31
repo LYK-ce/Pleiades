@@ -1,14 +1,14 @@
 # task_23_universal_robot — 机器人子系统重构（底座共享 + 设备端独有）
 
-> 状态：阶段 A/B + C 核心已完成（2026-08-30），C1-C5 建 crate 待做
+> 状态：✅ 全部完成（阶段 A/B/C 核心 + C1-C5 建 crate + 附加工作）
 > Created Date ： 2026-08-29
-> Modified Date ： 2026-08-30
+> Modified Date ： 2026-08-31
 > 关联文档：`docs/heterogeneity_analysis.md`（异构分析）、`docs/plugin_design.md`（插件化方案）
 > 取代：`task_22_universal_robot`（已废弃，见归档目录）
 
 ---
 
-## 当前进度（2026-08-30）
+## 当前进度（2026-08-31）
 
 ### 已完成
 
@@ -17,20 +17,20 @@
 | 阶段 A | 目录重组：`control/`→`ugv/`+`uav/`+`util/`、`world.rs`→`core/world.rs`（寻路下沉 GoalService）、`slam/` 拆分（grid→core）、`executor/goal`→`ugv/`、急停拆出、`planning`→`ugv/planning`、删 `MotionDevice`/`device.rs`，命令/动作解析下沉设备 | `cargo check` + robot 133 测试 |
 | 阶段 B | state 收敛：`encoders[4]`→STM32 内部、`LidarState`→LidarDevice 内部（`get_scan()`） | `cargo check` |
 | 阶段 C 核心 | 反向依赖拆分：`DeviceHandler` trait + 统一 `start()` 契约 + `robot.rs` 不再依赖设备端具体类型；`bootstrap` 按 `node_type` 分发；`MapDelta` 回 base；config 加 `NodeType`/`node_type`/`Clone` | `cargo check` 0 error + robot 134 测试 + 子 agent 审查 10 项全过 |
+| C0 | config 拆分：`BaseConfig`/`UgvConfig`/`UavConfig` 经 `#[serde(flatten)]` 复用共享段；`robot_bootstrap` 拆出到车/机各自装配；`mavlink` 依赖移 uav；`robot_cmd_frame_rx` 保留 base（非反向依赖） | `cargo check` |
+| C1 | 抽 `pleiades-base` lib（共享底座 + 基础设施 + robot/core + robot/util）；`Pleiades` 纯推理 bin 并入 base | `cargo build -p pleiades-base` |
+| C2 | 抽 `pleiades-ugv` bin（车设备端：stm32/lidar/slam/planning/executor/goal/急停 + `CarDeviceHandler`） | `cargo build -p pleiades-ugv` |
+| C3 | 抽 `pleiades-uav` bin（机设备端：mavlink + 复制车 2D 决策 + `UavDeviceHandler`） | `cargo build -p pleiades-uav` |
+| C4 | 抽 `pleiades-terminal` cdylib（地面站，原 `SrcPictorKernel`） | `cargo build -p pleiades-terminal` |
+| C5 | 收尾：workspace 4 crate + `deploy_robot.sh` bin 名改 `pleiades-ugv` + 删死脚本/空目录 + 清理过时 doc | `cargo build --workspace` |
+| 附加 | ① 新增第 5 crate `pleiades-sim`（无硬件模拟节点）；② UAV 2D 决策接线（「天上无人小车」）；③ 统一 `enabled=false → 跳过` 语义；④ 两轮 code review 修复（转向符号/D* Lite pop_valid/停车吞错/底盘泄漏等） | `cargo build --workspace` 0 error + robot 224 测试全绿（base 53/ugv 81/uav 47/sim 43） |
 
-### 下一步（C1-C5 建 crate）
+### 遗留/待后续（均非本任务范围或明确留后续）
 
-1. **C1**：抽 `pleiades-base` lib（共享底座 + 基础设施）
-2. **C2**：抽 `pleiades-ugv` bin（车设备端）
-3. **C3**：抽 `pleiades-uav` bin（机设备端）
-4. **C4**：抽 `pleiades-terminal` cdylib（地面站，原 `SrcPictorKernel`）
-5. **C5**：收尾（workspace `Cargo.toml` + 全量 build）
-
-### C1 前收尾项
-
-- 清理过时 doc 注释（`core/mod.rs`、`Robot/mod.rs`、`uav/mavlink/mod.rs` 的旧描述）
-- C0 剩余：`robot_cmd_frame_rx` 从 `core_bootstrap` 摘出（§六 C0 第 4 步）
-- `DecisionState`/`MotionAction`/`DecisionResult` 归属（C1 定）
+- **UAV 3D 化**（真飞行逻辑、3D 寻路、高度控制、3D 避障）—— 未来 task
+- **`ClusterInfo.node_type` 传播**（§3.5 明确「实施留后续」）
+- **集成测试 stale**：`pleiades-base/tests/` 的 t01/t04/t07/t09/t13 编译失败（`StorageManager`/`PeerManager`/`DataType`/`lua`→`vm`/`GGUF_Analyze` 改名）—— **ML_review 范围**
+- **VM 测试 2 失败**：`test_sandbox_os_blocked`（沙箱）+ `test_load_and_execute_hello_lua`（脚本相对路径）—— **ML_review 范围 / 既有**
 
 ---
 
