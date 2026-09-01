@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 共享底座（协议/集群/状态/世界/网络/事件总线）
-pleiades-base = { path = "../pleiades-base" }
+pleiades-base = { path = "../pleiades-base", default-features = false }
 
 # 异步运行时 + 同步原语
 tokio = { version = "1", features = ["full"] }

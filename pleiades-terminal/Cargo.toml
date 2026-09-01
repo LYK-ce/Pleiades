@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # 共享底座（libp2p 网络 / ORION 协议 / 地图合并 / LLM）
-pleiades-base = { path = "../pleiades-base" }
+pleiades-base = { path = "../pleiades-base", default-features = false }
 # Godot GDExtension 绑定（gdext）；api-4-7 匹配 Pictor 的 Godot 4.7
 godot = { version = "0.5", features = ["api-4-7"] }
 # 后台 tokio runtime（无头节点 + 同步 task）
