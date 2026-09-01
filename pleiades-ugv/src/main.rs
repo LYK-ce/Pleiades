@@ -12,6 +12,7 @@
 
 mod bootstrap;
 mod config;
+mod device;
 mod ugv;
 
 use std::sync::Arc;

@@ -84,6 +84,6 @@ pub use session_stream::protocol::{
 // GossipSub 业务 topic 常量与快照缓存（payload 构建在业务层 PeerManagement）
 pub use Gossipsub::{
     TOPIC_PEER_INFO, TOPIC_MODELS, TOPIC_SESSIONS,
-    TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP,
+    TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP, TOPIC_RTK_RTCM,
     SnapshotCache,
 };

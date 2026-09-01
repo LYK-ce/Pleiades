@@ -26,6 +26,8 @@ pub struct UgvConfig {
     pub lidar: Option<LidarConfig>,
     /// 他车障碍膨胀半径（米，缺省 0.2）
     pub obstacle_inflation_radius: Option<f32>,
+    /// RTK 流动站设备配置（LG290P）
+    pub lg290p: Option<Lg290pConfig>,
 }
 
 /// 底盘设备配置（STM32 轮式底盘）
@@ -44,6 +46,14 @@ pub struct ChassisConfig {
 /// 雷达设备配置（YDLIDAR，含 SLAM 建图）
 #[derive(Debug, Clone, Deserialize)]
 pub struct LidarConfig {
+    pub enabled: Option<bool>,
+    pub port: Option<String>,
+    pub baudrate: Option<u32>,
+}
+
+/// RTK 流动站设备配置（LG290P）
+#[derive(Debug, Clone, Deserialize)]
+pub struct Lg290pConfig {
     pub enabled: Option<bool>,
     pub port: Option<String>,
     pub baudrate: Option<u32>,
@@ -76,6 +86,7 @@ fn ensure_ugv_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     changed |= fill_chassis(&mut doc);
     changed |= fill_lidar(&mut doc);
+    changed |= fill_lg290p(&mut doc);
 
     if changed {
         fs::write(path, doc.to_string())?;
@@ -128,6 +139,27 @@ fn fill_lidar(doc: &mut DocumentMut) -> bool {
     changed
 }
 
+/// 补全 [lg290p] 段（缺失才补，幂等）
+fn fill_lg290p(doc: &mut DocumentMut) -> bool {
+    if doc.get("lg290p").is_none() {
+        doc["lg290p"] = Item::Table(toml_edit::Table::new());
+    }
+    let lg290p = doc["lg290p"].as_table_mut().expect("lg290p 应为 table");
+    let mut changed = false;
+    let defaults: [(&str, Item); 3] = [
+        ("enabled", toml_edit::value(false)),
+        ("port", toml_edit::value("/dev/ttyUSB2")),
+        ("baudrate", toml_edit::value(460800_i64)),
+    ];
+    for (k, v) in defaults {
+        if !lg290p.contains_key(k) {
+            lg290p.insert(k, v);
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +197,10 @@ mod tests {
         assert_eq!(l.enabled, Some(true));
         assert_eq!(l.port.as_deref(), Some("/dev/ttyUSB1"));
         assert_eq!(l.baudrate, Some(230400));
+        let g = parsed.lg290p.expect("lg290p 段应被补全");
+        assert_eq!(g.enabled, Some(false));
+        assert_eq!(g.port.as_deref(), Some("/dev/ttyUSB2"));
+        assert_eq!(g.baudrate, Some(460800));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

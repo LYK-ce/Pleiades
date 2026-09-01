@@ -29,6 +29,8 @@ pub const TOPIC_SESSIONS: &str = "pleiades/sessions";
 pub const TOPIC_ROBOT_POSE: &str = "pleiades/robot/pose";
 /// robot map topic：ORION 地图帧（增量/全量，状态快照，Task 12）
 pub const TOPIC_ROBOT_MAP: &str = "pleiades/robot/map";
+/// robot rtcm topic：RTK 改正数据（RTCM 3.x 帧包 ORION msgid=6，Task 24）
+pub const TOPIC_RTK_RTCM: &str = "pleiades/robot/rtcm";
 
 // ===== 快照缓存（通用消息层机制，类似 MQTT retained message） =====
 

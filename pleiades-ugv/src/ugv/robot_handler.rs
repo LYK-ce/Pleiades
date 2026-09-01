@@ -13,12 +13,14 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
+use pleiades_base::event_bus::EventBus;
 use pleiades_base::network::NodeHandle;
 use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::UgvConfig;
+use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
 use crate::ugv::executor::DecisionExecutor;
 use crate::ugv::goal::{GoalService, ARRIVAL_THRESHOLD_M};
@@ -32,6 +34,8 @@ struct CarInner {
     /// 底盘（enabled=false 时为 None）
     stm32: Option<Arc<STM32Device>>,
     lidar: Option<LidarDevice>,
+    /// RTK 流动站（enabled=false 时为 None）
+    lg290p: Option<Lg290pDevice>,
     goal_service: Arc<Mutex<GoalService>>,
     executor: DecisionExecutor,
 }
@@ -41,6 +45,7 @@ pub struct CarDeviceHandler {
     config: UgvConfig,
     origin: (f32, f32, f32),
     node_handle: Arc<NodeHandle>,
+    robot_bus: Arc<EventBus>,
     inner: OnceLock<CarInner>,
 }
 
@@ -49,9 +54,10 @@ impl CarDeviceHandler {
         robot: Arc<Robot>,
         config: UgvConfig,
         node_handle: Arc<NodeHandle>,
+        robot_bus: Arc<EventBus>,
         origin: (f32, f32, f32),
     ) -> Self {
-        Self { robot, config, origin, node_handle, inner: OnceLock::new() }
+        Self { robot, config, origin, node_handle, robot_bus, inner: OnceLock::new() }
     }
 }
 
@@ -142,7 +148,40 @@ impl DeviceHandler for CarDeviceHandler {
             _ => { info!("LiDAR 未配置，跳过"); None }
         };
 
-        self.inner.set(CarInner { stm32, lidar, goal_service, executor: DecisionExecutor::new() })
+        // RTK 流动站（LG290P）：enabled=false → 跳过（Task 24）
+        let lg290p_cfg = r.lg290p.as_ref();
+        let lg290p_enabled = lg290p_cfg.and_then(|l| l.enabled).unwrap_or(false);
+        let lg290p = if lg290p_enabled {
+            let port = lg290p_cfg
+                .and_then(|l| l.port.clone())
+                .unwrap_or_else(|| "/dev/ttyUSB2".to_string());
+            let baudrate = lg290p_cfg.and_then(|l| l.baudrate).unwrap_or(460800);
+            info!("启用 LG290P: port={port} baud={baudrate}");
+            match Lg290pDevice::spawn(
+                &port,
+                baudrate,
+                self.robot_bus.clone(),
+                self.robot.robot_state.clone(),
+                self.origin,
+            ) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    // spawn 失败：清理已启动的 stm32/lidar，避免后台 task 泄漏
+                    if let Some(s) = &stm32 {
+                        s.shutdown();
+                    }
+                    if let Some(l) = &lidar {
+                        l.shutdown();
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            info!("LG290P 未启用（enabled=false），跳过");
+            None
+        };
+
+        self.inner.set(CarInner { stm32, lidar, lg290p, goal_service, executor: DecisionExecutor::new() })
             .map_err(|_| "设备已启动".to_string())?;
         Ok(())
     }
@@ -218,5 +257,6 @@ impl DeviceHandler for CarDeviceHandler {
             l.shutdown();
         }
         if let Some(s) = &d.stm32 { s.shutdown(); }
+        if let Some(g) = &d.lg290p { g.shutdown(); }
     }
 }

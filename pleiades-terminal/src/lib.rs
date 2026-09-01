@@ -11,6 +11,9 @@
 //! - 上行（车 → Godot）：订阅 `robot_bus` 转发原始 ORION 帧 + 订阅 `event_bus` 转发 peer 事件
 //! - 生命周期：`ready` 起后台线程（core_bootstrap + run_headless），`exit_tree` 停机并 join。
 
+mod config;
+mod device;
+
 use godot::prelude::*;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,6 +188,33 @@ impl PleiadesKernel {
                 };
 
                 let _ = node_handle.set(boot.node_handle.clone());
+
+                // RTK 基站（UM960）：enabled 才 spawn，失败只告警不拖垮节点（Task 24）
+                // 句柄存活到 run_headless 返回前（随后台线程生命周期自然释放）
+                let _um960 = match config::Ensure_Terminal_Config() {
+                    Ok(cfg) => {
+                        if let Some(u) = cfg.um960.as_ref().filter(|u| u.enabled.unwrap_or(false)) {
+                            let port = u.port.clone().unwrap_or_else(|| "/dev/ttyUSB0".into());
+                            let baud = u.baudrate.unwrap_or(460800);
+                            let secs = u.survey_seconds.unwrap_or(180);
+                            match device::um960::Um960Device::spawn(
+                                &port, baud, secs, Arc::new(boot.node_handle.clone()),
+                            ) {
+                                Ok(d) => Some(d),
+                                Err(e) => {
+                                    godot_warn!("[Kernel] UM960 启动失败: {e}");
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        godot_warn!("[Kernel] 读取 [um960] 配置失败: {e}");
+                        None
+                    }
+                };
 
                 // 上行 1：robot_bus 原始帧转发 → out_queue
                 {

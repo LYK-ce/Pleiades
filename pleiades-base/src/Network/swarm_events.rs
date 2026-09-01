@@ -361,7 +361,7 @@ impl Network_Service {
                             }).to_string(),
                         });
                     }
-                    super::TOPIC_ROBOT_POSE | super::TOPIC_ROBOT_MAP => {
+                    super::TOPIC_ROBOT_POSE | super::TOPIC_ROBOT_MAP | super::TOPIC_RTK_RTCM => {
                         // ORION 二进制帧（位姿/地图），不做 JSON 解析，直接透传 robot_bus（Task 12：由 RR 广播迁移到 gossipsub）
                         let _ = self.robot_bus.Publish(Bus_Event::StreamRaw { payload: message.data });
                     }

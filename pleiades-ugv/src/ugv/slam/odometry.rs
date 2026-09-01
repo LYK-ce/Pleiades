@@ -7,9 +7,9 @@
 //! 基于 STM32 编码器线速度 (vx, vy) + IMU 航向角 (yaw) 在世界坐标上积分。
 //! 在 STM32Device RX 回调中收到 RPT_SPEED 帧后调用。
 //!
-//! x/y 初值 = origin，由 `STM32Device::spawn` 注入 local_state（Task 9）。
-//! 本函数只允许作用于 RX 回调的 local_state（单一写入者不变式），
-//! 不得直接对共享 RobotState 调用。
+//! x/y 初值 = origin，由 `Robot::new` 注入共享 RobotState（Task 24：从 local_state 上移）。
+//! 本函数必须在 STM32 RX 回调已持有写锁的共享 RobotState guard 上调用
+//! （`accumulate(&mut *guard, dt)`），与 LG290P RTK 覆盖共写 x/y。
 
 use pleiades_base::robot::core::state::RobotState;
 

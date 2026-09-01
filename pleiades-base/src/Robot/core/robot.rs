@@ -216,10 +216,10 @@ async fn state_notifier(
             _ = interval.tick() => {
                 // 先取快照并立即 drop 读锁（Task 23 review 修复：持锁跨 await 会挤压设备端
                 // RX 回调的 try_write，造成位姿抖动/滞后）
-                let (x, y, z, yaw, vx, vy, sub_target) = {
+                let (x, y, z, yaw, vx, vy, rtk_fixed, sub_target) = {
                     let s = state.read().await;
                     let es = execute_state.read().await;
-                    (s.x, s.y, s.z, s.attitude.yaw, s.vx, s.vy, es.sub_target)
+                    (s.x, s.y, s.z, s.attitude.yaw, s.vx, s.vy, s.rtk_fixed, es.sub_target)
                 };
                 let time_boot_ms = crate::robot::core::protocol::now_boot_ms();
                 let _ = pose_tx.send(Pose {
@@ -238,6 +238,7 @@ async fn state_notifier(
                         valid: sub_target.is_some(),
                         sub_gx: sub_target.map(|(gx, _)| gx).unwrap_or(0),
                         sub_gy: sub_target.map(|(_, gy)| gy).unwrap_or(0),
+                        rtk_fixed,
                     };
                     let frame = encode_frame(MSGID_POSE, peer_id, COMPID_ROBOT, &encode_pose(&pose));
                     if let Err(e) = nh.Gossipsub_Publish(TOPIC_ROBOT_POSE, frame).await {

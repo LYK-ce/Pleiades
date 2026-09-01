@@ -45,20 +45,19 @@ pub struct STM32Device {
 }
 
 impl STM32Device {
-    /// 启动 STM32 设备。`origin` 为小车初始世界坐标 (x, y, z)（默认 64,64,0），
-    /// 注入 local_state 的 x/y/z 作为积分起点（Task 9：RobotState 记录全局唯一坐标）。
-    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, origin: (f32, f32, f32), forward_speed: i16, turn_speed: i16) -> Result<Self, String> {
+    /// 启动 STM32 设备。（Task 24：origin 已由 Robot::new 注入共享 RobotState，
+    /// 本处 `_origin` 保留仅对齐签名，不再注入 local_state）
+    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, _origin: (f32, f32, f32), forward_speed: i16, turn_speed: i16) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let encoders = Arc::new(Mutex::new([0i32; 4]));
         let encoders_clone = encoders.clone();
         let mut sm: RxState = RxState::Head;
         let mut local_state = RobotState::default();
-        // 注入初始世界坐标（全局唯一坐标起点，Task 9）
-        local_state.x = origin.0;
-        local_state.y = origin.1;
-        local_state.z = origin.2;
+        // Task 24 写者改造：x/y/z 源头已移到共享 RobotState（由 Robot::new 注入 origin），
+        // local_state 降级为纯传感器 staging（不再注入 origin）
         let mut last_speed_ts = Instant::now();
+        let mut pending_dt: Option<f32> = None;
 
         let serial_cmd_tx = port::spawn_port(
             port, baudrate, 512,
@@ -73,7 +72,7 @@ impl STM32Device {
                             let now = Instant::now();
                             let dt = (now - last_speed_ts).as_secs_f32();
                             if dt > 0.0 && dt < 1.0 {
-                                odometry::accumulate(&mut local_state, dt);
+                                pending_dt = Some(dt);
                             }
                             last_speed_ts = now;
                         }
@@ -82,9 +81,21 @@ impl STM32Device {
                 }
                 if frame_parsed {
                     if let Ok(mut guard) = state_clone.try_write() {
-                        // 单一写入者不变式：共享 RobotState 只在此处全量覆盖；
-                        // x/y 仅在 local_state 内维护（origin 初始化 + accumulate 积分）
-                        *guard = local_state.clone();
+                        // Task 24 写者改造：传感器字段照写，x/y 读-改-写（同一把写锁内，
+                        // 避免与 LG290P RTK 覆盖交错丢增量）
+                        guard.vx = local_state.vx;
+                        guard.vy = local_state.vy;
+                        guard.vz = local_state.vz;
+                        guard.battery = local_state.battery;
+                        guard.attitude = local_state.attitude.clone();
+                        guard.gyro = local_state.gyro.clone();
+                        guard.accel = local_state.accel.clone();
+                        guard.mag = local_state.mag.clone();
+                        guard.z = local_state.z; // 车恒 0（D11：z 保持设备端现状）
+                        if let Some(dt) = pending_dt.take() {
+                            odometry::accumulate(&mut *guard, dt);
+                        }
+                        // 不写 guard.rtk_fixed（LG290P 独写）
                     } else {
                         warn!("[STM32] try_write 失败，状态更新丢弃");
                     }
@@ -212,7 +223,7 @@ impl STM32Device {
         tx_sink: mpsc::Sender<Vec<u8>>,
         car_type: CarType,
         state: Arc<RwLock<RobotState>>,
-        origin: (f32, f32, f32),
+        _origin: (f32, f32, f32),
     ) -> (Self, tokio::task::JoinHandle<()>) {
         use protocol::{feed_state_machine, update_state, RxState};
         use constants::{FORWARD_SPEED, TURN_SPEED};
@@ -228,11 +239,9 @@ impl STM32Device {
         let handle = tokio::spawn(async move {
             let mut sm: RxState = RxState::Head;
             let mut local_state = RobotState::default();
-            // 注入初始世界坐标（与生产 spawn 一致，Task 9）
-            local_state.x = origin.0;
-            local_state.y = origin.1;
-            local_state.z = origin.2;
+            // Task 24 写者改造：x/y/z 源头已移到共享 RobotState（Robot::new 注入 origin）
             let mut last_speed_ts = Instant::now();
+            let mut pending_dt: Option<f32> = None;
 
             loop {
                 tokio::select! {
@@ -257,7 +266,7 @@ impl STM32Device {
                                             let now = Instant::now();
                                             let dt = (now - last_speed_ts).as_secs_f32();
                                             if dt > 0.0 && dt < 1.0 {
-                                                odometry::accumulate(&mut local_state, dt);
+                                                pending_dt = Some(dt);
                                             }
                                             last_speed_ts = now;
                                         }
@@ -266,7 +275,19 @@ impl STM32Device {
                                 }
                                 if frame_parsed {
                                     if let Ok(mut guard) = state_clone.try_write() {
-                                        *guard = local_state.clone();
+                                        // Task 24 写者改造：传感器字段照写，x/y 读-改-写（同一把写锁内）
+                                        guard.vx = local_state.vx;
+                                        guard.vy = local_state.vy;
+                                        guard.vz = local_state.vz;
+                                        guard.battery = local_state.battery;
+                                        guard.attitude = local_state.attitude.clone();
+                                        guard.gyro = local_state.gyro.clone();
+                                        guard.accel = local_state.accel.clone();
+                                        guard.mag = local_state.mag.clone();
+                                        guard.z = local_state.z;
+                                        if let Some(dt) = pending_dt.take() {
+                                            odometry::accumulate(&mut *guard, dt);
+                                        }
                                     } else {
                                         warn!("[STM32 mock] try_write 失败，状态更新丢弃");
                                     }
@@ -359,14 +380,21 @@ mod mock_tests {
 
     #[tokio::test]
     async fn test_mock_origin_injected() {
-        // Task 9：origin 注入 local_state，首帧覆盖写后共享态 x/y 应为 origin
+        // Task 24 写者改造：origin 由 Robot::new 注入共享 state（测试里手动模拟），
+        // mock 首帧 vx=0 零位移后 x/y 保持 origin（z 恒 0）
         let state = Arc::new(RwLock::new(RobotState::default()));
+        {
+            let mut g = state.write().await;
+            g.x = 66.5;
+            g.y = 63.25;
+            g.z = 0.0;
+        }
         let (tx_sink, _tx_rx) = mpsc::channel::<Vec<u8>>(32);
         let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
         let (_dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state.clone(), (66.5, 63.25, 0.0));
 
-        // 喂一帧 vx=0 的 SPEED 帧触发全量覆盖；无位移，x/y 应保持 origin
+        // 喂一帧 vx=0 的 SPEED 帧触发字段级更新；无位移，x/y 应保持 origin
         let vx = 0i16;
         let mut data = vec![0u8; 7];
         data[0..2].copy_from_slice(&vx.to_le_bytes());
@@ -375,8 +403,8 @@ mod mock_tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let s = state.read().await;
-        assert!((s.x - 66.5).abs() < 1e-3, "共享态 x 应为 origin: {}", s.x);
-        assert!((s.y - 63.25).abs() < 1e-3, "共享态 y 应为 origin: {}", s.y);
-        assert!((s.z - 0.0).abs() < 1e-3, "共享态 z 应为 origin: {}", s.z);
+        assert!((s.x - 66.5).abs() < 1e-3, "共享态 x 应保持 origin: {}", s.x);
+        assert!((s.y - 63.25).abs() < 1e-3, "共享态 y 应保持 origin: {}", s.y);
+        assert!((s.z - 0.0).abs() < 1e-3, "共享态 z 应为 0: {}", s.z);
     }
 }

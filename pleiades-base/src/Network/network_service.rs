@@ -91,6 +91,8 @@ pub struct NetworkConfig {
     pub heartbeat_timeout: u64,
     /// Request-Response 协议超时（秒），默认300
     pub request_response_timeout: u64,
+    /// config 额外订阅的 gossipsub topic 列表（Task 24：ugv 配 pleiades/robot/rtcm）
+    pub subscribe_topics: Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -107,6 +109,7 @@ impl Default for NetworkConfig {
             heartbeat_interval: 60,   // 默认60秒
             heartbeat_timeout: 10,    // 默认10秒
             request_response_timeout: 300, // 默认300秒
+            subscribe_topics: Vec::new(),
         }
     }
 }
@@ -402,13 +405,17 @@ impl Network_Service {
             &self.config.dht_namespace,
         );
         // 2.5 订阅 GossipSub 业务状态 topic（IdentTopic = 原始字符串 topic，与默认配置一致）
-        let topics = [
+        let mut topics = vec![
             gossipsub::IdentTopic::new(super::TOPIC_PEER_INFO),
             gossipsub::IdentTopic::new(super::TOPIC_MODELS),
             gossipsub::IdentTopic::new(super::TOPIC_SESSIONS),
             gossipsub::IdentTopic::new(super::TOPIC_ROBOT_POSE),
             gossipsub::IdentTopic::new(super::TOPIC_ROBOT_MAP),
         ];
+        // Task 24：config 额外订阅的 topic（如 ugv 的 pleiades/robot/rtcm）
+        for t in &self.config.subscribe_topics {
+            topics.push(gossipsub::IdentTopic::new(t));
+        }
         for t in &topics {
             if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(t) {
                 warn!("GossipSub 订阅失败 ({}): {}", t, e);

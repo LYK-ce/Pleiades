@@ -30,6 +30,7 @@ pub const MSGID_MAP_FULL: u16 = 2;
 pub const MSGID_MAP_DELTA: u16 = 3;
 pub const MSGID_MANUAL_CONTROL: u16 = 4;
 pub const MSGID_TASK_SET: u16 = 5;
+pub const MSGID_RTCM: u16 = 6;
 
 /// compid 约定（协议文档 §4.3）
 pub const COMPID_ROBOT: u8 = 1;

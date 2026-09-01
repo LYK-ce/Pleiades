@@ -166,6 +166,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
             heartbeat_interval: n.and_then(|n| n.heartbeat_interval).unwrap_or(60),
             heartbeat_timeout:  n.and_then(|n| n.heartbeat_timeout).unwrap_or(10),
             request_response_timeout: n.and_then(|n| n.request_response_timeout).unwrap_or(300),
+            subscribe_topics: n.and_then(|n| n.subscribe_topics.clone()).unwrap_or_default(),
         }
     };
 

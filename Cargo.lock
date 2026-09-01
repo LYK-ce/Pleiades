@@ -3888,8 +3888,13 @@ dependencies = [
  "hex",
  "libp2p",
  "pleiades-base",
+ "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tracing",
 ]
 
 [[package]]

@@ -31,7 +31,7 @@ pub async fn ugv_bootstrap(
     let (robot, cmd_rx) = Robot::new(
         origin,
         Some(node_handle.clone()),
-        Some(robot_bus),
+        Some(robot_bus.clone()),
         Some(robot_cmd_frame_rx),
         peer_name,
     ).await?;
@@ -42,6 +42,7 @@ pub async fn ugv_bootstrap(
         robot.clone(),
         config.clone(),
         node_handle.clone(),
+        robot_bus.clone(),
         origin,
     ));
 

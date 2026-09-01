@@ -110,6 +110,7 @@ pub struct Network_Config {
     pub listen_port: Option<u16>,               // p2p 监听端口，0=随机
     pub bootstrap_peers: Option<Vec<String>>,   // DHT 种子节点列表
     pub dht_namespace: Option<String>,          // DHT 节点发现命名空间
+    pub subscribe_topics: Option<Vec<String>>,  // 额外订阅的 gossipsub topic 列表（Task 24）
 }
 
 /// [Storage] 段配置

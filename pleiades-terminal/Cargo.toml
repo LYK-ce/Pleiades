@@ -21,7 +21,15 @@ godot = { version = "0.5", features = ["api-4-7"] }
 tokio = { version = "1", features = ["full"] }
 # 解析 event_bus 的 State JSON（peer 事件）
 serde_json = "1.0"
+# config.toml 解析（[um960] 段，Task 24）
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+toml_edit = "0.22"
 # peer_id hex ↔ bytes 转换
 hex = "0.4"
+# 串口（spawn_port 的 CancellationToken）
+tokio-util = { version = "0.7", features = ["full"] }
+# 日志（UM960 驱动）
+tracing = "0.1"
 # PeerId 类型（与 pleiades-base 同版本，cargo 自动统一）
 libp2p = "0.56"

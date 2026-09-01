@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-08-30（Task 23 C1-C5：拆分为 workspace 四 crate）
+> 更新日期：2026-08-31（新增 §7 RTK 定位接入规划）
 > 范围：Robot 子系统（workspace 四 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）
 
@@ -513,6 +513,14 @@ baudrate = 921600
 vel_fwd = 0.3
 yaw_rate_deg = 15
 ```
+
+---
+
+## 7. RTK 定位接入（task_24，规划中）
+
+- 基站 UM960 在 `pleiades-terminal`，流动站 LG290P 在 `pleiades-ugv`；RTCM 改正数走 gossipsub `TOPIC_RTK_RTCM` 广播。
+- 定位以 offset 更新 `RobotState.x/y`（`world = origin + (ENU − ENU₀)`）。
+- **z 轴暂不更新**：LG290P 忽略 U（高度）分量，`RobotState.z` 保持设备端现状（车恒 0）。后续再评估是否接入高度。2026-08-31 决策。
 
 ---
 

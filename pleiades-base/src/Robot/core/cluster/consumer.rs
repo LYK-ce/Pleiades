@@ -160,6 +160,7 @@ mod tests {
             valid,
             sub_gx: gx,
             sub_gy: gy,
+            rtk_fixed: false,
         };
         encode_pose(&p)
     }
