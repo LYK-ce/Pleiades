@@ -26,9 +26,9 @@ pub struct PeerManager {
 }
 
 impl PeerManager {
-    pub fn new(local_peer_id: PeerId, name: String) -> Self {
+    pub fn new(local_peer_id: PeerId, name: String, node_type: String) -> Self {
         let mut peers = HashMap::new();
-        peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id, name));
+        peers.insert(local_peer_id, PeerInfo::new_local(local_peer_id, name, node_type));
         Self {
             peers: RwLock::new(peers),
         }
@@ -41,6 +41,7 @@ impl PeerManager {
         serde_json::json!({
             "peer_id": local.peer_id.to_string(),
             "name": local.name,
+            "node_type": local.node_type,
         }).to_string().into_bytes()
     }
 
@@ -73,6 +74,9 @@ impl PeerManager {
             peer_info.local = old.local;
             if peer_info.name.is_empty() {
                 peer_info.name = old.name.clone();
+            }
+            if peer_info.node_type.is_empty() {
+                peer_info.node_type = old.node_type.clone();
             }
         }
         let existed = peers.contains_key(&peer_info.peer_id);
@@ -200,6 +204,6 @@ impl Peer_Management_Capability for PeerManager {
 
 impl Default for PeerManager {
     fn default() -> Self {
-        Self::new(PeerId::random(), String::new())
+        Self::new(PeerId::random(), String::new(), String::new())
     }
 }

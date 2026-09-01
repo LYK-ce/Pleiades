@@ -18,7 +18,7 @@ use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::config::{BaseConfig, Ensure_Config, Ensure_Identity, Get_Peer_Name, CONFIG_DIR};
+use crate::config::{BaseConfig, Ensure_Config, Ensure_Identity, Get_Node_Type, Get_Peer_Name, CONFIG_DIR};
 use crate::event_bus::EventBus;
 use crate::network::{NetworkConfig, Network_Service, NodeHandle};
 use crate::orchestrator::command::UserCommand;
@@ -130,8 +130,9 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
 
     let local_peer_id = PeerId::from(keypair.public());
     let peer_name = Get_Peer_Name(&config);
+    let node_type = Get_Node_Type(&config).as_str().to_string();
 
-    let peer_manager_arc = create_peer_management(local_peer_id, peer_name);
+    let peer_manager_arc = create_peer_management(local_peer_id, peer_name, node_type);
     let peer_capability_for_network: Arc<dyn crate::peer_management::Peer_Management_Capability> = peer_manager_arc.clone();
     let peer_capability_for_core = peer_manager_arc.clone();
 

@@ -46,6 +46,7 @@ enum BridgeEvent {
     PeerInfo {
         peer_id: String,
         name: String,
+        node_type: String,
     },
 }
 
@@ -111,7 +112,7 @@ impl PleiadesKernel {
     fn peer_disconnected(peer_id: GString);
 
     #[signal]
-    fn peer_info_updated(peer_id: GString, peer_name: GString);
+    fn peer_info_updated(peer_id: GString, peer_name: GString, node_type: GString);
 
     /// 下发命令帧（Godot 拼好的完整 ORION 帧，fire-and-forget，同步返回 bool）
     #[func]
@@ -160,10 +161,11 @@ impl PleiadesKernel {
                     let peer = GString::from(peer_id.as_str());
                     self.signals().peer_disconnected().emit(&peer);
                 }
-                BridgeEvent::PeerInfo { peer_id, name } => {
+                BridgeEvent::PeerInfo { peer_id, name, node_type } => {
                     let peer = GString::from(peer_id.as_str());
                     let pname = GString::from(name.as_str());
-                    self.signals().peer_info_updated().emit(&peer, &pname);
+                    let ntype = GString::from(node_type.as_str());
+                    self.signals().peer_info_updated().emit(&peer, &pname, &ntype);
                 }
             }
         }
@@ -336,10 +338,11 @@ async fn event_loop(
                             .push_back(BridgeEvent::PeerDisconnected { peer_id }),
                         "peer_info_updated" => {
                             let name = v["peer_name"].as_str().unwrap_or("").to_string();
+                            let node_type = v["node_type"].as_str().unwrap_or("").to_string();
                             out_queue
                                 .lock()
                                 .unwrap()
-                                .push_back(BridgeEvent::PeerInfo { peer_id, name });
+                                .push_back(BridgeEvent::PeerInfo { peer_id, name, node_type });
                         }
                         _ => {}
                     }

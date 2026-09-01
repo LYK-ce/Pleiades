@@ -121,6 +121,8 @@ pub struct PeerInfo {
     pub peer_id: PeerId,
     /// 节点名称（不含 #XXXX 后缀，空字符串表示未知）
     pub name: String,
+    /// 节点类型：car/uav/ground_station，空串 = 未知（对称 name）
+    pub node_type: String,
     /// 地址列表
     pub addresses: Vec<Multiaddr>,
     /// 是否为本地节点
@@ -144,6 +146,7 @@ impl PeerInfo {
         Self {
             peer_id,
             name: String::new(),
+            node_type: String::new(),
             addresses,
             local: false,
             connected_at: now,
@@ -155,11 +158,12 @@ impl PeerInfo {
     }
 
     /// 创建本地节点信息
-    pub fn new_local(peer_id: PeerId, name: String) -> Self {
+    pub fn new_local(peer_id: PeerId, name: String, node_type: String) -> Self {
         let now = Instant::now();
         Self {
             peer_id,
             name,
+            node_type,
             addresses: Vec::new(),
             local: true,
             connected_at: now,

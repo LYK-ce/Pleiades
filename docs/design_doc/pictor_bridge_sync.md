@@ -54,11 +54,11 @@
 - 时机：事件驱动。
 - `peer_id`：**hex**。
 
-### 7. `peer_info_updated(peer_id: String, peer_name: String)`
+### 7. `peer_info_updated(peer_id: String, peer_name: String, node_type: String)`
 
 - 来源：`event_bus` State `type = peer_info_updated`（peer-info gossip）。
 - 时机：事件驱动（节点上报名字后）。
-- `peer_id`：hex；`peer_name`：节点名（车名）。
+- `peer_id`：hex；`peer_name`：节点名（车名）；`node_type`：节点类型（`car`/`uav`/`ground_station`，旧版本节点为空字符串）。
 
 ---
 
@@ -72,7 +72,7 @@
 | `peer_left` | ✅ | `peer_left` | mDNS 过期 |
 | `peer_connected` | ✅ | `peer_connected` | 连接建立 |
 | `peer_disconnected` | ✅ | `peer_disconnected` | 连接断开 |
-| `peer_info_updated` | ✅ | `peer_info_updated` | 节点名（gossip） |
+| `peer_info_updated` | ✅ | `peer_info_updated` | 节点名 + 类型（gossip） |
 
 > `event_bus` 里还有 ML_review 侧的 models / sessions 等 State 事件，均与机器人无关、不转发。
 

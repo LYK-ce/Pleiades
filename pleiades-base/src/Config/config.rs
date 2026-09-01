@@ -146,6 +146,15 @@ impl NodeType {
             _ => None,
         }
     }
+
+    /// 序列化为 config.toml 一致的字符串（peer-info 广播用）
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeType::GroundStation => "ground_station",
+            NodeType::Car => "car",
+            NodeType::Uav => "uav",
+        }
+    }
 }
 
 /// 读取节点类型，默认 Car（车）

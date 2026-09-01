@@ -285,14 +285,18 @@ impl Network_Service {
                 };
                 match message.topic.as_str() {
                     super::TOPIC_PEER_INFO => {
-                        // 节点身份：{"name": "..."}
-                        let name = serde_json::from_slice::<serde_json::Value>(&message.data)
-                            .ok()
+                        // 节点身份：{"name": "...", "node_type": "..."}
+                        let value = serde_json::from_slice::<serde_json::Value>(&message.data).ok();
+                        let name = value.as_ref()
                             .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        let node_type = value.as_ref()
+                            .and_then(|v| v["node_type"].as_str().map(|s| s.to_string()))
                             .unwrap_or_default();
                         if !name.is_empty() {
                             let mut updated = PeerInfo::new(author, vec![]);
                             updated.name = name.clone();
+                            updated.node_type = node_type.clone();
                             let _ = self.peer_handle.Upsert_Peer(updated).await;
                         }
                         // 通知 TUI
@@ -301,6 +305,7 @@ impl Network_Service {
                                 "type": "peer_info_updated",
                                 "peer_id": author.to_string(),
                                 "peer_name": name,
+                                "node_type": node_type,
                                 "is_local": false,
                                 "models": [],
                                 "sessions": [],

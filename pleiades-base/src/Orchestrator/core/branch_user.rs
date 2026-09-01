@@ -167,6 +167,7 @@ impl Core {
                                         "type": "peer_info_updated",
                                         "peer_id": local.peer_id.to_string(),
                                         "peer_name": local.name,
+                                        "node_type": local.node_type,
                                         "is_local": true,
                                         "models": [],
                                         "sessions": [],

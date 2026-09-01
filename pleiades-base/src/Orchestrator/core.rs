@@ -214,6 +214,7 @@ impl Core {
                             "type": "peer_info_updated",
                             "peer_id": peer_id_str.clone(),
                             "peer_name": local.name,
+                            "node_type": local.node_type,
                             "is_local": true,
                             "models": [],
                             "sessions": [],
