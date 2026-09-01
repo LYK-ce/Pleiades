@@ -67,6 +67,8 @@ pub struct DStarLite {
     goal: (i32, i32),
     /// 他车动态障碍格（Task 15：每次寻路前由 GoalService 注入；footprint = 1 格）
     dynamic_obstacles: HashSet<(i32, i32)>,
+    /// 上次返回的下一步格（sub_target 变化时打日志，避免每 50ms 刷屏）
+    last_step: Option<(i32, i32)>,
 }
 
 impl DStarLite {
@@ -80,6 +82,7 @@ impl DStarLite {
             start,
             goal,
             dynamic_obstacles: HashSet::new(),
+            last_step: None,
         };
         slf.initialize();
         info!("[D*] 创建规划器: start=({},{}) goal=({},{})", start.0, start.1, goal.0, goal.1);
@@ -113,7 +116,15 @@ impl DStarLite {
                 best = Some((n, val));
             }
         }
-        best.map(|(cell, _)| cell)
+        let step = best.map(|(cell, _)| cell);
+        // 仅在 sub_target 变化时打一条（车逐格移动，格子变了才打）
+        if step != self.last_step {
+            if let Some((gx, gy)) = step {
+                info!("[D*] sub_target = ({gx}, {gy})");
+            }
+            self.last_step = step;
+        }
+        step
     }
 
     /// 更新起点（机器人移动了一步）

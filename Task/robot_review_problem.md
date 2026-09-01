@@ -109,6 +109,12 @@
 | 🟡 T23-9 | 文档 | `universal_robot_design.md` / `robot_controller.md` / `robot_arch.md` 仍描述旧 caps（`world.get_path`/`action.*`/`GoalService.sub_target`） | 标注废弃/同步 | task_22_3 复查 |
 | 🟡 T23-10 | `robot.rs` 决策线程 | `result_tx.send` 不在 `select!` 中，理论阻塞无法被 cancel 中断（当前时序不可达） | 记隐性陷阱备注；后续 send 移入 select! | task_22_3 复查 |
 
+## 十一、多车群发 Goto 可靠性（2026-09-01 实车发现）
+
+| # | 位置 | 问题 | 建议 | 来源 |
+|---|---|---|---|---|
+| 🔴 N15 | `pleiades-ugv/src/ugv/goal.rs` `get_path()` 第④步（`uav`/`sim` 同构） | D* `next_step()` 返回 `None`（当前找不到到 goal 的路径，典型：窄通道被另一辆车临时占据）时，`get_path()` 立即清空 goal + pathfinder 并跳过任务；mission 已在前面 `pop_next()` 弹出、不重新入队 → 车永久停在原地。本质：把「暂时无路」误判为「永久不可达」直接放弃。实车现象：两车群发 Goto，一辆走、另一辆停在原地 | 区分「暂时无路」与「永久不可达」：D* 返回 None 时保留 goal 并重试；或加「贪心兜底」——向更接近 goal 的未阻挡邻居走一步、走到走不过去为止；仅在 goal 格为静态障碍或卡住超时才弃任务 | 2026-09-01 实车（李永康） |
+
 ## 附：来源索引
 
 - **task_8 / wb_8**：D* Lite 路径规划器（已归档 2026-08-08）→ 遗留 P1/P3/P6/P7/N10 转入本清单第一节
