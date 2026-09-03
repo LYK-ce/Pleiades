@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-31
-//Modified Date ： 2026-08-31
+//Modified Date ： 2026-09-03
 
 //! LG290P 流动站驱动（Task 24，ugv 侧）
 //!
@@ -11,10 +11,11 @@
 pub mod geo;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use pleiades_base::event_bus::{Bus_Event, EventBus};
 use pleiades_base::robot::core::protocol::{decode_frame, MSGID_RTCM};
@@ -67,6 +68,10 @@ fn handle_gga_line(
                 // 基准 = 车首次 FIXED 位置（D10，不需要基站坐标下行）
                 *base = Some(fix.clone());
                 *phase = Lg290pPhase::Tracking;
+                info!(
+                    "[LG290P] 首次 RTK_FIXED，offset 基准已确定（lat={:.8}, lon={:.8}），可动车",
+                    fix.lat, fix.lon
+                );
                 if let Ok(mut guard) = state.try_write() {
                     guard.rtk_fixed = true;
                 } else {
@@ -146,12 +151,21 @@ impl Lg290pDevice {
         let mut base: Option<GgaFix> = None;
         let mut line_buf: Vec<u8> = Vec::new();
 
+        let mut last_log = Instant::now();
         let on_bytes = move |bytes: &[u8]| {
             line_buf.extend_from_slice(bytes);
             while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
                 let line_bytes: Vec<u8> = line_buf.drain(..=pos).collect();
                 let line = String::from_utf8_lossy(&line_bytes);
                 if let Some(fix) = geo::parse_gga(&line) {
+                    // 30s 健康日志（调试：区分「收不到 GGA」与「还没 FIXED」）
+                    if last_log.elapsed().as_secs() >= 30 {
+                        info!(
+                            "[LG290P] 状态：quality={}, sats={}, phase={:?}",
+                            fix.quality, fix.satellites, phase
+                        );
+                        last_log = Instant::now();
+                    }
                     handle_gga_line(&fix, &mut phase, &mut base, &state_clone, origin);
                 }
             }
