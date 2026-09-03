@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-09-03
 
 //! 目标服务（Task 22 步骤 5，Task 22_3 改造：get_path 移入 main_loop，不再维护 sub_target）
 //!
@@ -19,7 +19,7 @@ use pleiades_base::robot::core::cluster::ClusterInfoTable;
 use pleiades_base::robot::core::command::Mission;
 use pleiades_base::robot::core::mission::MissionQueue;
 use crate::uav::planning::pathfinder::DStarLite;
-use crate::uav::planning::{assignment, cluster_to_obstacle_cells};
+use crate::uav::planning::{assignment /*, cluster_to_obstacle_cells */};
 use pleiades_base::robot::core::state::RobotState;
 use pleiades_base::robot::core::grid::{OccupancyGrid, CELL_RESOLUTION};
 
@@ -136,19 +136,21 @@ impl GoalService {
             }
         }
 
-        // ④ 寻路：move_to 当前位置 → 注入动态障碍 → next_step
-        let dynamic_obstacles: Vec<(i32, i32)> = {
-            let others = self.cluster_table.snapshot().await;
-            cluster_to_obstacle_cells(&others, self.obstacle_inflation_radius).into_iter().collect()
-        };
+        // ④ 寻路（task_27：uav 忽略地面障碍，喂空 grid）
+        // ── 原小车避障逻辑注释保留，便于回退 ──
+        // let dynamic_obstacles: Vec<(i32, i32)> = {
+        //     let others = self.cluster_table.snapshot().await;
+        //     cluster_to_obstacle_cells(&others, self.obstacle_inflation_radius).into_iter().collect()
+        // };
         let current_gx = (wx / CELL_RESOLUTION).floor() as i32;
         let current_gy = (wy / CELL_RESOLUTION).floor() as i32;
-        let grid = self.grid.read().await;
+        // let grid = self.grid.read().await;
+        let empty_grid = OccupancyGrid::new();   // 全 Unknown = 全可走，忽略地面障碍
         let next = match self.pathfinder.as_mut() {
             Some(pf) => {
                 pf.move_to((current_gx, current_gy));
-                pf.set_dynamic_obstacles(&dynamic_obstacles, &grid);
-                pf.next_step(&grid)
+                // pf.set_dynamic_obstacles(&dynamic_obstacles, &grid);
+                pf.next_step(&empty_grid)
             }
             None => None,
         };
