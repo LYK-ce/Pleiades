@@ -2,7 +2,7 @@
 
 > Created Date ： 2026-09-06
 > Modified Date ： 2026-09-08
-> 状态：阶段 0/1/2 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l），Lua 端到端验证与基准逐位一致；阶段 3（图传输 U8）Rust 侧 + 单帧测试脚本已实施；阶段 4（WebSocket 展示）已实施，待端到端联调
+> 状态：阶段 0/1/2 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l），Lua 端到端验证与基准逐位一致；阶段 3（图传输 U8）Rust 侧 + 单帧测试脚本已实施；阶段 4（WebSocket 展示）已实施，联调通过（抓图→传图→detect→webui→浏览器画框+FPS 全链路）
 > 分支：`robot_yolo`（演示专用，webui 不进正式分支）
 > 关联文档：`Architecture/robot_arch.md`、`Task/task_28_camera_device.md`（相机输出 JPEG）、实验项目 `/vepfs-mlp2/c20250205/240804016/Workspace/rust_yolo/`
 
@@ -453,9 +453,9 @@ webui.send(jpeg, dets)                       -- 发图 + 坐标给浏览器
 
 ---
 
-### 阶段 4：展示（WebSocket + HTML 画框）— 已实施，待端到端联调
+### 阶段 4：展示（WebSocket + HTML 画框）— 已实施，联调通过
 
-> 方案 2026-09-08 与李永康讨论定稿：**WebSocket**（非 SSE，二进制帧传图免 base64）+ 三车三 WS + **FPS 浏览器算** + **detect 坐标缩放回原图**（方案 B，推翻阶段 2「不缩放」决策）+ 端口默认 9010。
+> 方案 2026-09-08 与李永康讨论定稿：**WebSocket**（非 SSE，二进制帧传图免 base64）+ **FPS 浏览器算** + **detect 坐标缩放回原图**（方案 B，推翻阶段 2「不缩放」决策）+ **webui 端口自动分配**。2026-09-08 联调通过（全链路：抓图 → 传图 → detect → webui → 浏览器画框 + FPS）。
 
 **文件架构**
 ```
@@ -468,16 +468,20 @@ pleiades-base/src/Orchestrator/command.rs           # ✏️ UserCommand::Webui 
 pleiades-base/src/Orchestrator/core/branch_user.rs  # ✏️ webui 命令处理（tokio::spawn）
 pleiades-base/src/TUI/mod.rs                        # ✏️ webui 命令解析
 pleiades-base/Cargo.toml                            # ✏️ axum 加 ws feature
-Tool/yolo_viewer.html         # 🆕 浏览器展示页（输入框 + 三 WS + canvas + FPS）
+programs/user/yolo_uav.lua    # 🆕 UAV 轮询发图（cars 参数 + 多车）
+programs/user/yolo_ugv.lua    # 🆕 UGV 循环收图 → detect → webui.send
+Tool/yolo_viewer.html         # 🆕 浏览器连接入口（IP+端口 → 动态面板 + FPS）
 ```
 
 **核心设计**
 - 消息格式：一条二进制消息 = 一帧 `[4B header_len LE][header JSON {dets:[...]}][JPEG 字节]`
 - 连接管理：全局 `broadcast::Sender`（`OnceLock`），每连接一个转发 task；浏览器慢则自动丢帧，不阻塞检测管线
-- `webui` 命令：起服务（默认端口 9010，可 `webui <port>` 指定），绑 `0.0.0.0`，服务 spawn 到 Core 主 runtime（多线程，不受 Lua detect 阻塞）
+- `webui` 命令：起服务（不带参自动分配端口，`webui <port>` 可指定），绑 `0.0.0.0`，服务 spawn 到 Core 主 runtime（多线程，不受 Lua detect 阻塞）
 - `caps.webui.send(jpeg, dets)`：dets table → JSON（独立函数 `dets_table_to_json`）→ 打包 → 广播；**webui 未起服务时静默丢弃**
 - FPS：浏览器 `onmessage` 打 `performance.now()` 差分计算（每车一个），车端不算
 - 坐标：方案 B，detect 返回**原图像素坐标**，浏览器直接画框零换算
+- task_id：全局统一 `1001`，多车复用安全（tensor stream 点对点 + 每车独立 RendezvousMap，id 只在同车多条流间才需区分）
+- 背压：UAV→UGV 走可靠 tensor stream（yamux 流控，detect 慢则 UAV 自动限速不丢帧）；UGV→浏览器走 broadcast（lagged 丢旧帧，不阻塞 detect）
 
 **方法签名**
 ```rust
@@ -492,8 +496,8 @@ pub fn webui_publish(jpeg: &[u8], dets_json: &str);                 // 打包 + 
 3. ✅ `API/webui.rs`：WebSocket 服务 + 广播 + `API/mod.rs`（已实施）
 4. ✅ `webui` 命令（command.rs + TUI + branch_user）（已实施）
 5. ✅ `caps.webui.send`（capability_binding.rs + dets_table_to_json）（已实施）
-6. ✅ `yolo_test_ugv.lua` 加 send + `index.html`（已实施）
-7. ✅ cargo check 通过；⬜ 端到端联调（待本地两节点）
+6. ✅ `yolo_uav.lua`（轮询发图）+ `yolo_ugv.lua`（收图 detect）+ `yolo_viewer.html`（已实施）
+7. ✅ cargo check 通过；✅ 端到端联调通过（抓图 → 传图 → detect → webui → 画框 + FPS）
 
 ---
 
