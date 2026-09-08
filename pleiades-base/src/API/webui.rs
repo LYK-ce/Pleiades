@@ -21,11 +21,18 @@ use axum::{
 };
 use tokio::sync::broadcast;
 
+use super::server::find_available_port;
+
 /// 全局广播通道（webui 未启动时为 None，`webui_publish` 静默丢弃）
 static FRAME_TX: OnceLock<broadcast::Sender<Vec<u8>>> = OnceLock::new();
 
 /// 启动 WebSocket 展示服务，返回实际绑定端口。
-pub async fn spawn_webui_server(port: u16) -> Result<u16, String> {
+pub async fn spawn_webui_server(port: Option<u16>) -> Result<u16, String> {
+    let port = match port {
+        Some(p) => p,
+        None => find_available_port(9010)?,
+    };
+
     // 幂等初始化广播通道（已启动则复用）
     if FRAME_TX.get().is_none() {
         let (tx, _rx) = broadcast::channel(16);

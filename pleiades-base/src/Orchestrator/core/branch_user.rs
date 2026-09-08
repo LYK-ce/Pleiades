@@ -510,9 +510,8 @@ impl Core {
             // ════════════════════════════════════════════════
             UserCommand::Webui { port } => {
                 let event_bus = self.capabilities.event_bus.clone();
-                let bind_port = port.unwrap_or(9010);
                 tokio::spawn(async move {
-                    match crate::api::spawn_webui_server(bind_port).await {
+                    match crate::api::spawn_webui_server(port).await {
                         Ok(p) => {
                             event_bus.Publish(Bus_Event::Notify {
                                 level: NotifyLevel::Info,

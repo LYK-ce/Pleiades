@@ -10,52 +10,53 @@
   #controls button { padding: 6px 16px; cursor: pointer; background: #2563eb; color: #fff; border: none; border-radius: 4px; }
   #panels { display: flex; gap: 12px; flex-wrap: wrap; }
   .panel { flex: 1; min-width: 320px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
-  .panel .head { padding: 6px 10px; background: #222; display: flex; justify-content: space-between; font-size: 13px; }
+  .panel .head { padding: 6px 10px; background: #222; display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; }
   .panel .fps { color: #4ade80; font-weight: bold; }
+  .panel .close { cursor: pointer; background: #b91c1c; color: #fff; border: none; border-radius: 4px; padding: 2px 8px; }
   .panel canvas { width: 100%; display: block; }
 </style>
 </head>
 <body>
 <div id="controls">
-  <span>端口 9010</span>
-  <input id="ip1" placeholder="车1 IP" value="192.168.1.10">
-  <input id="ip2" placeholder="车2 IP" value="192.168.1.11">
-  <input id="ip3" placeholder="车3 IP" value="192.168.1.12">
-  <button onclick="connectAll()">连接三车</button>
+  <input id="ip" placeholder="车 IP（如 127.0.0.1）">
+  <input id="port" placeholder="端口" value="9010">
+  <button onclick="connect()">连接</button>
 </div>
-<div id="panels">
-  <div class="panel">
-    <div class="head"><span>车 1</span><span class="fps" id="fps1">-</span></div>
-    <canvas id="cv1"></canvas>
-  </div>
-  <div class="panel">
-    <div class="head"><span>车 2</span><span class="fps" id="fps2">-</span></div>
-    <canvas id="cv2"></canvas>
-  </div>
-  <div class="panel">
-    <div class="head"><span>车 3</span><span class="fps" id="fps3">-</span></div>
-    <canvas id="cv3"></canvas>
-  </div>
-</div>
+<div id="panels"></div>
 <script>
-const PORT = 9010;
-const socks = [];
+const socks = {};
+let nextId = 1;
 
-function connect(idx) {
-  const ip = document.getElementById("ip" + idx).value.trim();
-  if (!ip) return;
-  if (socks[idx - 1]) { try { socks[idx - 1].close(); } catch (e) {} }
+function connect() {
+  const ip = document.getElementById("ip").value.trim();
+  const port = document.getElementById("port").value.trim() || "9010";
+  if (!ip) { alert("请先填 IP"); return; }
 
-  const ws = new WebSocket("ws://" + ip + ":" + PORT + "/ws");
-  ws.binaryType = "arraybuffer";
+  const idx = nextId++;
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  panel.innerHTML = `
+    <div class="head">
+      <span>车 ${idx}（${ip}:${port}）</span>
+      <span class="fps" id="fps${idx}">-</span>
+      <button class="close" onclick="disconnect(${idx})">断开</button>
+    </div>
+    <canvas id="cv${idx}"></canvas>
+  `;
+  document.getElementById("panels").appendChild(panel);
+
   const cv = document.getElementById("cv" + idx);
   const ctx = cv.getContext("2d");
   const fpsEl = document.getElementById("fps" + idx);
   let last = 0;
 
+  const ws = new WebSocket("ws://" + ip + ":" + port + "/ws");
+  ws.binaryType = "arraybuffer";
+  socks[idx] = ws;
+
   ws.onopen = () => { console.log("车" + idx + " 已连接"); };
   ws.onerror = () => { fpsEl.textContent = "连接失败"; };
-  ws.onclose = () => { if (socks[idx - 1] === ws) fpsEl.textContent = "断开"; };
+  ws.onclose = () => { if (socks[idx] === ws) fpsEl.textContent = "断开"; };
 
   ws.onmessage = async (ev) => {
     // 拆包：[4B header_len LE][header JSON {dets:[...]}][JPEG]
@@ -85,18 +86,18 @@ function connect(idx) {
       // FPS（浏览器端差分）
       const now = performance.now();
       if (last > 0) {
-        const fps = 1000 / (now - last);
-        fpsEl.textContent = fps.toFixed(1) + " FPS";
+        fpsEl.textContent = (1000 / (now - last)).toFixed(1) + " FPS";
       }
       last = now;
     };
     img.src = url;
   };
-  socks[idx - 1] = ws;
 }
 
-function connectAll() {
-  connect(1); connect(2); connect(3);
+function disconnect(idx) {
+  if (socks[idx]) { try { socks[idx].close(); } catch (e) {} delete socks[idx]; }
+  const cv = document.getElementById("cv" + idx);
+  if (cv) { const p = cv.closest(".panel"); if (p) p.remove(); }
 }
 </script>
 </body>

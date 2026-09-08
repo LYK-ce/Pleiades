@@ -381,7 +381,8 @@ fn dets_table_to_json(dets: &mlua::Table) -> Result<String, String> {
             "ymax": ymax,
         }));
     }
-    serde_json::to_string(&items).map_err(|e| format!("dets to json: {e}"))
+    serde_json::to_string(&serde_json::json!({ "dets": items }))
+        .map_err(|e| format!("dets to json: {e}"))
 }
 
 // ============================================================

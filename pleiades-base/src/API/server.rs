@@ -63,7 +63,7 @@ pub async fn spawn_api_server(
 }
 
 /// 查找第一个可用端口（从 start 起递增）
-fn find_available_port(start: u16) -> Result<u16, String> {
+pub(crate) fn find_available_port(start: u16) -> Result<u16, String> {
     for port in start..start + 100 {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         if std::net::TcpListener::bind(addr).is_ok() {
