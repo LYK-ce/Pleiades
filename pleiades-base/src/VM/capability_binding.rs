@@ -12,7 +12,10 @@ use mlua::Lua;
 use libp2p::PeerId;
 use crate::storage::StorageCapability;
 use crate::ml_engine::{MlContext, capability, Yolo_Detector};
-use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor_str, tensor_to_bytes};
+use crate::ml_engine::lua_tensor::{
+    LuaTensor, bytes_to_tensor_str, tensor_from_u8_bytes_fn, tensor_to_bytes,
+    tensor_to_u8_bytes_fn,
+};
 use crate::vm::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
 use crate::event_bus::{EventBus, Bus_Event, NotifyLevel};
@@ -228,6 +231,32 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
             let tensor = bytes_to_tensor_str(bytes.as_bytes().as_ref(), &device)
                 .map_err(|e| mlua::Error::runtime(e))?;
             Ok(LuaTensor(tensor))
+        })?,
+    )?;
+
+    // 裸字节 → 1D U8 Tensor（无 header）。与上面的 tensor_from_bytes（反序列化带 header 字节）
+    // 语义相反：这里输入任意原始 u8 字节（如 JPEG），直接包成 shape=[N] U8 Tensor，
+    // 用于把图片等非张量字节塞进 tensor stream 通道。
+    ml.set(
+        "tensor_from_u8_bytes",
+        lua.create_function(|_, (bytes, device): (mlua::String, String)| {
+            tensor_from_u8_bytes_fn(bytes.as_bytes().as_ref(), &device)
+                .map_err(|e| mlua::Error::runtime(e))
+        })?,
+    )?;
+
+    // U8 Tensor → 纯字节（无 header）。与 tensor_from_u8_bytes 成对（unwrap），
+    // 剥掉 Tensor 包装取回原始字节（喂 det:detect 等）。
+    // 区别于 LuaTensor:to_bytes（带 header 的序列化）。
+    ml.set(
+        "tensor_to_u8_bytes",
+        lua.create_function(|lua, tensor: mlua::AnyUserData| {
+            let t = tensor
+                .borrow::<LuaTensor>()
+                .map_err(|e| mlua::Error::runtime(format!("tensor_to_u8_bytes: {e}")))?;
+            let bytes = tensor_to_u8_bytes_fn(&t).map_err(|e| mlua::Error::runtime(e))?;
+            lua.create_string(&bytes)
+                .map_err(|e| mlua::Error::runtime(e.to_string()))
         })?,
     )?;
 
