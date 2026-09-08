@@ -12,7 +12,6 @@ DESCRIPTION = "抓图 → 轮询发多辆 UGV（cars=ugv1,ugv2）"
 -- ==================== 配置（直接改这里）====================
 local TASK_ID   = 1001    -- tensor stream 配对 id（多车可复用同一个）
 local DEVICE    = "cpu"   -- U8 tensor 所在设备（图不参与计算，cpu 即可）
-local SLEEP_MS  = 500     -- 每帧发送间隔（毫秒）
 -- ==========================================================
 
 -- 按名字找 peer_id
@@ -57,7 +56,7 @@ function execute(params)
         return "no-peer"
     end
 
-    caps.print("[uav] 开始轮询发图（" .. #targets .. " 辆车，间隔 " .. SLEEP_MS .. "ms，Ctrl-C 停止）")
+    caps.print("[uav] 开始轮询发图（" .. #targets .. " 辆车，Ctrl-C 停止）")
     local frame = 0
     while true do
         local idx = (frame % #targets) + 1
@@ -66,6 +65,5 @@ function execute(params)
         caps.network.send_tensor(targets[idx].stream, img_t, frame)
         caps.print("[uav] 帧 " .. frame .. " → " .. targets[idx].name .. "（" .. #jpeg .. " 字节）")
         frame = frame + 1
-        os.execute("sleep " .. (SLEEP_MS / 1000))
     end
 end
