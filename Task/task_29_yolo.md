@@ -2,7 +2,7 @@
 
 > Created Date ： 2026-09-06
 > Modified Date ： 2026-09-08
-> 状态：阶段 0 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l）
+> 状态：阶段 0/1/2 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l），Lua 端到端验证与基准逐位一致
 > 分支：`robot_yolo`（演示专用，webui 不进正式分支）
 > 关联文档：`Architecture/robot_arch.md`、`Task/task_28_camera_device.md`（相机输出 JPEG）、实验项目 `/vepfs-mlp2/c20250205/240804016/Workspace/rust_yolo/`
 
@@ -45,7 +45,7 @@
 - 接入：`UavDeviceHandler::start()` 装配 + `shutdown()` 关闭
 - 涉及文件：`device/camera/mod.rs`（新增）、`device/mod.rs`、`uav/robot_handler.rs`、`config.rs`、`Cargo.toml`（加 nokhwa）
 
-**阶段 2：检测核心（YOLO 模块）**
+**阶段 2：检测核心（YOLO 模块）✅ 已实施**
 
 - `ML_Engine/Yolo/`（model.rs + detector.rs + coco_names.rs）
 - `ml.yolo_new` + `det:detect` cap
@@ -506,3 +506,9 @@ pub fn webui_publish(data: String);                          // 往 broadcast ch
   - 阶段 0 实施完成（DeviceCapability trait 版，cargo check 通过），提交推送到 `robot_yolo` 分支
   - 真实权重验证：yolov8n（6.1MB）+ yolov8l（84MB）在 rust_yolo 检测 bike.jpg 成功，yolov8l 更准（多检出 dog/car）
   - 分支策略 → 定：robot_yolo 演示专用不合并；webui（阶段 4）不进正式分支；核心能力（阶段 0-3）归属待定
+  - 阶段 1 实施完成（CameraDevice + DeviceCapability，Windows 实机 exec test_camera 验证通过）
+  - 阶段 2 实施完成，与设计的三处偏差（均已在代码落地）：
+    1. `ml.yolo_new(model_file, device)` 两参数（文档原设计 device/path/which 三参数）——权重文件名作参数，型号从文件名推断（n/s/m/l/x），权重放 Pleiades_Workspace/
+    2. detect 返回**检测尺度（resize 后）坐标**，不缩放回原图（文档原设计缩放回原图）——省掉换算，与 rust_yolo 基准直接逐位对比
+    3. 读写盘复用 storage 机制：`StorageReadHandle` 补 `read()`（对称阶段 1 的 `write()`），不新增 read_file_bytes cap
+  - 验证：cargo check 通过；example + Lua `exec yolo_test` 端到端，yolov8n 22 框 / yolov8l 28 框，与 rust_yolo 基准逐位一致
