@@ -9,8 +9,10 @@
 use pleiades_base::ml_engine::yolo::Yolo_Detector;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let model_file = args.get(1).map(|s| s.as_str()).unwrap_or("yolov8n.safetensors");
     let jpeg = std::fs::read("Pleiades_Workspace/bike.jpg")?;
-    let det = Yolo_Detector::new("yolov8n.safetensors", "cpu")?;
+    let det = Yolo_Detector::new(model_file, "cpu")?;
     let dets = det.detect(&jpeg, 0.25, 0.45)?;
     println!("detected {} objects", dets.len());
     for d in &dets {
