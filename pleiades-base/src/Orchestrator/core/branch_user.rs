@@ -12,7 +12,7 @@ use crate::network::DataType;
 use crate::vm::engine::LuaContext;
 use crate::vm::capability_binding::{
     register_caps, register_logging_caps, register_network_caps,
-    register_storage_caps, register_ml_caps,
+    register_storage_caps, register_ml_caps, register_webui_caps,
 };
 use crate::event_bus::{Bus_Event, NotifyLevel};
 use std::path::Path;
@@ -505,6 +505,29 @@ impl Core {
             // ════════════════════════════════════════════════
             // 远程 Lua 脚本执行 (请求-响应)
             // ════════════════════════════════════════════════
+            // ════════════════════════════════════════════════
+            // WebSocket 展示服务 (YOLO 检测结果 → 浏览器画框)
+            // ════════════════════════════════════════════════
+            UserCommand::Webui { port } => {
+                let event_bus = self.capabilities.event_bus.clone();
+                let bind_port = port.unwrap_or(9010);
+                tokio::spawn(async move {
+                    match crate::api::spawn_webui_server(bind_port).await {
+                        Ok(p) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Info,
+                                message: format!("WebUI server started on ws://0.0.0.0:{p}/ws"),
+                            });
+                        }
+                        Err(e) => {
+                            event_bus.Publish(Bus_Event::Notify {
+                                level: NotifyLevel::Error,
+                                message: format!("WebUI server failed: {e}"),
+                            });
+                        }
+                    }
+                });
+            }
             UserCommand::ExecRemote { peer, command, params } => {
                 // 1. 解析 peer 名称 → peer_id
                 let Ok(info) = self.capabilities.peer_manager.Get_Peer_By_Name(&peer).await else {
@@ -650,6 +673,17 @@ pub(super) fn spawn_lua_script(
                 caps.event_bus.Publish(Bus_Event::Output {
                     payload: cmd_output(
                         format!("[{}] 注册 ML 能力失败: {}", label, e),
+                        true,
+                    ),
+                });
+                return;
+            }
+
+            // 3.4 注册 WebUI 展示能力（YOLO 检测结果 → 浏览器）
+            if let Err(e) = register_webui_caps(&lua) {
+                caps.event_bus.Publish(Bus_Event::Output {
+                    payload: cmd_output(
+                        format!("[{}] 注册 WebUI 能力失败: {}", label, e),
                         true,
                     ),
                 });

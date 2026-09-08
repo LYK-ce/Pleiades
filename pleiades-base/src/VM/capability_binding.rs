@@ -330,6 +330,61 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
 }
 
 // ============================================================
+// 注册 WebUI 展示能力 (YOLO 检测结果 → 浏览器画框)
+// ============================================================
+
+/// 将 WebUI 展示能力暴露给 Lua。
+///
+/// 注册 `caps.webui.send(jpeg, dets)` — 打包一帧并广播给浏览器。
+/// 服务未启动时静默丢弃（`webui_publish` 内部处理）。
+pub fn register_webui_caps(lua: &Lua) -> mlua::Result<()> {
+    let caps: mlua::Table = lua.globals().get("caps")
+        .unwrap_or_else(|_| lua.create_table().expect("create caps table"));
+    let webui = lua.create_table()?;
+
+    webui.set(
+        "send",
+        lua.create_function(|_, (jpeg, dets): (mlua::String, mlua::Table)| {
+            let json = dets_table_to_json(&dets).map_err(mlua::Error::runtime)?;
+            crate::api::webui_publish(jpeg.as_bytes().as_ref(), &json);
+            Ok(())
+        })?,
+    )?;
+
+    caps.set("webui", webui)?;
+    lua.globals().set("caps", caps)?;
+    Ok(())
+}
+
+/// dets table → JSON 数组字符串（独立函数，遵守「闭包只做薄胶水」规范）。
+fn dets_table_to_json(dets: &mlua::Table) -> Result<String, String> {
+    let n = dets.len().map_err(|e| format!("dets len: {e}"))? as usize;
+    let mut items = Vec::with_capacity(n);
+    for i in 1..=n {
+        let row: mlua::Table = dets.get(i).map_err(|e| format!("dets[{i}]: {e}"))?;
+        let class_name: String = row
+            .get("class_name")
+            .map_err(|e| format!("dets[{i}].class_name: {e}"))?;
+        let confidence: f64 = row
+            .get("confidence")
+            .map_err(|e| format!("dets[{i}].confidence: {e}"))?;
+        let xmin: f64 = row.get("xmin").map_err(|e| format!("dets[{i}].xmin: {e}"))?;
+        let ymin: f64 = row.get("ymin").map_err(|e| format!("dets[{i}].ymin: {e}"))?;
+        let xmax: f64 = row.get("xmax").map_err(|e| format!("dets[{i}].xmax: {e}"))?;
+        let ymax: f64 = row.get("ymax").map_err(|e| format!("dets[{i}].ymax: {e}"))?;
+        items.push(serde_json::json!({
+            "class_name": class_name,
+            "confidence": confidence,
+            "xmin": xmin,
+            "ymin": ymin,
+            "xmax": xmax,
+            "ymax": ymax,
+        }));
+    }
+    serde_json::to_string(&items).map_err(|e| format!("dets to json: {e}"))
+}
+
+// ============================================================
 // 注册日志能力函数 (tracing + EventBus)
 // ============================================================
 

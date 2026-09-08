@@ -9,5 +9,7 @@
 pub mod types;
 pub mod routes;
 pub mod server;
+pub mod webui;
 
 pub use server::spawn_api_server;
+pub use webui::{spawn_webui_server, webui_publish};

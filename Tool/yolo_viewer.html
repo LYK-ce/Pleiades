@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>YOLO 多车检测查看器</title>
+<style>
+  body { margin: 0; padding: 12px; background: #111; color: #eee; font-family: sans-serif; }
+  #controls { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #controls input { padding: 6px; background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; width: 130px; }
+  #controls button { padding: 6px 16px; cursor: pointer; background: #2563eb; color: #fff; border: none; border-radius: 4px; }
+  #panels { display: flex; gap: 12px; flex-wrap: wrap; }
+  .panel { flex: 1; min-width: 320px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+  .panel .head { padding: 6px 10px; background: #222; display: flex; justify-content: space-between; font-size: 13px; }
+  .panel .fps { color: #4ade80; font-weight: bold; }
+  .panel canvas { width: 100%; display: block; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span>端口 9010</span>
+  <input id="ip1" placeholder="车1 IP" value="192.168.1.10">
+  <input id="ip2" placeholder="车2 IP" value="192.168.1.11">
+  <input id="ip3" placeholder="车3 IP" value="192.168.1.12">
+  <button onclick="connectAll()">连接三车</button>
+</div>
+<div id="panels">
+  <div class="panel">
+    <div class="head"><span>车 1</span><span class="fps" id="fps1">-</span></div>
+    <canvas id="cv1"></canvas>
+  </div>
+  <div class="panel">
+    <div class="head"><span>车 2</span><span class="fps" id="fps2">-</span></div>
+    <canvas id="cv2"></canvas>
+  </div>
+  <div class="panel">
+    <div class="head"><span>车 3</span><span class="fps" id="fps3">-</span></div>
+    <canvas id="cv3"></canvas>
+  </div>
+</div>
+<script>
+const PORT = 9010;
+const socks = [];
+
+function connect(idx) {
+  const ip = document.getElementById("ip" + idx).value.trim();
+  if (!ip) return;
+  if (socks[idx - 1]) { try { socks[idx - 1].close(); } catch (e) {} }
+
+  const ws = new WebSocket("ws://" + ip + ":" + PORT + "/ws");
+  ws.binaryType = "arraybuffer";
+  const cv = document.getElementById("cv" + idx);
+  const ctx = cv.getContext("2d");
+  const fpsEl = document.getElementById("fps" + idx);
+  let last = 0;
+
+  ws.onopen = () => { console.log("车" + idx + " 已连接"); };
+  ws.onerror = () => { fpsEl.textContent = "连接失败"; };
+  ws.onclose = () => { if (socks[idx - 1] === ws) fpsEl.textContent = "断开"; };
+
+  ws.onmessage = async (ev) => {
+    // 拆包：[4B header_len LE][header JSON {dets:[...]}][JPEG]
+    const buf = ev.data;
+    const view = new DataView(buf);
+    const headerLen = view.getUint32(0, true);
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, headerLen)));
+    const jpeg = new Uint8Array(buf, 4 + headerLen);
+
+    const blob = new Blob([jpeg], { type: "image/jpeg" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      cv.width = img.width;
+      cv.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      // 画框（坐标为原图像素坐标）
+      ctx.strokeStyle = "#4ade80";
+      ctx.lineWidth = 2;
+      ctx.fillStyle = "#4ade80";
+      ctx.font = "14px sans-serif";
+      for (const d of header.dets) {
+        ctx.strokeRect(d.xmin, d.ymin, d.xmax - d.xmin, d.ymax - d.ymin);
+        ctx.fillText(d.class_name, d.xmin, Math.max(14, d.ymin - 4));
+      }
+      // FPS（浏览器端差分）
+      const now = performance.now();
+      if (last > 0) {
+        const fps = 1000 / (now - last);
+        fpsEl.textContent = fps.toFixed(1) + " FPS";
+      }
+      last = now;
+    };
+    img.src = url;
+  };
+  socks[idx - 1] = ws;
+}
+
+function connectAll() {
+  connect(1); connect(2); connect(3);
+}
+</script>
+</body>
+</html>

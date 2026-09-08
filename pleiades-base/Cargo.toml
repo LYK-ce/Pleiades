@@ -53,7 +53,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 futures = "0.3"
 
 # HTTP API (OpenAI 兼容)
-axum = { version = "0.7", features = ["json", "macros"] }
+axum = { version = "0.7", features = ["json", "macros", "ws"] }
 async-stream = "0.3"
 
 # 序列化 (网络协议)

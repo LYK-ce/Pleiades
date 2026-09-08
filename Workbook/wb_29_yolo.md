@@ -68,6 +68,30 @@ Rust 侧（U8 dtype + 两个 cap）+ 单帧测试脚本（yolo_test_uav/yolo_tes
 - `tensor_to_u8_bytes_fn` 显式校验 dtype==U8，非 U8 直接报错。
 - exec 参数（`params`）在 Lua 里全是字符串（`HashMap<String,String>`），数字需 `tonumber`；但本阶段测试脚本不用 exec 传参，参数写死在脚本顶部。
 
+## 阶段 4（WebSocket 展示）— 已实施，待联调
+
+> 2026-09-08 方案定稿（与李永康讨论）
+
+### 最终方案
+- **WebSocket**（非 SSE）：二进制帧传图，免 base64。
+- **三车三 WS**：浏览器一个 HTML 连三个 WebSocket，三栏画框 + 各算 FPS。
+- **FPS 浏览器算**（`onmessage` 打 `performance.now()` 差分），车端不算。
+- **detect 坐标缩放回原图**（方案 B，推翻阶段 2「不缩放回原图」决策）。
+- **`webui` TUI 命令**起服务（默认端口 9010，可 `webui <port>`），服务 spawn 到 Core 主 runtime（多线程，不受 Lua detect 阻塞）；不用 Lua 启动。
+- **`caps.webui.send(jpeg, dets)`**：dets table → JSON（独立函数 `dets_table_to_json`）→ 打包 → 广播；**webui 未起服务时静默丢弃**。
+- 消息格式：一条二进制消息 = 一帧 `[4B header_len LE][header JSON {dets:[...]}][JPEG 字节]`。
+- HTML 输入框手动填三车 IP；端口统一 9010。
+
+### 关键决策理由
+- 轮询不行：FPS 需要帧精确到达，轮询的拉取间隔污染帧时间戳。
+- SSE 可但要 base64（文本协议）；WebSocket 二进制帧直传图，且全双工（将来可反向发命令）。
+- FPS 必须浏览器算：三车汇聚点，车端各算各的没意义。
+
+### 待实施文件
+- base 改：`Cargo.toml`（axum ws）、`ML_Engine/Yolo/detector.rs`（方案 B）、`API/webui.rs` + `mod.rs`、`Orchestrator/command.rs` + `branch_user.rs`、`TUI/mod.rs`、`VM/capability_binding.rs`
+- 新增：`Tool/yolo_viewer.html`
+- 车端脚本：`yolo_test_ugv.lua` 加 `caps.webui.send`
+
 ## 结束时间
 
 2026-09-08

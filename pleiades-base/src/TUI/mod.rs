@@ -558,6 +558,20 @@ pub fn parse_user_command(input: &str) -> Result<Option<UserCommand>, String> {
         }
     }
 
+    // ---- webui [port] ----
+    if trimmed == "webui" || trimmed.starts_with("webui ") {
+        let port_str = trimmed.strip_prefix("webui").unwrap_or("").trim();
+        let port = if port_str.is_empty() {
+            None
+        } else {
+            match port_str.parse::<u16>() {
+                Ok(p) => Some(p),
+                Err(_) => return Err(format!("无效端口: '{}'\n用法: webui [port]", port_str)),
+            }
+        };
+        return Ok(Some(UserCommand::Webui { port }));
+    }
+
     // ---- session inference [command] <session_id> <model_path> ----
     if let Some(rest) = trimmed.strip_prefix("session inference ") {
         let args: Vec<&str> = rest.split_whitespace().collect();

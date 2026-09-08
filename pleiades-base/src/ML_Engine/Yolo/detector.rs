@@ -6,7 +6,7 @@
 //!
 //! - `Yolo_Detector` 长驻：load 一次、detect 多次，与 `MlContext` 同构
 //! - 输入 = 图像原始字节（JPEG/PNG），解码在 detect 内部完成
-//! - 输出 = 检测框（检测尺度坐标，不缩放回原图）
+//! - 输出 = 检测框（原图像素坐标，后处理缩放回原图）
 
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{Module, VarBuilder};
@@ -16,7 +16,7 @@ use super::coco_names::COCO_NAMES;
 use super::model::{Multiples, YoloV8};
 use crate::ml_engine::device::Parse_Device_Str;
 
-/// 单个检测框（坐标为检测尺度，即 resize 后尺度）
+/// 单个检测框（坐标为原图像素坐标，已在后处理缩放回原图）
 pub struct Detection {
     pub class_index: usize,
     pub class_name: &'static str,
@@ -86,10 +86,10 @@ impl Yolo_Detector {
         })
     }
 
-    /// 检测：输入图像字节（JPEG/PNG），返回检测框（检测尺度坐标）。
+    /// 检测：输入图像字节（JPEG/PNG），返回检测框（原图像素坐标）。
     pub fn detect(&self, image_bytes: &[u8], conf_thr: f32, nms_thr: f32) -> Result<Vec<Detection>, String> {
-        // 1. 预处理：解码 + resize_exact（保比例 + 32 对齐）
-        let image_t = Yolo_Preprocess(image_bytes, &self.device)?;
+        // 1. 预处理：解码 + resize_exact（保比例 + 32 对齐），返回 (tensor, scale_x, scale_y)
+        let (image_t, scale_x, scale_y) = Yolo_Preprocess(image_bytes, &self.device)?;
         // 2. 前向
         let pred = self
             .model
@@ -97,13 +97,16 @@ impl Yolo_Detector {
             .map_err(|e| format!("forward: {e}"))?
             .squeeze(0)
             .map_err(|e| format!("squeeze: {e}"))?;
-        // 3. 后处理：置信度过滤 + NMS
-        Yolo_Postprocess(&pred, conf_thr, nms_thr, self.class_names)
+        // 3. 后处理：置信度过滤 + NMS + 坐标缩放回原图
+        Yolo_Postprocess(&pred, conf_thr, nms_thr, self.class_names, scale_x, scale_y)
     }
 }
 
 /// 预处理：解码 + resize_exact（长边 640、短边等比缩到 32 对齐）。
-fn Yolo_Preprocess(image_bytes: &[u8], device: &Device) -> Result<Tensor, String> {
+///
+/// 返回 `(tensor, scale_x, scale_y)`，其中 `scale = 原图尺寸 / resize 尺寸`，
+/// 供后处理把检测坐标缩放回原图像素坐标。
+fn Yolo_Preprocess(image_bytes: &[u8], device: &Device) -> Result<(Tensor, f32, f32), String> {
     let original_image = image::load_from_memory(image_bytes)
         .map_err(|e| format!("图像解码失败: {e}"))?;
     let (ow, oh) = (
@@ -117,6 +120,8 @@ fn Yolo_Preprocess(image_bytes: &[u8], device: &Device) -> Result<Tensor, String
         let h = oh * 640 / ow;
         (640, h / 32 * 32)
     };
+    let scale_x = ow as f32 / width as f32;
+    let scale_y = oh as f32 / height as f32;
     let image_t = {
         let img = original_image.resize_exact(
             width as u32,
@@ -136,15 +141,17 @@ fn Yolo_Preprocess(image_bytes: &[u8], device: &Device) -> Result<Tensor, String
         .map_err(|e| format!("to_dtype: {e}"))?
         * (1. / 255.))
     .map_err(|e| format!("scale: {e}"))?;
-    Ok(image_t)
+    Ok((image_t, scale_x, scale_y))
 }
 
-/// 后处理：置信度过滤 + NMS，返回检测尺度坐标（不缩放回原图）。
+/// 后处理：置信度过滤 + NMS，坐标缩放回原图像素坐标。
 fn Yolo_Postprocess(
     pred: &Tensor,
     conf_thr: f32,
     nms_thr: f32,
     class_names: &'static [&'static str],
+    scale_x: f32,
+    scale_y: f32,
 ) -> Result<Vec<Detection>, String> {
     let pred = pred
         .to_device(&Device::Cpu)
@@ -192,10 +199,10 @@ fn Yolo_Postprocess(
             dets.push(Detection {
                 class_index,
                 class_name: class_names[class_index],
-                xmin: b.xmin,
-                ymin: b.ymin,
-                xmax: b.xmax,
-                ymax: b.ymax,
+                xmin: b.xmin * scale_x,
+                ymin: b.ymin * scale_y,
+                xmax: b.xmax * scale_x,
+                ymax: b.ymax * scale_y,
                 confidence: b.confidence,
             });
         }

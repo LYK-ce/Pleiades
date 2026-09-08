@@ -37,6 +37,7 @@ function execute(params)
         caps.print("[ugv] 收到第 " .. frame .. " 帧，" .. #jpeg .. " 字节")
 
         local dets = det:detect(jpeg, CONF, NMS)
+        caps.webui.send(jpeg, dets)  -- 推给浏览器画框（webui 未起服务则静默丢弃）
         caps.print("[ugv] 检测到 " .. #dets .. " 个目标")
         for _, d in ipairs(dets) do
             caps.print(string.format("  %-12s conf=%.4f  [%.0f, %.0f, %.0f, %.0f]",
