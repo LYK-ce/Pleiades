@@ -1,5 +1,6 @@
 //Presented by KeJi
 //Date ： 2026-05-18
+//Modified Date ： 2026-09-08
 
 //! StorageHandle — acquire_read / acquire_write 返回的 Lua UserData
 //!
@@ -53,6 +54,11 @@ impl mlua::UserData for StorageWriteHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("path", |_, this, (): ()| {
             Ok(this.path.to_string_lossy().to_string())
+        });
+        methods.add_method("write", |_, this, bytes: mlua::String| {
+            std::fs::write(&this.path, bytes.as_bytes())
+                .map_err(|e| mlua::Error::runtime(format!("写入文件失败: {e}")))?;
+            Ok(())
         });
         methods.add_method_mut("release", |_, this, (): ()| {
             this.guard.take();

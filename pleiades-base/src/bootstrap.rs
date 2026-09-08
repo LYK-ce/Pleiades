@@ -12,7 +12,7 @@
 //!
 //! `robot_bootstrap`（车/机设备装配）已下沉到设备端 crate（Task 23 C0）。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use libp2p::PeerId;
 use tokio::sync::mpsc;
@@ -38,6 +38,8 @@ pub struct CoreBootstrap {
     pub node_handle: NodeHandle,
     pub network_service: Network_Service,
     pub core: Core,
+    /// 组件能力容器（含 device_caps，设备端 bootstrap 把自己的设备能力注册进来，Task 29 阶段 1）
+    pub capabilities: Arc<Capabilities>,
     pub user_cmd_tx: mpsc::Sender<UserCommand>,
     /// 日志 worker 保活（drop 即关闭日志线程——必须存活到进程退出，Task 9_2 实测修复）
     _log_guard: tracing_appender::non_blocking::WorkerGuard,
@@ -185,7 +187,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
         peer_manager: peer_capability_for_core,
         event_bus: event_bus.clone(),
         local_stream_hub: Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
-        device_caps: Vec::new(),
+        device_caps: RwLock::new(Vec::new()),
     });
 
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
@@ -193,5 +195,5 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
     info!("Orchestrator Core 初始化完成");
 
 
-    Ok(CoreBootstrap { config, event_bus, robot_bus, robot_cmd_frame_rx: Some(robot_cmd_frame_rx), node_handle, network_service, core, user_cmd_tx, _log_guard: log_guard })
+    Ok(CoreBootstrap { config, event_bus, robot_bus, robot_cmd_frame_rx: Some(robot_cmd_frame_rx), node_handle, network_service, core, capabilities, user_cmd_tx, _log_guard: log_guard })
 }

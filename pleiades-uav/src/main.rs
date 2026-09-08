@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-09-08
 
 //! pleiades-uav — 机载节点（Task 23 C3）
 //!
@@ -11,6 +11,7 @@
 
 mod bootstrap;
 mod config;
+mod device;
 mod uav;
 
 use std::sync::Arc;
@@ -67,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         boot.robot_bus.clone(),
         robot_cmd_frame_rx,
         origin,
+        boot.capabilities.clone(),
     ).await?;
 
     boot.run().await;

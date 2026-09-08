@@ -8,7 +8,7 @@ pub mod command;
 pub mod inference_id;
 pub mod local_tensor_stream;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use crate::network::Network_Capability;
 use crate::peer_management::Peer_Management_Capability;
 use crate::storage::StorageCapability;
@@ -46,7 +46,7 @@ pub struct Capabilities {
     /// 本地张量流配对 Hub
     pub local_stream_hub: Arc<LocalStreamHub>,
     /// 设备端注入的设备能力列表（spawn_lua_script 遍历调用 register_lua_caps）
-    pub device_caps: Vec<Arc<dyn DeviceCapability>>,
+    pub device_caps: RwLock<Vec<Arc<dyn DeviceCapability>>>,
 }
 
 // ============================================================

@@ -671,7 +671,7 @@ pub(super) fn spawn_lua_script(
             }
 
             // 3.6 注册设备端注入的 cap（如 camera.capture）
-            for device in &caps.device_caps {
+            for device in caps.device_caps.read().unwrap().iter() {
                 if let Err(e) = device.register_lua_caps(&lua) {
                     caps.event_bus.Publish(Bus_Event::Notify {
                         level: NotifyLevel::Error,

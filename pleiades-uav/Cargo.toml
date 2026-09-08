@@ -1,6 +1,6 @@
 #Presented by KeJi
 #Created Date ： 2026-08-30
-#Modified Date ： 2026-08-30
+#Modified Date ： 2026-09-08
 
 [package]
 name = "pleiades-uav"
@@ -32,3 +32,16 @@ toml_edit = "0.22"
 
 # MAVLink 飞控协议（机设备端）
 mavlink = { version = "0.18", default-features = false, features = ["std", "dialect-ardupilotmega", "dialect-common"] }
+
+# 图像编码（NV12→RGB→JPEG，Task 29 阶段 1）
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# 设备能力注册（实现 base 的 DeviceCapability trait，版本须与 base 严格一致）
+mlua = { version = "0.12.0-rc.1", features = ["lua54", "vendored", "async"] }
+
+# 摄像头抓帧（nokhwa 后端，平台条件：Linux V4L2 / Windows MediaFoundation）
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }

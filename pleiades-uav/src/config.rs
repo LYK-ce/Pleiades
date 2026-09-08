@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-31
+//Modified Date ： 2026-09-08
 
 //! UAV（机）设备配置（Task 23 C0：设备段从 base 拆出，`#[serde(flatten)]` 复用共享段）
 //!
@@ -24,6 +24,8 @@ pub struct UavConfig {
     pub flight_ctrl: Option<FlightCtrlConfig>,
     /// 他车障碍膨胀半径（米，缺省 0.2；「天上小车」2D 寻路阶段使用）
     pub obstacle_inflation_radius: Option<f32>,
+    /// 摄像头设备配置（USB UVC，Task 28/29）
+    pub camera: Option<CameraConfig>,
 }
 
 /// 飞控设备配置（Pixhawk / MAVLink）
@@ -38,6 +40,17 @@ pub struct FlightCtrlConfig {
     pub vel_fwd: Option<f32>,
     /// 转向角速度 (°/s，缺省 15)
     pub yaw_rate_deg: Option<f32>,
+}
+
+/// 摄像头设备配置（USB UVC）
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraConfig {
+    pub enabled: Option<bool>,
+    /// 设备路径：纯数字 = 索引（Windows 常用 "0"），否则 = 路径（Linux 常用 "/dev/video0"）
+    pub path: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub timeout_ms: Option<u64>,
 }
 
 /// 读取 UAV 配置（.config/config.toml）。
@@ -66,6 +79,7 @@ fn ensure_uav_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         changed = true;
     }
     changed |= fill_flight_ctrl(&mut doc);
+    changed |= fill_camera(&mut doc);
 
     if changed {
         fs::write(path, doc.to_string())?;
@@ -89,6 +103,29 @@ fn fill_flight_ctrl(doc: &mut DocumentMut) -> bool {
     for (k, v) in defaults {
         if !fc.contains_key(k) {
             fc.insert(k, v);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 补全 [camera] 段（缺失才补，幂等）
+fn fill_camera(doc: &mut DocumentMut) -> bool {
+    if doc.get("camera").is_none() {
+        doc["camera"] = Item::Table(toml_edit::Table::new());
+    }
+    let cam = doc["camera"].as_table_mut().expect("camera 应为 table");
+    let mut changed = false;
+    let defaults: [(&str, Item); 5] = [
+        ("enabled", toml_edit::value(false)),
+        ("path", toml_edit::value("0")),
+        ("width", toml_edit::value(1280_i64)),
+        ("height", toml_edit::value(720_i64)),
+        ("timeout_ms", toml_edit::value(3000_i64)),
+    ];
+    for (k, v) in defaults {
+        if !cam.contains_key(k) {
+            cam.insert(k, v);
             changed = true;
         }
     }
@@ -126,6 +163,12 @@ mod tests {
         assert_eq!(f.baudrate, Some(921600));
         assert_eq!(f.vel_fwd, Some(0.3));
         assert_eq!(f.yaw_rate_deg, Some(15.0));
+        let cam = parsed.camera.expect("camera 段应被补全");
+        assert_eq!(cam.enabled, Some(false));
+        assert_eq!(cam.path.as_deref(), Some("0"));
+        assert_eq!(cam.width, Some(1280));
+        assert_eq!(cam.height, Some(720));
+        assert_eq!(cam.timeout_ms, Some(3000));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
