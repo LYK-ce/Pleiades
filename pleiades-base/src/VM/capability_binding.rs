@@ -11,7 +11,7 @@ use std::sync::Arc;
 use mlua::Lua;
 use libp2p::PeerId;
 use crate::storage::StorageCapability;
-use crate::ml_engine::{MlContext, capability};
+use crate::ml_engine::{MlContext, capability, Yolo_Detector};
 use crate::ml_engine::lua_tensor::{LuaTensor, bytes_to_tensor_str, tensor_to_bytes};
 use crate::vm::network_stream::NetworkStream;
 use crate::network::tensor_stream::protocol::{Send_Tensor_Frame, Receive_Tensor_Frame, Send_EOF, Tensor_Buffer};
@@ -286,6 +286,13 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, (file_id, device): (String, String)| {
             MlContext::offload_load(&file_id, &device)
                 .map_err(|e| mlua::Error::runtime(e))
+        })?,
+    )?;
+
+    ml.set(
+        "yolo_new",
+        lua.create_function(|_, device: String| {
+            Yolo_Detector::new(&device).map_err(|e| mlua::Error::runtime(e))
         })?,
     )?;
 

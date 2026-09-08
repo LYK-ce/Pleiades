@@ -68,6 +68,9 @@ candle-nn = "0.10.2"
 candle-transformers = "0.10.2"
 anyhow = "1.0"
 
+# 图像解码 (YOLO 目标检测，JPEG/PNG 解码)
+image = "0.25"
+
 # 系统工具
 num_cpus = "1.16"
 thiserror = "1.0"   # 可选，用于简化错误定义

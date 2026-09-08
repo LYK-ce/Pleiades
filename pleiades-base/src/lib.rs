@@ -88,6 +88,7 @@ pub use ml_engine::{
 pub use ml_engine::MlContext;
 pub use ml_engine::context::Message;
 pub use ml_engine::{analyze_model, split_model};
+pub use ml_engine::yolo::{Yolo_Detector, Detection};
 
 // PeerManagement模块类型导出
 pub use peer_management::{

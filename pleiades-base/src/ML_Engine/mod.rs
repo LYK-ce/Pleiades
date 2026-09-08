@@ -20,6 +20,9 @@ pub mod gguf_model;
 pub mod context;
 pub mod capability;
 
+#[path = "Yolo/mod.rs"]
+pub mod yolo;
+
 #[path = "GGUF_Models/mod.rs"]
 pub mod gguf_models;
 
@@ -39,3 +42,4 @@ pub use gguf_models::common::model::Model;
 pub use context::MlContext;
 pub use capability::{analyze_model, split_model};
 pub use device::Parse_Device_Str;
+pub use yolo::{Yolo_Detector, Detection};

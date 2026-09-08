@@ -29,6 +29,11 @@ impl mlua::UserData for StorageReadHandle {
         methods.add_method("path", |_, this, (): ()| {
             Ok(this.path.to_string_lossy().to_string())
         });
+        methods.add_method("read", |lua, this, (): ()| {
+            let bytes = std::fs::read(&this.path)
+                .map_err(|e| mlua::Error::runtime(format!("读取文件失败: {e}")))?;
+            lua.create_string(&bytes)
+        });
         methods.add_method_mut("release", |_, this, (): ()| {
             this.guard.take();
             Ok(())
