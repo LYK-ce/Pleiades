@@ -291,8 +291,8 @@ pub fn register_ml_caps(lua: &Lua) -> mlua::Result<()> {
 
     ml.set(
         "yolo_new",
-        lua.create_function(|_, device: String| {
-            Yolo_Detector::new(&device).map_err(|e| mlua::Error::runtime(e))
+        lua.create_function(|_, (model_file, device): (String, String)| {
+            Yolo_Detector::new(&model_file, &device).map_err(|e| mlua::Error::runtime(e))
         })?,
     )?;
 

@@ -16,9 +16,9 @@ function execute(params)
     handle:release()
     caps.print("[yolo] 读到图片 " .. #jpeg .. " 字节")
 
-    -- 2. 加载检测器（型号/权重写死，cpu 设备）
+    -- 2. 加载检测器（权重文件名 + 设备，型号从文件名推断）
     caps.print("[yolo] 加载 yolov8n ...")
-    local det = ml.yolo_new("cpu")
+    local det = ml.yolo_new("yolov8n.safetensors", "cpu")
 
     -- 3. 检测（conf=0.25, nms=0.45，与 rust_yolo 基准一致）
     caps.print("[yolo] 检测中 ...")

@@ -16,10 +16,6 @@ use super::coco_names::COCO_NAMES;
 use super::model::{Multiples, YoloV8};
 use crate::ml_engine::device::Parse_Device_Str;
 
-/// 默认 YOLO 模型（第一版写死，权重放 Pleiades_Workspace/）
-const DEFAULT_YOLO_MODEL_FILE: &str = "yolov8n.safetensors";
-const DEFAULT_YOLO_WHICH: &str = "n";
-
 /// 单个检测框（坐标为检测尺度，即 resize 后尺度）
 pub struct Detection {
     pub class_index: usize,
@@ -31,11 +27,22 @@ pub struct Detection {
     pub confidence: f32,
 }
 
-/// 从 config 读取 workspace 目录，拼出默认权重路径。
-fn Default_Model_Path() -> Result<std::path::PathBuf, String> {
-    let (config, _) = crate::config::Ensure_Config()
-        .map_err(|e| format!("读取配置失败: {e}"))?;
-    Ok(config.workspace_dir().join(DEFAULT_YOLO_MODEL_FILE))
+/// 从权重文件名推断型号（"yolov8n.safetensors" → "n"）。
+fn Infer_Which(model_file: &str) -> Result<&'static str, String> {
+    let stem = model_file
+        .strip_suffix(".safetensors")
+        .ok_or_else(|| format!("权重文件需以 .safetensors 结尾: {model_file}"))?;
+    let which = stem
+        .strip_prefix("yolov8")
+        .ok_or_else(|| format!("权重文件名需以 yolov8 开头: {model_file}"))?;
+    match which {
+        "n" => Ok("n"),
+        "s" => Ok("s"),
+        "m" => Ok("m"),
+        "l" => Ok("l"),
+        "x" => Ok("x"),
+        _ => Err(format!("未知 YOLO 型号: '{which}'（支持 n/s/m/l/x）")),
+    }
 }
 
 /// 加载 YOLO 模型（safetensors 全量加载，FP16 存储转 F32 计算）。
@@ -64,11 +71,14 @@ pub struct Yolo_Detector {
 }
 
 impl Yolo_Detector {
-    /// 创建检测器（型号/权重路径写死，权重放 `Pleiades_Workspace/`）。
-    pub fn new(device: &str) -> Result<Self, String> {
+    /// 创建检测器（权重文件名 + 设备；型号从文件名推断，权重放 `Pleiades_Workspace/`）。
+    pub fn new(model_file: &str, device: &str) -> Result<Self, String> {
         let dev = Parse_Device_Str(device)?;
-        let path = Default_Model_Path()?;
-        let model = Yolo_Load_Model(&path, &dev, DEFAULT_YOLO_WHICH)?;
+        let which = Infer_Which(model_file)?;
+        let (config, _) = crate::config::Ensure_Config()
+            .map_err(|e| format!("读取配置失败: {e}"))?;
+        let path = config.workspace_dir().join(model_file);
+        let model = Yolo_Load_Model(&path, &dev, which)?;
         Ok(Self {
             model,
             device: dev,
