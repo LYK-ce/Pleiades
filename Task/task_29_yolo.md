@@ -2,7 +2,7 @@
 
 > Created Date ： 2026-09-06
 > Modified Date ： 2026-09-08
-> 状态：阶段 0/1/2 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l），Lua 端到端验证与基准逐位一致；阶段 3 Rust 侧（U8 dtype + `ml.tensor_from_u8_bytes`/`ml.tensor_to_u8_bytes`）已实施，Lua 脚本（yolo_uav_send/yolo_car_detect）待后续
+> 状态：阶段 0/1/2 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l），Lua 端到端验证与基准逐位一致；阶段 3 Rust 侧（U8 dtype + `ml.tensor_from_u8_bytes`/`ml.tensor_to_u8_bytes`）+ 单帧测试脚本（yolo_test_uav/yolo_test_ugv）已实施，待联调验证
 > 分支：`robot_yolo`（演示专用，webui 不进正式分支）
 > 关联文档：`Architecture/robot_arch.md`、`Task/task_28_camera_device.md`（相机输出 JPEG）、实验项目 `/vepfs-mlp2/c20250205/240804016/Workspace/rust_yolo/`
 
@@ -382,15 +382,15 @@ local dets = det:detect(image_bytes, conf, nms)  -- add_method（&self，非 mut
 
 ---
 
-### 阶段 3：图传输（tensor stream + U8）— Rust 侧已实施，Lua 脚本待后续
+### 阶段 3：图传输（tensor stream + U8）— Rust 侧 + 单帧测试脚本已实施，待联调
 
 **文件架构**
 ```
 pleiades-base/src/ML_Engine/lua_tensor.rs   # ✏️ tensor_to_bytes/bytes_to_tensor 加 U8（dtype 2）
 pleiades-base/src/VM/capability_binding.rs  # ✏️ 加 ml.tensor_from_u8_bytes
 programs/user/
-├── yolo_uav_send.lua          # 🆕 UAV：capture → U8 tensor → send_tensor（轮询）
-└── yolo_car_detect.lua        # 🆕 车：accept → recv_tensor → detect → webui.send
+├── yolo_test_uav.lua          # 🆕 UAV：capture → U8 tensor → send_tensor（单帧测试）
+└── yolo_test_ugv.lua          # 🆕 UGV：accept → recv_tensor → detect → 打印（单帧测试）
 ```
 
 **涉及文件**
@@ -398,8 +398,8 @@ programs/user/
 |---|---|---|
 | `ML_Engine/lua_tensor.rs` | ✏️ | tensor_to_bytes/bytes_to_tensor 加 `DType::U8 => 2`；bytes_to_tensor 字节数改按 dtype 算 |
 | `VM/capability_binding.rs` | ✏️ | 加 `ml.tensor_from_u8_bytes` + `ml.tensor_to_u8_bytes` |
-| `programs/user/yolo_uav_send.lua` | 🆕 | UAV 发图脚本 |
-| `programs/user/yolo_car_detect.lua` | 🆕 | 车收图检测脚本 |
+| `programs/user/yolo_test_uav.lua` | 🆕 | UAV 发图脚本（单帧测试） |
+| `programs/user/yolo_test_ugv.lua` | 🆕 | UGV 收图检测脚本（单帧测试） |
 
 **方法签名**
 ```rust
@@ -447,8 +447,8 @@ webui.send(jpeg, dets)                       -- 发图 + 坐标给浏览器
 **实施步骤**
 1. ✅ `lua_tensor.rs` 加 U8：`tensor_to_bytes` 加 `DType::U8 => 2`；`bytes_to_tensor` 加 U8 反序列化分支 + 字节数改按 dtype 算（**已实施**）
 2. ✅ `capability_binding.rs` 加 `ml.tensor_from_u8_bytes`（mlua::String → Tensor::from_vec u8 → LuaTensor）+ `ml.tensor_to_u8_bytes`（to_vec1::<u8> → 纯字节）（**已实施**）
-3. ⬜ 写 `yolo_uav_send.lua`：capture → tensor_from_u8_bytes → open_tensor_stream → send_tensor 轮询（**待后续，与李永康讨论脚本后再写**）
-4. ⬜ 写 `yolo_car_detect.lua`：accept → 循环 recv_tensor → tensor_to_u8_bytes → detect → webui.send（**待后续**）
+3. ✅ 写 `yolo_test_uav.lua`：capture → tensor_from_u8_bytes → open_tensor_stream → send_tensor（**已实施，单帧测试**）
+4. ✅ 写 `yolo_test_ugv.lua`：accept → 循环 recv_tensor → tensor_to_u8_bytes → detect → 打印 bbox（**已实施，单帧测试**）
 5. ⬜ 两节点联调：传一张图，确认车收到完整字节并能 detect（**待后续**）
 
 ---

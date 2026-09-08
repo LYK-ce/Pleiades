@@ -1,4 +1,4 @@
-# Workbook — Task 29: YOLO-v8 目标检测（阶段 2 检测核心）
+# Workbook — Task 29: YOLO-v8 目标检测（阶段 2 检测核心 + 阶段 3 图传输）
 
 > 对应任务：`Task/task_29_yolo.md`
 > 分支：`robot_yolo`
@@ -6,7 +6,7 @@
 
 ## 状态
 
-阶段 0/1/2 已实施 + 验证通过（已提交推送）。阶段 3（图传输 U8 tensor）、阶段 4（webui + HTML 画框）未实施。
+阶段 0/1/2 已实施 + 验证通过（已提交推送）。阶段 3 Rust 侧 + 单帧测试脚本已实施（待两节点联调）。阶段 4（webui + HTML 画框）未实施。
 
 ## 关键决策（与 task_29 方案 D1-D13 的偏差，均已落地）
 
@@ -35,6 +35,38 @@
 - Lua 沙箱禁 `io`（engine.rs），读文件走 `storage_acquire_read` + `handle:read()`
 - rust_yolo 跑 l 需 `--which l`（默认 n 会 shape mismatch）；我们的 `Infer_Which` 从文件名自动推断，无此问题
 - mDNS `failed reading datagram`（os error 10040）= libp2p-mdns 接收缓冲区硬编码 4096 字节，超大米 DNS 包被丢弃，与 YOLO 无关，忽略
+
+## 阶段 3（图传输 U8 tensor）— Rust 侧 + 单帧测试脚本
+
+> 2026-09-08 实施完成，待两节点联调验证
+
+### 状态
+Rust 侧（U8 dtype + 两个 cap）+ 单帧测试脚本（yolo_test_uav/yolo_test_ugv）已实施并推送。联调（UAV 抓图 → 传 UGV → detect）待本地两节点验证。
+
+### 关键决策（与李永康讨论定）
+- **先单 UAV → 单 UGV 单帧跑通**，正式 3 车轮询脚本留后续。
+- **命名**：`tensor_from_u8_bytes` / `tensor_to_u8_bytes`，与 `tensor_from_bytes` 的区别已写入 task 文档 + `lua_tensor.rs` 注释（四函数对照）：
+  - `tensor_to/from_bytes` = 序列化对（带 `[dtype][ndim][dims]` header，跨网络恢复张量）
+  - `tensor_from/to_u8_bytes` = wrap/unwrap 对（无 header，裸字节进出 tensor stream）
+- **YOLO 输入尺寸核实**：非固定 640×640，而是「长边 640、保比例、32 对齐」（1280×720 → 640×352），无 letterbox 补边。camera capture 的 JPEG 直接喂 detect，无需中间处理。
+- **测试脚本参数写死在脚本顶部「配置块」**（李永康要求：直接改脚本文件，不用 exec 传参）。
+- **peer 发现**：脚本顶部 `PEER_NAME`（默认 "ugv"）按名字找 peer_id；留空则 `get_all_peers()` 自动找第一个非本机节点。
+- **task_id（=inference_id）**：tensor stream 的 rendezvous 配对 id，两端一致即可（默认 1001）。
+
+### 改动文件
+- **base 改**：`ML_Engine/lua_tensor.rs`（U8 dtype + `tensor_from_u8_bytes_fn`/`tensor_to_u8_bytes_fn`）、`VM/capability_binding.rs`（`ml.tensor_from_u8_bytes`/`ml.tensor_to_u8_bytes`）
+- **新增脚本**：`programs/user/yolo_test_uav.lua`、`programs/user/yolo_test_ugv.lua`
+- **文档**：`Task/task_29_yolo.md`（阶段 3 状态 + 命名区别对照表）
+
+### 验证
+- `cargo check -p pleiades-base --no-default-features` → 0 error（24 个 warning 均为改动前已存在）
+- 联调待本地两节点（UAV + UGV）跑通
+
+### 关键坑
+- `recv_tensor` 收到 EOF 时**抛异常**（`capability_binding.rs` 返回 `Err("recv_tensor: received EOF")`），Lua 用 `pcall(function() return recv_tensor(...) end)` 捕获判断流结束（模式见 `programs/archived/pipe_2.lua`）。
+- candle U8 `from_vec::<u8>` / `to_vec1::<u8>` 首次在项目使用，`cargo check` 验证编译通过。
+- `tensor_to_u8_bytes_fn` 显式校验 dtype==U8，非 U8 直接报错。
+- exec 参数（`params`）在 Lua 里全是字符串（`HashMap<String,String>`），数字需 `tonumber`；但本阶段测试脚本不用 exec 传参，参数写死在脚本顶部。
 
 ## 结束时间
 
