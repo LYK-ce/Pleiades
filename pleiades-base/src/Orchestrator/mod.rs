@@ -14,6 +14,7 @@ use crate::peer_management::Peer_Management_Capability;
 use crate::storage::StorageCapability;
 use crate::event_bus::EventBus;
 use crate::orchestrator::local_tensor_stream::LocalStreamHub;
+use mlua::Lua;
 
 // ============================================================
 // Capabilities — 统一的组件能力容器
@@ -26,6 +27,13 @@ use crate::orchestrator::local_tensor_stream::LocalStreamHub;
 ///   不适合 trait object。由未来 Lua 层通过 `mlua::UserData` 调用。
 /// - 分析/切分 (`analyze_model`/`split_model`) 是独立 async 函数，
 ///   Orchestrator 直接 `use crate::ml_engine::{analyze_model, split_model}` 调用。
+/// 设备能力接口：设备端（uav/ugv）实现此 trait，把自己的设备 cap（如 camera.capture）注册进 Lua。
+///
+/// 与 `Network_Capability` / `StorageCapability` 同为 trait object，风格统一。
+pub trait DeviceCapability: Send + Sync {
+    fn register_lua_caps(&self, lua: &Lua) -> mlua::Result<()>;
+}
+
 pub struct Capabilities {
     /// 网络通信
     pub network: Box<dyn Network_Capability>,
@@ -37,6 +45,8 @@ pub struct Capabilities {
     pub event_bus: Arc<EventBus>,
     /// 本地张量流配对 Hub
     pub local_stream_hub: Arc<LocalStreamHub>,
+    /// 设备端注入的设备能力列表（spawn_lua_script 遍历调用 register_lua_caps）
+    pub device_caps: Vec<Arc<dyn DeviceCapability>>,
 }
 
 // ============================================================

@@ -670,6 +670,17 @@ pub(super) fn spawn_lua_script(
                 return;
             }
 
+            // 3.6 注册设备端注入的 cap（如 camera.capture）
+            for device in &caps.device_caps {
+                if let Err(e) = device.register_lua_caps(&lua) {
+                    caps.event_bus.Publish(Bus_Event::Notify {
+                        level: NotifyLevel::Error,
+                        message: format!("[{}] 设备 cap 注册失败: {}", label, e),
+                    });
+                    return;
+                }
+            }
+
             // 4. 编译脚本
             if let Err(e) = lua.load(&script).eval::<()>() {
                 caps.event_bus.Publish(Bus_Event::Output {

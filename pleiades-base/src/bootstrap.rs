@@ -185,6 +185,7 @@ pub async fn core_bootstrap() -> Result<CoreBootstrap, Box<dyn std::error::Error
         peer_manager: peer_capability_for_core,
         event_bus: event_bus.clone(),
         local_stream_hub: Arc::new(crate::orchestrator::local_tensor_stream::LocalStreamHub::new()),
+        device_caps: Vec::new(),
     });
 
     let (user_cmd_tx, user_cmd_rx) = mpsc::channel::<UserCommand>(64);
