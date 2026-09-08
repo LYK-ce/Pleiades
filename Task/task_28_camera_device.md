@@ -1,8 +1,8 @@
 # task_28_camera_device — 无人机 USB 摄像头设备驱动
 
 > Created Date ： 2026-09-03
-> Modified Date ： 2026-09-03
-> 状态：方案已定，待实施
+> Modified Date ： 2026-09-08
+> 状态：已实施（作为 task_29 阶段 1 落地，2026-09-08 Windows 实机验证抓图成功）
 > 关联文档：`Architecture/robot_arch.md`、`docs/design_doc/UAV.md`（DRF450 摄像头：200 万像素 1080P USB）
 
 ---
@@ -183,3 +183,29 @@ pub struct CameraConfig {
 ## 九、讨论记录
 
 - 2026-09-03 与李永康讨论定稿：摄像头做成子设备（D1）；选型从 v4l 改为 **nokhwa**——因确定用 std::thread 常驻线程后，`Camera` 非 Sync 短板消除、`frame()` 一行取帧更省（D2）；显式 `new/open/capture/close` 生命周期（D3/D4）；fourcc 固定 MJPG 不暴露 config（D5）；config 精简为 `enabled/path/width/height/timeout_ms`（D6）；第一版只做驱动，发图/显示/YOLO/Lua caps 后续扩展（D8/D9）。
+
+## 十、实施记录（2026-09-08）
+
+状态：**已实施**，作为 task_29 阶段 1 落地，Windows 实机验证通过（`exec test_camera` 成功抓图存盘）。
+
+与原始方案（D1-D9）的差异（实机约束 + 架构对齐）：
+
+| # | 原始方案 | 实际实施 | 原因 |
+|---|---|---|---|
+| D2 | nokhwa `input-v4l` | nokhwa `0.10.11`，平台条件依赖（Linux `input-v4l` / Windows `input-msmf`） | 调试用 Windows 笔记本摄像头，需跨平台 |
+| D5 | fourcc 固定 **MJPG** | fourcc **NV12** | 实测 Chicony 笔记本摄像头 30 种格式全是 NV12，无 MJPG |
+| D7 | 不支持 MJPG 则报错 | NV12 → `decode_image::<RgbFormat>()` → `image` 编码 JPEG | 摄像头只出 NV12，需转码 |
+| D8 | `UavDeviceHandler::start()` 装配 | `uav_bootstrap` 创建/open + `device_caps.write().push()` | camera 被 base 的 Lua 调用（非 uav 决策链），且需在 `exec` 前注入 `device_caps` |
+| — | Lua caps 属“后续扩展” | 本阶段即实现 `DeviceCapability`，注册 `camera.capture()` | task_29 阶段 1 需要 |
+
+连带 base 改动：
+
+- `CoreBootstrap` 暴露 `capabilities: Arc<Capabilities>`（uav 注入 device_caps 的入口）
+- `Capabilities.device_caps` 从 `Vec` 改 `RwLock<Vec>`（Arc 内可变注入）
+- `StorageWriteHandle` 补 `write` 方法（Lua 写文件走 storage 锁机制，不打开 `io`）
+
+验证：
+
+- `cargo check -p pleiades-base --no-default-features` / `-p pleiades-uav` → 0 error
+- `cargo test -p pleiades-uav config::` → 2 passed（`fill_camera` 补全）
+- Windows 实机：`[camera] enabled=true` + `exec test_camera` → 抓图存 `Pleiades_Workspace/test_camera.jpg` 成功

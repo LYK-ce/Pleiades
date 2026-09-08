@@ -238,7 +238,7 @@ for device in &caps.device_caps {
 
 ---
 
-### 阶段 1：Camera 适配（UAV 抓图）
+### 阶段 1：Camera 适配（UAV 抓图）✅ 已实施（2026-09-08，Windows 实机验证通过）
 
 **文件架构**
 ```

@@ -81,3 +81,6 @@ Test_Environment_3/
 .zgent/
 uploads/
 Tool/__pycache__/
+
+# 比赛技术报告（本地撰写，不提交远程）
+/technical report/
