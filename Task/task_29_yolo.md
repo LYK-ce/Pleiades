@@ -1,8 +1,9 @@
 # task_29_yolo — candle YOLO-v8 目标检测融入 ML_Engine
 
 > Created Date ： 2026-09-06
-> Modified Date ： 2026-09-07
-> 状态：已评审修正（F1-F7 已补），待定稿
+> Modified Date ： 2026-09-08
+> 状态：阶段 0 已实施（已提交 robot_yolo 分支）；真实权重验证通过（yolov8n/l）
+> 分支：`robot_yolo`（演示专用，webui 不进正式分支）
 > 关联文档：`Architecture/robot_arch.md`、`Task/task_28_camera_device.md`（相机输出 JPEG）、实验项目 `/vepfs-mlp2/c20250205/240804016/Workspace/rust_yolo/`
 
 ---
@@ -11,8 +12,8 @@
 
 把 candle 生态的 **YOLO-v8 目标检测**融入现有 ML_Engine 体系，使机器人（UAV/UGV）具备「拍一张图 → 检测 → 得到 bbox」的能力。
 
-- 现有 ML_Engine 是 GGUF/LLM 专用（`MlContext` + 量化 QTensor + 按层加载 + KV cache），YOLO 走 **safetensors F32 全量加载**，两者**平行隔离、互不侵入**。
-- 已跑通实验：`rust_yolo` 项目（candle 0.10.2）用随机权重验证了「加载 → 前向 → 后处理(NMS) → 输出」整条链路。
+- 现有 ML_Engine 是 GGUF/LLM 专用（`MlContext` + 量化 QTensor + 按层加载 + KV cache），YOLO 走 **safetensors 全量加载**（权重文件 FP16 存储：yolov8n 6.4MB / yolov8l 87MB；VarBuilder 加载时转 F32 计算），两者**平行隔离、互不侵入**。
+- 已跑通实验：`rust_yolo` 项目（candle 0.10.2）先用随机权重验证链路，后用真实权重（yolov8n/l）检测 bike.jpg 成功（person/bicycle/motorcycle/dog/car 均正确检出，yolov8l 精度更高）。
 
 ### 第一版里程碑（验收标准）
 
@@ -22,7 +23,7 @@
 
 整个闭环拆成 5 个步骤（阶段 0 前置 + 4 个阶段），按依赖顺序实施：
 
-**阶段 0：设备 Lua cap 注入口（前置，base）**
+**阶段 0：设备 Lua cap 注入口（前置，base）✅ 已实施**
 
 解决评审 F1：设备端（uav）的 `CameraDevice` 无法把自己的 cap 注册进 base 的 Lua（跨 crate：uav 依赖 base，base 不能反向依赖 uav）。通用解法：
 
@@ -191,7 +192,7 @@ local dets = det:detect(image_bytes, conf, nms)   -- 返回 table 数组
 
 ## 九、实施阶段详细方案
 
-### 阶段 0：设备 Lua cap 注入口（前置，base）
+### 阶段 0：设备 Lua cap 注入口（前置，base）✅ 已实施
 
 **文件架构**
 ```
@@ -501,3 +502,7 @@ pub fn webui_publish(data: String);                          // 往 broadcast ch
   - 派子 agent 对照代码评审，发现 F1-F7 七类问题；主体决策 D7/D10/D12 均与代码严格吻合
   - F1 camera cap 跨 crate → 定：加「设备 cap 注入口」（阶段 0，Capabilities + spawn_lua_script），camera 留 uav
   - F2-F7（UserData / mlua::String / resize_exact / bytes_to_tensor 硬编码 / tensor_to_u8_bytes / webui.send 打包 / find_available_port / nokhwa 离线）→ 已逐条修正进文档
+- 2026-09-08 实施 + 验证：
+  - 阶段 0 实施完成（DeviceCapability trait 版，cargo check 通过），提交推送到 `robot_yolo` 分支
+  - 真实权重验证：yolov8n（6.1MB）+ yolov8l（84MB）在 rust_yolo 检测 bike.jpg 成功，yolov8l 更准（多检出 dog/car）
+  - 分支策略 → 定：robot_yolo 演示专用不合并；webui（阶段 4）不进正式分支；核心能力（阶段 0-3）归属待定
