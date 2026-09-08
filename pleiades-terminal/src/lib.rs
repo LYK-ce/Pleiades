@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-15
-//Modified Date ： 2026-08-16
+//Modified Date ： 2026-09-08
 
 //! Pictor Kernel — Pleiades × Godot GDExtension 桥（Task 16）
 //!
@@ -23,6 +23,9 @@ use std::time::Duration;
 
 use pleiades_base::event_bus::Bus_Event;
 use pleiades_base::network::{DataType, NodeHandle};
+use pleiades_base::orchestrator::command::UserCommand;
+use pleiades_base::tui::parse_user_command;
+use tokio::sync::mpsc;
 
 /// 桥事件（后台线程 → 主线程 `poll()` 排空）
 enum BridgeEvent {
@@ -57,6 +60,8 @@ struct PleiadesKernel {
     base: Base<Node>,
     /// 出站发送句柄（core_bootstrap 就绪后填充）
     node_handle: Arc<OnceLock<NodeHandle>>,
+    /// 命令通道发送端（core_bootstrap 就绪后填充，clone 自 CoreBootstrap.user_cmd_tx，Task 26）
+    user_cmd_tx: Arc<OnceLock<mpsc::Sender<UserCommand>>>,
     /// 同步队列（后台 → 主线程 poll）
     out_queue: Arc<Mutex<VecDeque<BridgeEvent>>>,
     /// 优雅停机标志
@@ -71,6 +76,7 @@ impl INode for PleiadesKernel {
         Self {
             base,
             node_handle: Arc::new(OnceLock::new()),
+            user_cmd_tx: Arc::new(OnceLock::new()),
             out_queue: Arc::new(Mutex::new(VecDeque::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -129,6 +135,33 @@ impl PleiadesKernel {
             .is_ok()
     }
 
+    /// 下发命令字符串（与 TUI 同语法，如 `session create xxx` / `api 1`），同步返回执行反馈（Task 26）
+    ///
+    /// - 复用 `parse_user_command` 解析，成功后经 `user_cmd_tx` 送入 Core 主循环 B1 分支执行。
+    /// - `quit`/`exit`/`clear`/空串 解析为本地命令（Ok(None)），返回 "OK (本地命令)"，不实际退出。
+    /// - fire-and-forget；`try_send` 通道满时返回 "ERR: 通道已满/关闭"，Godot 侧可重试。
+    #[func]
+    fn send_user_command(&self, command_line: GString) -> GString {
+        let Some(tx) = self.user_cmd_tx.get() else {
+            godot_warn!("[Kernel] send_user_command 失败：命令通道未就绪");
+            return GString::from("ERR: 命令通道未就绪");
+        };
+        match parse_user_command(&command_line.to_string()) {
+            Ok(Some(cmd)) => match tx.try_send(cmd) {
+                Ok(()) => GString::from("OK"),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    godot_warn!("[Kernel] send_user_command 发送失败：通道已满");
+                    GString::from("ERR: 通道已满")
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    godot_warn!("[Kernel] send_user_command 发送失败：通道已关闭");
+                    GString::from("ERR: 通道已关闭")
+                }
+            },
+            Ok(None) => GString::from("OK (本地命令)"),
+            Err(msg) => GString::from(format!("ERR: {msg}").as_str()),
+        }
+    }
     /// Godot 主线程每帧调用：排空 `out_queue` 并 emit 信号（方案 B：零跨线程发信号）
     #[func]
     fn poll(&mut self) {
@@ -175,6 +208,7 @@ impl PleiadesKernel {
 impl PleiadesKernel {
     fn spawn_background(&mut self) {
         let node_handle = self.node_handle.clone();
+        let user_cmd_tx = self.user_cmd_tx.clone();
         let out_queue = self.out_queue.clone();
         let shutdown = self.shutdown.clone();
 
@@ -190,6 +224,7 @@ impl PleiadesKernel {
                 };
 
                 let _ = node_handle.set(boot.node_handle.clone());
+                let _ = user_cmd_tx.set(boot.user_cmd_tx.clone());
 
                 // RTK 基站（UM960）：enabled 才 spawn，失败只告警不拖垮节点（Task 24）
                 // 句柄存活到 run_headless 返回前（随后台线程生命周期自然释放）
