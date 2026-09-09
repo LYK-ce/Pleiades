@@ -65,8 +65,14 @@ function execute(params)
         return
     end
 
-    -- 按 peer_id 排序，确保链顺序确定
-    table.sort(remote_peers, function(a, b) return a.peer_id < b.peer_id end)
+    -- 按分片范围排序（split_start 升序），确保分片 0（embedding 层）在链头、分片 1（output 层）在链尾
+    local function parse_split_start(file_name)
+        local s = string.match(file_name or "", "_split_(%d+)_")
+        return s and tonumber(s) or 0
+    end
+    table.sort(remote_peers, function(a, b)
+        return parse_split_start(a.file_name) < parse_split_start(b.file_name)
+    end)
 
     caps.print(string.format("│ 发现 %d 个远程分片节点:", #remote_peers))
     for i, p in ipairs(remote_peers) do
