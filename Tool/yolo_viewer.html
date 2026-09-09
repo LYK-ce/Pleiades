@@ -21,11 +21,14 @@
   <input id="ip" placeholder="车 IP（如 127.0.0.1）">
   <input id="port" placeholder="端口" value="9010">
   <button onclick="connect()">连接</button>
+  <span id="totalFps" style="color:#4ade80; font-weight:bold; font-size:14px;">- FPS（总）</span>
 </div>
 <div id="panels"></div>
 <script>
 const socks = {};
 let nextId = 1;
+let totalFrames = 0;      // 所有车收到的帧数合计
+let totalStart = 0;       // 第一帧到达时刻（performance.now）
 
 function connect() {
   const ip = document.getElementById("ip").value.trim();
@@ -59,7 +62,9 @@ function connect() {
   ws.onclose = () => { if (socks[idx] === ws) fpsEl.textContent = "断开"; };
 
   ws.onmessage = async (ev) => {
-    // 拆包：[4B header_len LE][header JSON {dets:[...]}][JPEG]
+    if (totalStart === 0) totalStart = performance.now();
+    totalFrames++;
+    // 拆包
     const buf = ev.data;
     const view = new DataView(buf);
     const headerLen = view.getUint32(0, true);
@@ -99,6 +104,16 @@ function disconnect(idx) {
   const cv = document.getElementById("cv" + idx);
   if (cv) { const p = cv.closest(".panel"); if (p) p.remove(); }
 }
+
+// 总 FPS：所有车帧数合计 / 时间（轮询发图下反映系统总检测吞吐）
+setInterval(() => {
+  if (totalStart === 0) return;
+  const elapsed = (performance.now() - totalStart) / 1000;
+  const el = document.getElementById("totalFps");
+  if (el && elapsed > 0) {
+    el.textContent = (totalFrames / elapsed).toFixed(1) + " FPS（总）";
+  }
+}, 1000);
 </script>
 </body>
 </html>
