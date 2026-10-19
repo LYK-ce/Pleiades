@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-07-21 (Robot 模块架构, 多设备独立 State 设计, LiDAR 集成)
+> **最后更新**: 2026-10-19 (workspace 五 crate 化, Robot 章节改指 robot_arch.md)
 
 ---
 
@@ -31,34 +31,32 @@
 /workspace/
 ├── .config/                    ← 运行时配置 (keypair.bin + config.toml)
 ├── Architecture/               ← 架构设计文档
-├── Src/                        ← 全部 Rust 源代码
-│   ├── main.rs                 ← 6 阶段 bootstrap
-│   ├── Config/                 ← 配置读写
-│   ├── EventBus/               ← 广播事件总线
-│   ├── ML_Engine/              ← ML 推理引擎 (GGUF/PGGUF)
-│   ├── Network/                ← P2P 网络 (libp2p)
-│   ├── Orchestrator/           ← 任务编排核心
-│   │   └── local_tensor_stream/ ← 本地张量流通道
-│   ├── PeerManagement/         ← 节点发现与管理
-│   ├── Session_Manager/        ← 推理会话槽位
-│   ├── Storage/                ← 统一存储管理
-│   ├── TUI/                    ← 终端 UI (ratatui)
-│   ├── API/                    ← OpenAI 兼容 HTTP API
-│   ├── VM/                     ← Lua 脚本引擎 + 所有绑定
-│   └── Robot/                  ← 机器人控制（Pleiades-Orion 分支）
-│       ├── core/               ←   Robot 中枢 + Command
-│       ├── state.rs            ←   RobotState + LidarState
-│       ├── websocket.rs        ←   WebSocket 遥控
-│       └── control/            ←   设备驱动
-│           ├── serial/port.rs  ←     通用 TX+RX tokio task
-│           └── device/
-│               ├── stm32/      ←     STM32 底盘驱动
-│               └── lidar/      ←     YDLIDAR Tmini 驱动
+├── Cargo.toml                  ← workspace 清单 (5 个成员 crate)
+├── pleiades-base/              ← 核心库 + [[bin]] Pleiades
+│   └── src/
+│       ├── main.rs             ← 6 阶段 bootstrap
+│       ├── Config/             ← 配置读写
+│       ├── EventBus/           ← 广播事件总线
+│       ├── ML_Engine/          ← ML 推理引擎 (GGUF/PGGUF) + Yolo/
+│       ├── Network/            ← P2P 网络 (libp2p)
+│       ├── Orchestrator/       ← 任务编排核心
+│       │   └── local_tensor_stream/ ← 本地张量流通道
+│       ├── PeerManagement/     ← 节点发现与管理
+│       ├── Session_Manager/    ← 推理会话槽位
+│       ├── Storage/            ← 统一存储管理
+│       ├── TUI/                ← 终端 UI (ratatui)
+│       ├── API/                ← OpenAI 兼容 HTTP API + webui (WebSocket)
+│       ├── VM/                 ← Lua 脚本引擎 + 所有绑定
+│       └── Robot/              ← 机器人共享中枢（见 §3.10）
+├── pleiades-terminal/          ← GDExtension 地面站桥 + RTK 基站 UM960
+├── pleiades-uav/               ← 无人机设备端 (mavlink / camera)
+├── pleiades-ugv/               ← 无人车设备端 (stm32 / lidar / lg290p / slam / planning)
+├── pleiades-sim/               ← 仿真节点（无硬件，测试决策链）
 ├── programs/                   ← Lua 脚本
 │   ├── builtin/                ← 内置 (优先级低于 user)
 │   │   └── legacy/             ← 过期脚本 (API 不兼容)
 │   └── user/                   ← 用户脚本
-└── tests/                      ← 集成测试
+└── pleiades-base/tests/        ← 集成测试
 ```
 
 ---
@@ -82,35 +80,34 @@
 
 ### 3.1 Config
 
-**位置**: `Src/Config/`
+**位置**: `pleiades-base/src/Config/`
 
 ```rust
-pub fn Ensure_Config() -> (Pleiades_Config, PathBuf);   // 自动创建默认配置
-pub fn Read_Config(path: &Path) -> Result<Pleiades_Config, Box<dyn Error>>;  // 解析 TOML
-pub fn Ensure_Identity(dir: &Path) -> Keypair;           // Ed25519 密钥
+pub fn Ensure_Config() -> Result<(BaseConfig, PathBuf), Box<dyn Error>>;  // 自动创建默认配置
+pub fn Read_Config(path: &Path) -> Result<BaseConfig, Box<dyn Error>>;    // 解析 TOML
+pub fn Ensure_Identity(dir: &Path) -> Result<Keypair, Box<dyn Error>>;   // Ed25519 密钥
 ```
 
-配置文件 `.config/config.toml` 结构：
+配置文件 `.config/config.toml` 共享段（`BaseConfig` 只定义所有终端共享的段；设备段由各设备端 crate 用 `#[serde(flatten)]` 组合）：
 ```toml
 [Log]       level = "info", log_file_path = "Log/"
-[Network]   LAN = true, WAN = false, transport_protocol = "tcp",
-            cleanup_interval = 300, timeout_interval = 30,
-            heartbeat_interval = 30, heartbeat_timeout = 60,
-            request_response_timeout = 30
-[Runtime]   device = "cpu", model_path = "", max_token = 128,
-            temperature = 0.8, seed = 299792458
-[Storage]   workspace_dir = "Pleiades_Workspace", quota_gb = 0
-[Session]   max_slots = 4
-[Identity]  peer_name = "new_peer"
+[Network]   LAN = true, WAN = false, Transport_Protocol = "TCP",
+            listen_port = 0, dht_namespace = "pleiades-nodes", bootstrap_peers = [],
+            cleanup_interval = 300, timeout_interval = 300,
+            heartbeat_interval = 60, heartbeat_timeout = 10,
+            request_response_timeout = 300, subscribe_topics = []
+[Storage]   workspace_dir = "Pleiades_Workspace", quota_gb = 0, kvcache_dir = ".kvcache"
+[Identity]  peer_name = "new_peer", node_type = "car"   # car=车 / uav=机 / ground_station=地面站
 
-> ⚠️ `config.toml` 中存在 `[Scheduler]` 段（strategy = "uniform"），但 `Pleiades_Config` 中尚未实现对应的 `Scheduler_Config` 结构体，该段在反序列化时被静默忽略。
+# 设备段（各设备端 crate 各自定义，不在此列）：[chassis]/[lidar]/[lg290p]（ugv）、
+# [flight_ctrl]/[camera]（uav）、[um960]（terminal）
 ```
 
 ---
 
 ### 3.2 EventBus
 
-**位置**: `Src/EventBus/`
+**位置**: `pleiades-base/src/EventBus/`
 
 基于 `tokio::sync::broadcast` 的全局事件总线。4 种通用事件类型，payload 为 JSON 字符串：
 
@@ -125,7 +122,7 @@ pub fn Ensure_Identity(dir: &Path) -> Keypair;           // Ed25519 密钥
 
 ### 3.3 Storage ⚠️
 
-**位置**: `Src/Storage/`
+**位置**: `pleiades-base/src/Storage/`
 
 **这是文件访问的唯一入口！严禁绕过 Storage 直接使用 `std::fs` 或 `tokio::fs`。**
 
@@ -176,7 +173,7 @@ pub struct FileEntry {
 
 ### 3.4 ML_Engine
 
-**位置**: `Src/ML_Engine/`
+**位置**: `pleiades-base/src/ML_Engine/`
 
 #### 3.4.1 GGUF → PGGUF 转换 ⚠️
 
@@ -265,7 +262,7 @@ impl MlSession {
 
 ### 3.5 Network
 
-**位置**: `Src/Network/`
+**位置**: `pleiades-base/src/Network/`
 
 libp2p 协议栈：TCP + Noise 加密 + Yamux 多路复用 + mDNS 发现 + Kademlia DHT + Request-Response + Stream + Ping。
 
@@ -313,7 +310,7 @@ pub trait Network_Capability {
 
 ### 3.6 Orchestrator
 
-**位置**: `Src/Orchestrator/`
+**位置**: `pleiades-base/src/Orchestrator/`
 
 `Core` 结构体的主循环通过 `tokio::select!` 处理 5 个分支：
 
@@ -330,9 +327,10 @@ pub trait Network_Capability {
 pub struct Capabilities {
     pub network: Box<dyn Network_Capability>,
     pub storage: Arc<dyn StorageCapability>,
-    pub peer_manager: Box<dyn Peer_Management_Capability>,
+    pub peer_manager: Arc<dyn Peer_Management_Capability>,
     pub event_bus: Arc<EventBus>,
     pub local_stream_hub: Arc<LocalStreamHub>,
+    pub device_caps: RwLock<Vec<Arc<dyn DeviceCapability>>>,  // 设备端注入（spawn_lua_script 遍历注册）
 }
 ```
 
@@ -345,7 +343,7 @@ pub struct Capabilities {
 
 ### 3.7 VM (Lua 引擎)
 
-**位置**: `Src/VM/`
+**位置**: `pleiades-base/src/VM/`
 
 #### 3.7.1 沙箱环境
 
@@ -448,7 +446,7 @@ local_tensor.send_eof(stream)
 
 ### 3.8 TUI
 
-**位置**: `Src/TUI/`
+**位置**: `pleiades-base/src/TUI/`
 
 ratatui + crossterm。双输入框布局：
 
@@ -470,7 +468,7 @@ ratatui + crossterm。双输入框布局：
 
 ### 3.9 Session_Manager
 
-**位置**: `Src/Session_Manager/`
+**位置**: `pleiades-base/src/Session_Manager/`
 
 管理推理会话的生命周期和槽位分配。无 trait，`SessionManager` 为具体类型，包裹在 `Arc<Mutex<SessionManager>>` 中供 Core 使用。
 
@@ -495,83 +493,38 @@ impl SessionManager {
 
 ### 3.10 Robot
 
-**位置**: `Src/Robot/`
+**位置**: `pleiades-base/src/Robot/`（共享中枢）+ `pleiades-ugv/` / `pleiades-uav/` / `pleiades-terminal/` / `pleiades-sim/`（设备端）
 
-机器人控制系统（`Pleiades-Orion` 分支）。采用多 Device 独立 State 架构。
+> ⚠️ 本节原先描述的 `Src/Robot/core/{executor,slam,control,planning}`、`Src/Robot/websocket.rs` 与 `Src/WebSocket/server.rs` **均已失效**：
+> executor/slam/planning 已下沉到设备端（executor 现为 `pleiades-ugv/src/ugv/executor.rs`），WebSocket 遥控已由 GDExtension 桥（`pleiades-terminal`）取代。
+> **Robot 现状以 [`Architecture/robot_arch.md`](robot_arch.md) 为准**，本节只保留入口索引。
 
-**文件结构**（2026-08-12 更新）：
+`pleiades-base/src/Robot/core/` 当前真实结构：
+
 ```
-Src/Robot/
-├── mod.rs              ← 模块入口 + public export
-├── core/
-│   ├── robot.rs        ← Robot::launch() + 主 select! 循环 + state_notifier/slam_task
-│   ├── command.rs      ← 三层命令（Mode/Manual/Auto）+ Mission（Goto / Circle{x,y,members}）
-│   ├── state.rs        ← RobotState + LidarState + ExecuteState
-│   ├── executor.rs     ← 自动任务执行器（Idle/Turning/Moving + D* Lite）
-│   ├── mission.rs      ← MissionQueue（FIFO，replace 替换语义）
-│   ├── mode.rs         ← OpMode（Manual/Auto）
-│   ├── protocol/       ← ORION 协议（frame.rs 帧编解码 + messages.rs 消息 payload）
-│   ├── cluster/        ← 集群数据面（ClusterInfoTable + consumer，Task 13_1）
-│   └── planning/       ← 规划层（Task 14）
-│       ├── assignment.rs  ← 群发 Goto/Circle 散布位置确定性分配
-│       └── pathfinder.rs  ← D* Lite 路径规划（自 slam/ 迁入）
-├── slam/               ← 感知/建图层
-│   ├── grid.rs         ← OccupancyGrid（own/merged 双表，log-odds）
-│   ├── lidar_mapper.rs ← 点云→栅格 + Bresenham 射线
-│   └── odometry.rs     ← 世界坐标积分
-├── control/
-│   ├── types.rs        ← CarType 枚举
-│   ├── serial/port.rs  ← spawn_port(): 通用 TX+RX tokio task
-│   └── device/
-│       ├── stm32/      ← STM32 底盘驱动
-│       └── lidar/      ← YDLIDAR Tmini 驱动
-└── (WebSocket 独立于 Src/WebSocket/，非 robot 子模块)
+pleiades-base/src/Robot/
+├── mod.rs                  ← 模块入口 + public export
+└── core/
+    ├── robot.rs            ← Robot::new() + DeviceHandler trait + 主循环骨架
+    ├── command.rs          ← 三层命令（Mode/Manual/Auto）+ Mission（Goto / Circle{x,y,members}）
+    ├── command_consumer.rs ← 命令入站消费（ORION 帧 → Command）
+    ├── state.rs            ← RobotState + ExecuteState + DecisionState
+    ├── mission.rs          ← MissionQueue（FIFO，replace 替换语义）
+    ├── mode.rs             ← OpMode（Manual/Auto，默认 Auto）
+    ├── protocol/           ← ORION 协议（frame.rs 帧编解码 + messages.rs 消息 payload）
+    ├── cluster/            ← 集群数据面（ClusterInfoTable + consumer + maintenance）
+    ├── grid.rs             ← OccupancyGrid（own/merged 双表，log-odds）
+    ├── world.rs            ← 世界（grid + cluster，只读接口 get_cell/get_agents）
+    └── map_delta.rs        ← MapDelta 地图增量协议类型
 ```
 
-**分层语义**：`slam` = 感知/建图（产生地图）；`planning` = 决策（消费地图：assignment 任务分配 + pathfinder 寻路）；`executor` = 执行（走/停 + 让行）。
+- **共享中枢**（base）：协议 / 集群 / 状态 / 世界 / 命令 / `DeviceHandler` trait。
+- **设备端**：`pleiades-ugv/src/ugv/`（stm32 / lidar / executor / goal / planning / slam）、`pleiades-uav/src/uav/`（mavlink + 2D 决策）、`pleiades-terminal/src/lib.rs`（Godot 哑管道桥）、`pleiades-sim/src/sim/`（无硬件仿真）。
+- 设备驱动细节、启动流程、寻路机制、ORION 协议与近期任务（task_24~29）见 [`Architecture/robot_arch.md`](robot_arch.md)。
 
-**核心结构**:
-```rust
-pub struct Robot {
-    pub cmd_tx: mpsc::Sender<Command>,            // 统一命令输入
-    pub robot_state: Arc<RwLock<RobotState>>,      // STM32 独占写
-    pub lidar_state: Arc<RwLock<LidarState>>,      // LiDAR 独占写
-    cancel: CancellationToken,
-}
-```
+---
 
-**设计原则**:
-- 每个 Device 持有独立的 `Arc<RwLock<自己的State>>`，互不干扰
-- Device 通过 `spawn_port()` 获取通用 TX+RX tokio task
-- RX 回调内使用 `try_write()` 更新状态（同步，不阻塞）
-- `RobotState` 由 STM32 维护（vx/vy/vz/battery/attitude/encoders）
-- `LidarState` 由 LiDAR 维护（scan: LaserScan）
-- 上层命令（WS/Lua/LLM）通过 `cmd_tx` 统一发送 `Command`
-
-**启动流程**（2026-08-12 更新，经 `bootstrap::robot_bootstrap` Phase 1~6）：
-```rust
-// bootstrap.rs：读配置 → Robot::launch(port, baudrate, car_type, lidar_port, lidar_baudrate,
-//   origin, node_handle, robot_bus, peer_name) → websocket::start(ws_bind, peer_name, ...)
-let robot = Robot::launch(...)?;
-crate::websocket::start(&ws_bind, &peer_name, robot.robot_cmd_tx.clone(), ...);
-// WS 服务端（每车一个）在 Src/WebSocket/server.rs，经 parse_orion_frame 解析 ORION 帧命令
-```
-
-**Command**（2026-08-12 更新）：
-```rust
-pub enum Command { Mode(ModeCmd), Manual(ManualCmd), Auto(AutoCmd) }
-pub enum Mission {
-    Goto { x: f32, y: f32, members: Vec<Vec<u8>> },    // members 非空 = 群发（Task 14）
-    Circle { x: f32, y: f32, members: Vec<Vec<u8>> },  // 围圈：x/y 圆心，环上均匀铺开（Task 18）
-}
-pub enum AutoCmd { Set(Vec<Mission>) }  // member_count>1 时 Set 内为群发任务
-```
-
-**测试**:
-- `stm32/protocol.rs` — 16 个纯函数测试（帧构建/状态机/分包/传感器解析）
-- `lidar/checksum.rs` — 校验和往返测试
-- `lidar/parser.rs` — 状态机完整包解析测试
-- `stm32/mod.rs` — 3 个 mock 集成测试（TX 命令/RX 更新/分包）
+## 4. 关键工作流
 
 ### 4.1 模型加载与分析
 

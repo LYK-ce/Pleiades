@@ -2,6 +2,26 @@
 
 本文档面向 Lua 脚本开发者，列出系统中所有可用的能力函数。
 
+> 注册实现：`pleiades-base/src/VM/capability_binding.rs`（`register_caps` / `register_storage_caps` / `register_network_caps` / `register_ml_caps` / `register_webui_caps` / `register_logging_caps`）+ `pleiades-base/src/VM/local_stream.rs`（`register_local_stream_caps`）。
+
+---
+
+## 基础
+
+### `caps.monotonic_time()`
+
+返回单调时钟秒数（`f64`，高精度挂钟），用于计时与性能测量。
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| 秒数 | `number` | 自**首次调用** `monotonic_time()` 起单调递增 |
+
+```lua
+local t0 = caps.monotonic_time()
+-- ... 工作 ...
+caps.print(string.format("耗时 %.3f s", caps.monotonic_time() - t0))
+```
+
 ---
 
 ## 日志
@@ -155,6 +175,26 @@ caps.network.send_file(peer_id, handle:path())
 |--------|------|
 | PeerId | `string` |
 
+### `caps.network.get_all_peers()`
+
+列出 PeerManager 中登记的所有节点（含本地）。
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| 节点列表 | `table[]` | 每项包含 `name` (string) 和 `peer_id` (string，Base58) |
+
+### `caps.network.list_model_peers(model_id)`
+
+查询持有指定模型分片的节点（含分片层范围与性能画像）。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `model_id` | `number` | 模型标识 |
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| 节点列表 | `table[]` | 每项包含 `peer_id`、`name`、`layer_start`、`layer_end`、`file_name`、`model_id`、`devices`（table，如 `{"cuda:0","cuda:1"}`）、`profile`（table，可能含 `latency_ms`） |
+
 ### `caps.network.dial(addr)`
 
 主动连接到指定地址。
@@ -251,7 +291,28 @@ caps.network.send_eof(stream)
 
 ---
 
+## WebUI — 浏览器展示
+
+### `caps.webui.send(jpeg, dets)`
+
+把一帧 JPEG 与检测框结果推送给浏览器（WebUI 服务未启动时静默丢弃）。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `jpeg` | `string` | JPEG 原始字节 |
+| `dets` | `table[]` | 检测框数组，每项 `{class_name (string), confidence (number), xmin, ymin, xmax, ymax (number)}` |
+
+```lua
+caps.webui.send(jpeg_bytes, {
+    { class_name = "person", confidence = 0.91, xmin = 10, ymin = 20, xmax = 110, ymax = 220 },
+})
+```
+
+---
+
 ## ML Engine — 推理引擎
+
+> 会话对象的 Rust 类型为 `MlContext`（`pleiades-base/src/ML_Engine/context.rs`），本文档沿用旧称 `MlSession`；检测器为 `Yolo_Detector`（`pleiades-base/src/ML_Engine/Yolo/detector.rs`）。
 
 ### `ml.new(device)`
 
@@ -278,6 +339,31 @@ caps.network.send_eof(stream)
 |--------|------|
 | 张量对象 | `LuaTensor` |
 
+### `ml.tensor_from_u8_bytes(bytes, device)`
+
+把任意原始 u8 字节（如 JPEG）包成 1D `U8` Tensor（shape `[N]`，**无 header**）。与 `ml.tensor_from_bytes`（反序列化带 header 的字节）语义相反。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `bytes` | `string` | 原始字节 |
+| `device` | `string` | 目标设备：`"cpu"` / `"cuda"` |
+
+| 返回值 | 类型 |
+|--------|------|
+| 张量对象 | `LuaTensor`（U8） |
+
+### `ml.tensor_to_u8_bytes(tensor)`
+
+把 `U8` Tensor 剥掉包装取回原始字节（`ml.tensor_from_u8_bytes` 的逆操作）。区别于 `LuaTensor:to_bytes()`（带 header 的序列化）。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `tensor` | `LuaTensor` | `U8` 张量 |
+
+| 返回值 | 类型 |
+|--------|------|
+| 字节 | `string` |
+
 ### `ml.analyze_model(path)`
 
 解析 GGUF/PGGUF 文件，返回模型架构元信息。
@@ -290,7 +376,7 @@ caps.network.send_eof(stream)
 |--------|------|------|
 | 架构信息 | `table` | `{architecture, num_layers, embedding_length, head_count, head_count_kv, head_dim, feed_forward_length, context_length, rms_norm_eps, rope_freq_base, vocab_size, eos_token_id, is_split, split_start, split_end}` |
 
-### `ml.split_model(path, start, end, output_dir)`
+### `ml.split_model(path, start, end, output_dir, keep_tokenizer)`
 
 切分模型指定层范围，输出到目标目录。
 
@@ -300,6 +386,33 @@ caps.network.send_eof(stream)
 | `start` | `number` | 起始层索引（含） |
 | `end` | `number` | 结束层索引（含） |
 | `output_dir` | `string` | 输出目录 |
+| `keep_tokenizer` | `boolean` | 是否保留 tokenizer 元数据 |
+
+### `ml.offload_load(file_id, device)`
+
+从 KVCache 目录加载 offload 的会话（反序列化 KV + 模型权重），返回可直接使用的会话对象。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `file_id` | `string` | KVCache 文件名 |
+| `device` | `string` | 目标设备：`"cpu"` / `"cuda"` |
+
+| 返回值 | 类型 |
+|--------|------|
+| 会话对象 | `MlSession` |
+
+### `ml.yolo_new(model_file, device)`
+
+创建 YOLO 检测器（型号从权重文件名推断，权重放 `Pleiades_Workspace/`）。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `model_file` | `string` | 权重文件名 |
+| `device` | `string` | 目标设备：`"cpu"` / `"cuda"` |
+
+| 返回值 | 类型 |
+|--------|------|
+| 检测器 | `Yolo_Detector` userdata |
 
 ---
 

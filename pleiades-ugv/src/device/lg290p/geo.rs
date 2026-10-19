@@ -1,10 +1,10 @@
 //Presented by KeJi
 //Created Date ： 2026-08-31
-//Modified Date ： 2026-08-31
+//Modified Date ： 2026-10-19
 
 //! LG290P 流动站侧 GNSS 纯函数（Task 24）
 //!
-//! 照搬 `uploads/lg290p_enu.py` L27-94 的 `parse_gga` / `ecef` / `enu`，Rust 化（f64 坐标）。
+//! 照搬 `Tool/lg290p_enu.py` L27-94 的 `parse_gga` / `ecef` / `enu`，Rust 化（f64 坐标）。
 //! 与 terminal 侧 `device/um960/geo.rs` **内容相同但物理独立**（D3，不共享）。
 
 /// WGS84 椭球长半轴（米）

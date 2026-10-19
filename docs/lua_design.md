@@ -2,6 +2,7 @@
 
 Presented by KeJi
 Date ： 2026-05-17
+Modified Date ： 2026-10-19
 
 ## 1. 模块概述
 
@@ -16,10 +17,14 @@ Date ： 2026-05-17
 ### 模块结构
 
 ```
-Lua/
+pleiades-base/src/VM/            ← Lua 模块（原 `Src/VM/`）
 ├── engine.rs              ← LuaContext: 沙箱创建 + 基础测试
 ├── registry.rs            ← ProgramRegistry: 脚本扫描 + 命令注册表
-├── capability_binding.rs  ← (待建) 能力函数注册: Rust → Lua 桥接
+├── capability_binding.rs  ← 能力函数注册: Rust → Lua 桥接（已实现）
+├── network_stream.rs      ← NetworkStream userdata（张量流句柄）
+├── storage_handle.rs      ← StorageReadHandle / StorageWriteHandle userdata
+├── local_stream.rs        ← LocalTensorStream userdata + `local_tensor` 表
+├── lua_tensor_binding.rs  ← LuaTensor userdata 辅助
 └── mod.rs                 ← 模块入口
 ```
 
@@ -114,7 +119,7 @@ pub struct ProgramRegistry {
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `scan()` | `fn scan() → mlua::Result<Self>` | 扫描 programs/ 目录，收集所有 .lua 脚本元数据 |
+| `scan()` | `fn scan() → mlua::Result<Self>` | 扫描 `programs/builtin/` 与 `programs/user/` 目录，收集所有 .lua 脚本元数据 |
 | `command_names()` | `fn command_names() → Vec<&String>` | 返回所有命令名（TUI 补全用） |
 | `get()` | `fn get(cmd: &str) → Option<&ProgramEntry>` | 按命令名查找脚本条目 |
 
@@ -150,7 +155,7 @@ end
 ### 4.3 完整示例
 
 ```lua
--- programs/hello.lua
+-- programs/user/hello.lua
 COMMAND = "hello"
 DESCRIPTION = "演示脚本：验证 Lua 引擎正常启动"
 
@@ -189,7 +194,7 @@ Lua 脚本
 
 ---
 
-## 6. 能力函数桥接（capability_binding.rs）
+## 6. 能力函数桥接（`pleiades-base/src/VM/capability_binding.rs`）
 
 ### 6.1 设计目标
 
@@ -234,6 +239,8 @@ fn register_capabilities(lua: &Lua, caps: &Arc<Capabilities>) -> mlua::Result<()
 ```
 
 ### 6.4 能力函数分级
+
+> ⚠️ 下表为设计期草案，函数名已过时；**现行 caps 清单以 `docs/capabilities.md` 为准**（例：`caps:get_available_peers()` 现为 `caps.network.get_all_peers()`，`caps:send_file()` 现为 `caps.network.send_file()`）。
 
 #### A 级：无需模型的基础能力
 
@@ -317,7 +324,8 @@ fn peers_to_lua_table<'lua>(lua: &'lua Lua, peers: &[PeerInfo]) -> mlua::Result<
 1. Core::route_user() 收到 UserCommand::Execute { command, params, reply }
 2. ProgramRegistry::get(&command) → 获取脚本路径
 3. LuaContext::new() → 创建沙箱 Lua 实例
-4. capability_binding::register(&lua, &caps) → 注入 caps 函数表
+4. capability_binding::register_caps / register_network_caps / register_storage_caps /
+   register_ml_caps / register_webui_caps / register_logging_caps(&lua, ...) → 注入 caps 函数表
 5. lua.load(script_content).eval() → 执行 Lua 顶层（注册 COMMAND/DESCRIPTION/execute）
 6. 构造 params table → lua.globals().set("params", params_table)
 7. let execute_fn: Function = lua.globals().get("execute")
@@ -359,6 +367,8 @@ fn peers_to_lua_table<'lua>(lua: &'lua Lua, peers: &[PeerInfo]) -> mlua::Result<
 
 `MlSession` 是 `mlua::UserData` 类型，在 Lua 侧表现为对象：
 
+> ⚠️ 示例中的 `caps:create_session` / `caps:destroy_session` **已不存在**；现行写法为 `ml.new(device)` + `sess:load_model(path, start, end)`，完整清单见 `docs/capabilities.md`。
+
 ```lua
 -- Phase 3+ 的推理脚本示例
 local sess = caps:create_session(model, "cpu", 0, 39)
@@ -395,18 +405,18 @@ caps:destroy_session(sess)
 
 ### ✅ 已完成
 
-- `engine.rs` — `LuaContext::new()` 沙箱创建，2 tests
-- `registry.rs` — `ProgramRegistry::scan()` 脚本扫描，1 test
-- `programs/hello.lua` — 演示脚本
-- `Cargo.toml` — mlua 依赖已添加
+- `pleiades-base/src/VM/engine.rs` — `LuaContext::new()` 沙箱创建，2 tests
+- `pleiades-base/src/VM/registry.rs` — `ProgramRegistry::scan()` 脚本扫描，1 test
+- `pleiades-base/src/VM/capability_binding.rs` — 能力函数注册层（`register_caps` / `register_network_caps` / `register_storage_caps` / `register_ml_caps` / `register_webui_caps` / `register_logging_caps`）
+- `programs/user/hello.lua` — 演示脚本
+- `pleiades-base/Cargo.toml` — mlua 依赖已添加
+- `reload` 命令 — 运行时热加载（`pleiades-base/src/VM/registry.rs::reload_user`）
 
 ### ⚠ 待完成
 
-- `capability_binding.rs` — 能力函数注册层（核心缺失）
-- `programs/pipeline.lua` / `run.lua` / `list.lua` — 业务脚本
-- Core 路由简化 — `branch_user.rs` 统一 Execute 分支
-- TUI 命令补全 — 接入 `ProgramRegistry::command_names()`
-- `reload` 命令 — 运行时热加载
+- `programs/builtin/legacy/pipeline.lua` / `run.lua` / `list.lua` — 旧业务脚本（现行业务脚本在 `programs/user/`）
+- TUI 命令补全 — 接入 `ProgramRegistry::command_names()`（待确认）
+- 文档 §6.4 / §8 的能力函数名待与 `docs/capabilities.md` 对齐（旧名如 `caps:create_session` 已不存在）
 
 ### 🟡 待优化
 

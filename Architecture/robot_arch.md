@@ -1,41 +1,44 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-08-31（新增 §7 RTK 定位接入规划）
-> 范围：Robot 子系统（workspace 四 crate + 相关 Network 数据面）
-> 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）
+> 更新日期：2026-10-19（workspace 五 crate 化；task_24~29 落地：RTK / node_type 广播 / Godot 命令通道 / UAV 寻路 / CameraDevice / YOLO-v8）
+> 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
+> 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
 ---
 
-## 0. 总体形态：一个底座 + 三个终端
+## 0. 总体形态：一个底座 + 三个设备端 + 仿真节点
 
 Task 23 把「一份代码适配所有设备」重构为「**底座共享 + 设备端独有**」——异构设备在「共享世界状态」层同构、在「设备实现」层异构，底座只统一前者，后者各写各的。
 
 ```toml
 [workspace]
-members = ["pleiades-base", "pleiades-ugv", "pleiades-uav", "pleiades-terminal"]
+members = ["pleiades-base", "pleiades-ugv", "pleiades-uav", "pleiades-terminal", "pleiades-sim"]
 ```
 
 ```mermaid
 flowchart TB
     BASE["🟦 pleiades-base（lib 共享底座）<br/>协议/集群/状态/世界/命令/网络/事件总线"]
-    UGV["🟧 pleiades-ugv（bin 车）<br/>stm32/lidar/executor/goal/planning/slam"]
-    UAV["🟧 pleiades-uav（bin 机）<br/>mavlink + 复制 2D 决策"]
-    TERM["🟧 pleiades-terminal（cdylib 地面站）<br/>PleiadesKernel GDExtension"]
+    UGV["🟧 pleiades-ugv（bin 车）<br/>stm32/lidar/lg290p/executor/goal/planning/slam"]
+    UAV["🟧 pleiades-uav（bin 机）<br/>mavlink + camera + 复制 2D 决策"]
+    TERM["🟧 pleiades-terminal（cdylib 地面站）<br/>PleiadesKernel GDExtension + UM960 RTK 基站"]
+    SIM["🟪 pleiades-sim（bin 仿真）<br/>无硬件，跑完整决策链（动作只打印）"]
     BASE --> UGV
     BASE --> UAV
     BASE --> TERM
+    BASE --> SIM
 ```
 
-- **底座单一来源**：协议/集群/状态/世界的定义在 `pleiades-base` 一处，三个终端同时生效。
+- **底座单一来源**：协议/集群/状态/世界的定义在 `pleiades-base` 一处，各设备端同时生效。
 - **设备端彻底分离**：车的二进制没有 mavlink，机没有 stm32，地面站没有车机驱动。
-- **各自编译**：`cargo build -p pleiades-ugv / -p pleiades-uav / -p pleiades-terminal` 互不拖累。
+- **仿真节点**：`pleiades-sim` 无硬件，`on_tick` 跑完整决策链（寻路 + 三状态机），动作只打印，用于测试决策链。
+- **各自编译**：`cargo build -p pleiades-ugv / -p pleiades-uav / -p pleiades-terminal / -p pleiades-sim` 互不拖累。
 
 ---
 
 ## 1. 整体架构
 
-### 1.1 目录结构（workspace 四 crate）
+### 1.1 目录结构（workspace 五 crate）
 
 ```text
 pleiades-base/                    # 🟦 lib 共享底座（车/机/地面站同一份）
@@ -45,6 +48,7 @@ pleiades-base/                    # 🟦 lib 共享底座（车/机/地面站同
     ├── bootstrap.rs              # core_bootstrap()：配置→日志→EventBus→Storage→Network→Core
     ├── Config/ Network/ ML_Engine/ PeerManagement/ Orchestrator/
     │   Storage/ Session_Manager/ EventBus/ TUI/ CLI/ VM/ API/   # 共享基础设施
+    ├── ML_Engine/Yolo/           # YOLO-v8 目标检测（safetensors，与 GGUF 管线隔离，Task 29）
     └── Robot/
         ├── mod.rs                # pub mod core; pub mod util; + re-export
         ├── core/                 # 🟦 底座核心（共享，车机同一份）
@@ -71,8 +75,10 @@ pleiades-base/                    # 🟦 lib 共享底座（车/机/地面站同
 pleiades-ugv/                     # 🟧 bin 车设备端（独有）
 └── src/
     ├── main.rs                   # 入口（core_bootstrap + parse_origin + ugv_bootstrap）
-    ├── config.rs                 # UgvConfig = flatten BaseConfig + chassis/lidar/obstacle_inflation_radius
+    ├── config.rs                 # UgvConfig = flatten BaseConfig + chassis/lidar/lg290p/obstacle_inflation_radius
     ├── bootstrap.rs              # ugv_bootstrap()：Robot::new + CarDeviceHandler
+    ├── device/                   # 设备子目录（Task 24 起新增）
+    │   └── lg290p/               # RTK 流动站 LG290P 驱动（geo.rs + robot_bus 订阅转发 RTCM）
     └── ugv/
         ├── mod.rs
         ├── types.rs              # CarType 枚举（X3 / X3Plus / X1 / R2 + motion_limits）
@@ -88,8 +94,10 @@ pleiades-ugv/                     # 🟧 bin 车设备端（独有）
 pleiades-uav/                     # 🟧 bin 机设备端（独有）
 └── src/
     ├── main.rs                   # 入口（core_bootstrap + parse_origin + uav_bootstrap）
-    ├── config.rs                 # UavConfig = flatten BaseConfig + flight_ctrl
-    ├── bootstrap.rs              # uav_bootstrap()：Robot::new + UavDeviceHandler
+    ├── config.rs                 # UavConfig = flatten BaseConfig + flight_ctrl + camera
+    ├── bootstrap.rs              # uav_bootstrap()：Robot::new + UavDeviceHandler + CameraDevice 注入 device_caps
+    ├── device/                   # 设备子目录（Task 28）
+    │   └── camera/               # USB 摄像头 CameraDevice（nokhwa + DeviceCapability）
     └── uav/
         ├── mod.rs
         ├── mavlink/              # MAVLink 飞控驱动（mod.rs + protocol.rs + types.rs + constants.rs）
@@ -100,10 +108,24 @@ pleiades-uav/                     # 🟧 bin 机设备端（独有）
 
 pleiades-terminal/                # 🟧 cdylib 地面站（独有，原 SrcPictorKernel）
 └── src/
-    └── lib.rs                    # PleiadesKernel（GodotClass，哑管道桥）
+    ├── lib.rs                    # PleiadesKernel（GodotClass，哑管道桥）+ send_user_command（Task 26）
+    ├── config.rs                 # TerminalConfig = flatten BaseConfig + [um960]（Task 24）
+    └── device/
+        └── um960/                # RTK 基站 UM960 驱动（geo.rs + rtcm_parser.rs + 状态机）
+
+pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有）
+└── src/
+    ├── main.rs                   # 入口（core_bootstrap + parse_origin + sim_bootstrap）
+    ├── config.rs                 # SimConfig = flatten BaseConfig + obstacle_inflation_radius
+    ├── bootstrap.rs              # sim_bootstrap()：Robot::new + SimDeviceHandler
+    └── sim/
+        ├── sim_handler.rs        # SimDeviceHandler（实现 DeviceHandler，动作只打印）
+        ├── executor.rs           # 车 2D 三状态机
+        ├── goal.rs               # 目标服务
+        └── planning/             # 车 2D 寻路（assignment + pathfinder + cluster_obstacles）
 ```
 
-**分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
+**分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
 ```mermaid
 flowchart TB
@@ -113,15 +135,22 @@ flowchart TB
     subgraph UGV["pleiades-ugv 车"]
         STM32["stm32 底盘"]
         LIDAR["lidar 雷达"]
+        LG["lg290p RTK 流动站"]
         SLAM["slam 建图"]
         PLAN["planning 寻路"]
         EXEC["executor 决策"]
     end
     subgraph UAV["pleiades-uav 机"]
         MAV["mavlink 飞控"]
+        CAM["camera USB 摄像头"]
+    end
+    subgraph SIM["pleiades-sim 仿真"]
+        SIMH["SimDeviceHandler（动作只打印）"]
     end
     CORE ---|"RobotState/Command/Mission/grid"| UGV
     CORE ---|"RobotState/Command"| UAV
+    CORE ---|"RobotState/Command"| SIM
+    LG -->|"x/y（RTK_FIXED）"| CORE
     STM32 -->|"x/y/yaw"| SLAM
     LIDAR -->|"LaserScan"| SLAM
     SLAM -->|"grid"| CORE
@@ -463,12 +492,13 @@ pub trait DeviceHandler: Send + Sync {
 
 | 实现 | crate | start() 装配 | on_tick 决策 |
 |---|---|---|---|
-| `CarDeviceHandler` | pleiades-ugv | 读 `UgvConfig` → spawn stm32 + lidar + goal_service + 决策器 | 急停 → 寻路 → 决策 → 发动作 |
-| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink + goal_service + 决策器 | 寻路 → 决策 → 发动作（复用车 2D，无急停） |
+| `CarDeviceHandler` | pleiades-ugv | 读 `UgvConfig` → spawn stm32 + lidar + lg290p + goal_service + 决策器 | 急停 → 寻路 → 决策 → 发动作 |
+| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink + goal_service + 决策器（camera 由 `uav_bootstrap` 注入 `device_caps`） | 寻路 → 决策 → 发动作（复用车 2D，无急停；task_27 起忽略地面障碍） |
+| `SimDeviceHandler` | pleiades-sim | 无硬件 | 完整决策链（寻路 + 三状态机），动作只打印 |
 
-### 5.2 节点类型（NodeType，设计已定、传播待实施）
+### 5.2 节点类型（NodeType）
 
-`NodeType: u8 { GroundStation=0, Car=1, Uav=2 }`，在 `[Identity] node_type`（config）声明。`ClusterInfo.node_type` 传播（让设备识别对方是车/机）**留后续 task**（见 task §3.5「实施留后续」）。
+`NodeType: u8 { GroundStation=0, Car=1, Uav=2 }`，在 `[Identity] node_type`（config）声明。`node_type` 经 `PeerInfo`（String 型，与 `peer_name` 对称）随 peer-info gossipsub 广播，地面站据此选 sprite——**已实施**（task_25，见 §8.1）。`ClusterInfo.node_type` 传播（让设备识别对方是车/机）**留后续 task**（见 task §3.5「实施留后续」）。
 
 ---
 
@@ -479,8 +509,11 @@ config 与代码同构——「共享段」在 base 定义一次，「设备段�
 | config 段 | 归属 | 内容 |
 |---|---|---|
 | `[Log]` / `[Network]` / `[Storage]` / `[Identity]`（含 `node_type`） | base `BaseConfig` | 共享 |
-| `obstacle_inflation_radius` / `[chassis]` / `[lidar]` | ugv `UgvConfig` | 车底盘 + 雷达 + 膨胀半径 |
-| `[flight_ctrl]` | uav `UavConfig` | 机飞控 |
+| `obstacle_inflation_radius` / `[chassis]` / `[lidar]` / `[lg290p]` | ugv `UgvConfig` | 车底盘 + 雷达 + RTK 流动站 + 膨胀半径 |
+| `[flight_ctrl]` / `[camera]` | uav `UavConfig` | 机飞控 + USB 摄像头 |
+| `[um960]` | terminal `TerminalConfig` | RTK 基站（enabled/port/baudrate/survey_seconds） |
+
+> `[Network].subscribe_topics`（base）用于按节点订阅额外 gossipsub topic：ugv 配 `["pleiades/robot/rtcm"]` 才收 RTK 改正数，**不硬编码全节点订阅**（task_24）。
 
 ```toml
 # 共享段（所有终端相同）
@@ -512,15 +545,80 @@ connection = "/dev/ttyAMA0"
 baudrate = 921600
 vel_fwd = 0.3
 yaw_rate_deg = 15
+[camera]
+enabled = false          # 默认关（与 lg290p 一致）
+path = "/dev/video0"
+width = 1280
+height = 720
+timeout_ms = 3000
+
+# ugv 独有设备段（RTK 流动站，task_24）
+[lg290p]
+enabled = false
+port = "/dev/ttyUSB2"
+baudrate = 460800
+
+# terminal 独有设备段（RTK 基站，task_24）
+[um960]
+enabled = false
+port = "/dev/ttyUSB0"
+baudrate = 460800
+survey_seconds = 180
 ```
 
 ---
 
-## 7. RTK 定位接入（task_24，规划中）
+## 7. RTK 定位接入（task_24，已实施）
 
-- 基站 UM960 在 `pleiades-terminal`，流动站 LG290P 在 `pleiades-ugv`；RTCM 改正数走 gossipsub `TOPIC_RTK_RTCM` 广播。
-- 定位以 offset 更新 `RobotState.x/y`（`world = origin + (ENU − ENU₀)`）。
+- 基站 UM960 在 `pleiades-terminal/src/device/um960/`（`geo.rs` 三纯函数 + `rtcm_parser.rs` 切帧 + 生命周期状态机 `Init → Surveying → Stable → Broadcasting`）；流动站 LG290P 在 `pleiades-ugv/src/device/lg290p/`（读 GGA + 独立订阅 robot_bus 把 RTCM 转发写串口）。
+- RTCM 改正数包 ORION 帧（新增 `MSGID_RTCM = 6`）走 gossipsub `TOPIC_RTK_RTCM`（`pleiades/robot/rtcm`）广播；订阅由 `[Network].subscribe_topics` 按节点配置（ugv 才订阅，不硬编码全节点）。
+- 定位以 offset 更新 `RobotState.x/y`（`world = origin + (ENU − ENU₀)`；ENU base = **车首次 RTK_FIXED 位置**，不需要基站坐标下行）。
+- `RobotState.rtk_fixed` 实时反映可信度：FIXED 写 true、失锁/非 FIXED 写 false（x/y/z 位置保持不更新）；`PoseData` 同步加 `rtk_fixed`（POSE 37→38 字节）。
 - **z 轴暂不更新**：LG290P 忽略 U（高度）分量，`RobotState.z` 保持设备端现状（车恒 0）。后续再评估是否接入高度。2026-08-31 决策。
+- ⚠️ POSE 38B 与旧 37B **不兼容**（`decode_pose` 严格校验 38 字节），需整车/机/终端/Pictor 同版本合入。
+
+---
+
+## 8. task_24~29 落地概览
+
+| Task | 内容 | 状态 | 主要落点 |
+|---|---|---|---|
+| 24 | RTK 局域差分定位 | 已实施 | `pleiades-terminal/src/device/um960/`、`pleiades-ugv/src/device/lg290p/`、base `Robot/core/protocol`（`MSGID_RTCM` / `PoseData.rtk_fixed`） |
+| 25 | node_type 广播 | 已实施（PeerInfo / 事件 / Godot 信号）；`ClusterInfo.node_type` 留后续 | `PeerManagement/peer_info.rs`、`Network/swarm_events.rs`、`pleiades-terminal/src/lib.rs` |
+| 26 | Godot 命令通道 | 已实施 | `pleiades-terminal/src/lib.rs` 的 `send_user_command()` |
+| 27 | UAV 寻路忽略地面障碍 | 已实施（待实机验证） | `pleiades-uav/src/uav/goal.rs` |
+| 28 | CameraDevice（USB 摄像头） | 已实施（实机抓图验证通过） | `pleiades-uav/src/device/camera/` |
+| 29 | YOLO-v8 目标检测 | 阶段 0/1/2 已实施；阶段 3 Rust 侧 + 阶段 4 已实施并联调通过 | `pleiades-base/src/ML_Engine/Yolo/`、`API/webui.rs`、`VM/capability_binding.rs` |
+
+### 8.1 node_type 广播（task_25）
+
+- 节点类型在 `[Identity] node_type` 声明（`car` / `uav` / `ground_station`）；`NodeType::as_str()` 转字符串，存 `PeerInfo.node_type`（String 型，空串=未知，与 `peer_name` 完全对称）。
+- peer-info gossipsub 广播携带 `node_type` → 地面站 `swarm_events` 解析 → `peer_info_updated` 事件加字段 → Godot 信号 `peer_info_updated(peer_id, peer_name, node_type)` → Pictor 按类型选 sprite。
+- `ClusterInfo.node_type` 传播（让设备识别对方是车/机）留后续 task。
+
+### 8.2 Godot 命令通道（task_26）
+
+- `PleiadesKernel.send_user_command(command_line) -> GString`：复用 TUI 的 `parse_user_command()` 解析命令字符串 → `user_cmd_tx.try_send()` → Core 主循环 B1 分支执行；同步返回 `"OK"` / `"ERR: ..."`。
+- 命令 fire-and-forget，无结果回传通道；base 零改动（`parse_user_command` / `UserCommand` 均已 pub）。
+
+### 8.3 UAV 寻路（task_27）
+
+- 无人机 = 「飞在天上的小车」：保留 2D 格子寻路（D* Lite），但寻路时喂**空 `OccupancyGrid`**（全 Unknown = 全可走）且不注入他车动态障碍 → 走 Manhattan 阶梯路径，不绕地面/他车障碍。
+- 任务分配（`group_goto` / `circle_mission`）与地图合并（`cluster_consumer` 写 grid）照旧；z 固定 2m 由飞控管，寻路只动 x/y。原避障代码注释保留，便于回退。
+
+### 8.4 CameraDevice（task_28）
+
+- `pleiades-uav/src/device/camera/`：`new` / `open` / `capture`（async 返回一帧 JPEG 字节）/ `close` 四方法；`std::thread` 常驻线程持 nokhwa 摄像头，`capture` 经 oneshot 回传。
+- `[camera]` 段：`enabled`（默认 false）/ `path` / `width` / `height` / `timeout_ms`。
+- 实现 base 的 `DeviceCapability` trait（`register_lua_caps`），Lua 侧 `camera.capture()`；由 `uav_bootstrap` 注入 `Capabilities.device_caps`。
+- 实机差异：摄像头只出 NV12（无 MJPG）→ `decode_image::<RgbFormat>()` + `image` 编码 JPEG。
+
+### 8.5 YOLO-v8 目标检测（task_29）
+
+- `pleiades-base/src/ML_Engine/Yolo/`（`model.rs` + `detector.rs` + `coco_names.rs`），safetensors 全量加载，与 GGUF/LLM 管线**平行隔离、互不侵入**。
+- Lua cap：`ml.yolo_new(model_file, device)` + `det:detect(image_bytes, conf, nms)`（走 `exec program` 体系，与 `session inference` 同构）；权重放 `Pleiades_Workspace/`，型号从文件名推断。
+- 图传输：`ML_Engine/lua_tensor.rs` 加 U8 dtype + `ml.tensor_from_u8_bytes` / `ml.tensor_to_u8_bytes`，走 tensor stream（UAV 抓图 → 车 detect）。
+- 展示：`pleiades-base/src/API/webui.rs`（WebSocket 广播，端口自动分配）+ `Tool/yolo_viewer.html`（画框 + 浏览器算 FPS）。
 
 ---
 

@@ -1,7 +1,10 @@
 # Robot Controller 设计文档
 
 > 创建日期：2026-07-28
-> 状态：设计中
+> 更新日期：2026-10-19
+> 状态：**已被取代（历史设计稿）**——本文档描述的 Robot Controller 现行形态见 `Architecture/robot_arch.md`，通信协议见 `docs/design_doc/orion_protocol.md`。
+
+> ⚠️ **阅读须知**：本文档为 2026-07 的历史设计稿，其中 §3.3「WebSocket JSON 协议」与 §10 的旧文件结构均已失效，仅保留作演进记录。现状以 `Architecture/robot_arch.md` 为准。
 
 ---
 
@@ -111,22 +114,13 @@ SwitchToAuto   → stop() → op_mode = Auto
 Auto → Manual：MissionQueue 保留不动（暂停），切回 Auto 后继续。
 Cancel（仅 Auto 下）：清空队列 + 停车。
 
-### 3.3 WebSocket 协议
+### 3.3 WebSocket 协议（已废弃）
 
-```json
-// 模式
-{"cmd":"mode",  "action":"switch_to_auto"}
-{"cmd":"mode",  "action":"switch_to_manual"}
-
-// 手动
-{"cmd":"manual","action":"forward","speed":50}
-{"cmd":"manual","action":"stop"}
-
-// 自动
-{"cmd":"auto",  "action":"push",
- "missions":[{"type":"goto","x":1.0,"y":2.0}]}
-{"cmd":"auto",  "action":"cancel"}
-```
+> ⚠️ **本节已废弃**：原「WebSocket JSON 遥控协议」（形如 `{"cmd":"mode","action":"switch_to_auto"}`）**不再使用**。
+>
+> - **现行协议**：**ORION 帧 + GDExtension 桥**（`pleiades-terminal` 以 cdylib 形式作为 Godot 插件 `PleiadesKernel`），详见 `docs/design_doc/orion_protocol.md`。
+> - **Robot 侧命令帧编解码**：`pleiades-base/src/Robot/core/protocol/`（`frame.rs` / `messages.rs` / `command_decode.rs`）。
+> - **Robot 现状架构**：`Architecture/robot_arch.md`。
 
 ---
 
@@ -334,24 +328,24 @@ odom 累积使用数学约定（`(cos, sin)`），Pictor 可视化一致。坐�
 ## 9. 配置
 
 ```toml
-[Robot]
-stm32_port = "/dev/myserial"
-stm32_baud = 115200
-lidar_port = "/dev/rplidar"
-lidar_baud = 230400
-ws_bind = "0.0.0.0:9090"
-
-auto_tick_ms = 50
-arrival_threshold_m = 0.3
-sub_target_threshold_m = 0.2
-obstacle_threshold_m = 0.3
-
+# 现行配置已拆分为「共享段 + 设备段」（Task 23）：
+#   共享段 → pleiades-base/src/Config/config.rs
+#   车设备段 → pleiades-ugv/src/config.rs（[chassis] / [lidar] / [lg290p]）
+[chassis]
+enabled = true
+port = "/dev/myserial"
+baudrate = 115200
+car_type = "X3"
+forward_speed = 30
 turn_speed = 10
-move_speed = 30
-turn_align_threshold_deg = 5
 
-unknown_as_free = true
+[lidar]
+enabled = true
+port = "/dev/rplidar"
+baudrate = 230400
 ```
+
+> ⚠️ 原 `[Robot]` 段（`ws_bind = "0.0.0.0:9090"`、`auto_tick_ms`、`obstacle_threshold_m`、`unknown_as_free` 等）已不存在：WebSocket 遥控服务已移除（见 §3.3），节拍/阈值现为代码常量或设备段字段。
 
 ---
 
@@ -360,20 +354,27 @@ unknown_as_free = true
 
 
 ```
-Src/Robot/
+pleiades-base/src/Robot/              ← 共享底座（Task 23 后）
+├── mod.rs               ← 模块入口 + re-export
 ├── core/
-│   ├── command.rs      ← 三层 Command
-│   ├── mode.rs         ← OpMode
-│   ├── mission.rs      ← MissionQueue
-│   ├── robot.rs        ← 主循环 + auto_tick
-│   └── executor.rs     ← Executor + 三状态 Idle/Turning/Moving
-├── slam/
-│   └── pathfinder.rs   ← D* Lite
-└── ...
+│   ├── mod.rs
+│   ├── state.rs         ← RobotState 等全局状态类型
+│   ├── command.rs       ← Command 枚举定义
+│   ├── mode.rs          ← OpMode
+│   ├── mission.rs       ← MissionQueue
+│   ├── robot.rs         ← Robot::launch() + select! 主循环
+│   └── protocol/        ← 命令帧编解码（ORION 帧）
+└── util/
+    └── serial/port.rs   ← spawn_port() 通用函数
 
-Src/Config/
-    └── config.rs       ← RobotConfig
+pleiades-ugv/src/ugv/                 ← 车设备端（Task 23 后）
+├── types.rs             ← CarType（设备层共用）
+├── stm32/               ← STM32 协议 + STM32Device
+├── executor.rs          ← Executor + 三状态 Idle/Turning/Moving
+└── planning/pathfinder.rs ← D* Lite
 ```
+
+> ⚠️ `Src/Robot/`、`Src/Config/` 路径已失效（顶层 `Src/` 不存在）。原 `websocket.rs` 也已移除——WebSocket 遥控服务改用 `pleiades-terminal` 的 GDExtension 桥（ORION 帧，见 §3.3）。
 
 ## 11. 已知限制
 

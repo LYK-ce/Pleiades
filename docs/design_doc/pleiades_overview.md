@@ -2,12 +2,15 @@
 
 > Presented by KeJi
 > Date: 2026-05-21
+> Modified Date: 2026-10-19
 
 ## 概述
 
 Pleiades 是一个**边缘设备分布式推理运行时框架**。它让多台设备（笔记本、工作站、边缘服务器等）通过 P2P 网络协同完成大规模语言模型的推理，每台设备只负责模型的一部分层。
 
 核心思想：**单机跑不动的大模型，拆成几片分给局域网里的几台机器一起跑。**
+
+2026 下半年起，Pleiades 扩展出**机器人控制**方向：`pleiades-base` 内新增 Robot 子系统与 **ORION 统一通信协议**，工程按 5 个 crate 组织（`pleiades-base` / `ugv` / `uav` / `terminal` / `sim`，见「工程结构」）。
 
 ---
 
@@ -34,7 +37,7 @@ Pleiades 最核心的设计决策是**用 Lua 虚拟机替代传统硬编码编�
 │  │ (分布式推理)  │ │ (本地推理)    │ │ (programs/user/*.lua) │ │
 │  └──────────────┘ └──────────────┘ └──────────────────────┘ │
 ├─────────────────────────────────────────────────────────────┤
-│         Lua VM 层 (Src/VM/)                                  │
+│         Lua VM 层 (pleiades-base/src/VM/)                          │
 │  ┌─────────────┐  ┌────────────────┐  ┌─────────────────┐  │
 │  │ engine.rs   │  │ registry.rs    │  │capability_binding│  │
 │  │ 沙箱创建     │  │ 脚本注册表      │  │ Rust→Lua 桥接    │  │
@@ -158,36 +161,57 @@ Lua 虚拟机通过 `caps.*` / `network.*` / `ml.*` / `local_tensor.*` 暴露 Ru
 
 | 模块 | 目录 | 职责 |
 |------|------|------|
-| Config | `Src/Config/` | TOML 配置读写 |
-| Network | `Src/Network/` | P2P 网络、Tensor/File/Bandwidth Stream、Rendezvous |
-| ML Engine | `Src/ML_Engine/` | GGUF 模型加载/推理/拆分/分析 |
-| Orchestrator | `Src/Orchestrator/` | Core 编排、命令解析、本地张量流 |
-| Peer Mgmt | `Src/PeerManagement/` | 节点状态表、节点名称、Profile |
-| Storage | `Src/Storage/` | 文件追踪、并发读写锁、校验 |
-| Session | `Src/Session_Manager/` | LLM 会话管理 |
-| EventBus | `Src/EventBus/` | 全局事件广播（Notify/State/Stream/Output） |
-| TUI | `Src/TUI/` | 终端图形界面（双输入框、4面板） |
-| VM | `Src/VM/` | Lua 沙箱引擎、能力函数桥接、脚本注册表 |
+| Config | `pleiades-base/src/Config/` | TOML 配置读写 |
+| Network | `pleiades-base/src/Network/` | P2P 网络、Gossipsub、Tensor/File/Bandwidth Stream、Rendezvous |
+| ML Engine | `pleiades-base/src/ML_Engine/` | GGUF 模型加载/推理/拆分/分析 |
+| Orchestrator | `pleiades-base/src/Orchestrator/` | Core 编排、命令解析、本地张量流 |
+| Peer Mgmt | `pleiades-base/src/PeerManagement/` | 节点状态表、节点名称、Profile |
+| Storage | `pleiades-base/src/Storage/` | 文件追踪、并发读写锁、校验 |
+| Session | `pleiades-base/src/Session_Manager/` | LLM 会话管理 |
+| EventBus | `pleiades-base/src/EventBus/` | 全局事件广播（Notify/State/Stream/StreamRaw/Output） |
+| TUI | `pleiades-base/src/TUI/` | 终端图形界面（双输入框、4面板） |
+| VM | `pleiades-base/src/VM/` | Lua 沙箱引擎、能力函数桥接、脚本注册表 |
+| API | `pleiades-base/src/API/` | OpenAI 兼容 API Server、YOLO WebUI |
+| CLI | `pleiades-base/src/CLI/` | 命令行入口 |
+| Robot | `pleiades-base/src/Robot/` | 机器人统一核心：ORION 协议、状态/栅格/任务/集群、串口 |
 | Programs | `programs/` | Lua 脚本（builtin 系统 + user 用户） |
+
+### 工程结构（5 个 crate）
+
+| crate | 目录 | 职责 |
+|-------|------|------|
+| `pleiades-base` | `pleiades-base/` | 共享运行时：网络 / ML / 存储 / 编排 / Lua VM / TUI / API + **Robot 子系统**（含 ORION 协议） |
+| `pleiades-ugv` | `pleiades-ugv/` | 无人车：STM32 底盘、LiDAR、SLAM、规划/执行、LG290P RTK 流动站 |
+| `pleiades-uav` | `pleiades-uav/` | 无人机：MAVLink、相机、规划/执行 |
+| `pleiades-terminal` | `pleiades-terminal/` | 地面站/控制终端：UM960 RTK 基站、Pictor（Godot）GDExtension 桥 |
+| `pleiades-sim` | `pleiades-sim/` | 仿真车端：规划/执行仿真 |
 
 ## 当前完成度
 
-| 阶段 | 状态 |
-|------|------|
-| Lua 基础设施 (沙箱 + 注册表 + 能力函数) | ✅ |
-| TOML 模板 → Lua 脚本迁移 | ✅ |
-| 遗留 VM 代码清理 (Vm_Base/ML_VM/Orch_VM/Scheduler) | ✅ |
-| TUI 命令体系 (run/send/reload/exec/pipeline/...) | ✅ |
-| 独立本地流 (Local Tensor Stream) | ✅ |
-| TUI 命令补全动态化 | ❌ |
-| Pipeline 端到端联调 (Coordinator + Worker) | ❌ |
-| Relay Job 指令完善 | ❌ |
-| GGUF 模型加载优化 (From_Extracted → New) | ❌ |
-| 心跳故障处理 (滑动窗口) | ❌ |
-| PeerStore 共享组件 | ❌ |
-| pending_responses 超时清理 | ❌ |
-| ML Engine 推理路径优化 (零拷贝) | ❌ |
-| mDNS 服务名自定义 | ❌ |
+> 更新至 2026-10-19（原 2026-05 快照已过时）。✅ = 代码已落地；待确认 = 无法在不构建的前提下验证行为；❌ = 全库无对应实现。
+
+| 领域 | 状态 | 依据 |
+|------|------|------|
+| Lua 基础设施（沙箱 + 注册表 + 能力函数） | ✅ | `pleiades-base/src/VM/` |
+| TOML 模板 → Lua 脚本迁移 | ✅ | `programs/builtin/` + `programs/user/` |
+| 遗留 VM 代码清理（Vm_Base/ML_VM/Orch_VM/Scheduler） | ✅ | 全库无 `Scheduler_Capability` 等引用 |
+| TUI 命令体系（run/send/reload/exec/pipeline/...） | ✅ | `pleiades-base/src/TUI/` |
+| 独立本地流（Local Tensor Stream） | ✅ | `Orchestrator/local_tensor_stream/` |
+| 5 crate 拆分（base/ugv/uav/terminal/sim） | ✅ | `Cargo.toml` workspace members |
+| Robot 子系统（状态/栅格/任务/集群/串口） | ✅ | `pleiades-base/src/Robot/` |
+| ORION 统一协议（帧 + msgid 1~6 + 命令解码） | ✅ | `Robot/core/protocol/` |
+| 多车集群（gossipsub 广播 + 任务群发 + 集群地图合并） | ✅ | `Robot/core/cluster/` + `Network/Gossipsub/` |
+| RTK 接入（UM960 基站 + LG290P 流动站，msgid=6） | ✅ | `pleiades-terminal/src/device/um960/`、`pleiades-ugv/src/device/lg290p/` |
+| YOLO 检测 + WebUI 展示 | ✅ | `API/webui.rs` + `programs/user/yolo_*.lua` |
+| Pipeline 端到端联调（Coordinator + Worker） | 待确认 | `programs/user/pipeline_coord*.lua`、`llm*.lua` 已存在 |
+| Relay Job 指令完善 | 待确认 | — |
+| GGUF 模型加载优化（From_Extracted → New） | 待确认 | `Layer_Weights` 与 `From_Extracted` 并存 |
+| 心跳故障处理（滑动窗口） | 待确认 | `Network/network_service.rs` 有 heartbeat 相关代码 |
+| PeerStore 共享组件 | ❌ | 全库 0 命中 `PeerStore` |
+| pending_responses 超时清理 | 待确认 | `Network/Request_Response/outbound.rs` |
+| ML Engine 推理路径优化（零拷贝） | 待确认 | — |
+| mDNS 服务名自定义 | 待确认 | `Network/` 有 mDNS 代码 |
+| TUI 命令补全动态化 | 待确认 | — |
 
 ## 开发方向
 
@@ -212,3 +236,4 @@ Lua 虚拟机通过 `caps.*` / `network.*` / `ml.*` / `local_tensor.*` 暴露 Ru
 | 终端 | ratatui + crossterm |
 | GPU | CUDA (candle-core/cuda, nvml-wrapper) |
 | 存储校验 | BLAKE3 / SHA256 |
+| 机器人 | UGV/UAV/仿真端 + ORION 协议 + RTK（UM960 基站 / LG290P 流动站） |

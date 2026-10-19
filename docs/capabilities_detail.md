@@ -116,6 +116,8 @@ WriteGuard 离开作用域后自动释放，文件注册到 Storage 索引。
 
 ## Storage 读写锁
 
+> Userdata 定义于 `pleiades-base/src/VM/storage_handle.rs`（`StorageReadHandle` / `StorageWriteHandle`）。
+
 ### StorageReadHandle
 
 ```
@@ -194,7 +196,7 @@ caps.network.send_eof(stream_ud)
 
 ### NetworkStream UserData
 
-定义于 `Src/VM/network_stream.rs`，包装 `Mutex<libp2p::Stream>` + `Arc<Capabilities>`：
+定义于 `pleiades-base/src/VM/network_stream.rs`，包装 `Mutex<libp2p::Stream>` + `Arc<Capabilities>`：
 
 ```rust
 pub struct NetworkStream {
@@ -263,7 +265,7 @@ local next = sess:sample(logits, 0.8)
 
 ### LuaTensor UserData
 
-定义于 `Src/ML_Engine/lua_tensor.rs`，包装 `candle_core::Tensor`：
+定义于 `pleiades-base/src/ML_Engine/lua_tensor.rs`，包装 `candle_core::Tensor`：
 
 ```rust
 pub struct LuaTensor(pub Tensor);
@@ -309,11 +311,11 @@ ml.analyze_model(path)
 
 不依赖 MlSession，可在加载模型前调用。用于判断模型是否已切分、层数范围等。
 
-### `ml.split_model(path, start, end, output_dir)`
+### `ml.split_model(path, start, end, output_dir, keep_tokenizer)`
 
 ```
-ml.split_model(path, start, end, output_dir)
-  → capability::split_model(Path, start, end, out_dir)
+ml.split_model(path, start, end, output_dir, keep_tokenizer)
+  → capability::split_model(Path, start, end, out_dir, keep_tokenizer)
     → 读取 GGUF 头
     → 提取指定层范围的 tensor
     → 写入 .pgguf 文件到 output_dir

@@ -54,40 +54,38 @@ cargo run --release
 
 ### 配置文件
 
-首次运行自动生成 `.config/config.toml`：
+首次运行自动生成 `.config/config.toml`（共享段由 `pleiades-base` 的 `BaseConfig` 定义；设备段如 `[chassis]` / `[lidar]` / `[flight_ctrl]` / `[um960]` / `[lg290p]` / `[camera]` 由各设备端 crate 启动时补全）：
 
 ```toml
-[Log]       level = "info"
-[Network]   LAN = true, WAN = false
-[Runtime]   device = "cpu"
-[Storage]   workspace_dir = "Pleiades_Workspace"
-[Session]   max_slots = 4
-[Identity]  peer_name = "new_peer"
+[Log]       level = "info", log_file_path = "Log/"
+[Network]   LAN = true, WAN = false, Transport_Protocol = "TCP",
+            listen_port = 0, dht_namespace = "pleiades-nodes", bootstrap_peers = []
+[Storage]   workspace_dir = "Pleiades_Workspace", quota_gb = 0, kvcache_dir = ".kvcache"
+[Identity]  peer_name = "new_peer", node_type = "car"   # car=车 / uav=机 / ground_station=地面站
 ```
 
 ## 项目结构
 
+Cargo workspace（5 个 crate）：
+
 ```
-pleiades/
-├── Src/                    ← Rust 源代码
-│   ├── Config/             ← 配置读写
-│   ├── EventBus/           ← 广播事件总线
-│   ├── ML_Engine/          ← ML 推理引擎 (GGUF/PGGUF)
-│   ├── Network/            ← P2P 网络 (libp2p)
-│   ├── Orchestrator/       ← 任务编排核心
-│   ├── PeerManagement/     ← 节点发现与管理
-│   ├── Session_Manager/    ← 推理会话槽位
-│   ├── Storage/            ← 统一存储管理
-│   ├── TUI/                ← 终端 UI (ratatui)
-│   ├── API/                ← OpenAI 兼容 HTTP API
-│   └── VM/                 ← Lua 脚本引擎 + 绑定
+Orion/
+├── Cargo.toml              ← workspace 清单
+├── pleiades-base/          ← 核心库 + [[bin]] Pleiades：Config/EventBus/ML_Engine/Network/
+│                              Orchestrator/PeerManagement/Robot/Session_Manager/Storage/TUI/API/VM
+├── pleiades-terminal/      ← GDExtension 地面站桥（PleiadesKernel）+ RTK 基站 UM960
+├── pleiades-uav/           ← 无人机设备端：mavlink 飞控 / camera USB 摄像头
+├── pleiades-ugv/           ← 无人车设备端：stm32 / lidar / lg290p(RTK 流动站) / slam / planning
+├── pleiades-sim/           ← 仿真节点（无硬件，跑完整决策链，用于测试）
 ├── programs/               ← Lua 脚本
 │   ├── builtin/            ← 内置脚本
 │   └── user/               ← 用户脚本
 ├── Architecture/           ← 架构设计文档
 ├── docs/                   ← 设计文档
-└── tests/                  ← 集成测试
+└── pleiades-base/tests/    ← 集成测试
 ```
+
+机器人子系统：共享中枢在 `pleiades-base/src/Robot/`（状态 / 命令 / 集群 / 世界模型 / ORION 协议），设备端实现分布在 `pleiades-ugv/`、`pleiades-uav/`、`pleiades-terminal/`，另有 `pleiades-sim/` 仿真节点；节点间通过 **ORION 二进制协议**（帧头 + 校验和，POSE / MAP_FULL / MAP_DELTA / MANUAL_CONTROL / TASK_SET / RTCM 等消息）在 libp2p 上通信。详见 [Architecture/robot_arch.md](Architecture/robot_arch.md)。
 
 ## 架构概览
 

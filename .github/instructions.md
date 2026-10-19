@@ -9,11 +9,11 @@ agent必须严格遵守以下规则
 **当前分支 `Pleiades-Orion` 只负责 Robot（机器人控制）相关内容的开发。**
 
 具体范围：
-- `Src/Robot/` — STM32 串口协议、机器人控制、WebSocket 遥控
+- `pleiades-base/src/Robot/` — STM32 串口协议、机器人控制（WebSocket 遥控已由 GDExtension 桥取代，设备端驱动在 `pleiades-ugv/` / `pleiades-uav/`）
 - `Task/` — Robot 任务文件
 - `Workbook/` — Robot 工作记录
-- Robot 相关的 Lua 绑定（`Src/VM/capability_binding.rs` 中 robot 部分）
-- Robot 相关的测试脚本和工具（`programs/user/robot_test.lua`、`Tool/robot_control.html`）
+- Robot 相关的 Lua 绑定（`pleiades-base/src/VM/capability_binding.rs` 中 robot 部分）
+- Robot 相关的测试脚本和工具（`programs/user/test_camera.lua`、`programs/user/yolo_*.lua`、`Tool/yolo_viewer.html`、`Tool/test_lidar.py`）
 
 **禁止在 `Pleiades-Orion` 分支上修改以下内容**（这些由 `ML_review` 分支负责）：
 - ML_Engine 推理引擎
@@ -150,7 +150,7 @@ Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理�
 
 ## 项目路径
 
-当前项目主目录：`/vepfs-mlp2/c20250205/240804016/Workspace/Pleiades`
+当前项目主目录：`/vepfs-mlp2/c20250205/240804016/Workspace/Orion`
 
 编译使用 `build.sh` 脚本（自动处理 GCC 版本兼容）。
 
@@ -172,7 +172,7 @@ Agent 在首次启动时应读取 `Architecture/Pleiades_Architecture.md`，理�
 使用项目根目录下的 `build.sh` 脚本编译和部署：
 
 ```bash
-cd /vepfs-mlp2/c20250205/240804016/Workspace/Pleiades
+cd /vepfs-mlp2/c20250205/240804016/Workspace/Orion
 
 # 仅编译
 ./build.sh
@@ -181,7 +181,7 @@ cd /vepfs-mlp2/c20250205/240804016/Workspace/Pleiades
 ./build.sh deploy
 
 # 运行测试
-./build.sh test -p Pleiades --lib storage
+./build.sh test -p pleiades-base --lib storage
 
 # 快速语法检查
 ./build.sh check

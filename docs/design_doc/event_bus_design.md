@@ -2,7 +2,7 @@
 
 Presented by KeJi
 Created Date ： 2026-05-19
-Modified Date ： 2026-06-15
+Modified Date ： 2026-10-19
 
 ---
 
@@ -26,7 +26,7 @@ Modified Date ： 2026-06-15
 
 **模组等级：Level 0** — 不调用任何其他项目模块，仅依赖第三方 crate（`tokio::sync::broadcast`）。为全系统最底层基础设施。
 
-EventBus 是全局事件总线，对 `tokio::sync::broadcast` 的薄封装。不感知任何领域概念，通过 4 种通用事件类型 + JSON payload 实现生产者与消费者完全解耦。
+EventBus 是全局事件总线，对 `tokio::sync::broadcast` 的薄封装。不感知任何领域概念，通过 5 种通用事件类型 + JSON payload（`StreamRaw` 为原始字节）实现生产者与消费者完全解耦。
 
 ---
 
@@ -34,7 +34,7 @@ EventBus 是全局事件总线，对 `tokio::sync::broadcast` 的薄封装。不
 
 ### Bus_Event
 
-4 种通用事件类型。`Notify` 使用具名字段，其余 3 种使用 JSON 字符串 payload 以解耦领域概念。
+5 种通用事件类型。`Notify` 使用具名字段，`StreamRaw` 使用原始字节 payload，其余 3 种使用 JSON 字符串 payload 以解耦领域概念。
 
 ```rust
 pub enum Bus_Event {
@@ -50,6 +50,11 @@ pub enum Bus_Event {
     /// payload 为 JSON 字符串，消费者解析 "type" 字段二次路由
     Stream { payload: String },
 
+    /// 高频流式推送——原始字节（二进制帧专用，如 ORION 协议帧）
+    /// 2026-08-07：robot_bus 二进制承载（新协议前置依赖）
+    /// payload 为原始字节，不经过 UTF-8/JSON 处理
+    StreamRaw { payload: Vec<u8> },
+
     /// 命令执行结果（flush、ls、help 等命令的输出）
     /// payload 为 JSON 字符串，消费者解析 "type" 字段二次路由
     Output { payload: String },
@@ -61,9 +66,10 @@ pub enum Bus_Event {
 | `Notify` | 一次性通知 | 纯文本 `message: String` | 直接读取 `level` + `message`，无需解析 |
 | `State` | 持久状态变更 | JSON `{"type": "peer_discovered", ...}` | `serde_json::from_str` → 按 `type` 分发 |
 | `Stream` | 高频流式推送 | JSON `{"type": "token", ...}` | `serde_json::from_str` → 按 `type` 分发 |
+| `StreamRaw` | 高频流式推送（二进制） | 原始字节 `Vec<u8>`（不做 UTF-8/JSON 处理） | 直接取 `payload` 交给二进制解析（ORION 帧），**无二级路由** |
 | `Output` | 命令执行结果 | JSON `{"type": "cmd_result", ...}` | `serde_json::from_str` → 按 `type` 分发 |
 
-> **设计说明**：`Notify` 不走 JSON 是因为消费端只需要「根据 level 加前缀，输出 message」，结构化字段比 JSON 字符串更直接高效。其余三个变体需要二级路由（同一变体内有多种子类型），JSON 的 `"type"` 字段承担此职责。
+> **设计说明**：`Notify` 不走 JSON 是因为消费端只需要「根据 level 加前缀，输出 message」，结构化字段比 JSON 字符串更直接高效。`StreamRaw` 不走 JSON 是因为二进制帧（如 ORION 协议帧）经 `from_utf8_lossy` 会损坏，必须原样透传。其余三个变体需要二级路由（同一变体内有多种子类型），JSON 的 `"type"` 字段承担此职责。
 
 ### NotifyLevel
 

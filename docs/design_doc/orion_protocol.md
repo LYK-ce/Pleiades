@@ -1,6 +1,7 @@
 # Orion 统一通信协议（Orion Communication Protocol）
 
 > 创建日期：2026-08-07
+> 修改日期：2026-10-19
 > 状态：设计中（消息字段以本文件为准，后续讨论补充其余章节）
 
 ---
@@ -117,34 +118,47 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | 3 | `ORION_MAP_DELTA` | 车 → 集群/终端 | 地图有变化时（≤5Hz） |
 | 4 | `ORION_MANUAL_CONTROL` | 终端/集群 → 车 | 事件驱动 |
 | 5 | `ORION_TASK_SET` | 终端/集群 → 车 | 事件驱动 |
+| 6 | `ORION_RTCM` | 基站/终端 → 车（gossipsub 广播） | 1Hz（基站 RTCM 实时流，Task 24 新增） |
 
 > 字段命名遵循 MAVLink 风格（`snake_case`、C 类型）。类型字节序：大端（与 MAVLink 一致）。
 
 ### 3.1 ORION_POSE（msgid 1）— 位姿
 
-一次打包坐标 + 速度 + 朝向 + 时间戳（保持单车时代的一次性语义）。
+一次打包坐标 + 速度 + 朝向 + 时间戳（保持单车时代的一次性语义），并附带寻路意图子目标与 RTK 可信标志。
 
 | 字段 | 类型 | 单位 | 说明 |
 |---|---|---|---|
 | `time_boot_ms` | uint32 | ms | 开机起算时间戳 |
 | `x` | float | m | 全局世界坐标 X（x 东） |
 | `y` | float | m | 全局世界坐标 Y（y 南） |
+| `z` | float | m | 垂直高度（车恒 0，机写飞控 EKF；RTK 不更新 z，Task 22） |
 | `vx` | float | m/s | X 方向速度 |
 | `vy` | float | m/s | Y 方向速度 |
 | `yaw` | float | rad | 朝向角，范围 [-π, π]，**顺时针为正** |
+| `valid` | uint8 | — | 意图有效标志（Task 13_1）：0 = 无当前任务/子目标 |
+| `sub_gx` | int32 | 格 | 意图：D* 寻路下一格网格坐标 X；`valid=0` 时忽略 |
+| `sub_gy` | int32 | 格 | 意图：D* 寻路下一格网格坐标 Y；`valid=0` 时忽略 |
+| `rtk_fixed` | uint8 | — | RTK 固定解标志（Task 24）：FIXED=1 / 失锁=0；未启用 RTK 恒 0 |
 
-**payload 布局**（大端，共 24 字节）：
+**payload 布局**（大端，共 38 字节，Task 24 起）：
 
 | 偏移 | 字段 | 类型 |
 |---|---|---|
 | 0 | `time_boot_ms` | u32 |
 | 4 | `x` | f32 |
 | 8 | `y` | f32 |
-| 12 | `vx` | f32 |
-| 16 | `vy` | f32 |
-| 20 | `yaw` | f32 |
+| 12 | `z` | f32 |
+| 16 | `vx` | f32 |
+| 20 | `vy` | f32 |
+| 24 | `yaw` | f32 |
+| 28 | `valid` | u8 |
+| 29 | `sub_gx` | i32 |
+| 33 | `sub_gy` | i32 |
+| 37 | `rtk_fixed` | u8 |
 
-来源映射：`x/y` 直接映射 `RobotState.{x, y}`（全局世界坐标）、`{vx, vy}`、`attitude.yaw`，**无坐标变换**；`time_boot_ms` 由开机基准时间换算（`now_boot_ms()`，替代原 `Pose.ts` unix 秒，字段类型 f64 → u32）；`valid/sub_gx/sub_gy` 映射 `ExecuteState.sub_target`（Executor 写，`state_notifier` 读，Task 13_1）。
+> 长度演进：24B（初版：时间戳 + x/y/vx/vy/yaw）→ 33B（Task 13_1 追加 `valid` + `sub_gx/sub_gy`）→ 37B（Task 22 追加 `z`）→ **38B（Task 24 末尾追加 `rtk_fixed`）**。`decode_pose` 严格校验 38 字节（`payload.len() != 38` 直接拒绝），旧帧无兼容过渡期——整车/机/终端/Pictor 须同版本合入。
+
+来源映射：`x/y` 直接映射 `RobotState.{x, y}`（全局世界坐标）、`z` 映射 `RobotState.z`（车恒 0）、`{vx, vy}`、`attitude.yaw`，**无坐标变换**；`time_boot_ms` 由开机基准时间换算（`now_boot_ms()`，替代原 `Pose.ts` unix 秒，字段类型 f64 → u32）；`valid/sub_gx/sub_gy` 映射 `ExecuteState.sub_target`（Executor 写，`state_notifier` 读，Task 13_1）；`rtk_fixed` 映射 `RobotState.rtk_fixed`（LG290P 实时写，Task 24）。
 
 > 意图语义（2026-08-10 决策）：subtarget = 本车 D* 寻路**下一格**（第一版 1 格，k 格 + 时间窗留扩展字段）；接收方存入 `ClusterInfo.sub_target`，用于窄路口意图判断/未来寻路障碍注入。`valid=0`（无任务/空闲）时接收方必须忽略 sub 坐标。
 
@@ -250,6 +264,8 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | 7 | `stop_lidar` | — |
 | 8 | `switch_to_manual` | — |
 | 9 | `switch_to_auto` | — |
+| 10 | `takeoff` | —（Task 22_4，机） |
+| 11 | `land` | —（Task 22_4，机） |
 
 映射：`ORION_MANUAL_CONTROL` → `Command::Manual(ManualCmd::*)` / `Command::Mode(ModeCmd::*)`。
 
@@ -292,6 +308,23 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 - **立即中断**：正在执行的任务立即终止（`executor.reset()` + `stm32.stop()`），从新队列第一个任务开始
 - **成员身份校验**：群发任务每车校验自己 `PeerId::to_bytes()` 是否在 members（字节一致，帧内为终端原样回填）；排序用字节升序，不信任帧序
 - ⚠️ **同批升级无过渡期**：本布局于 Task 14 变更（加入 member_count + members 段），车端与 Pictor 必须同批上线；旧帧（1+9n 布局）不再兼容（长度恰好匹配的旧帧会被解析为 member_count=0 → 取消，语义安全）
+
+### 3.6 ORION_RTCM（msgid 6）— RTK 改正数据（Task 24 新增）
+
+基站（`pleiades-terminal` / UM960）向所有车广播的 **RTCM 3.x 原始帧**，供车侧流动站（LG290P）解算厘米级定位。**双层帧**：外层 ORION 帧（传输 + 身份），内层 RTCM（业务数据），payload 无自定义字段结构。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `payload` | bytes[] | **RTCM 3.x 原始帧**（基站侧已切帧，一条消息 = 一帧完整 RTCM） |
+
+**payload 布局**：即 RTCM 原始字节，长度可变（无固定偏移表；帧长由外层 `len` 字段给出）。
+
+- **方向**：基站/终端 → 车（**gossipsub 广播**，topic `pleiades/robot/rtcm` = `TOPIC_RTK_RTCM`）；车侧由 LG290P 驱动独立订阅 robot_bus 认领（`match msgid == 6`，D7 方式 A，`cluster_consumer` 不改）
+- **频率**：1Hz 实时流（随基站串口 RTCM 输出；`Gossipsub_Publish_Try` 满则丢弃，下一帧补上）
+- **帧身份**：`sysid` = 基站（terminal）本机 peer_id 字节（`Get_Local_Peer_Id().to_bytes()`）、`compid` = 200（`COMPID_GROUND_STATION`）
+- **快照重放**：复用现有统一机制（发布即更新快照），新车接入可重放最近一帧（无害）
+- 实现：基站侧 `encode_frame(MSGID_RTCM, &sysid, COMPID_GROUND_STATION, &rtcm)`（`pleiades-terminal/src/device/um960/mod.rs`）；车侧 `decode_frame` + `MSGID_RTCM` 比对后取 `frame.payload` 写串口（`pleiades-ugv/src/device/lg290p/mod.rs`）
+- ⚠️ **无独立 `encode_rtcm` 辅助函数**：当前直接调用通用 `encode_frame` 组帧（rtk_design §5.1 曾计划新增 `encode_rtcm`，实际未落地，以代码为准）
 
 ---
 

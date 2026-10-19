@@ -2,6 +2,7 @@
 
 Presented by KeJi
 Date ： 2026-05-16
+Modified Date ： 2026-10-19
 
 ## 1. 模块概述
 
@@ -17,7 +18,7 @@ Date ： 2026-05-16
 ### 模块结构
 
 ```
-Network/
+pleiades-base/src/Network/
 ├── mod.rs                  ← 模块入口 + re-export
 ├── network_service.rs      ← Network_Service（Init + Start 事件循环编排）
 ├── swarm_events.rs         ← Swarm 事件处理（分发器 + Mdns/Kademlia/RR/Ping handler）
@@ -47,7 +48,7 @@ Network/
 Orchestrator / Lua 脚本
          │
          ▼
-  Box<dyn Network_Capability>         ← capability.rs (trait)
+  Box<dyn Network_Capability>         ← pleiades-base/src/Network/capability.rs (trait)
          │
          ├── send_data / send_response  → NodeHandle → cmd_tx → Handle_Command
          ├── dial / disconnect          → NodeHandle → cmd_tx → Handle_Command
@@ -57,10 +58,10 @@ Orchestrator / Lua 脚本
          └── test_bandwidth             → stream::Control (直接)
          │
          ▼
-  Network_Service 事件循环              ← network_service.rs
+  Network_Service 事件循环              ← pleiades-base/src/Network/network_service.rs
          │
-         ├── Swarm 事件 → swarm_events.rs
-         ├── 外部命令   → command_handler.rs
+         ├── Swarm 事件 → pleiades-base/src/Network/swarm_events.rs
+         ├── 外部命令   → pleiades-base/src/Network/command_handler.rs
          ├── 入站文件流  → orchestrator_event_tx → Orchestrator
          ├── 入站张量流  → rendezvous → Orchestrator
          └── 入站带宽流  → Receive_And_Count + 回传结果
@@ -212,8 +213,8 @@ Init(config, keypair, peer_handle, event_bus)
 
 ```
 tokio::select! 5 个分支:
-  ├── SwarmEvent → self.Handle_Swarm_Event(event)   → swarm_events.rs
-  ├── NodeCommand → self.Handle_Command(cmd)         → command_handler.rs
+  ├── SwarmEvent → self.Handle_Swarm_Event(event)   → pleiades-base/src/Network/swarm_events.rs
+  ├── NodeCommand → self.Handle_Command(cmd)         → pleiades-base/src/Network/command_handler.rs
   ├── 入站文件流  → orchestrator_event_tx.send(...)  → Orchestrator
   ├── 入站张量流  → Read_Tensor_Stream_Handshake     → rendezvous
   └── 入站带宽流  → Receive_And_Count + Write_Bandwidth_Result
@@ -223,17 +224,17 @@ tokio::select! 5 个分支:
 
 | 事件类型 | 处理方 | 说明 |
 |---------|--------|------|
-| mDNS 发现/离开 | `swarm_events.rs` | 更新 Kademlia + 发布 EventBus 事件 |
-| Kademlia 查询结果 | `swarm_events.rs` | 仅记录日志 |
-| 入站 Request (Command/File) | `swarm_events.rs` → Inbound_Manager → Orchestrator | 转发给上层决策 |
-| 入站 Request (Data/Info) | `swarm_events.rs` | Network 内部回复 "OK" |
-| 出站 Response | `swarm_events.rs` → Outbound_Manager | oneshot 回传调用方 |
-| OutboundFailure | `swarm_events.rs` → Outbound_Manager | 通知等待方失败 |
-| 连接建立/断开 | `swarm_events.rs` | 更新 PeerManager + 发布 EventBus |
-| Ping 心跳 | `swarm_events.rs` | 更新 PeerManager 延迟/状态 |
-| 入站文件流 | `network_service.rs (select!)` | 转发给 Orchestrator |
-| 入站张量流 | `network_service.rs (select!)` | rendezvous 匹配 |
-| 入站带宽流 | `network_service.rs (select!)` | 计数 + 回传 |
+| mDNS 发现/离开 | `pleiades-base/src/Network/swarm_events.rs` | 更新 Kademlia + 发布 EventBus 事件 |
+| Kademlia 查询结果 | `pleiades-base/src/Network/swarm_events.rs` | 仅记录日志 |
+| 入站 Request (Command/File) | `pleiades-base/src/Network/swarm_events.rs` → Inbound_Manager → Orchestrator | 转发给上层决策 |
+| 入站 Request (Data/Info) | `pleiades-base/src/Network/swarm_events.rs` | Network 内部回复 "OK" |
+| 出站 Response | `pleiades-base/src/Network/swarm_events.rs` → Outbound_Manager | oneshot 回传调用方 |
+| OutboundFailure | `pleiades-base/src/Network/swarm_events.rs` → Outbound_Manager | 通知等待方失败 |
+| 连接建立/断开 | `pleiades-base/src/Network/swarm_events.rs` | 更新 PeerManager + 发布 EventBus |
+| Ping 心跳 | `pleiades-base/src/Network/swarm_events.rs` | 更新 PeerManager 延迟/状态 |
+| 入站文件流 | `pleiades-base/src/Network/network_service.rs (select!)` | 转发给 Orchestrator |
+| 入站张量流 | `pleiades-base/src/Network/network_service.rs (select!)` | rendezvous 匹配 |
+| 入站带宽流 | `pleiades-base/src/Network/network_service.rs (select!)` | 计数 + 回传 |
 
 ### 3.4 命令处理规则
 
@@ -278,7 +279,7 @@ tokio::select! 5 个分支:
 ## 5. 模块导出
 
 ```rust
-// Network/mod.rs
+// pleiades-base/src/Network/mod.rs
 
 // 子模块
 pub mod capability;
@@ -324,7 +325,7 @@ pub use bandwidth_stream::{...};
 | 入站请求转发 | Handle_Request_Response_Event → inbound_tx | 复用 mpsc 通道 |
 | 入站文件流转发 | select! 分支 → orchestrator_event_tx | 异步事件通知 |
 | 入站张量流交接 | select! 分支 → rendezvous | 双向匹配 |
-| 连接/发现/Ping 事件 | swarm_events.rs → PeerManager + EventBus | Network 内部闭环 |
+| 连接/发现/Ping 事件 | `pleiades-base/src/Network/swarm_events.rs` → PeerManager + EventBus | Network 内部闭环 |
 
 ---
 
@@ -360,10 +361,13 @@ pub use bandwidth_stream::{...};
 | 拆分 swarm_events.rs | Handle_Mdns/Kademlia/RR/Ping + Handle_Swarm_Event 分发器 |
 | 拆分 command_handler.rs | Handle_Command 独立文件 |
 | Network_Service 字段 `pub(crate)` | 支持跨文件 impl block 访问 |
+| **已完成**：Peer_Management_Capability 方法名统一 | `List_Peers` → `Get_All_Peers`（另有 `Get_Local_Peer` / `Get_Peer_By_Name`）；`Update_Heartbeat` / `Update_Status` / `Update_Bandwidth` → `Update_Profile` + `Upsert_Peer` + `Update_Supported_Models` / `Update_Sessions` |
 
 ---
 
 ## 9. TODO
+
+> 已完成的待办已迁入 §8「重构历史」（如删除 `NodeCommand::UpdateInfo`、`Peer_Management_Capability` 方法名统一）。
 
 ### WAN 广域网支持
 
@@ -371,11 +375,6 @@ pub use bandwidth_stream::{...};
 - STUN/TURN 中继发现
 - WAN 模式下 Kademlia 引导优化
 
-### Peer_Management_Capability 方法名统一
-
-- `List_Peers` → `Get_Peers`
-- `Update_Heartbeat` / `Update_Status` / `Update_Bandwidth` 待统一为 `Update_Peer` + `PeerProfile`
-
 ### RendezvousMap TTL
 
-- 未匹配流 30s 自动过期清理
+- 未匹配流 30s 自动过期清理（当前 `pleiades-base/src/Network/Tensor_Stream/rendezvous.rs` 尚无 TTL 机制）

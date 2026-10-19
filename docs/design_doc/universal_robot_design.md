@@ -2,10 +2,12 @@
 
 Presented by KeJi
 Created Date ： 2026-08-19
-Modified Date ： 2026-08-20
+Modified Date ： 2026-10-19
 
-> 状态：**方案已定稿（2026-08-20）**，尚未开始实施。
-> 关联文档：`robot_arch.md`（现状架构）、`UAV.md`（无人机目标平台）、`multi_robot_map.md`（分布式地图一致性）。
+> 状态：**方案已废弃（2026-08-29）**，被 `task_23_universal_robot`（底座共享 + 设备端独有）取代，不再实施。
+> 废弃原因：本方案「三层统一 + `MotionDevice` 统一 + Lua 决策」的思路被否定（本质是「一份代码适配所有设备」的固化思维），六类异构来源见 `docs/heterogeneity_analysis.md`。
+> task_22 系列实施情况（均见 `Task/archived task/`）：`task_22_3`（单写者收敛）、`task_22_4`（`MavlinkDevice`）**已实施**；`task_22_1` **已取消**、`task_22_2` / `task_22_5` **未实施**。
+> 关联文档：`Architecture/robot_arch.md`（Robot 现状架构）、`docs/heterogeneity_analysis.md`（异构分析，新架构依据）、`Task/archived task/task_23_universal_robot.md`（取代任务）、`docs/design_doc/UAV.md`（无人机目标平台）、`docs/design_doc/multi_robot_map.md`（分布式地图一致性）。
 
 ---
 
@@ -13,7 +15,7 @@ Modified Date ： 2026-08-20
 
 ### 1.1 问题
 
-当前 `Src/Robot/` 子系统为 **2D 轮式车专用**：STM32 底盘串口协议、差速/麦轮运动模型、2D 占据栅格建图、2D D* Lite 寻路、`CarType`（X3/X3Plus/X1/R2）配置。调研结论：核心逻辑约 60~70% 是车专用。
+当前 `pleiades-base/src/Robot/` 子系统（车专用设备端现位于 `pleiades-ugv/src/ugv/`）为 **2D 轮式车专用**：STM32 底盘串口协议、差速/麦轮运动模型、2D 占据栅格建图、2D D* Lite 寻路、`CarType`（X3/X3Plus/X1/R2）配置。调研结论：核心逻辑约 60~70% 是车专用。
 
 要扩展到 **无人机（DRF450 四旋翼，Pixhawk 2.4.8 + ArduPilot + MAVLink）**，乃至未来的船/履带等平台，直接改会造成大量耦合。
 
@@ -362,7 +364,7 @@ end
 | 急停（Rust 强制 stop）与 Lua 决策的优先级/时序 | 实施时定 |
 | D* 独立后的锁序（D* → robot_state → cluster_table → grid） | 实施时定 |
 | caps 边界情况（get_cell 越界、get_path nil 语义细节） | 实施时定 |
-| 机脚本 / `MavlinkDevice` 示例实现 | 后续 task（等机硬件） |
+| 机脚本 / `MavlinkDevice` 示例实现 | 已实施（`task_22_4`，2026-08-25；后随 `task_23` 迁至 `pleiades-uav/src/uav/mavlink/`） |
 
 ---
 

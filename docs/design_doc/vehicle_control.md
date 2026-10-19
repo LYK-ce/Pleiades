@@ -2,7 +2,7 @@
 
 Presented by KeJi
 Created Date ： 2026-07-09
-Modified Date ： 2026-07-09
+Modified Date ： 2026-10-19
 
 ---
 
@@ -206,24 +206,28 @@ state.write() ←  RobotState (全局)
 
 ## 5. 文件结构
 
+> 顶层 `Src/` 已不存在（Task 23 拆为 5 crate workspace：`pleiades-base` / `pleiades-terminal` / `pleiades-uav` / `pleiades-ugv` / `pleiades-sim`）。本节按现行实际路径给出。
+
 ```
-Src/Robot/
+pleiades-base/src/Robot/              ← 共享底座（协议 / 状态 / 集群 / 主循环）
 ├── mod.rs               ← 模块入口 + re-export
-├── state.rs             ← RobotState 等全局状态类型
-├── websocket.rs         ← WebSocket 遥控服务 (上层)
 ├── core/
 │   ├── mod.rs
+│   ├── state.rs         ← RobotState 等全局状态类型
 │   ├── command.rs       ← Command 枚举定义
 │   └── robot.rs         ← Robot::launch() + select! 主循环
-└── control/
-    ├── types.rs          ← CarType（设备层共用）
-    ├── serial/
-    │   ├── mod.rs
-    │   └── port.rs       ← spawn_port() 通用函数
-    └── device/
-        ├── mod.rs
-        └── stm32.rs      ← STM32 协议 + STM32Device
+└── util/
+    └── serial/port.rs   ← spawn_port() 通用函数
+
+pleiades-ugv/src/ugv/                 ← 车设备端（Task 23 后）
+├── types.rs             ← CarType（设备层共用）
+└── stm32/               ← STM32 协议 + STM32Device
+
+pleiades-terminal/src/                ← 地面站（cdylib，GDExtension 桥）
+└── lib.rs               ← PleiadesKernel 入口
 ```
+
+> ⚠️ 原 `Src/Robot/websocket.rs`（WebSocket 遥控服务）已移除：上层命令通道改为 ORION 帧 + GDExtension 桥，见 `docs/design_doc/orion_protocol.md`。原 `control/device/stm32.rs` 现为 `pleiades-ugv/src/ugv/stm32/` 模块目录。
 
 ---
 
@@ -231,7 +235,7 @@ Src/Robot/
 
 以增加 LiDAR 为例，只需 **4 步**：
 
-### Step 1: 创建 `control/device/lidar.rs`
+### Step 1: 创建 `pleiades-ugv/src/ugv/lidar/`（模块目录）
 
 ```rust
 // ① 定义协议帧格式和解析逻辑
@@ -263,7 +267,7 @@ impl LidarDevice {
 }
 ```
 
-### Step 2: 在 `RobotState` 里加 LiDAR 字段（`state.rs`）
+### Step 2: 在 `RobotState` 里加 LiDAR 字段（`pleiades-base/src/Robot/core/state.rs`）
 
 ```rust
 pub struct RobotState {
@@ -272,13 +276,13 @@ pub struct RobotState {
 }
 ```
 
-### Step 3: 在 `Robot::launch()` 里实例化（`core/robot.rs`）
+### Step 3: 在 `Robot::launch()` 里实例化（`pleiades-base/src/Robot/core/robot.rs`）
 
 ```rust
 let lidar = LidarDevice::spawn("/dev/ttyLidar", 115200, state.clone())?;
 ```
 
-### Step 4: 在 `Command` 和 `dispatch` 里加命令（`core/command.rs` + `core/robot.rs`）
+### Step 4: 在 `Command` 和 `dispatch` 里加命令（`pleiades-base/src/Robot/core/command.rs` + `pleiades-base/src/Robot/core/robot.rs`）
 
 ```rust
 enum Command {

@@ -1,10 +1,10 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-26
+//Modified Date ： 2026-10-19
 
 //! STM32 协议常量
 //!
-//! 对齐 ros_stm32_protocol.md 中定义的帧格式和功能码。
+//! 对齐 docs/ros_stm32_protocol.md 中定义的帧格式和功能码。
 
 // ─── 运动状态（FUNC_CAR_RUN） ──────────────────────────
 

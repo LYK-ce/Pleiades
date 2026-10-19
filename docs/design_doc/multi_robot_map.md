@@ -3,7 +3,7 @@
 > 创建日期：2026-08-11
 > 状态：问题定义与现有方案调研（具体方案待讨论）
 > 范围：多车共享同一张地图的一致性机制
-> 关联：`docs/design_doc/multi_robot_control.md`、`Task/task_13_2_crdt_map.md`、`调研报告_分布式地图一致性方案.md`、`调研报告_增量补充_多机地图CRDT同步.md`
+> 关联：`docs/design_doc/multi_robot_control.md`、`Task/task_13_2_crdt_map.md`、`docs/调研报告_分布式地图一致性方案.md`、`docs/调研报告_增量补充_多机地图CRDT同步.md`
 
 ---
 

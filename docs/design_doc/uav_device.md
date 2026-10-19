@@ -2,18 +2,20 @@
 
 Presented by KeJi
 Created Date ： 2026-08-25
-Modified Date ： 2026-08-25
+Modified Date ： 2026-10-19
 
-> 状态：**设计讨论稿**（部分决策待定，见 §6）
-> 关联文档：`universal_robot_design.md`（通用机器人定稿方案）、`UAV.md`（DRF450 硬件规格）、`robot_arch.md`（Robot 现状架构）
+> 状态：**已实施**（`task_22_4`，2026-08-25）；后随 `task_23`（底座共享 + 设备端独有）迁至 `pleiades-uav/src/uav/mavlink/`。文档正文保留当时的设计讨论（部分决策待定，见 §5）。
+> 关联文档：`universal_robot_design.md`（通用机器人**已废弃**方案）、`UAV.md`（DRF450 硬件规格）、`Architecture/robot_arch.md`（Robot 现状架构）
+>
+> ⚠️ **后续变更提示**：文中 `MotionDevice` trait 与带速度载荷的 `MotionAction` 已被 `task_23` 取代——现行设备契约是 `DeviceHandler`（`pleiades-base/src/Robot/core/robot.rs`）+ `DeviceCapability`（`pleiades-base/src/Orchestrator/mod.rs`），`MotionAction` 已改为无载荷纯意图枚举（`pleiades-base/src/Robot/core/state.rs`）。
 
 ---
 
 ## 1. 背景与目标
 
 把 UAV 仓库（`rust-mavlink-test`）中**已验证**的「Rust 操纵 MAVLink 飞控」能力，迁入 Orion，成为
-`Src/Robot/control/device/` 下的**第三个设备**（车 `stm32` / 雷达 `lidar` / 飞控 `mavlink`），
-实现 `MotionDevice` trait。对应 task_22 遗留的「机脚本 / MavlinkDevice」与
+`pleiades-uav/src/uav/mavlink/` 下的**第三个设备**（车 `pleiades-ugv/src/ugv/stm32/` / 雷达 `pleiades-ugv/src/ugv/lidar/` / 飞控 `pleiades-uav/src/uav/mavlink/`），
+实现 `MotionDevice` trait（现为 `DeviceHandler`，见头部提示）。对应 task_22 遗留的「机脚本 / MavlinkDevice」与
 `universal_robot_design.md` 已定稿的 `FlightCtrlDevice`。
 
 **目标形态**：设备自闭环 —— 上层只发离散动作（`move_forward/stop`），
@@ -36,12 +38,12 @@ UAV Rust 代码分两层：
 
 | 资产 | 位置 | 用途 |
 |---|---|---|
-| `MotionDevice` trait | `Src/Robot/device.rs` | 统一运行期动作接口 |
-| `MotionAction` 枚举 | `Src/Robot/core/state.rs:113` | 期望动作的理想类型（`MoveForward(i16)/MoveBackward/TurnLeft/TurnRight/Stop`） |
-| `spawn_port` | `Src/Robot/control/serial/port.rs` | 串口 TX/RX 后台 task（`cancel` 退出），零改动复用 |
-| `spawn_slam` 骨架 | `Src/Robot/slam/task.rs:56-63` | `interval + select!{tick/cancel}` 定时 loop 范例 |
-| `LidarDevice::spawn` | `Src/Robot/control/device/lidar/mod.rs` | 「设备内部打包 tokio 组」范例 |
-| config 预留 | `Src/bootstrap.rs` | `flight_ctrl.enabled`（缺省 false，仅 warn） |
+| 设备契约（原 `MotionDevice` trait） | `pleiades-base/src/Robot/core/robot.rs`（`DeviceHandler`）；`MotionDevice` 已移除 | 统一设备运行期接口 |
+| `MotionAction` 枚举 | `pleiades-base/src/Robot/core/state.rs:104` | 期望动作的理想类型（`MoveForward/MoveBackward/TurnLeft/TurnRight/Stop`，Task 22_5 后无速度载荷） |
+| `spawn_port` | `pleiades-base/src/Robot/util/serial/port.rs` | 串口 TX/RX 后台 task（`cancel` 退出），零改动复用 |
+| `spawn_slam` 骨架 | `pleiades-ugv/src/ugv/slam/task.rs` | `interval + select!{tick/cancel}` 定时 loop 范例 |
+| `LidarDevice::spawn` | `pleiades-ugv/src/ugv/lidar/mod.rs` | 「设备内部打包 tokio 组」范例 |
+| config | `pleiades-uav/src/config.rs`（`FlightCtrlConfig`）+ `pleiades-uav/src/uav/robot_handler.rs`（读 `flight_ctrl.enabled`） | 飞控设备配置与开关 |
 
 ---
 
@@ -173,8 +175,8 @@ let yaw_world = yaw_fc - offset;
 
 | # | 待定项 | 说明 |
 |---|---|---|
-| 1 | `FlightCtrlConfig.connection` | config 结构体字段是否已定义，还是需补（bootstrap.rs 当前仅 `enabled`） |
-| 2 | mavlink crate 依赖 | Orion `Cargo.toml` 需加 `mavlink 0.18`（`dialect-ardupilotmega` + `dialect-common`），确认可接受 |
+| 1 | `FlightCtrlConfig.connection` | 已定义（`pleiades-uav/src/config.rs`：`connection` / `baudrate` / `vel_fwd` / `yaw_rate_deg`） |
+| 2 | mavlink crate 依赖 | 已加入 `pleiades-uav/Cargo.toml`（`mavlink 0.18`，`dialect-ardupilotmega` + `dialect-common`） |
 
 ---
 
@@ -199,9 +201,9 @@ let yaw_world = yaw_fc - offset;
 ## 7. 附：实现步骤
 
 1. `Cargo.toml` 加 mavlink 依赖。
-2. 建 `Src/Robot/control/device/mavlink/`：`mod.rs`（`MavlinkDevice` + `MotionDevice` impl + 保持 loop）、`protocol.rs`（`parse_one_frame` / `handle_message` / 命令打包）、`types.rs`（`Telemetry`）。
-3. `control/device/mod.rs` 加 `pub mod mavlink;`。
-4. `bootstrap.rs` 补 `FlightCtrlConfig` + 遍历 spawn 接入。
+2. 建 `pleiades-uav/src/uav/mavlink/`：`mod.rs`（`MavlinkDevice` + `DeviceHandler` impl + 保持 loop）、`protocol.rs`（`parse_one_frame` / `handle_message` / 命令打包）、`types.rs`（`Telemetry`）。
+3. `pleiades-uav/src/uav/mod.rs` 加 `pub mod mavlink;`。
+4. `pleiades-uav/src/config.rs` 补 `FlightCtrlConfig`，在 `pleiades-uav/src/uav/robot_handler.rs` 读开关并 spawn 接入。
 5. `MotionDevice` 自闭环 + 翻译表 + 一次性命令。
 6. 遥测 → `RobotState` 映射。
 7. 单测（复用 `spawn_mock` 模式：channel 模拟 TX/RX）。

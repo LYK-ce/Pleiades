@@ -2,6 +2,7 @@
 
 > Presented by KeJi
 > Date: 2026-05-20
+> Modified Date: 2026-10-19
 
 ## 目标
 
@@ -40,11 +41,14 @@ Prompt线程 (std::thread)                     ML推理线程 (std::thread)
 ## 文件结构
 
 ```
-Src/Orchestrator/local_tensor_stream/
+pleiades-base/src/Orchestrator/local_tensor_stream/
   ├── mod.rs          # 模块入口，LocalStreamHub
-  ├── frames.rs       # 本地帧读写函数（泛型 S: AsyncRead+AsyncWrite+Unpin）
-  └── lua_binding.rs  # Lua userdata: LocalTensorStream, 注册 local 表
+  └── frames.rs       # 本地帧读写函数（泛型 S: AsyncRead+AsyncWrite+Unpin）
+
+pleiades-base/src/VM/local_stream.rs   # Lua userdata: LocalTensorStream + 注册 local_tensor 表
 ```
+
+> 注：原设计中的 `lua_binding.rs` **不存在**；Lua 侧 userdata 与能力注册统一落在 `pleiades-base/src/VM/local_stream.rs`（`register_local_stream_caps`），见 §3。
 
 调用链：
 
@@ -141,9 +145,9 @@ pub async fn local_send_eof<S: AsyncWriteExt + Unpin>(
 }
 ```
 
-复用的常量：`TENSOR_EOF_OFFSET`，`MAX_TENSOR_SIZE`（从 `protocol.rs` 导入）。
+复用的常量：`TENSOR_EOF_OFFSET`（从 `pleiades-base/src/Network/Tensor_Stream/protocol.rs` 导入；`MAX_TENSOR_SIZE` 为该文件私有常量，未导出）。
 
-### 3. Lua userdata（`lua_binding.rs`）
+### 3. Lua userdata（`pleiades-base/src/VM/local_stream.rs`）
 
 ```rust
 use mlua::{UserData, UserDataMethods};
@@ -162,7 +166,7 @@ impl UserData for LocalTensorStream {
 }
 ```
 
-### 4. Lua 能力注册（在 `capability_binding.rs` 中新增）
+### 4. Lua 能力注册（在 `pleiades-base/src/VM/capability_binding.rs` 中新增）
 
 ```rust
 use crate::orchestrator::local_tensor_stream::{
@@ -246,11 +250,11 @@ end
 
 | 步骤 | 内容 | 预估行数 |
 |------|------|---------|
-| 1 | 创建 `Src/Orchestrator/local_tensor_stream/` 目录结构 | — |
+| 1 | 创建 `pleiades-base/src/Orchestrator/local_tensor_stream/` 目录结构 | — |
 | 2 | `mod.rs` — LocalStreamHub（open/accept 配对） | ~50 |
 | 3 | `frames.rs` — 本地帧读写泛型函数 | ~80 |
-| 4 | `lua_binding.rs` — LocalTensorStream userdata | ~50 |
-| 5 | 在 `capability_binding.rs` 新增 `register_local_stream_caps()` | ~80 |
+| 4 | `pleiades-base/src/VM/local_stream.rs` — LocalTensorStream userdata | ~50 |
+| 5 | 在 `pleiades-base/src/VM/capability_binding.rs` 新增 `register_local_stream_caps()` | ~80 |
 | 6 | 在 `Core::new()` 中创建 `Arc<LocalStreamHub>`，传入 Lua 注册 | ~10 |
 | 7 | `cargo check` + 单测 | — |
 
