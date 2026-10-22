@@ -86,6 +86,7 @@ Modified Date ： YYYY-MM-DD
   - `archived task/` — 已完成的任务归档
 - `Workbook/` — 工作记录（命名格式 `wb_{id}_{description}.md`）
 - `docs/` — 设计文档、说明文档
+- `tmp/` — 执行引擎中间产物（已被 `.gitignore` 忽略）
 
 ## 任务文件规范
 每个任务文件命名格式：`task_{id}_{description}.md`，存储在 `Task/` 目录下。
@@ -103,6 +104,41 @@ Workbook 目录中的工作记录文件与任务文件一一对应，命名方�
 4. 更新 workbook，记录依赖关系、结束时间，使用最精简的方式记录必要信息
 5. 若任务完成，将任务文件移入 `Task/archived task/`
 6. 结束任务
+
+# 执行引擎使用规则
+
+当人类要求「按 task 文档执行任务」时，主 agent 必须用**执行引擎**（`run_program`）编写一个**串行执行程序**，按 task 文档中的 step 逐步推进。
+
+## 基本流程
+
+1. 主 agent 先读 task 文档，识别其中的 **step**（分步），确定 step 数量与顺序；若 task 文档没有明确 step，先与人类确认拆分，再编写执行程序。
+2. 编写 `run_program` 程序：按 step 顺序**串行**推进，step 之间不得并行。
+3. 对**每一个 step**，依次 dispatch **3 个子 agent**（串行，不并行）：
+   - **规划**：读 task 文档 + workbook + 相关代码，产出该 step 的实施计划（改动文件、接口、风险、验收标准）。
+   - **实现**：依据规划结果完成代码改动。
+   - **评审**：独立评审实现结果（对照该 step 的验收标准 + 代码规范），产出**结构化结论**：`PASS` / `FAIL` + 问题清单。
+4. 子 agent 的 prompt 必须自包含（子 agent 不共享主 agent 的上下文）；规划 → 实现、实现 → 评审之间的产物通过文件传递。**所有子 agent 都可以使用 `tmp/` 存放自己需要的中间产物**（实施计划、评审报告等）。
+
+## 轮次与失败处理
+
+- 评审返回 `FAIL` → **再跑一轮**（规划 → 实现 → 评审）；后一轮的规划子 agent 必须带上上一轮评审的问题清单。
+- 每个 step **最多 3 轮**。
+- 3 轮仍未 `PASS` → **中断执行**：程序立即停止，不再推进后续 step。
+- 中断后**主 agent 只做汇报**（哪个 step 失败、卡在哪、3 轮的问题清单），不得自行降级、跳过或继续。
+
+## Workbook 记录
+
+- **每个 step 结束后（无论 PASS 还是最终失败），必须更新该 task 对应的 workbook 文档**。
+- **同一个 task 的所有 step 共享同一个 workbook 文档**（`Workbook/wb_{id}_{description}.md`）。
+- 每个 step 追加一节，采用最精简格式记录：step 编号、轮次、结果、关键决策、依赖、起止时间。
+- workbook 不存在则先创建。目的是让后续 agent 只读 workbook 就能快速接上上下文。
+
+## 约束
+
+- step 之间**严格串行**。
+- 主 agent 不亲自实现 step 内容，只负责编排、写 workbook、向人类汇报。
+- 执行程序**不调用 `report()` 主动唤醒主 agent**；执行进展与结果落在 workbook 中，主 agent 据此汇报。
+- **程序运行完毕后清理 `tmp/`**（无论成功还是中断）。
 
 
 
