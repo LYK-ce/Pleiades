@@ -1,0 +1,21 @@
+; Presented by KeJi
+; Created Date ： 2026-10-21
+; Modified Date ： 2026-10-22
+;
+; 观察者相机（Step 3 完成态）。节点树与契约见 COMPONENTS.md §4.2。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+; 与仿真完全解耦：本场景只有一台 Camera3D，不含任何物理/传感器节点。
+; 只写引擎原生属性；脚本的 @export 一律用默认值，不写进本文件（COMPONENTS.md §4.2）。
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/camera/ObserverCamera.gd" id="1_observer_camera"]
+
+[node name="ObserverCamera" type="Camera3D"]
+script = ExtResource("1_observer_camera")
+position = Vector3(64, 26, 108)
+rotation_degrees = Vector3(-30, 0, 0)
+current = true
+fov = 70.0
+near = 0.05
+far = 500.0

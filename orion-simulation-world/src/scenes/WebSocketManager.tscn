@@ -1,0 +1,19 @@
+; Presented by KeJi
+; Created Date ： 2026-10-21
+; Modified Date ： 2026-10-22
+;
+; WebSocketManager 组件（Step 6）。节点树与接口见 COMPONENTS.md §4.5。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+; 本场景没有 @export 节点引用，因此**不需要** node_paths（E16/E20 只约束节点引用）；
+; vehicle_scene / vehicles_root 两个 @export 由 World.tscn 的实例化节点绑定。
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/net/WebSocketManager.gd" id="1_ws_manager"]
+
+[node name="WebSocketManager" type="Node"]
+script = ExtResource("1_ws_manager")
+
+[node name="Heartbeat" type="Timer" parent="."]
+wait_time = 1.0
+autostart = true

@@ -1,0 +1,85 @@
+; Presented by KeJi
+; Created Date ： 2026-10-21
+; Modified Date ： 2026-10-22
+;
+; 世界组件主场景（Step 3 完成态）。节点树与属性见 COMPONENTS.md §2 / §4.1。
+; Step 3：Step 2 的临时 DebugCamera 已删除，改由 ObserverCamera.tscn 实例（current=true）承担观察。
+; Step 6：Systems 下挂 WebSocketManager 实例，并绑定 vehicle_scene / vehicles_root 两个 @export。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+; 尺度不经本文件固化：VoxelWorld.cell_size 只是可读声明，运行时由 World.gd 按 [sim_world] 覆盖。
+; 节点引用必须靠 node_paths=PackedStringArray(...)，且 NodePath **相对该节点自身**（COMPONENTS.md §9.1 E20）。
+
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://src/world/World.gd" id="1_world"]
+[ext_resource type="PackedScene" path="res://src/scenes/ObserverCamera.tscn" id="2_observer_camera"]
+[ext_resource type="PackedScene" path="res://src/scenes/WebSocketManager.tscn" id="3_ws_manager"]
+[ext_resource type="PackedScene" path="res://src/scenes/Vehicle.tscn" id="4_vehicle"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_world"]
+sky_top_color = Color(0.26, 0.43, 0.7, 1)
+sky_horizon_color = Color(0.66, 0.72, 0.8, 1)
+ground_bottom_color = Color(0.14, 0.16, 0.19, 1)
+ground_horizon_color = Color(0.55, 0.6, 0.66, 1)
+
+[sub_resource type="Sky" id="Sky_world"]
+sky_material = SubResource("ProceduralSkyMaterial_world")
+
+[sub_resource type="Environment" id="Environment_world"]
+background_mode = 2
+sky = SubResource("Sky_world")
+ambient_light_source = 3
+ambient_light_color = Color(0.5, 0.55, 0.62, 1)
+ambient_light_energy = 1.0
+tonemap_mode = 2
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(128, 1, 128)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.22, 0.24, 0.26, 1)
+roughness = 0.9
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+size = Vector3(128, 1, 128)
+
+[node name="World" type="Node3D"]
+script = ExtResource("1_world")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_world")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-55, -35, 0)
+shadow_enabled = true
+
+[node name="Ground" type="StaticBody3D" parent="."]
+position = Vector3(64, -0.5, 64)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("BoxMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="VoxelWorld" type="GridMap" parent="."]
+cell_size = Vector3(0.5, 0.5, 0.5)
+cell_center_x = true
+cell_center_y = true
+cell_center_z = true
+collision_layer = 2
+collision_mask = 0
+
+[node name="Vehicles" type="Node3D" parent="."]
+
+[node name="Systems" type="Node3D" parent="."]
+
+[node name="ObserverCamera" parent="." instance=ExtResource("2_observer_camera")]
+
+[node name="WebSocketManager" parent="Systems" instance=ExtResource("3_ws_manager") node_paths=PackedStringArray("vehicles_root")]
+vehicle_scene = ExtResource("4_vehicle")
+vehicles_root = NodePath("../../Vehicles")
+

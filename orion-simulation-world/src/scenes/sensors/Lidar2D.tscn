@@ -1,0 +1,20 @@
+; Presented by KeJi
+; Created Date ： 2026-10-21
+; Modified Date ： 2026-10-22
+;
+; 传感器组件 lidar_2d（Step 8）。节点树与接口见 COMPONENTS.md §4.7。
+; 根节点 Node3D：position / rotation.y 由 Vehicle.AttachSensor() 按 mount 外参写入，本场景不写死。
+; 参数不走场景（默认值唯一来源 = Lidar2D.gd + SensorCatalog.DEFAULTS）。
+; 节点引用必须靠 node_paths=PackedStringArray(...)（COMPONENTS.md §9.1 E16）。
+; 手写维护：不要用编辑器另存（会丢头注释、load_steps 会漂，COMPONENTS.md §9.1 E8）。
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/sensors/Lidar2D.gd" id="1_lidar"]
+
+[node name="Lidar2D" type="Node3D" node_paths=PackedStringArray("debug_points")]
+script = ExtResource("1_lidar")
+debug_points = NodePath("DebugPoints")
+
+[node name="DebugPoints" type="MeshInstance3D" parent="."]
+visible = false

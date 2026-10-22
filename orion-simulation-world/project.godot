@@ -1,7 +1,7 @@
 ; Engine configuration file.
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-21
+; Modified Date ： 2026-10-22
 ;
 ; 手写维护：新增字段请保持分组与顺序，避免编辑器重排产生无关 diff。
 
@@ -11,7 +11,7 @@ config_version=5
 
 config/name="Orion Simulation World"
 config/description="task_30 的 Godot 侧模拟世界（组件清单见 COMPONENTS.md）"
-run/main_scene="res://World.tscn"
+run/main_scene="res://src/scenes/World.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [display]
