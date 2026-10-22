@@ -1,0 +1,55 @@
+; Presented by KeJi
+; Created Date ： 2026-10-21
+; Modified Date ： 2026-10-21
+;
+; Vehicle 组件（Step 4）。节点树与接口见 COMPONENTS.md §4.3。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+; 节点引用必须靠 node_paths=PackedStringArray(...) 才会绑定（COMPONENTS.md §9.1 E16）。
+
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scripts/vehicle/Vehicle.gd" id="1_vehicle"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_placeholder"]
+size = Vector3(0.3, 0.16, 0.24)
+
+[sub_resource type="BoxMesh" id="BoxMesh_body"]
+size = Vector3(0.3, 0.16, 0.24)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_body"]
+albedo_color = Color(0.85, 0.55, 0.15, 1)
+roughness = 0.55
+
+[sub_resource type="BoxMesh" id="BoxMesh_nose"]
+size = Vector3(0.06, 0.1, 0.14)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_nose"]
+albedo_color = Color(0.9, 0.2, 0.15, 1)
+roughness = 0.6
+
+[node name="Vehicle" type="CharacterBody3D" groups=["vehicle"] node_paths=PackedStringArray("body", "collision_shape", "chassis_root", "sensors_root")]
+collision_layer = 4
+collision_mask = 7
+script = ExtResource("1_vehicle")
+body = NodePath("Body")
+collision_shape = NodePath("CollisionShape3D")
+chassis_root = NodePath("Chassis")
+sensors_root = NodePath("Sensors")
+
+[node name="Body" type="MeshInstance3D" parent="."]
+position = Vector3(0, 0.08, 0)
+mesh = SubResource("BoxMesh_body")
+surface_material_override/0 = SubResource("StandardMaterial3D_body")
+
+[node name="Nose" type="MeshInstance3D" parent="Body"]
+position = Vector3(0.15, 0, 0)
+mesh = SubResource("BoxMesh_nose")
+surface_material_override/0 = SubResource("StandardMaterial3D_nose")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+position = Vector3(0, 0.08, 0)
+shape = SubResource("BoxShape3D_placeholder")
+
+[node name="Chassis" type="Node3D" parent="."]
+
+[node name="Sensors" type="Node3D" parent="."]

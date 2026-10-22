@@ -1,0 +1,20 @@
+#Presented by KeJi
+#Created Date ： 2026-10-19
+#Modified Date ： 2026-10-19
+
+# ── Godot 4 引擎缓存 / 导入产物（不应提交）──
+.godot/
+.import/
+/android/
+
+# 导出配置（含本地路径，通常不提交）
+export.cfg
+export_presets.cfg
+
+# 导入的翻译（由 CSV 自动生成）
+*.translation
+
+# C# / Mono（若使用 C# 脚本）
+.mono/
+data_*/
+mono_crash.*.json
