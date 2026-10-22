@@ -73,6 +73,8 @@ nul
 
 # 特定于本项目的忽略项
 Pleiades_Workspace/
+# sim 端到端测试环境（编译产物 + 运行时 .config/Log/Pleiades_Workspace 全落在这里）
+/RobotSim_TestEnv/
 Test_Environment_1/
 Test_Environment_2/
 Test_Environment_3/
@@ -84,3 +86,6 @@ Tool/__pycache__/
 
 # 比赛技术报告（本地撰写，不提交远程）
 /technical report/
+
+# 封控研究（本地撰写，不提交远程）
+/control_research/

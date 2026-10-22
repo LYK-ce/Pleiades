@@ -1,6 +1,6 @@
 #Presented by KeJi
 #Created Date ： 2026-08-30
-#Modified Date ： 2026-08-30
+#Modified Date ： 2026-10-21
 
 [package]
 name = "pleiades-sim"
@@ -27,3 +27,16 @@ async-trait = "0.1"
 # 配置解析
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+
+# 世界链路（task_31 §四.5.1）：WS 客户端
+#   默认特性 = connect + handshake（客户端/服务端都有），默认**不含 TLS**；
+#   绝不能写 default-features = false —— 那会把 connect_async / accept_async 一起关掉。
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde_json = "1.0"
+# 取消令牌 CancellationToken（设计外唯一补充依赖，见 tmp/task31/plan.md R4：
+#   pleiades-base 依赖 tokio-util 但不 re-export，sim 必须自己声明；lock 里已是 0.7.18，零下载）
+# 注：本机 registry 的 tokio-util 0.7.18 **没有 `sync` feature**（lib.rs 里 `pub mod sync;`
+#   是无条件编译），写 `features = ["sync"]` 会直接报 "does not have that feature"，
+#   故按默认特性声明即可拿到 tokio_util::sync::CancellationToken。
+tokio-util = "0.7"

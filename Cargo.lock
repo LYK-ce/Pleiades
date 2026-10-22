@@ -4377,9 +4377,13 @@ name = "pleiades-sim"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "pleiades-base",
  "serde",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
  "toml",
  "tracing",
 ]
