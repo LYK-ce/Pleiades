@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use constants::{MotionState, RPT_SPEED};
 use protocol::{
@@ -93,7 +93,18 @@ impl STM32Device {
                         guard.mag = local_state.mag.clone();
                         guard.z = local_state.z; // 车恒 0（D11：z 保持设备端现状）
                         if let Some(dt) = pending_dt.take() {
+                            let (x0, y0) = (guard.x, guard.y);
                             odometry::accumulate(&mut *guard, dt);
+                            // 排查用（真机偶发位置跳变）：记录本次积分的输入与结果
+                            info!(
+                                "[ODO] dt={dt:.3}s 来了 vx={:.3} vy={:.3} yaw={:.1}° | \
+                                 更新 ({x0:.3},{y0:.3}) -> ({:.3},{:.3})",
+                                guard.vx,
+                                guard.vy,
+                                guard.attitude.yaw.to_degrees(),
+                                guard.x,
+                                guard.y
+                            );
                         }
                         // 不写 guard.rtk_fixed（LG290P 独写）
                     } else {

@@ -53,3 +53,15 @@
 - 轮次：1 / 3
 - 结果：PASS
 - 规划要点：计划已写入 `tmp/task32/plan.md`（391 行）。规划期间我实际运行了基线，并验证了冒烟夹具，`orion-simulation-world/` 一字未改。 **计划要点（4 行）** 1. **改动面**：涉及 5 个文件——`WebSocketManager.gd` 中 `UAV_ALTITUDE_M` 从 2.0 改为 2.5；`Quadrotor.gd` 新增 `ClampAltitude()`、`_physics_process()` 以及 1 秒限流 warn，把宿主车身的世界 z 限制在 `[0, World.AIR_WALL_HEIGHT_M-0.2] = [0, 31.8]`；`check_quadrotor.gd` 把 `SPAWN_WORLD.z` 从 2.0 改为 2.5，并新增 3 项 clamp 断言（45→48）；`check_ws_manager.gd` 的 B5 期望值从 2.0 改为 2.5；`COMPONENTS.md` 按 17 处逐行清单修改，并新增 E25 和 §11 `task_32-3` 行。 2. **关键裁决**：`check_quadrotor` 的白盒 lint 禁止脚本出现 `global_position`（D8），所以 clamp 通过 `global_transform.origin.y` 修改**Vehicle 车身**（不是 Quadrotor 子节点）；备选方案（Vehicle 在 move 后回调）已登记但未采用；`check_pose.gd` 实测只测 UGV（3 处 2.0 是 `BuildPose` 样本），因此不改并说明；回写 task_30 受范围约束，改为记进 COMPONENTS。 3. **审计口径**：带边界正则的 `2.0` 命中 42 行 = 9 行 UAV 语义
+
+## 追加（**非 task_32 范围**）— 真机位置跳变排查：里程计日志
+
+- 背景：两辆静止真车在地面站位置偶发跳变（室内、无 RTK）。只读代码审查结论见
+  `Tool/investigation/pose_jump_report.md`（W3 RTK 未开启 ⇒ 唯一持续写者是 W2 里程计）。
+- 改动（唯一文件 `pleiades-ugv/src/ugv/stm32/mod.rs`）：
+  - `:19` `use tracing::warn;` → `use tracing::{info, warn};`
+  - `:95-107` 在 `odometry::accumulate` 前后各取一次坐标，打一条 `info`；**积分逻辑零改动、无新增分支、无限流**
+  - 日志格式：`[ODO] dt=0.040s 来了 vx=0.012 vy=-0.003 yaw=0.0° | 更新 (64.000,64.000) -> (64.000,64.000)`
+- 验证：`cargo check -p pleiades-ugv` 绿；`cargo test -p pleiades-ugv` **87 passed**（与改前一致）
+- 未做：未部署（`build.sh deploy` 待人类执行）；未改 `odometry.rs`、未动 `pending_dt` 语义、未改 `try_write` 失败 warn
+- 预期日志量：跟随 `RPT_SPEED`（文档 40 ms ≈ 25 行/s，约 10 MB/h）；现场排查用 `grep "\[ODO\]" Log/pleiades.log.*`
