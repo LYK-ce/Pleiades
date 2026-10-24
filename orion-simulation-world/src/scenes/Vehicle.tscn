@@ -1,22 +1,25 @@
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-22
+; Modified Date ： 2026-10-23
 ;
 ; Vehicle 组件（Step 4）。节点树与接口见 COMPONENTS.md §4.3。
+; task_33 Step 3：ModelUGV 改挂 assets/chassis/ugv_chassis.glb（模型 = 碰撞盒，D11）。
+;   占位 BoxMesh/CollisionShape3D 尺寸同步为模型 AABB 0.30 × 0.25 × 0.25，抬升 y = 0.125；
+;   有模型时占位与 Nose 一起隐藏（Vehicle._Mount_Model），物理碰撞盒始终是 CollisionShape3D 这一个。
 ; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
 ; 节点引用必须靠 node_paths=PackedStringArray(...) 才会绑定（COMPONENTS.md §9.1 E16）。
 
 [gd_scene load_steps=9 format=3]
 
 [ext_resource type="Script" path="res://src/vehicle/Vehicle.gd" id="1_vehicle"]
-[ext_resource type="PackedScene" path="res://assets/ugv_x3plus_lowpoly.glb" id="5_model_ugv"]
+[ext_resource type="PackedScene" path="res://assets/chassis/ugv_chassis.glb" id="5_model_ugv"]
 [ext_resource type="PackedScene" path="res://assets/uav_quadrotor_lowpoly.glb" id="6_model_uav"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_placeholder"]
-size = Vector3(0.3, 0.16, 0.24)
+size = Vector3(0.3, 0.25, 0.25)
 
 [sub_resource type="BoxMesh" id="BoxMesh_body"]
-size = Vector3(0.3, 0.16, 0.24)
+size = Vector3(0.3, 0.25, 0.25)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_body"]
 albedo_color = Color(0.85, 0.55, 0.15, 1)
@@ -41,7 +44,7 @@ model_ugv = NodePath("ModelUGV")
 model_uav = NodePath("ModelUAV")
 
 [node name="Body" type="MeshInstance3D" parent="."]
-position = Vector3(0, 0.08, 0)
+position = Vector3(0, 0.125, 0)
 mesh = SubResource("BoxMesh_body")
 surface_material_override/0 = SubResource("StandardMaterial3D_body")
 
@@ -51,7 +54,7 @@ mesh = SubResource("BoxMesh_nose")
 surface_material_override/0 = SubResource("StandardMaterial3D_nose")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-position = Vector3(0, 0.08, 0)
+position = Vector3(0, 0.125, 0)
 shape = SubResource("BoxShape3D_placeholder")
 
 [node name="Chassis" type="Node3D" parent="."]

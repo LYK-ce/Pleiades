@@ -1,11 +1,14 @@
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-22
+; Modified Date ： 2026-10-23
 ;
 ; 差速底盘组件 diff_drive_ugv（Step 5）。节点树与接口见 COMPONENTS.md §4.4。
 ; 根节点 Node3D + DiffDrive.gd（extends ChassisModel）；Wheels/* 是**纯视觉**件，
 ;   不参与物理：碰撞形状只有 Vehicle/CollisionShape3D 一个（由底盘 Configure -> SetBodySize 定尺寸）。
 ; 轮子轴向：CylinderMesh 默认轴 = Y，rotation_degrees=(90,0,0) 把轴转到 Z（横轴）。
+; 摆位（task_33 Step 3）：场景里的占位值 = DiffDrive 的默认参数
+;   wheel_base 0.30 / track_width 0.25 / WHEEL_RADIUS 0.06 → x=±0.15, y=0.06,
+;   z=±0.125；运行期 Configure() 会按生效参数重新摆（_layout_wheels）。
 ; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
 
 [gd_scene load_steps=4 format=3]
@@ -28,25 +31,25 @@ script = ExtResource("1_diff_drive")
 [node name="Wheels" type="Node3D" parent="."]
 
 [node name="WheelFL" type="MeshInstance3D" parent="Wheels"]
-position = Vector3(0.15, 0.06, -0.12)
+position = Vector3(0.15, 0.06, -0.125)
 rotation_degrees = Vector3(90, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("StandardMaterial3D_wheel")
 
 [node name="WheelFR" type="MeshInstance3D" parent="Wheels"]
-position = Vector3(0.15, 0.06, 0.12)
+position = Vector3(0.15, 0.06, 0.125)
 rotation_degrees = Vector3(90, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("StandardMaterial3D_wheel")
 
 [node name="WheelRL" type="MeshInstance3D" parent="Wheels"]
-position = Vector3(-0.15, 0.06, -0.12)
+position = Vector3(-0.15, 0.06, -0.125)
 rotation_degrees = Vector3(90, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("StandardMaterial3D_wheel")
 
 [node name="WheelRR" type="MeshInstance3D" parent="Wheels"]
-position = Vector3(-0.15, 0.06, 0.12)
+position = Vector3(-0.15, 0.06, 0.125)
 rotation_degrees = Vector3(90, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("StandardMaterial3D_wheel")

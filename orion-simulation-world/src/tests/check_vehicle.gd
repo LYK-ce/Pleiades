@@ -1,11 +1,11 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
 # Vehicle 组件自检（Step 4）：场景形态 / 空车稳定 / 装配（底盘 + 传感器）/ 运动 / 位姿 / 边界。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
 #          --script res://src/tests/check_vehicle.gd
-# 期望：total=36 failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR。
+# 期望：total=40 failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR。
 #
 # 决定本文件写法的实测事实（plan.md §2）：
 #   P4  PackedScene.pack() 可以打包"运行时 set_script 的 Node3D"当底盘/传感器替身（不落 .tscn）
@@ -13,6 +13,8 @@
 #   P15 含 await 的辅助函数必须被 await 调用；本文件所有辅助函数都不含 await，await 只内联在 _run
 #   P16 一次 null 解引用会让协程中断、quit() 不执行 → 入口一律先判空，命令一律带 timeout
 #   P18 节点上未知方法是动态的：一律 .get(...) / .call(...) 访问替身与脚本方法
+#   P20 task_33 Step 3：占位尺寸 = 车体模型 AABB（0.30×0.25×0.25，D11）；
+#       mount.pitch 单位度、正 = 抬头 / 负 = 低头、缺省 0（不预置任何角度）
 #   帧数相关断言只用 --fixed-fps 60 下的累计量（30 帧 = 0.5 s），不逐帧比对
 #
 # 注意（GDScript 4.7 类型推断陷阱）：instantiate() / load() 的返回值一律显式标注类型。
@@ -116,6 +118,18 @@ func _run() -> void:
 		origin_detail = "mesh=%s body.y=%.4f shape.y=%.4f half=%.4f" % [mesh_probe.size,
 			body_probe.position.y, shape_probe.position.y, half_h]
 	_check("origin-convention", origin_ok, origin_detail)
+
+	# A6b 占位尺寸（task_33 Step 3）：空车占位与车体模型 AABB 逐轴一致（0.30 × 0.25 × 0.25）
+	var ph_ok := false
+	var ph_detail := "占位缺失"
+	if body_probe != null and shape_probe != null and body_probe.mesh is BoxMesh \
+			and shape_probe.shape is BoxShape3D:
+		var ph_mesh: BoxMesh = body_probe.mesh as BoxMesh
+		var ph_shape: BoxShape3D = shape_probe.shape as BoxShape3D
+		ph_ok = ph_mesh.size.is_equal_approx(Vector3(0.30, 0.25, 0.25)) \
+			and ph_shape.size.is_equal_approx(Vector3(0.30, 0.25, 0.25))
+		ph_detail = "mesh=%s shape=%s" % [ph_mesh.size, ph_shape.size]
+	_check("placeholder-size", ph_ok, ph_detail)
 
 	# A7 树外 instantiate + free：NodePath 解析不依赖场景树
 	var probe2: Node = vehicle_packed.instantiate()
@@ -329,6 +343,46 @@ func _run() -> void:
 
 	if sensor_holder == null:
 		_fatal("sensor-double", "测试替身未挂上，后续断言无法进行")
+		_finish()
+		return
+
+	# A22b/A22c/A22d mount.pitch（task_33 Step 3）：单位度；正 = 抬头、负 = 低头；缺省 0 = 不预置角度。
+	#   语义依据：光轴 = 传感器局部 −Z，rotation.x = pitch（欧拉序 YXZ）。
+	#   三次探针同一 slot（先卸后挂）且都传 rays=360（A23 要读 configured_params）。
+	var pitch_default_ok := false
+	var pitch_default_detail := "缺省挂载失败"
+	var pitch_down_ok := false
+	var pitch_down_detail := "挂载失败"
+	var pitch_up_ok := false
+	var pitch_up_detail := "挂载失败"
+	var s_default: Node3D = vehicle.AttachSensor("lidar_front", sensor_scene,
+		{"x": 0.1, "z": 0.2}, {"rays": 360}) as Node3D
+	if s_default != null:
+		pitch_default_ok = s_default.rotation.x == 0.0 and absf(s_default.rotation.y) < TOL
+		pitch_default_detail = "rot_x=%.6f rot_y=%.6f" % [s_default.rotation.x,
+			s_default.rotation.y]
+	var s_down: Node3D = vehicle.AttachSensor("lidar_front", sensor_scene,
+		{"yaw": 0.0, "pitch": -30.0}, {"rays": 360}) as Node3D
+	if s_down != null:
+		pitch_down_ok = absf(s_down.rotation_degrees.x + 30.0) < 1e-3 \
+			and absf(s_down.rotation.y) < TOL \
+			and absf((-s_down.global_basis.z).y + 0.5) < 1e-3
+		pitch_down_detail = "rot_x=%.2f axis_y=%.4f" % [s_down.rotation_degrees.x,
+			(-s_down.global_basis.z).y]
+	var s_up: Node3D = vehicle.AttachSensor("lidar_front", sensor_scene,
+		{"pitch": 15.0}, {"rays": 360}) as Node3D
+	if s_up != null:
+		var want_up: float = sin(deg_to_rad(15.0))
+		pitch_up_ok = absf((-s_up.global_basis.z).y - want_up) < 1e-3
+		pitch_up_detail = "axis_y=%.4f want=%.4f" % [(-s_up.global_basis.z).y, want_up]
+	_check("mount-pitch-default", pitch_default_ok, pitch_default_detail)
+	_check("mount-pitch-down", pitch_down_ok, pitch_down_detail)
+	_check("mount-pitch-up", pitch_up_ok, pitch_up_detail)
+	# 挂回无 pitch 的 mount：A23 读 configured_params.rays、A24 要求 slots.size()==1、A25 抽样。
+	sensor_holder = vehicle.AttachSensor("lidar_front", sensor_scene,
+		{"x": 0.1, "y": 0.0, "z": 0.2, "yaw": 0.0}, {"rays": 360}) as Node3D
+	if sensor_holder == null:
+		_fatal("sensor-remount", "pitch 探针后重挂失败，后续断言无法进行")
 		_finish()
 		return
 

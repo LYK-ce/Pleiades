@@ -1,18 +1,26 @@
 # Presented by KeJi
 # Created Date ： 2026-10-22
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
-# 低模外观自检（Step 2）：模型静态挂在 Vehicle.tscn 上 / 显隐正确 / 尺寸朝向正确。
+# 低模外观自检（Step 2 + task_33 Step 3）：模型静态挂在 Vehicle.tscn / 两个传感器场景上，
+# 显隐正确 / 尺寸朝向正确 / 模型 = 碰撞盒 / 传感器模型零碰撞。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
 #          --script res://src/tests/check_models.gd
-# 期望：total=16 failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR。
+# 期望：total=24 failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR。
 #
 # 决定本文件写法的实测事实（plan.md §0 / §3）：
-#   - glb 里**没有**名字含 Nose 的节点：红色车头是 Body 这个 MeshInstance3D 的第 2 个
-#     surface（材质名 UGV_NoseRed / UAV_NoseRed），所以朝向断言必须"节点名 + 材质名"双通道。
-#   - UGV 模型在 Vehicle 坐标系的整体 AABB = P(-0.21, 0.00, -0.14) S(0.42, 0.16, 0.28)；
+#   - 旧 UGV 低模（ugv_x3plus_lowpoly.glb）里**没有**名字含 Nose 的节点：红色车头是 Body 这个
+#     MeshInstance3D 的第 2 个 surface（材质名 UGV_NoseRed / UAV_NoseRed），所以 UAV 的朝向断言
+#     仍走"节点名 + 材质名"双通道。task_33 Step 3 起 ModelUGV 改用 assets/chassis/ugv_chassis.glb，
+#     它的车头是**独立节点 NosePlate**（新 glb 没有 NoseRed 材质通道）→ UGV 命中走 by-name。
+#   - UGV 模型在 Vehicle 坐标系的整体 AABB = P(-0.15, 0.00, -0.13) S(0.30, 0.25, 0.25)（= 碰撞盒）；
 #     UAV = P(-0.32, 0.00, -0.32) S(0.64, 0.14, 0.64)。
-#   - 节点总数：空车 22、装一个底盘 28（模型节点是静态实例，装配只改 visible）。
+#   - 传感器模型（task_33 Step 3，纯视觉、无碰撞）：挂在 Lidar2D/CameraSensor 场景的 Body 上，
+#     Body 是 glb 实例根（Node3D），子弹节点才是 MeshInstance3D（E27 见 COMPONENTS.md §9.1）。
+#     雷达 AABB（holder 系）= P(-0.04, 0.00, -0.04) S(0.08, 0.054, 0.08)，扫描面 = 原点；
+#     相机 AABB（Body 系）= P(-0.055, -0.021, -0.015) S(0.055, 0.036, 0.030)，镜片前表面 = 光心。
+#   - 节点总数（实测）：空车 25、装一个底盘 31（ugv_chassis 模型子树 9 个节点；
+#     模型节点是静态实例，装配只改 visible，所以 M7/M8 的 _count_nodes 基线恒定）。
 #   - mi.get_aabb() 是 **mesh 局部 AABB**（不含节点自身旋转/缩放）→ 必须 8 角点过变换。
 #   - 树外读 global_transform 会 ERROR（P8）→ AABB / 朝向断言只能在 add_child 之后。
 #   - _ensure_refs() 会在 _ready 里按名补齐引用 → E16 真绑定只能用**树外探针**证明。
@@ -24,21 +32,35 @@
 extends SceneTree
 
 const VEHICLE_SCENE := "res://src/scenes/Vehicle.tscn"
-const UGV_MODEL_SCENE := "res://assets/ugv_x3plus_lowpoly.glb"
+const UGV_MODEL_SCENE := "res://assets/chassis/ugv_chassis.glb"
 const UAV_MODEL_SCENE := "res://assets/uav_quadrotor_lowpoly.glb"
+const LIDAR_SCENE := "res://src/scenes/sensors/Lidar2D.tscn"
+const CAMERA_SCENE := "res://src/scenes/sensors/CameraSensor.tscn"
+const LIDAR_GLB := "res://assets/sensors/lidar_tmini.glb"
+const CAMERA_GLB := "res://assets/sensors/camera_module.glb"
 const UGV_CHASSIS := "diff_drive_ugv"
 const UAV_CHASSIS := "quadrotor_uav"
 
 ## M3/M5：模型整体 AABB 期望尺寸（Vehicle 坐标系，米）+ 容差。
-const UGV_SIZE := Vector3(0.42, 0.16, 0.28)
+const UGV_SIZE := Vector3(0.30, 0.25, 0.25)
 const UAV_SIZE_XZ := 0.64
 const UAV_SIZE_Y_MIN := 0.11
 const UAV_SIZE_Y_MAX := 0.15
 const TOL := 0.01
 
 ## M6：碰撞形状尺寸必须仍是底盘参数（模型只是外观层，一行物理都不许跟着变）。
-const UGV_HULL := Vector3(0.30, 0.16, 0.24)
+## task_33 Step 3 起底盘几何默认值 = 模型 AABB（D11：模型 = 碰撞盒）。
+const UGV_HULL := Vector3(0.30, 0.25, 0.25)
 const UAV_HULL := Vector3(0.40, 0.12, 0.40)
+
+## S1~S7：传感器模型（task_33 Step 3）。模型根是 glb 实例（Node3D），子节点才是 MeshInstance3D。
+const CAMERA_MODEL_YAW_DEG := 90.0      # 模型 +X（镜头）→ 传感器 −Z（光轴）的补偿角
+const SENSOR_TOL := 1.0e-3              # 传感器模型 AABB / 原点的绝对容差（米）
+const LIDAR_CAP := Vector3(0.09, 0.06, 0.09)   # step.md 尺寸上限（≤）
+const CAMERA_CAP := Vector3(0.06, 0.04, 0.04)  # step.md 尺寸上限（≤）
+const CAMERA_LENS_X := 0.0              # 镜片前表面 = 光心（max.x ≈ 0）
+const CAMERA_BRACKET_Y := -0.021        # 支架底面 y（机身下方）
+const SENSOR_MESH_COUNT := 4            # 两件传感器模型都是 4 个 mesh（一对象一材质）
 
 ## M2/M5：Wheels / Rotors 下的视觉件个数（全部应被模型接管而隐藏）。
 const EXPECTED_MESH_COUNT := 4
@@ -150,6 +172,15 @@ func _run() -> void:
 	_check("M6-ugv-hull-box", ugv_box != null and ugv_box.size.is_equal_approx(UGV_HULL),
 		"size=%s" % [ugv_box.size if ugv_box != null else shape_node.shape])
 
+	# M3b 模型 = 碰撞盒（D11，task_33 Step 3）：车体模型 AABB 与 BoxShape3D 的 AABB 逐轴相等。
+	#   两者都在 Vehicle 局部系；BoxShape3D 没有 position，AABB 原点 = CollisionShape3D.position - size/2。
+	var hull_aabb: AABB = AABB()
+	if ugv_box != null:
+		hull_aabb = AABB(shape_node.position - ugv_box.size * 0.5, ugv_box.size)
+	_check("M3b-ugv-model-equals-hull", ugv_box != null
+		and _aabb_equal(ugv_aabb, hull_aabb, SENSOR_TOL),
+		"model=%s hull=%s" % [_fmt(ugv_aabb), _fmt(hull_aabb)])
+
 	# ============================================================ 3. 幂等（M7）：同一底盘再装一次
 	var nodes_before: int = _count_nodes(vehicle)
 	var children_before: int = chassis_root.get_child_count()
@@ -233,7 +264,124 @@ func _run() -> void:
 		cycle_detail, model_ugv.visible, model_uav.visible, body.visible,
 		_count_nodes(vehicle)])
 
-	# ============================================================ 6. 清理（P12：退出时无 ERROR）
+	# ============================================================ 6. 传感器模型接入（S1~S7）
+	# 三件 glb 都已在 Step 1 的 check_sensor_models 锁过资产层；这里锁"场景里怎么接的"。
+	var lidar_packed: PackedScene = load(LIDAR_SCENE) as PackedScene
+	var camera_packed: PackedScene = load(CAMERA_SCENE) as PackedScene
+	if lidar_packed == null or camera_packed == null:
+		_fatal("S0-sensor-scenes", "lidar=%s camera=%s" % [lidar_packed, camera_packed])
+		vehicle.queue_free()
+		await process_frame
+		_finish()
+		return
+	var lidar_probe: Node3D = lidar_packed.instantiate() as Node3D
+	var camera_probe: Node3D = camera_packed.instantiate() as Node3D
+	if lidar_probe != null:
+		root.add_child(lidar_probe)
+	if camera_probe != null:
+		root.add_child(camera_probe)
+	await process_frame
+
+	# S1 雷达场景：Body = glb 实例、transform 恒 identity、DebugPoints 仍在且默认隐藏
+	var lidar_body: Node3D = null
+	var lidar_debug: MeshInstance3D = null
+	if lidar_probe != null:
+		lidar_body = lidar_probe.get_node_or_null("Body") as Node3D
+		lidar_debug = lidar_probe.get_node_or_null("DebugPoints") as MeshInstance3D
+	_check("S1-lidar-body-mount", lidar_body != null
+		and lidar_body.scene_file_path == LIDAR_GLB
+		and lidar_body.transform.is_equal_approx(Transform3D.IDENTITY)
+		and lidar_debug != null and not lidar_debug.visible,
+		"body=%s path=%s xf=%s debug=%s" % [lidar_body,
+			lidar_body.scene_file_path if lidar_body != null else "null",
+			lidar_body.transform if lidar_body != null else "null", lidar_debug != null])
+
+	# S2 雷达模型 AABB（holder 局部系）：尺寸 ≤ 上限、扫描面 = 原点（min.y≈0、center.xz≈0）
+	var lidar_aabb: AABB = _subtree_aabb(_space_of(lidar_probe), lidar_body)
+	var lidar_center: Vector3 = lidar_aabb.get_center()
+	var lidar_meshes: int = _count_meshes(lidar_body)
+	_check("S2-lidar-model-aabb", lidar_meshes == SENSOR_MESH_COUNT
+		and _aabb_size_le(lidar_aabb, LIDAR_CAP, SENSOR_TOL)
+		and absf(lidar_aabb.position.y) <= SENSOR_TOL
+		and absf(lidar_center.x) <= SENSOR_TOL and absf(lidar_center.z) <= SENSOR_TOL,
+		"%s meshes=%d" % [_fmt(lidar_aabb), lidar_meshes])
+
+	# S3 相机场景：Body = glb 实例、不写 position（光心 = 原点）、绕 Y +90° 把镜头 +X 转到光轴 −Z
+	var camera_body: Node3D = null
+	if camera_probe != null:
+		camera_body = camera_probe.get_node_or_null("Body") as Node3D
+	var cam_rot: Vector3 = camera_body.rotation_degrees if camera_body != null else Vector3.ZERO
+	_check("S3-camera-body-mount", camera_body != null
+		and camera_body.scene_file_path == CAMERA_GLB
+		and camera_body.position.is_equal_approx(Vector3.ZERO)
+		and absf(cam_rot.x) < 1e-4 and absf(cam_rot.z) < 1e-4
+		and absf(cam_rot.y - CAMERA_MODEL_YAW_DEG) < 1e-4,
+		"rot=(%.2f, %.2f, %.2f)" % [cam_rot.x, cam_rot.y, cam_rot.z])
+
+	# S4 相机模型 AABB（Body 自身局部系 = 把 90° 旋掉）：尺寸 ≤ 上限、镜片前表面 = 光心（max.x≈0）、
+	#    支架在机身下方（min.y≈-0.021）；且模型 +X 与光轴（-holder.basis.z）同向。
+	var cam_aabb: AABB = _subtree_aabb(_space_of(camera_body), camera_body)
+	var cam_meshes: int = _count_meshes(camera_body)
+	var cam_axis_dot: float = 0.0
+	if camera_body != null and camera_probe != null:
+		cam_axis_dot = camera_body.global_basis.x.normalized().dot(
+			(-camera_probe.global_basis.z).normalized())
+	_check("S4-camera-optic-origin", cam_meshes == SENSOR_MESH_COUNT
+		and _aabb_size_le(cam_aabb, CAMERA_CAP, SENSOR_TOL)
+		and absf(cam_aabb.end.x - CAMERA_LENS_X) <= SENSOR_TOL
+		and absf(cam_aabb.position.y - CAMERA_BRACKET_Y) <= SENSOR_TOL
+		and cam_axis_dot > 0.9999,
+		"%s meshes=%d dot=%.4f" % [_fmt(cam_aabb), cam_meshes, cam_axis_dot])
+
+	# S5~S7 真挂到车上（雷达在车顶、相机在车鼻；pitch 只有相机给 -30）
+	var lidar_attached: Node3D = vehicle.AttachSensor("lidar_top", lidar_packed,
+		{"x": -0.05, "z": 0.25}) as Node3D
+	var camera_attached: Node3D = vehicle.AttachSensor("camera_front", camera_packed,
+		{"x": 0.15, "z": 0.12, "pitch": -30.0}) as Node3D
+	await process_frame
+
+	# S5 传感器子树里一个物理节点都不许有（E27：否则雷达扫到自己、相机被自己的壳挡）
+	var lidar_physics: int = _count_physics(lidar_attached)
+	var camera_physics: int = _count_physics(camera_attached)
+	_check("S5-sensor-no-collision", lidar_attached != null and camera_attached != null
+		and lidar_physics == 0 and camera_physics == 0,
+		"lidar=%d camera=%d" % [lidar_physics, camera_physics])
+
+	# S6 pitch=-30 ⇒ 低头：rotation.x≈-30、rotation.y=0（yaw 未给）、光轴 y≈-0.5，模型仍朝光轴
+	var cam_axis: Vector3 = -camera_attached.global_basis.z if camera_attached != null else Vector3.ZERO
+	cam_axis = cam_axis.normalized()
+	var cam_model_dir: Vector3 = Vector3.ZERO
+	if camera_attached != null:
+		var cam_child: Node3D = camera_attached.get_node_or_null("Body") as Node3D
+		if cam_child != null:
+			cam_model_dir = cam_child.global_basis.x.normalized()
+	var cam_rot_x: float = camera_attached.rotation_degrees.x if camera_attached != null else 0.0
+	var cam_rot_y: float = camera_attached.rotation.y if camera_attached != null else 1.0
+	_check("S6-sensor-pitch-applied", camera_attached != null
+		and absf(cam_rot_x + 30.0) < 1e-3 and absf(cam_rot_y) < 1e-6
+		and absf(cam_axis.y + 0.5) < 1e-3 and cam_model_dir.dot(cam_axis) > 0.9999,
+		"rot_x=%.2f axis=(%.3f, %.3f, %.3f)" % [cam_rot_x, cam_axis.x, cam_axis.y, cam_axis.z])
+
+	# S7 雷达 mount 不带 pitch ⇒ 不预置任何角度（rotation.x 精确 0），扫描面保持水平
+	var lidar_plane_y: float = 0.0
+	var lidar_rot_x: float = 0.0
+	if lidar_attached != null:
+		lidar_rot_x = lidar_attached.rotation.x
+		lidar_plane_y = (lidar_attached.global_basis * Vector3(0.0, 0.0, 1.0)).y
+	_check("S7-lidar-pitch-default", lidar_attached != null and lidar_rot_x == 0.0
+		and absf(lidar_plane_y) < 1e-9,
+		"rot_x=%.4f plane_y=%.6f" % [lidar_rot_x, lidar_plane_y])
+
+	# 传感器探针出树（同帧释放：先 remove 再 free，避免 "already has parent" 类告警）
+	if lidar_probe != null:
+		root.remove_child(lidar_probe)
+		lidar_probe.queue_free()
+	if camera_probe != null:
+		root.remove_child(camera_probe)
+		camera_probe.queue_free()
+	await process_frame
+
+	# ============================================================ 7. 清理（P12：退出时无 ERROR）
 	vehicle.queue_free()
 	await process_frame
 	await process_frame
@@ -366,6 +514,65 @@ func _fmt_hits(hits: Array[Dictionary]) -> String:
 func _fmt(a: AABB) -> String:
 	return "P(%.2f, %.2f, %.2f) S(%.2f, %.2f, %.2f)" % [a.position.x, a.position.y,
 		a.position.z, a.size.x, a.size.y, a.size.z]
+
+
+## 某节点自身局部系（= 世界变换的逆）；null → IDENTITY（断言会红，不崩）。
+func _space_of(node: Node3D) -> Transform3D:
+	if node == null:
+		return Transform3D.IDENTITY
+	return node.global_transform.affine_inverse()
+
+
+## 子树（含自身）在 space 坐标系下的整体 AABB；无 mesh = 零点零尺寸（断言据此 FAIL）。
+func _subtree_aabb(space: Transform3D, root_node: Node) -> AABB:
+	var out: AABB = AABB()
+	if root_node == null:
+		return out
+	var first: bool = true
+	for mi: MeshInstance3D in _collect_meshes(root_node):
+		var box: AABB = _aabb_of_mesh_in(space, mi)
+		if first:
+			out = box
+			first = false
+		else:
+			out = out.merge(box)
+	return out
+
+
+## AABB 逐轴相等（位置 + 尺寸，绝对容差）—— 断言"模型 = 碰撞盒"用。
+func _aabb_equal(a: AABB, b: AABB, tol: float) -> bool:
+	for axis in range(3):
+		if absf(a.position[axis] - b.position[axis]) > tol:
+			return false
+		if absf(a.size[axis] - b.size[axis]) > tol:
+			return false
+	return true
+
+
+## AABB 尺寸逐轴 ≤ 上限（step.md 的"尺寸上限"口径）。
+func _aabb_size_le(a: AABB, cap: Vector3, tol: float) -> bool:
+	for axis in range(3):
+		if a.size[axis] > cap[axis] + tol:
+			return false
+	return true
+
+
+## 物理节点计数（E27：传感器模型必须是 0）。
+func _count_physics(node: Node) -> int:
+	if node == null:
+		return 0
+	var n: int = 0
+	if node is CollisionShape3D or node is CollisionPolygon3D \
+			or node is PhysicsBody3D or node is Area3D:
+		n += 1
+	for child: Node in node.get_children():
+		n += _count_physics(child)
+	return n
+
+
+## 子树里 MeshInstance3D 个数（glb 一个对象一个 mesh，用来证明模型真的实例化了）。
+func _count_meshes(node: Node) -> int:
+	return _collect_meshes(node).size()
 
 
 # ================================================================ 树遍历（无 await）

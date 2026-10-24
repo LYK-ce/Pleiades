@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
 # 底盘目录 ChassisCatalog（COMPONENTS.md §7.6）：chassis 名 -> 场景路径 / 默认参数。
 #   全静态、无状态副作用；被 Vehicle._resolve_chassis_scene() 与 Step 6 的 manager 共用。
@@ -26,8 +26,8 @@ const DEFAULTS := {
 		"max_speed": 1.5,
 		"max_turn_rate": 90.0,
 		"wheel_base": 0.30,
-		"track_width": 0.24,
-		"height": 0.16,
+		"track_width": 0.25,
+		"height": 0.25,
 	},
 	"quadrotor_uav": {
 		"max_speed": 2.0,

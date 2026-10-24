@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
 # DiffDrive 差速底盘自检（Step 5）：场景形态 / 目录与装配 / 运动语义 / 撞墙会停 / 边界与白盒。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
@@ -8,8 +8,10 @@
 # 期望：failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR（COMPONENTS.md §11 Step 5）。
 #
 # 决定本文件写法的实测事实（plan.md §2.2）：
-#   P3  真实 World.tscn 里 0.30 m 长的车身从 world x=126.5 恒速东进，停在 godot x=127.3499
-#       （车头 127.4999，墙面 127.5）→ "撞墙会停" 用**位置**断言，不用速度。
+#   P3  真实 World.tscn 里 0.30 m 长的车身从 world x=126.5 恒速东进，实测停在 godot
+#       x=127.3375（车头 127.4875，墙面 127.5）→ "撞墙会停" 用**位置**断言，不用速度。
+#       task_33 Step 3 复核：车体截面 0.16/0.24 → 0.25/0.25 后停位**逐字相同**（4 组尺寸实测
+#       都是 127.337524）——撞墙是 x 向面接触，x 向尺寸没变（仍 0.30），所以 WANT_WALL_X 不动。
 #   P4  move_and_slide() 撞墙后自己把 velocity 归零 → velocity≈0 不能当撞墙判据。
 #   P5  CylinderMesh 只有 top_radius / bottom_radius / height（没有 radius）。
 #   P6  CharacterBody3D.MOTION_MODE_GROUNDED 是默认值 → 必须先置 FLOATING 再断言被改回。
@@ -47,7 +49,7 @@ const WALL_X := 127.5
 const WANT_FWD_60 := 1.1375
 const WANT_FWD_15 := 0.10
 const WANT_TURN_60 := 1.1912
-## 撞墙后的停位与倒车位移（P3 实测 + 解析）。
+## 撞墙后的停位与倒车位移（P3 实测 + 解析）。±0.05 覆盖实测 127.337524，与车体截面无关。
 const WANT_WALL_X := 127.35
 const WANT_BACK_30 := 0.3875
 
@@ -55,8 +57,8 @@ const DEFAULT_PARAMS := {
 	"max_speed": 1.5,
 	"max_turn_rate": 90.0,
 	"wheel_base": 0.30,
-	"track_width": 0.24,
-	"height": 0.16,
+	"track_width": 0.25,
+	"height": 0.25,
 }
 
 ## A35 白盒 lint：三个底盘脚本里**不允许**出现的符号（越界 / 违反 D8 / §9.1）。
@@ -120,11 +122,11 @@ func _run() -> void:
 				cyl.top_radius, cyl.height, wheel.rotation_degrees.x]
 	_check("wheels-shape", wheels_ok, wheels_detail)
 
-	# A4 默认摆位（wheel_base=0.30 / track_width=0.24，前 +X、右 +Z）
+	# A4 默认摆位（wheel_base=0.30 / track_width=0.25，前 +X、右 +Z）
 	var layout_ok := wheels != null
 	var layout_detail := ""
-	var want_pos := [Vector3(0.15, 0.06, -0.12), Vector3(0.15, 0.06, 0.12),
-		Vector3(-0.15, 0.06, -0.12), Vector3(-0.15, 0.06, 0.12)]
+	var want_pos := [Vector3(0.15, 0.06, -0.125), Vector3(0.15, 0.06, 0.125),
+		Vector3(-0.15, 0.06, -0.125), Vector3(-0.15, 0.06, 0.125)]
 	if wheels != null:
 		for i in range(WHEEL_NAMES.size()):
 			var wheel: Node3D = wheels.get_node_or_null(WHEEL_NAMES[i]) as Node3D
@@ -236,10 +238,10 @@ func _run() -> void:
 	if body != null and shape != null and body.mesh is BoxMesh and shape.shape is BoxShape3D:
 		var box: BoxMesh = body.mesh as BoxMesh
 		var shape_box: BoxShape3D = shape.shape as BoxShape3D
-		size_ok = box.size.is_equal_approx(Vector3(0.30, 0.16, 0.24)) \
-			and shape_box.size.is_equal_approx(Vector3(0.30, 0.16, 0.24)) \
-			and absf(body.position.y - 0.08) < 1e-4 \
-			and absf(shape.position.y - 0.08) < 1e-4
+		size_ok = box.size.is_equal_approx(Vector3(0.30, 0.25, 0.25)) \
+			and shape_box.size.is_equal_approx(Vector3(0.30, 0.25, 0.25)) \
+			and absf(body.position.y - 0.125) < 1e-4 \
+			and absf(shape.position.y - 0.125) < 1e-4
 		size_detail = "mesh=%s shape=%s body.y=%.4f shape.y=%.4f" % [box.size,
 			shape_box.size, body.position.y, shape.position.y]
 	_check("body-shape", size_ok, size_detail)
@@ -247,7 +249,7 @@ func _run() -> void:
 	# A13 参数合并 + 轮子按自定义尺寸重新摆位
 	var merged: Dictionary = vehicle.GetChassisParams()
 	var merge_ok := absf(float(merged.get("max_speed", 0.0)) - 1.2) < TOL \
-		and absf(float(merged.get("track_width", 0.0)) - 0.24) < TOL \
+		and absf(float(merged.get("track_width", 0.0)) - 0.25) < TOL \
 		and absf(float(merged.get("max_turn_rate", 0.0)) - 90.0) < TOL
 	var applied_custom: bool = vehicle.ApplyChassis(CHASSIS_NAME,
 		{"wheel_base": 0.40, "track_width": 0.20}, null)

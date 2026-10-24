@@ -1,0 +1,43 @@
+; Presented by KeJi
+; Created Date ： 2026-10-23
+; Modified Date ： 2026-10-23
+;
+; 传感器组件 camera（task_33 Step 2）。节点树与接口见 COMPONENTS.md §4.8。
+; 根节点 Node3D：position / rotation 由挂载方（Step 3 的 Vehicle.AttachSensor）写入，本场景不写死。
+; Viewport 必须 own_world_3d=false（共享父视口的 World3D，否则渲空世界，§9.1 E26）。
+; render_target_update_mode=0（UPDATE_DISABLED）：只在 Capture_Jpeg() 里置 UPDATE_ONCE，绝不每帧渲。
+; Lens 不写 position（= 原点）：本场景的"光心"就是根节点原点，Lens 的世界变换由
+;   CameraSensor._Sync_View_Transform() 在每次抓拍前写入（SubViewport 会断掉 Node3D 继承链，E26）。
+; 节点引用必须靠 node_paths=PackedStringArray(...)（§9.1 E16）。
+; 参数不走场景：默认值唯一来源 = CameraSensor.gd 的 DEFAULT_* 常量（Configure() 运行时覆盖）。
+; 手写维护：不要用编辑器另存（会丢头注释、load_steps 会漂，§9.1 E8）。
+;
+; task_33 Step 3：Body = assets/sensors/camera_module.glb 的实例（**纯视觉**，不得带任何碰撞体，§9.1 E27）。
+;   rotation_degrees=(0,90,0) 的理由：Camera3D 看**局部 −Z**（光轴），而 camera_module.glb 的镜头朝 +X；
+;   绕 Y 转 +90° 把模型 +X 精确映到 −Z（实测 basis*(1,0,0) = (0,0,-1)）。写 -90° 会让镜头朝车尾。
+;   模型整个落在 z ∈ [0, 0.055]（光心之后），near = 0.05 在光心之前 → 相机拍不到自己的壳。
+;   不写 position：本场景的"光心"= 根节点原点（Lens 不写 position，A4-lens-node 锁这一点）。
+
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://src/sensors/CameraSensor.gd" id="1_camera_sensor"]
+[ext_resource type="PackedScene" path="res://assets/sensors/camera_module.glb" id="2_camera_body"]
+
+[node name="CameraSensor" type="Node3D" node_paths=PackedStringArray("viewport", "lens")]
+script = ExtResource("1_camera_sensor")
+viewport = NodePath("Viewport")
+lens = NodePath("Viewport/Lens")
+
+[node name="Body" parent="." instance=ExtResource("2_camera_body")]
+rotation_degrees = Vector3(0, 90, 0)
+
+[node name="Viewport" type="SubViewport" parent="."]
+own_world_3d = false
+size = Vector2i(1280, 720)
+render_target_update_mode = 0
+
+[node name="Lens" type="Camera3D" parent="Viewport"]
+current = true
+fov = 70.0
+near = 0.05
+far = 200.0

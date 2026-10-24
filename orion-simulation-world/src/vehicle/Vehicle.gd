@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
 # Vehicle 组件（task_30 §4.1 D11 / COMPONENTS.md §4.3）：avatar 的"身体"。
 #   本身是 CharacterBody3D（不是 Node3D 容器）；位置更新在世界侧（D8），
@@ -146,7 +146,10 @@ func ApplyChassis(chassis_name: String, params: Dictionary = {},
 
 
 ## 挂传感器：slot 归一化后作为节点名；同 slot 重挂 = 先卸后挂（同帧即可）。
-## mount = {x, y, z, yaw}，**车体局部坐标 + 世界轴向**（x 前 / y 右 / z 高 / yaw 绕 z）。
+## mount = {x, y, z, yaw, pitch?}，**车体局部坐标 + 世界轴向**（x 前 / y 右 / z 高 / yaw 绕 z）。
+##   pitch（task_33 Step 3，可选）：单位 = 度（与 yaw 同口径，内部 deg_to_rad）；缺省 0，
+##   **不预置任何角度**。语义 = 绕车体横轴抬/低头：**正 = 抬头、负 = 低头**
+##   （光轴 = 传感器局部 −Z，实测 pitch=-30° → 光轴 y = -0.5）。
 func AttachSensor(slot: String, sensor_scene: PackedScene, mount: Dictionary = {},
 		params: Dictionary = {}) -> Node:
 	var key := _normalize_slot(slot)
@@ -174,7 +177,11 @@ func AttachSensor(slot: String, sensor_scene: PackedScene, mount: Dictionary = {
 	# mount 外参：车体局部 + 世界轴向，换算只经 WorldTransform（唯一入口）。
 	holder.position = WorldTransform.PosToGodot(Vector3(
 		float(mount.get("x", 0.0)), float(mount.get("y", 0.0)), float(mount.get("z", 0.0))))
-	holder.rotation.y = WorldTransform.YawToGodot(float(mount.get("yaw", 0.0)))
+	# pitch 可选（度，缺省 0 = 不预置任何角度）：绕车体横向轴（Godot X）抬/低头。
+	#   符号：正 = 抬头、负 = 低头（光轴 = 局部 −Z；实测 rotation.x=-30° → -basis.z.y=-0.5）。
+	#   欧拉序 YXZ：先按 yaw 转车体航向，再绕"已转 yaw 的横轴"俯仰；|pitch|<90° 时 rotation.y 仍 = -yaw。
+	holder.rotation = Vector3(deg_to_rad(float(mount.get("pitch", 0.0))),
+		WorldTransform.YawToGodot(float(mount.get("yaw", 0.0))), 0.0)
 	if holder.has_method("Configure"):
 		holder.call("Configure", params)
 	_sensors[key] = holder

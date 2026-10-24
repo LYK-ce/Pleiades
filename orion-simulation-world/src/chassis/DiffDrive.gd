@@ -1,9 +1,14 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-23
 #
 # 差速底盘 diff_drive_ugv（Step 5 / COMPONENTS.md §4.4）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED（D3）+ 差速运动学 + 世界侧速度环。
+#
+# 几何默认值（D11：模型 = 碰撞盒，task_33 Step 3）：wheel_base/track_width/height 不是拍脑袋，
+#   而是外观模型 assets/chassis/ugv_chassis.glb 的 AABB → 0.30 × 0.25 × 0.25（米），
+#   于是 ApplyBodySize(Vector3(wheel_base, height, track_width)) 生成的 BoxShape3D 与模型逐轴相等。
+#   车体截面从 0.16/0.24 变成 0.25/0.25 是**有意的行为变更**：贴墙余量/绕行余量会变。
 #
 # 控制接口与真机一致（§6.3-1）：只吃 motion_cmd{action, speed(百分比)}，
 #   速度环在底盘内部跑 —— sim 侧的控制器组件与真机完全相同。
@@ -39,8 +44,8 @@ const WHEEL_NAMES := ["WheelFL", "WheelFR", "WheelRL", "WheelRR"]
 var _max_speed := 1.5              # m/s
 var _max_turn_rate := PI * 0.5     # rad/s（= 90 °/s）
 var _wheel_base := 0.30            # m（纵向，X）
-var _track_width := 0.24           # m（横向，Z）
-var _height := 0.16                # m
+var _track_width := 0.25           # m（横向，Z）= 模型 AABB z
+var _height := 0.25                # m = 模型 AABB y（D11）
 
 # 速度环状态（世界侧）：当前值与目标值，按加速度上限斜坡逼近
 var _speed := 0.0                  # 当前线速度（局部 +X 正向，m/s）
@@ -60,8 +65,8 @@ func GetDefaultParams() -> Dictionary:
 		"max_speed": 1.5,
 		"max_turn_rate": 90.0,
 		"wheel_base": 0.30,
-		"track_width": 0.24,
-		"height": 0.16,
+		"track_width": 0.25,
+		"height": 0.25,
 	}
 
 
@@ -71,8 +76,8 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 	_max_speed = maxf(GetParam("max_speed", 1.5), 0.0)
 	_max_turn_rate = maxf(RateToRad(GetParam("max_turn_rate", 90.0)), 0.0)
 	_wheel_base = maxf(GetParam("wheel_base", 0.30), MIN_SIZE)
-	_track_width = maxf(GetParam("track_width", 0.24), MIN_SIZE)
-	_height = maxf(GetParam("height", 0.16), MIN_SIZE)
+	_track_width = maxf(GetParam("track_width", 0.25), MIN_SIZE)
+	_height = maxf(GetParam("height", 0.25), MIN_SIZE)
 	# 换底盘不继承旧速度：状态一律清零
 	_speed = 0.0
 	_yaw_rate = 0.0
