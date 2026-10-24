@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-24
 
 #![allow(non_snake_case)]
 
@@ -43,6 +43,15 @@
 //!   无雷达 / 未连世界 → `None` → `on_tick` 跳过急停（真机 `lidar: None` 同语义）
 //! - 急停**每 tick 复核**、不锁存；触发时 `Stop()` + `ExecuteState = Idle` + **保留 goal**（供绕行）
 
+// 设备能力注册（task_34 Step 4）：`CameraSimCap` 实现 base 的 `DeviceCapability`。
+//
+// 为什么用 `#[path]` 而不在 `sim/mod.rs` 里加一行 `pub mod device_cap;`：
+// 本 step 的允许清单里没有 `sim/mod.rs`（只有 `sim/device_cap.rs` 与 `sim/sensors/`）。
+// `#[path]` 相对**本文件所在目录**（`src/sim/`）解析 → `src/sim/device_cap.rs`。
+// 注意：模块的规范路径因此是 `crate::sim::sim_handler::device_cap`，别处引用要写全路径。
+#[path = "device_cap.rs"]
+pub mod device_cap;
+
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
@@ -52,6 +61,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use pleiades_base::network::NodeHandle;
+use pleiades_base::orchestrator::{Capabilities, DeviceCapability};
 use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
@@ -62,9 +72,12 @@ use crate::sim::chassis::pose_ingest::PoseHistory;
 use crate::sim::emergency_stop::{self, Check_Emergency_Stop};
 use crate::sim::executor::DecisionExecutor;
 use crate::sim::goal::{GoalService, ARRIVAL_THRESHOLD_M};
+use crate::sim::sensors::camera::CameraSensor;
 use crate::sim::sensors::lidar::mapping_task::MappingCtx;
 use crate::sim::sensors::lidar::LidarSensor;
 use crate::sim::sensors::{Sensor, SensorSet};
+
+use self::device_cap::CameraSimCap;
 use crate::world_link::{
     MotionSender, WorldConsumers, WorldLink, WorldLinkHandle, MOTION_CHANNEL_CAP,
 };
@@ -97,6 +110,10 @@ pub struct SimDeviceHandler {
     inner: OnceLock<SimInner>,
     /// 世界链路句柄：`None` = 未配置 / `enabled = false`（此时门闩不生效，决策链照跑）
     world: OnceLock<WorldLinkHandle>,
+    /// base 的能力容器（task_34 Step 4）：`start()` 里把相机 cap 推进 `device_caps`
+    /// → `spawn_lua_script` 遍历时注册出 Lua 表 `camera_sim`。
+    /// **只写 `device_caps`：不碰 `user_cmd_tx`、不碰控制口、不新增任何命令通路。**
+    capabilities: Arc<Capabilities>,
 }
 
 impl SimDeviceHandler {
@@ -105,8 +122,17 @@ impl SimDeviceHandler {
         config: SimConfig,
         node_handle: Arc<NodeHandle>,
         origin: (f32, f32, f32),
+        capabilities: Arc<Capabilities>,
     ) -> Self {
-        Self { robot, config, node_handle, origin, inner: OnceLock::new(), world: OnceLock::new() }
+        Self {
+            robot,
+            config,
+            node_handle,
+            origin,
+            inner: OnceLock::new(),
+            world: OnceLock::new(),
+            capabilities,
+        }
     }
 
     /// 按 `[chassis]` 建底盘（§六.5.7 的取舍：**无段 → 不建底盘**；段存在但没写 `enabled` → 默认 true）
@@ -157,6 +183,34 @@ fn Select_Lidar(lidars: &[Arc<LidarSensor>]) -> Option<Arc<LidarSensor>> {
         .find(|l| l.Slot().starts_with("lidar_"))
         .or_else(|| lidars.first())
         .cloned()
+}
+
+/// 相机用哪个 `slot`（`camera_sim` 只能暴露**一个**，与急停只吃一个 lidar 同一取舍）
+///
+/// 规则与 [`Select_Lidar`] 同法：**优先 slot 名以 `camera_` 开头的第一个，否则回退到声明顺序第一个**
+/// （纯前缀规则会让"有相机但 slot 不叫 camera_*"的车**永远没有 camera_sim** ——
+/// 静默失效比"用错一个"更危险）。
+/// 多于一个时打一条 `warn!`：脚本里只有 `camera_sim` 一个表名，不做 `camera_sim_<slot>` 之类的新别名
+/// （多相机不在本 task）。
+fn Select_Camera(set: &SensorSet) -> Option<Arc<CameraSensor>> {
+    let cameras = set.Cameras();
+    if cameras.len() > 1 {
+        warn!(
+            "[camera] 配置了 {} 个 camera（{}）：camera_sim 只暴露其中 1 个（不实现多相机别名）",
+            cameras.len(),
+            cameras.iter().map(|c| c.Slot()).collect::<Vec<_>>().join(",")
+        );
+    }
+    let picked = cameras
+        .iter()
+        .find(|c| c.Slot().starts_with("camera_"))
+        .or_else(|| cameras.first())
+        .cloned();
+    // 用 `Get_Camera` 再取一次同一个实例（同 slot 同实例）：顺带把类型化访问器变成真实调用点
+    match picked {
+        Some(c) => set.Get_Camera(c.Slot()).or(Some(c)),
+        None => None,
+    }
 }
 
 #[async_trait]
@@ -240,6 +294,9 @@ impl DeviceHandler for SimDeviceHandler {
         // 急停用 lidar 句柄（Step 6）：与 `set` 里那个是同一个实例，`set` 随后被 move 进
         // `WorldConsumers`，所以要在这里先取出来
         let lidar: Option<Arc<LidarSensor>>;
+        // 相机句柄（task_34 Step 4）：与 `set` 里那个是同一个实例；`set` 随后被 move 进
+        // `WorldConsumers`，所以必须在 `self.inner.set(...)` 之前取出来（推 cap 用）
+        let camera: Option<Arc<CameraSensor>>;
         // 本机 PeerId 的 base58：世界 hello 与控制口的 `status` **共用**（Step 5 起只算一次）
         let peer_id = self.node_handle.Get_Local_Peer_Id().to_base58();
         let handle = match world_cfg {
@@ -259,7 +316,7 @@ impl DeviceHandler for SimDeviceHandler {
                 };
                 let set = Arc::new(SensorSet::Build(&resolved.sensors, &ctx)?);
                 info!(
-                    "[world] 传感器就绪 slots={}（每个 lidar_2d 自带 200 ms 建图 task）",
+                    "[world] 传感器就绪 slots={}（lidar_2d 自带 200 ms 建图 task；camera 只保留最新一帧）",
                     set.Len()
                 );
                 // 急停的雷达（§八.5.2 注）：必须先于 `set` 被 move 取出
@@ -274,6 +331,18 @@ impl DeviceHandler for SimDeviceHandler {
                         "[Sim] 无 lidar（未配置 lidar_2d）：on_tick 跳过急停（真机 lidar=None 同语义）"
                     ),
                 }
+                // 相机（task_34 Step 4）：与 lidar 同时机取出（`set` 马上被 move）
+                camera = Select_Camera(&set);
+                match &camera {
+                    Some(c) => info!(
+                        "[camera] camera_sim 使用 slot={} rate_hz={}（世界按 rate_hz 推 type=2 帧）",
+                        c.Slot(),
+                        c.Params().rate_hz
+                    ),
+                    None => info!(
+                        "[camera] 无 camera 零件（未配置 sensor=\"camera\"）：Lua 里不会有 camera_sim"
+                    ),
+                }
                 sensors = set.All().to_vec();
                 // ---- 5) 世界链路：只 spawn，**绝不 await 网络**
                 Some(WorldLink::Spawn(
@@ -285,6 +354,7 @@ impl DeviceHandler for SimDeviceHandler {
             }
             None => {
                 lidar = None;
+                camera = None;
                 info!("[Sim] 未连世界：无传感器 → on_tick 跳过急停（真机 lidar=None 同语义）");
                 // 不连世界：接收端在此丢弃。`MotionSender` 未装配 → 动作只 `debug!` 丢弃，
                 // 不会落到 `try_send` 报「通道关闭」，因此无日志噪音（保留纯决策链空跑观感）
@@ -311,6 +381,18 @@ impl DeviceHandler for SimDeviceHandler {
                 control_cancel: control_cancel.clone(),
             })
             .map_err(|_| "设备已启动".to_string())?;
+        // ---- 6.5) 相机 cap 推进 `device_caps`（task_34 Step 4）
+        //          只写 base 的能力容器：Lua 表 `camera_sim` 由 `spawn_lua_script` 遍历时注册。
+        //          **不新增 `user_cmd_tx`、不碰控制口、不改 on_tick。**
+        if let Some(cam) = camera {
+            let cap: Arc<dyn DeviceCapability> = Arc::new(CameraSimCap::New(cam));
+            match self.capabilities.device_caps.write() {
+                Ok(mut g) => g.push(cap),
+                // 锁中毒不 panic（与本 crate 其它锁同纪律），取回内层继续写
+                Err(poisoned) => poisoned.into_inner().push(cap),
+            }
+            info!("[camera] camera_sim 已注入 Lua（capture() / info()）");
+        }
         info!("[Sim] 模拟设备启动（无硬件：决策链 + 底盘 + 传感器，动作经世界链路下发）");
         // ---- 7) 起控制口（**在 inner.set 之后**：注入的 Command 走到 device.reset() 时 inner 已就绪）
         //         无 `[control]` 段 → `unwrap_or_default()` → 默认开启（§七.3）

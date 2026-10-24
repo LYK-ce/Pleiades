@@ -1,12 +1,15 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-24
 #
-# WebSocketManager 自检（Step 6）：场景形态 / World.tscn 接线 / 底盘+传感器装配 / 运动下行 /
-# 传感器先于底盘 / 空 manifest / 断开清理 / 错误路径 / 规范 lint。
+# WebSocketManager 自检：场景形态 / World.tscn 接线 / 底盘+传感器装配 / 运动下行 /
+# 传感器先于底盘 / 空 manifest / 断开清理 / 错误路径 / camera 装配与出帧闸门 / 规范 lint。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
 #          --script res://src/tests/check_ws_manager.gd
 # 期望：failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR/SCRIPT ERROR（COMPONENTS.md §11 Step 6）。
+#
+# task_34 Step 3 追加：A9（`type=2` 帧格式）/ A10（连接缓冲 4 MiB）/
+#   J1~J6（`sensor="camera"` 真装配 + 出帧闸门）/ [skip] J7（帧内容，无渲染器时不计入 total）。
 #
 # 关键手法：**同一个进程里既当世界、又当 sim**。真 World.tscn + 真 WebSocketPeer 客户端
 #   （P1/P6 实测 --headless 下 TCPServer + accept_stream + connect_to_url 完整可用），
@@ -20,6 +23,8 @@
 #   P7  node_paths 的 NodePath **相对该节点自身**（B2 直接断言 vehicles_root == World/Vehicles）。
 #   P16 一次 null 解引用会让协程中断、quit() 不执行 -> 每条断言先判空，所有等待都带超时。
 #   E21 JSON.parse_string() 非法输入会向 stderr 打 ERROR -> 协议层改用 JSON.new().parse()。
+#   频率类等待一律用**引擎帧数**（`_wait_frames`）而不是墙钟毫秒：`--fixed-fps 60` 只固定 delta，
+#   不限制实际帧率，墙钟在引擎时间里不可控（task_34 风险 R4）。
 #
 # 白盒断言（manager._manifests 等）在本仓库是既有做法（check_diff_drive.gd 的 A35 lint 同例）。
 
@@ -36,6 +41,7 @@ const LINK_SCRIPT := "res://src/net/ComponentLink.gd"
 const WORLD_SCENE := "res://src/scenes/World.tscn"
 const VEHICLE_SCENE := "res://src/scenes/Vehicle.tscn"
 const LIDAR_SCENE := "res://src/scenes/sensors/Lidar2D.tscn"
+const CAMERA_SCRIPT := "res://src/sensors/CameraSensor.gd"
 
 const NET_SCRIPTS := [WIRE_SCRIPT, LINK_SCRIPT, WS_MANAGER_SCRIPT]
 const HEADER_FILES := [WIRE_SCRIPT, LINK_SCRIPT, WS_MANAGER_SCRIPT, WS_MANAGER_SCENE]
@@ -46,8 +52,18 @@ const SPAWN_TOL := 0.001
 const LIDAR_RAYS := 360
 const LIDAR_FRAME_BYTES := 1455
 
+## camera 装配（task_34 Step 3）：目录默认 640×480@1 Hz，用 `sensor_hello.params` 显式下发。
+const CAMERA_SLOT := "camera_nose"
+const CAMERA_WANT_SIZE := Vector2i(640, 480)
+const CAMERA_MOUNT := {"x": 0.15, "y": 0.0, "z": 0.12, "yaw": 0.0, "pitch": 0.0}
+const CAMERA_PARAMS := {"width": 640, "height": 480, "fov_deg": 70.0,
+	"quality": 0.8, "rate_hz": 1.0}
+## 90 个引擎帧 = 引擎时间 1.5 s（1 Hz 下至少到点 1 次）。
+const CAMERA_GATE_FRAMES := 90
+
 var _total: int = 0
 var _failed: int = 0
+var _skipped: int = 0
 var _harness_errors: int = 0
 var _sims: Array = []
 
@@ -60,6 +76,8 @@ class Sim:
 	var inbox: Array = []
 	## 收到的二进制帧计数（断言"下行没有乱发"）
 	var binary_count: int = 0
+	## 按到达顺序存下的二进制帧（只用于 camera 段：断言 type=2 帧真的到了 sim 侧）
+	var binaries: Array = []
 	## 解析失败的文本帧计数
 	var bad_json_count: int = 0
 	var closed: bool = false
@@ -80,6 +98,7 @@ class Sim:
 				var bytes: PackedByteArray = peer.get_packet()
 				if not peer.was_string_packet():
 					binary_count += 1
+					binaries.append(bytes)
 					continue
 				var json := JSON.new()
 				if json.parse(bytes.get_string_from_utf8()) != OK or not (json.data is Dictionary):
@@ -226,6 +245,42 @@ func _run() -> void:
 		and send_err == ERR_UNCONFIGURED and binary_err == ERR_UNCONFIGURED,
 		"send=%d binary=%d seq=%d" % [send_err, binary_err, bare_link.out_seq])
 	bare_link = null
+
+	# ---- A9（task_34 Step 3）：camera 帧格式 = 15 B 头 + **JPEG 原样 payload**
+	var camera_payload := PackedByteArray([0xFF, 0xD8, 0xFF, 0xE0, 0x42])
+	var camera_frame: PackedByteArray = WireProtocol.BuildCameraFrame(4, 11, 3.25, camera_payload)
+	var camera_header: Dictionary = WireProtocol.ParseFrameHeader(camera_frame)
+	var camera_tail: PackedByteArray = camera_frame.slice(WireProtocol.FRAME_HEADER_SIZE)
+	var empty_frame: PackedByteArray = WireProtocol.BuildCameraFrame(4, 11, 3.25, PackedByteArray())
+	_check("A9 camera-frame",
+		camera_frame.size() == WireProtocol.FRAME_HEADER_SIZE + camera_payload.size()
+		and int(camera_header.get("type", -1)) == WireProtocol.FRAME_TYPE_CAMERA
+		and int(camera_header.get("slot_id", -1)) == 4
+		and int(camera_header.get("seq", -1)) == 11
+		and absf(float(camera_header.get("world_time", 0.0)) - 3.25) < 1e-9
+		and camera_tail == camera_payload
+		and empty_frame.size() == WireProtocol.FRAME_HEADER_SIZE,
+		"size=%d type=%d slot=%d seq=%d empty=%d" % [
+			camera_frame.size(), int(camera_header.get("type", -1)),
+			int(camera_header.get("slot_id", -1)), int(camera_header.get("seq", -1)),
+			empty_frame.size()])
+
+	# ---- A10（task_34 Step 3）：连接缓冲提到 4 MiB（默认 64 KiB 撑不住一张 720p JPEG）
+	var probe_link: Variant = ComponentLink.new()
+	probe_link.Init(null, 99)          # null tcp 分支在 accept_stream 之前 return，缓冲已设好
+	var buffer_expect: int = 4 * 1024 * 1024
+	_check("A10 link-buffer-size",
+		ComponentLink.MAX_FRAME_BUFFER_BYTES == buffer_expect
+		and probe_link.peer != null
+		and probe_link.peer.inbound_buffer_size == buffer_expect
+		and probe_link.peer.outbound_buffer_size == buffer_expect
+		and probe_link.closed,
+		"in=%d out=%d closed=%s" % [
+			probe_link.peer.inbound_buffer_size if probe_link.peer != null else -1,
+			probe_link.peer.outbound_buffer_size if probe_link.peer != null else -1,
+			str(probe_link.closed)])
+	probe_link.peer = null
+	probe_link = null
 	probe.free()
 
 	# ============================================================ B. World.tscn 接线
@@ -582,6 +637,107 @@ func _run() -> void:
 		"open=%s simX=%s count=%d (was %d)" % [sim_a2.IsOpen(), manager.GetVehicle("simX"),
 			manager.GetVehicleCount(), count_before_h7])
 
+	# ============================================================ J. camera 装配（task_34 Step 3）
+	# 刻意放在 G/H 的**所有计数断言之后**：J 新建第 4 台车 + 第 2 条传感器连接，
+	#   因此 C5 GetVehicleCount()==1 / F1 assembled==3 / G2 count==2 / G5 links==3 全部不受影响。
+	var sim_cam: Variant = _new_sim(port)
+	await _wait_open(sim_cam, 1500)
+	sim_cam.Send({
+		"msg": "chassis_hello",
+		"peer_id": "simCam",
+		"chassis": "diff_drive_ugv",
+		"params": {},
+		"manifest": [{"slot": CAMERA_SLOT, "sensor": "camera"}],
+	})
+	var ready_cam: Dictionary = await _wait_msg(sim_cam, "chassis_ready", 1500)
+	var sim_cam2: Variant = _new_sim(port)
+	await _wait_open(sim_cam2, 1500)
+	sim_cam2.Send({
+		"msg": "sensor_hello",
+		"peer_id": "simCam",
+		"slot": CAMERA_SLOT,
+		"sensor": "camera",
+		"mount": CAMERA_MOUNT,
+		"params": CAMERA_PARAMS,
+	})
+	var camera_ready: Dictionary = await _wait_msg(sim_cam2, "sensor_ready", 1500)
+	var camera_id: int = int(camera_ready.get("sensor_id", 0))
+	_check("J1 camera-sensor-ready",
+		not ready_cam.is_empty() and not camera_ready.is_empty()
+		and str(camera_ready.get("slot", "")) == CAMERA_SLOT and camera_id >= 1,
+		"sensor_id=%d ready=%s" % [camera_id, camera_ready])
+
+	var vehicle_cam: Node3D = manager.GetVehicle("simCam")
+	var camera_node: Node = vehicle_cam.GetSensor(CAMERA_SLOT) if vehicle_cam != null else null
+	var camera_script: Script = camera_node.get_script() as Script if camera_node != null else null
+	var camera_script_path: String = camera_script.resource_path if camera_script != null else ""
+	var camera_size: Vector2i = camera_node.call("Get_Image_Size") if camera_node != null \
+		else Vector2i(-1, -1)
+	var camera_params: Dictionary = camera_node.call("Get_Params") if camera_node != null else {}
+	var camera_can_capture: bool = bool(camera_node.call("Can_Capture")) \
+		if camera_node != null else false
+	var headless: bool = DisplayServer.get_name() == "headless"
+	_check("J2 camera-geometry",
+		camera_node != null and camera_script_path == CAMERA_SCRIPT
+		and camera_size == CAMERA_WANT_SIZE
+		and is_equal_approx(float(camera_params.get("fov_deg", -1.0)), 70.0)
+		and is_equal_approx(float(camera_params.get("rate_hz", -1.0)), 1.0)
+		and camera_can_capture == (not headless),
+		"script=%s size=%s fov=%.1f rate=%.2f can_capture=%s" % [
+			camera_script_path, str(camera_size),
+			float(camera_params.get("fov_deg", -1.0)),
+			float(camera_params.get("rate_hz", -1.0)), str(camera_can_capture)])
+
+	# 白盒：证明 manager 在 sensor_ready 之后**真的调了 SetStream**，且用的是 ready 里的那个 id。
+	_check("J3 camera-stream-bound",
+		camera_node != null and bool(camera_node.call("HasStream"))
+		and int(camera_node.get("_sensor_id")) == camera_id,
+		"has_stream=%s sensor_id=%d（ready 里是 %d）" % [
+			str(camera_node.call("HasStream")) if camera_node != null else "n/a",
+			int(camera_node.get("_sensor_id")) if camera_node != null else -1, camera_id])
+
+	# E27 在装配线上的守卫：相机零件纯视觉，子树里零碰撞 / 零物理体。
+	var camera_physics: int = _Count_Physics(camera_node) if camera_node != null else -1
+	_check("J4 camera-no-collision", camera_physics == 0,
+		"physics_nodes=%d" % camera_physics)
+
+	var assembly_cam: Dictionary = await _wait_msg(sim_cam, "assembly_ready", 1500)
+	_check("J5 camera-assembly",
+		not assembly_cam.is_empty() and str(assembly_cam.get("peer_id", "")) == "simCam",
+		"assembly=%s" % [assembly_cam])
+
+	# 出帧闸门：到点必须发生（引擎帧计时，不看墙钟）；无渲染器时**绝不空转出帧**。
+	var tick_before: int = int(camera_node.call("Get_Tick_Count")) if camera_node != null else 0
+	await _wait_frames(CAMERA_GATE_FRAMES)
+	var tick_after: int = int(camera_node.call("Get_Tick_Count")) if camera_node != null else 0
+	var camera_binaries: Array = sim_cam2.binaries
+	var types_ok: bool = true
+	for item: Variant in camera_binaries:
+		var row_bytes: PackedByteArray = item
+		var row_header: Dictionary = WireProtocol.ParseFrameHeader(row_bytes)
+		if int(row_header.get("type", -1)) != WireProtocol.FRAME_TYPE_CAMERA \
+				or int(row_header.get("slot_id", -1)) != camera_id:
+			types_ok = false
+	var frames_ok: bool = types_ok and (camera_binaries.size() >= 1
+		if camera_can_capture else camera_binaries.is_empty())
+	_check("J6 camera-stream-gate", tick_after - tick_before >= 1 and frames_ok,
+		"ticks=+%d frames=%d types=%s can_capture=%s" % [
+			tick_after - tick_before, camera_binaries.size(),
+			"ok" if types_ok else "bad", str(camera_can_capture)])
+
+	# 帧内容：只有真渲染器下才有帧可看（headless = dummy 渲染器，物理上出不了图）。
+	if camera_can_capture and not camera_binaries.is_empty():
+		var last_frame: PackedByteArray = camera_binaries[camera_binaries.size() - 1]
+		var last_payload: PackedByteArray = last_frame.slice(WireProtocol.FRAME_HEADER_SIZE)
+		_check("J7 camera-payload-jpeg",
+			last_payload.size() > 1000 and last_payload.slice(0, 3).hex_encode() == "ffd8ff",
+			"payload=%d head=%s" % [last_payload.size(),
+				last_payload.slice(0, 3).hex_encode()])
+	else:
+		print("[skip] J7 camera-payload-jpeg（display=%s：dummy 渲染器，相机不出帧）"
+			% DisplayServer.get_name())
+		_skipped += 1
+
 	# ============================================================ I. 规范 lint
 	var lint_bad: Array = []
 	for path: String in NET_SCRIPTS:
@@ -697,6 +853,25 @@ func _wait_physics(frames: int) -> void:
 		await physics_frame
 
 
+## 等 n 个**引擎帧**（--fixed-fps 60 下 60 帧 = 引擎时间 1 s）。
+## 频率类断言一律用它，**不用墙钟毫秒**：`--fixed-fps` 固定 delta 但不限制实际帧率（task_34 R4）。
+func _wait_frames(frames: int) -> void:
+	for _i in range(frames):
+		_pump()
+		await process_frame
+
+
+## 子树物理节点计数（E27：传感器必须 0；与 check_camera_sensor.gd 的 `_Count_Physics` 同实现）。
+func _Count_Physics(node: Node) -> int:
+	var n: int = 0
+	if node is CollisionShape3D or node is CollisionPolygon3D \
+		or node is PhysicsBody3D or node is Area3D:
+		n += 1
+	for child in node.get_children():
+		n += _Count_Physics(child)
+	return n
+
+
 ## 去掉以 # 开头的注释行，只留可执行代码（白盒 lint 用，同 check_diff_drive.gd）。
 func _strip_comment_lines(source: String) -> String:
 	var code := ""
@@ -744,6 +919,8 @@ func _fatal(label: String, detail: String) -> void:
 
 
 func _finish() -> void:
+	if _skipped > 0:
+		print("[check] skipped=", _skipped, "（相机帧内容：无渲染器，不计入 total）")
 	print("[check] total=", _total, " failed=", _failed)
 	if _failed == 0:
 		print("SELF-CHECK OK")

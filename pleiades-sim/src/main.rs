@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-24
 
 //! pleiades-sim — 模拟车/机节点（无硬件，用于测试决策链）
 //!
@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         boot.robot_bus.clone(),
         robot_cmd_frame_rx,
         origin,
+        // 设备能力容器（task_34 Step 4）：相机 cap 要进 `device_caps`，Lua 里才有 `camera_sim`。
+        // `boot` 后面还要被 `run()` / `run_headless()` 消费 → 只能 `clone()`，不能 `move`。
+        boot.capabilities.clone(),
     ).await?;
 
     if headless {

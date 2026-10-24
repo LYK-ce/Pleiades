@@ -2,10 +2,10 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-21
-> Modified Date ： 2026-10-23
+> Modified Date ： 2026-10-24
 >
-> 对应任务：`Task/task_30_sim_world.md`（sim 接入 Godot 模拟世界）；`Task/task_33_camera_simulation.md`（相机仿真 + 传感器 / 底盘建模，2026-10-23 起）
-> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。本文是 Step 2~8 的唯一施工依据；后续 step 若需偏离，必须**先改本文并说明理由**。
+> 对应任务：`Task/task_30_sim_world.md`（sim 接入 Godot 模拟世界）；`Task/task_33_camera_simulation.md`（相机仿真 + 传感器 / 底盘建模，2026-10-23 起）；`Task/task_34_camera.md`（camera 传感器全链路，2026-10-24 起）
+> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。本文是 Step 2~8 的唯一施工依据；后续 step 若需偏离，必须**先改本文并说明理由**。
 > 引擎：Godot **4.7.2**（`4.7.2.stable.custom_build.ed1daf0bf`），渲染后端 `gl_compatibility`。
 
 ---
@@ -201,13 +201,19 @@ timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --scri
 # 空气墙 / 顶盖（task_32 Step 2）：5 个 box、layer 1、四面 20 m/s 冲撞与 32 m 顶盖
 timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_bounds.gd
 
-# 相机组件（task_33 Step 2）：① 纯 headless 只跑 A 组（结构 / 参数）12 项，B 组自动 [skip]
+# 相机组件（task_33 Step 2 / task_34 Step 3）：① 纯 headless 只跑 A 组（结构 / 参数 / 出帧）18 项，
+#    其中出帧部分（A13~A18）只验流绑定 / 帧头 / 频率 / 无渲染器闸门 / 目录登记，不碰像素；B 组（真渲染）10 项自动 [skip]
 timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd
 # ② **真验收（出图）**：本机 `--headless` 是 dummy 渲染器，物理上出不了图（§9.1 E26-③）；
-#    用 tmp/task33/xvfb 里解包的 Xvfb（**:99**）+ llvmpipe 软件 GL 跑 A+B 共 21 项，**必须**带 --audio-driver Dummy
+#    用 tmp/task33/xvfb 里解包的 Xvfb（**:99**）+ llvmpipe 软件 GL 跑 A+B 共 28 项，**必须**带 --audio-driver Dummy
 #    （无声卡时 ALSA 会打一行 ERROR，把"0 ERROR"验收搞假红）。
 DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 \
   --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd
+
+# camera 装配线（task_34 Step 3）：`check_ws_manager` 现在覆盖 `sensor="camera"` 的整套装配
+# （J1~J6：sensor_ready -> 几何 -> SetStream -> zero-collision -> assembly_ready -> 出帧闸门；
+#  帧内容 J7 在 headless 下 [skip]），59 项断言（原 51 项 + A9/A10 + J1~J6）。
+timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_ws_manager.gd
 
 # 模拟世界拍照（task_33 Step 4，§4.8.2）：① 纯 headless 只跑 S 组（结构）18 项，R 组 17 项自动 [skip]
 timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_shots.gd
@@ -328,7 +334,8 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 
 ## 3 组件 `.tscn` 清单
 
-固定 **8 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补，见 §4.8）：
+固定 **8 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补、task_34 Step 3 起进入
+`sensor_hello` 装配线，见 §4.8 / §4.8.3）：
 
 | # | 文件（`res://`，相对工程根） | 根节点类型 | 脚本 | 职责 | Step | 静态挂载位置 | 运行时实例化者 |
 |---|---|---|---|---|---|---|---|
@@ -339,7 +346,7 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | 5 | `src/scenes/WebSocketManager.tscn` | `Node` | `src/net/WebSocketManager.gd` | WS 服务端：装配 + 收发 | 6 ✅ | `World/Systems/WebSocketManager` | 静态实例 |
 | 6 | `src/scenes/chassis/Quadrotor.tscn` | `Node3D` | `src/chassis/Quadrotor.gd` | 四旋翼底盘（`FLOATING`） | 7 ✅ | — | `Vehicle.ApplyChassis()` → `Vehicle/Chassis` |
 | 7 | `src/scenes/sensors/Lidar2D.tscn` | `Node3D` | `src/sensors/Lidar2D.gd` | 2D 单线激光（真射线）+ `Body` 外观实例（`lidar_tmini.glb`，纯视觉、无碰撞） | 8 ✅ | — | `Vehicle.AttachSensor()` → `Vehicle/Sensors/<slot>` |
-| 8 | `src/scenes/sensors/CameraSensor.tscn` | `Node3D` | `src/sensors/CameraSensor.gd` | 相机：`SubViewport` 离屏渲染 → JPEG + `Body` 外观实例（`camera_module.glb`，纯视觉、无碰撞） | task_33-2 ✅ | — | Step 3 起 `Vehicle.AttachSensor()` → `Vehicle/Sensors/<slot>`（本 step 只有自检实例化） |
+| 8 | `src/scenes/sensors/CameraSensor.tscn` | `Node3D` | `src/sensors/CameraSensor.gd` | 相机：`SubViewport` 离屏渲染 → JPEG + 按 `rate_hz` 组 `type=2` 帧下发（task_34 Step 3）+ `Body` 外观实例（`camera_module.glb`，纯视觉、无碰撞） | task_33-2 ✅ / task_34-3 ✅ | — | `sensor_hello` 装配线（`SensorCatalog` 登记 `camera`）→ `Vehicle/Sensors/<slot>`（task_34-3 起）；自检仍直接实例化 |
 
 非组件脚本（无 `.tscn`）：
 
@@ -352,8 +359,9 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | `src/chassis/ChassisModel.gd` | 底盘基类 | 底盘接口契约 + 速度环 / 指令解析公共工具（§7.5） |
 | `src/chassis/ChassisCatalog.gd` | 静态目录 | `chassis` 名 → 场景路径 / 默认参数（运行时 `load()`；Step 5 ✅） |
 | `src/chassis/DiffDrive.gd` / `Quadrotor.gd` | 底盘实现 | 运动学 + 速度环（`DiffDrive` ✅ Step 5 / `Quadrotor` ✅ Step 7） |
-| `src/sensors/SensorCatalog.gd` | 静态目录 | `sensor` 名 → 场景路径 / 默认参数（运行时 `load()`；Step 8 ✅） |
+| `src/sensors/SensorCatalog.gd` | 静态目录 | `sensor` 名 → 场景路径 / 默认参数（运行时 `load()`；Step 8 ✅，task_34-3 加 `camera`） |
 | `src/sensors/Lidar2D.gd` | 挂 `Lidar2D` | 射线扫描 + 二进制下发（Step 8 ✅） |
+| `src/sensors/CameraSensor.gd` | 挂 `CameraSensor` | 离屏渲染 + `Configure` + 按 `rate_hz` 出 `type=2` 帧（`SetStream` / `Emit_Frame`，task_34-3 ✅） |
 | `src/net/WebSocketManager.gd` | 挂 manager | 监听 / accept / 两张表 / 装配 / manifest / 清理（Step 6 ✅） |
 | `src/net/ComponentLink.gd` | `RefCounted` | 单条连接封装与状态（Step 6 ✅） |
 | `src/net/WireProtocol.gd` | 静态工具 | 消息名、JSON 编解码、二进制帧构造 / 解析（Step 6 ✅） |
@@ -364,7 +372,7 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | `src/tests/check_camera.gd` | `SceneTree` 脚本 | 相机自检（Step 3） |
 | `src/tests/check_diff_drive.gd` | `SceneTree` 脚本 | 差速底盘自检（Step 5，41 项断言） |
 | `src/tests/check_quadrotor.gd` | `SceneTree` 脚本 | 四旋翼底盘自检（Step 7，48 项断言） |
-| `src/tests/check_ws_manager.gd` | `SceneTree` 脚本 | WebSocketManager 自检（Step 6，51 项断言；真 World + 真 WS 客户端） |
+| `src/tests/check_ws_manager.gd` | `SceneTree` 脚本 | WebSocketManager 自检（Step 6，**59 项断言**：51 + task_34-3 的 `A9/A10` + `J1~J6`；真 World + 真 WS 客户端） |
 | `src/tests/check_lidar.gd` | `SceneTree` 脚本 | Lidar2D 自检（Step 8，48 项断言；真 World + 自建 box 障碍） |
 | `src/tests/check_bounds.gd` | `SceneTree` 脚本 | 空气墙 / 顶盖自检（task_32 Step 2，12 项断言） |
 
@@ -998,23 +1006,38 @@ const DEFAULT_WIDTH := 1280          # 另有 DEFAULT_HEIGHT=720 / DEFAULT_FOV_D
 const DEFAULT_NEAR := 0.05           # near 0.05 = "贴车身也不穿模"（Step 4 的车鼻占比断言依赖它）
 const DEFAULT_FAR := 200.0
 const WARMUP_FRAMES := 2             # 前 2 帧是黑的（step 明令）
+const DEFAULT_RATE_HZ := 1.0         # 出帧频率默认值（task_34 Step 3；UAV 相机口径）
+const MIN_RATE := 1e-3               # 频率下限，防 1/0
+const ACCUM_EPS := 1e-6              # 累加器容差（与 Lidar2D 同款）
 
 @export var viewport: SubViewport    # node_paths=PackedStringArray("viewport", "lens")
 @export var lens: Camera3D           # NodePath("Viewport/Lens")
 
-var width: int = DEFAULT_WIDTH       # 以下 4 个 = Configure() 的生效参数
+var width: int = DEFAULT_WIDTH       # 以下 5 个 = Configure() 的生效参数
 var height: int = DEFAULT_HEIGHT
 var fov_deg: float = DEFAULT_FOV_DEG
 var quality: float = DEFAULT_QUALITY
+var rate_hz: float = DEFAULT_RATE_HZ
 
-func Configure(params = null) -> void             # width / height / fov_deg / quality
+signal frame_produced(seq: int, world_time: float, size_bytes: int)   # task_34 Step 3
+
+func Configure(params = null) -> void             # width / height / fov_deg / quality / **rate_hz**
 func Capture_Jpeg() -> PackedByteArray            # await；渲一帧 → JPEG 字节
 func Capture_To_File(abs_path: String) -> bool    # await；上面 + 落盘（自动建目录，只收绝对路径）
 func Get_Image_Size() -> Vector2i                 # viewport.size（refs 缺失时回退 width/height）
 func Can_Capture() -> bool                        # 环境探测（**非 task 文档列的交付能力**，见 ⑦）
-func Get_Params() -> Dictionary                   # 生效参数副本（自检 / Step 3 / Step 4 用）
+func Get_Params() -> Dictionary                   # 生效参数副本（5 键，rate_hz 追加在末尾）
 func Get_Last_Error() -> String                   # 最近一次失败原因（空串 = 没失败过）
 func Get_Capture_Count() -> int                   # 成功出图次数
+
+# ---- task_34 Step 3：下行流（与 Lidar2D 同签名同时序，manager 鸭子调用）
+func SetStream(link, sensor_id: int) -> void      # sensor_ready **之后**绑流；累加器清零
+func ClearStream() -> void                        # 解绑（清 link / sensor_id / 累加器）
+func HasStream() -> bool
+func Tick_Stream(delta: float) -> void            # 累加器唯一实现（_process 只转发它）
+func Emit_Frame(jpeg: PackedByteArray) -> bool    # 出帧唯一出口：true = 已 SendBinary
+func Get_Tick_Count() -> int                      # 到点次数（>= 下者）
+func Get_Frame_Count() -> int                     # 真正下发的帧数
 ```
 
 **光轴 = 传感器局部 `−Z`（task_33 Step 3 的朝向契约）**：
@@ -1064,7 +1087,8 @@ func Get_Capture_Count() -> int                   # 成功出图次数
 
 **① 组件是"独立零件"**：Step 2 落地时**不挂模型**（Step 3 已补 `Body` + `camera_module.glb`，见上文节点树）、
 **不接网络**（无推流 / 无 1 Hz 定时器 / 无 `camera.capture()`，task_33 §九 已明列非目标）、
-**不登记 `SensorCatalog`**（目录注册属 `sensor_hello` 装配线）、**不实例化进 `World.tscn`**（挂世界仍是 Step 4 的拍照脚本）。
+**不登记 `SensorCatalog`**（目录注册属 `sensor_hello` 装配线，已于 task_34 Step 3 补上，见 §4.8.3）、
+**不实例化进 `World.tscn`**（挂世界仍是 Step 4 的拍照脚本）。
 Step 2 落地时既有 11 个自检的断言数与基线**逐字一致**；Step 3 补 `Body` 后 `check_camera_sensor` 的
 A 组 12 项测量值与基线**逐字不变**（模型在光心后方、零碰撞，`A5-no-collision` 计数仍 0）。
 
@@ -1116,19 +1140,25 @@ A 组 12 项测量值与基线**逐字不变**（模型在光心后方、零碰�
 | 抓拍后 `render_target_update_mode` | **1（UPDATE_ONCE）** |
 
 **⑩ 自检**：`src/tests/check_camera_sensor.gd`（`SceneTree` 形态，照 `check_sensor_models.gd`）。
-A 组 12 项（结构 / 参数）**恒跑**；B 组 9 项（真渲染）只在 `Can_Capture()==true` 时跑，
+A 组 18 项（结构 / 参数 / 出帧）**恒跑**；B 组 10 项（真渲染）只在 `Can_Capture()==true` 时跑，
 headless 下逐条 `[skip]` 且**不计入 `total`**（否则断言数会和基线错位）。
+其中 A13~A18 与 B10 是 task_34 Step 3 追加的；A13~A17 用**假 JPEG**（`FF D8 FF …`）走 `Emit_Frame()` 真路径 +
+**手工 `Tick_Stream()`** 推步，所以 headless 下也**不依赖像素、不依赖墙钟**（§4.8.3-③⑥）。
 
 | 跑法 | 命令 | 期望 |
 |---|---|---|
-| 纯 headless | `timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd` | `total=12 failed=0` + `SELF-CHECK OK` + EXIT=0 + `[skip]` ×9 |
-| **真验收（出图）** | `DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd` | **`total=21 failed=0`** + `SELF-CHECK OK` + EXIT=0 + 0 ERROR |
+| 纯 headless | `timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd` | `total=18 failed=0` + `SELF-CHECK OK` + EXIT=0 + `[skip]` ×10 |
+| **真验收（出图）** | `DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_sensor.gd` | **`total=28 failed=0`** + `SELF-CHECK OK` + EXIT=0 + 0 ERROR |
 
 断言清单：`A1` 场景可加载 / `A2` 根节点名+类型+脚本路径 / `A3` `SubViewport` 共享世界+尺寸+初始不渲 /
 `A4` 镜头参数+父节点是 `SubViewport`+光心在原点 / `A5` 零碰撞体 / `A6~A10` `Configure` 的
 空字典 / 尺寸 / 缺键 / 非法值回退 / `null` 五态 / `A11` `Can_Capture()` 与显示环境一致 /
 `A12` 源码白盒 lint；`B1` 非空+JPEG 魔数 / `B2` SOF0 尺寸 / `B3` 非全黑 / `B4` 改 fov 成图不同 /
-`B5` 连拍稳定 / `B6` 落盘 / `B7` 坏路径返回 false / `B8` 分辨率真的生效 / `B9` 没有偷偷变 `ALWAYS`。
+`B5` 连拍稳定 / `B6` 落盘 / `B7` 坏路径返回 false / `B8` 分辨率真的生效 / `B9` 没有偷偷变 `ALWAYS`；
+**task_34 Step 3 追加**：`A13` 流绑 / 解 / 重绑 / `A14` 帧头字段+payload 原样+魔数 / `A15` `seq` 递增+空图不出帧 /
+`A16` `rate_hz` 节奏（1 Hz 每 60 步 1 次、2 Hz 每 60 步 2 次） / `A17` 无渲染器闸门（树外实例：只 warn 一次、零帧、
+`Get_Last_Error()` 仍空） / `A18` `SensorCatalog` 的 `camera` 登记（场景路径 + 5 键默认值逐键比对） /
+`B10` 真抓拍 → 真帧（`15 + N` 字节、payload 首三字节 `ffd8ff`、SOF0 = 当前成图尺寸）。
 
 #### 4.8.2 拍照脚本（task_33 Step 4 落地，**不改变 §4.8 设计**）
 
@@ -1214,6 +1244,60 @@ R 组（**仅 Xvfb 档**，17 项 = 逐张 12 + 全局 5）：
 **边界（与 §4.8 一致）**：不启动 `pleiades-sim`、不连 WS 客户端（脚本把 `World.tscn` 自带的
 `WebSocketManager.autolisten` 在 `add_child` **之前**关掉，日志无 `[ws] listening`）、不跑决策链 / 不造
 `motion_cmd`；**不改** `CameraSensor.gd` / 任何 `.tscn` / `assets`；不登记 `SensorCatalog`。
+> 最后一条只对 task_33 Step 4 成立：task_34 Step 3 起 `SensorCatalog` 已登记 `camera`（见 §4.8.3 / §7.6），
+> 装配线会实例化本组件；`check_camera_shots.gd` 本身仍直接实例化、不依赖目录。
+
+#### 4.8.3 出帧（task_34 Step 3 落地，**不改变 §4.8 设计**）
+
+相机从"按需单拍"变成"可按频率出帧的可装配零件"。**抓拍内核一行未改**（`Capture_Jpeg()` 的五步、
+`_Sync_View_Transform()`、`.tscn` 的 `update_mode=0` 与"只在抓拍时置 `UPDATE_ONCE`"全部原样），
+新增的只是"什么时刻拍、拍完发给谁"。
+
+**① 时序铁律**：`SetStream(link, sensor_id)` 必须在 `sensor_ready` **之后**由 manager 鸭子调用
+（`WebSocketManager._MountSensor()` 里 `node.has_method("SetStream")` 那一行，与 `Lidar2D` 同款钩子，
+manager 一行未改）。先绑流再回 ready 会让 sim 侧出现"收到帧但还不知道 slot_id"的窗口（§5.3）。
+
+**② 累加器**：`_process(delta)` 只转发 `Tick_Stream(delta)`；公式与 `Lidar2D` **逐字同款**：
+
+```
+period = 1.0 / max(rate_hz, MIN_RATE)          # MIN_RATE = 1e-3，防 1/0
+_accum += max(delta, 0)
+if _accum + ACCUM_EPS < period: return          # ACCUM_EPS = 1e-6
+_accum = min(_accum - period, period)           # 卡顿后最多补一张，不"追赶爆拍"
+_tick_count += 1; _Capture_Tick()               # 协程，**这里绝不 await**
+```
+
+`1e-6` 容差不是可选项：60 × 1/60 = `0.9999999999999999` < 1.0，不加容差 1 Hz 一个整周期出 0 帧。
+`_link == null` 时 `Tick_Stream()` 首行直接 return —— 未绑流的实例（`check_models` / `check_camera_shots`
+里的相机）**零开销、零副作用**。
+
+**③ 无渲染器闸门（E26-③ 的直接后果）**：`Can_Capture() == false`（`--headless` = dummy 渲染器）时
+**只 `push_warning` 一次、绝不出帧、绝不 `await`** —— 否则协程会永久挂在 `frame_post_draw` 上。
+到点计数刻意放在闸门**之前**：headless 下"1 Hz 到点 1 次"仍可被观测，而"零帧"同时成立，两条要求互不掩盖
+（`check_camera_sensor.A17` + `check_ws_manager.J6` 双向钉死）。
+
+**④ 一帧 = 15 B 头 + JPEG 原始字节**（§8.2）：`WireProtocol.BuildCameraFrame()`，不重编码、不加长度前缀；
+宽高从 JPEG 的 SOF0 段读（不上线），端序与 lidar 帧逐字节相同（GDScript 的 `encode_*` 一律小端）。
+
+**⑤ `_capturing` 互斥**：上一张还没回来时，到点**只计数不抓拍**（帧率上限 = 抓拍耗时）。因此
+`Get_Tick_Count() >= Get_Frame_Count()` 恒成立；不做队列、不积压、不丢帧补偿。
+
+**⑥ 可观察语义**：`signal frame_produced(seq, world_time, size_bytes)` 在"一张图组好之后"发出，**有 link
+但未 OPEN 时也发**（与 `Lidar2D.scan_produced` 同口径）；`Get_Tick_Count()` = 到点次数、
+`Get_Frame_Count()` = 真正 `SendBinary` 成功的帧数。信号只带字节数、不带数组（避免每帧复制大缓冲）。
+
+**⑦ 失败表（本 step 只新增一种失败面）**：
+
+| 情形 | 行为 |
+|---|---|
+| `jpeg` 为空（`Capture_Jpeg()` 失败） | `_Capture_Tick()` 直接 return；`push_error` 已由 `Capture_Jpeg()` 打过，`Get_Last_Error()` 有原因 |
+| `Can_Capture() == false` | **只 warn 一次**、`_tick_count` 照增、**绝不出帧、绝不 await** |
+| 有 link 但未 OPEN | `Emit_Frame()` 返回 `false`，`frame_produced` 照发，`_frame_count` 不增 |
+| 无 link（自检直调 `Emit_Frame`） | 内部 `_seq` 自增，返回 `false`，信号照发 |
+
+**⑧ `Emit_Frame()` 是公开的，且不是测试专用缝**：它是**出帧唯一出口**，生产路径 `_Capture_Tick()` 也走它；
+与 `Lidar2D._Publish()` 同构，区别只在"payload 可注入"——因为相机的 payload 来自一次耗时的 `await` 抓拍，
+headless 下无法经 `Capture_Jpeg()` 出图，帧头 / 魔数只能这样验（`check_camera_sensor.A14/A15`）。
 
 ---
 
@@ -1411,7 +1495,7 @@ const MSG_ASSEMBLY_READY := "assembly_ready"
 const MSG_POSE := "pose"          # 位姿下行（task_31 Step 1）；imu / gnss 在 v1 不做（§10）
 
 const FRAME_TYPE_LIDAR := 1
-const FRAME_TYPE_CAMERA := 2      # 预留
+const FRAME_TYPE_CAMERA := 2      # task_34 Step 3 落地（payload = JPEG 原始字节）
 const FRAME_HEADER_SIZE := 15
 const LIDAR_SAMPLE_BYTES := 4     # 每个距离 f32
 
@@ -1421,6 +1505,8 @@ static func MakeJsonText(msg: Dictionary) -> String                   # send_tex
 static func BuildPose(world_time: float, pose: Dictionary, velocity: Vector3) -> Dictionary
 static func BuildLidar2DFrame(sensor_id: int, seq: int, world_time: float,
         ranges: PackedFloat32Array) -> PackedByteArray
+static func BuildCameraFrame(sensor_id: int, seq: int, world_time: float,
+        jpeg: PackedByteArray) -> PackedByteArray                     # task_34 Step 3
 static func ParseFrameHeader(bytes: PackedByteArray) -> Dictionary     # 短包(<15 B) -> {}；否则 {type, slot_id, seq, world_time}
 static func FramePayloadSize(bytes: PackedByteArray) -> int            # max(size - 15, 0)
 ```
@@ -1430,6 +1516,10 @@ static func FramePayloadSize(bytes: PackedByteArray) -> int            # max(siz
 - `ParseJson` 用 `JSON.new().parse()`（返回 `Error`）而不是 `JSON.parse_string()`：后者遇非法输入会向 **stderr 打印 `ERROR: Parse JSON failed`**，污染「grep ERROR 必须为空」的验收（§9.1 **E21**）。解析失败 / 非 `Dictionary`（数组、标量、null）一律 `{}`。
 - `BuildLidar2DFrame`：先 `resize(15)` 编头（`encode_u8(0,…)` / `encode_u16(1, sensor_id & 0xFFFF)` / `encode_u32(3, seq & 0xFFFFFFFF)` / `encode_double(7, world_time)`），再 `append_array(ranges.to_byte_array())`；长度 = `15 + 4·rays`（360 线 = **1455 B**）。
 - `ParseFrameHeader` 的短包语义 = `{}`（调用方据此丢弃整帧，不部分解析）。
+- `BuildCameraFrame`（task_34 Step 3）：**同一套 15 B 帧头**（`type=2` / 同样的字段偏移 / 同样的小端），
+  payload = **JPEG 原始字节**——不重编码、不加长度前缀、不加分隔符；长度 `15 + N`（N = `jpeg.size()`），
+  宽高从 JPEG 的 `SOF0` 段读（不上线，与 lidar 的"角度不上线"同理）；空 payload 时长度恰为 15，
+  **调用方应自行丢弃**（sim 侧按短包忽略）。解析侧复用 `ParseFrameHeader()` / `FramePayloadSize()`，无需新增函数。
 - `BuildPose`（task_31 Step 1）：固定 **8 键** `{msg, world_time, x, y, z, yaw, vx, vy}`，`z` **必带**（UGV 0 / UAV 2.5）；`velocity.z` 丢弃（`vz` 不上线），不发 `valid` / `sub_gx` / `sub_gy` / `rtk_fixed`；`velocity` 由**调用方**传 `WorldTransform.VelToWorld(vehicle.velocity)` 的结果（本文件**不** preload `WorldTransform`，保持"只做协议事实"的分层）；`pose` 缺 key 时四字段回 `0.0`（不崩）。
 - **只做协议事实**：不碰 socket、不碰场景树。
 
@@ -1443,6 +1533,11 @@ static func FramePayloadSize(bytes: PackedByteArray) -> int            # max(siz
 - `Poll()` 顺序写死：`peer.poll()` → **先抽包**（`STATE_OPEN`/`STATE_CLOSING` 都抽）→ 再看 `STATE_CLOSED` 置 `closed`；先关后抽会丢最后几帧。
 - `last_error` 记关闭原因 / 对端关闭码（`get_close_code()` / `get_close_reason()`），供 manager 一行日志。
 - `SendJson` / `SendBinary` 未 OPEN 时返回 `ERR_UNCONFIGURED`（不崩、不打印）。
+- **收发缓冲 4 MiB（task_34 Step 3）**：`Init()` 里 `peer` 建好之后、`accept_stream()` **之前**，把
+  `peer.inbound_buffer_size` / `peer.outbound_buffer_size` 都设为 `MAX_FRAME_BUFFER_BYTES = 4 MiB`
+  （`WebSocketPeer` 默认只有 **64 KiB**，一张 720p JPEG 就能撑爆）。顺序是硬约束：连上后再改对已分配的
+  wslay 缓冲无效。代价 = 每连接常驻 2 × 4 MiB（世界侧连接数 = sim 数，个位数，可接受）。
+  自检 `check_ws_manager.A10` 用 `Init(null, 99)`（`null tcp` 分支在 `accept_stream` 之前 return）直接断言属性值。
 
 ### 7.5 `ChassisModel` 及实现（`src/chassis/`）
 
@@ -1500,9 +1595,29 @@ static func GetDefaults(p_name: String) -> Dictionary  # 副本（duplicate(true
 `SensorCatalog` 同构：
 
 ```gdscript
-const SCENES := {"lidar_2d": "res://src/scenes/sensors/Lidar2D.tscn"}
-const DEFAULTS := {"lidar_2d": {"range": 12.0, "rays": 360, "rate_hz": 10.0}}
+const SCENES := {
+    "lidar_2d": "res://src/scenes/sensors/Lidar2D.tscn",
+    "camera":   "res://src/scenes/sensors/CameraSensor.tscn",       # task_34 Step 3
+}
+const DEFAULTS := {
+    "lidar_2d": {"range": 12.0, "rays": 360, "rate_hz": 10.0},
+    "camera":   {"width": 640, "height": 480, "fov_deg": 70.0, "quality": 0.8, "rate_hz": 1.0},
+}
 ```
+
+> **两个口径，不要混（task_34 Step 3 的关键取舍）**：`DEFAULTS["camera"]` 是 **640×480 @ 1 Hz**
+> （装配线口径，对齐 UAV 相机默认、也对齐 task 文档硬要点 4），而组件常量
+> `CameraSensor.DEFAULT_WIDTH/HEIGHT = 1280×720` 与 `CameraSensor.tscn` 的 `size` 是 **task_33 的既定基线**
+> （组件口径，`check_camera_shots.gd` 的 `S14/R2` 9 项按它硬断言）。两者**不冲突也不互相同步**：
+> 目录表是"新零件进装配线时的默认参数"，组件常量是"不经装配线直接实例化时的默认值"。
+>
+> **当前调用链的已知 gap（如实记录，不假装闭环）**：`WebSocketManager._MountSensor()` 至今**不读**
+> `GetDefaults()`，只把 `sensor_hello.params` 原样交给 `Vehicle.AttachSensor()`。所以
+> `DEFAULTS["camera"]` 是**契约 / 样例级**默认值（由 `check_camera_sensor.A18` 锁定其内容），
+> 与 lidar 的 `DEFAULTS["lidar_2d"]` 处境相同；真正生效的参数由 sim 侧 `sensor_hello.params` 给
+> （`check_ws_manager.J2` 用 640×480 的 params 证明"从配置可调"）。
+>
+> `"imu"` 仍然 `Has() == false`（`check_lidar.B1` 依赖），`camera` 的加入不改任何既有语义。
 
 > **必须用 `load()` 而非 `preload()`**：Step 6（manager）先于 Step 7/8（场景文件）完成，`preload` 会因资源不存在导致整脚本解析失败。
 
@@ -1565,21 +1680,27 @@ const DEFAULTS := {"lidar_2d": {"range": 12.0, "rays": 360, "rate_hz": 10.0}}
 7. `sensor_id` / `avatar_id` 均由 manager 单调分配（`u16` 语义，v1 用 `int`）。
 8. **`pose`（world → sim，task_31 Step 1）**：频率 **10 Hz**（`POSE_BROADCAST_INTERVAL_S = 0.1`，对齐真机 `state_notifier` 的 100 ms）；**只走底盘连接**（与 `motion_cmd` 同一条，传感器连接一条都不发）；`world_time` 单位=**秒**，与 `chassis_ready` / `assembly_ready` 同时间基（`WorldClock.Now()`）；`x`/`y`/`z`/`yaw` 取自 `Vehicle.GetPose()`（世界坐标 Z-up、米、yaw 弧度绕 +z、归一化 `[-PI, PI)`，**与 `chassis_ready.spawn` 同构**，静止时逐字段相等）；`vx`/`vy` 取自 `WorldTransform.VelToWorld(vehicle.velocity)`（世界 x=东、y=南）；`z` **必带**（UGV `0.0` / UAV `2.5`，消费方不得假设 `z==0`）；**不发** `vz` / `valid` / `sub_gx` / `sub_gy` / `rtk_fixed`（决策链产物归 sim、世界无 RTK）。
 
-### 8.2 二进制帧（LiDAR，**小端**）
+### 8.2 二进制帧（LiDAR / camera，**小端**）
 
 | offset | size | field | 说明 |
 |---|---|---|---|
-| 0 | 1 | `type` u8 | `1` = `lidar_2d`；`2` = camera（预留） |
+| 0 | 1 | `type` u8 | `1` = `lidar_2d`；`2` = camera（task_34-3 落地） |
 | 1 | 2 | `slot_id` u16 | = `sensor_id`（`sensor_ready` 里下发的值） |
 | 3 | 4 | `seq` u32 | 每连接独立递增 |
 | 7 | 8 | `world_time` f64 | 秒，`WorldClock.Now()` |
-| 15 | N | `payload` | lidar：`f32[rays]` 距离（米，`0.0` = 无回波） |
+| 15 | N | `payload`（lidar） | `f32[rays]` 距离（米，`0.0` = 无回波） |
+| 15 | N | `payload`（camera） | **JPEG 原始字节**（不重编码、不加长度前缀） |
 
-总长 = `15 + 4·rays`（360 线 → 1455 B）。
+总长 = `15 + 4·rays`（lidar，360 线 → 1455 B）/ `15 + N`（camera，N = JPEG 字节数）。
 
 - GDScript 侧 `PackedByteArray.encode_u16/encode_u32/encode_double` 与 `PackedFloat32Array.to_byte_array()` 在 x86/ARM 上均为小端，与 Rust 侧 `from_le_bytes` 对齐。
 - **Rust 侧按本表小端解析，不要依赖主机序**。
 - 角度不上线：`slot_id` + `seq` + `world_time` 已足够；`rays` 与 `range` 由 `sensor_hello.params` 静态约定。
+- **camera 帧（`type=2`，task_34 Step 3）**：payload 就是 `CameraSensor.Capture_Jpeg()` 交出的那段字节，
+  **不重编码、不裁剪、不加长度前缀**（长度由 WS 帧本身给出）；宽高不上线，sim 侧从 JPEG 的 `SOF0` 段读
+  （与 lidar"角度不上线"同一取舍）；`type` / `slot_id` / `seq` / `world_time` 四个头字段与 lidar **逐字节同构**，
+  所以 `ParseFrameHeader()` / `FramePayloadSize()` 一套代码通吃。
+- 空 payload（长度恰 15）**不是合法图像帧**：sim 侧应直接丢弃（世界侧正常不会发，`Emit_Frame()` 对空图返回 `false`）。
 
 ### 8.3 状态机与错误处理
 
@@ -1674,7 +1795,7 @@ Modified Date ： YYYY-MM-DD
 | 底盘 | `diff_drive_ugv` / `quadrotor_uav` 两种（D6） | 目录外名字直接拒绝。`diff_drive_ugv` 的几何默认值 = `ugv_chassis.glb` 的 AABB **`0.30 × 0.25 × 0.25`**（D11：模型 = 碰撞盒，task_33 Step 3）；车体截面由 `0.16/0.24` 变 `0.25/0.25` **会改变贴墙 / 绕行 / 急停余量**（同样的墙面，车头更早接触），goto 冒烟需按新尺寸复核 |
 | 世界边界 | **可见 2 m 体素矮墙 + 不可见 32 m 空气墙 + 32 m 顶盖**（空气墙在 layer 1，与地面同层） | task_32 Step 2；矮墙只作视觉 / 近距障碍，真正的硬边界是空气墙：20 m/s 四面冲撞 10 s 与 5 m/s 持续爬升 10 s 都出不去（`src/tests/check_bounds.gd` 的 B2~B6）；雷达贴边时会把空气墙扫成静态障碍 → SLAM 地图边缘出现"墙"，**预期行为**（task_32 §三.5-3）。另：UAV 还有 `[0, 31.8]` **软件 clamp 兜底**（`Quadrotor.ClampAltitude()`，task_32 Step 3），即使物理失效也飞不出 32 m 顶盖 |
 | LiDAR 噪声 | 默认关闭 | `_rng` 保留，`params.noise` 未启用 |
-| 相机传感器 | **世界侧零件已落地**（task_33 Step 2）+ **已挂外观模型**（Step 3）+ **已由 Step 4 的 `check_camera_shots.gd` 挂进世界拍照**（§4.8.2），**不推流** | `src/scenes/sensors/CameraSensor.tscn` 能按需出一张 JPEG（`Capture_Jpeg()` / `Capture_To_File()`，见 §4.8），并在 `Body` 上挂了 `camera_module.glb`（纯视觉、无碰撞、光轴 `−Z`）；**不接网络**：无 1 Hz 定时器、无 `camera.capture()` 请求应答，二进制 `type=2` 仍只是**预留**（属 sim 接入线）；**不挂进 `World.tscn`**：进世界的唯一入口是 `src/tests/check_camera_shots.gd`（Step 4，拍照自检；`World.tscn` 本身仍不引用相机） |
+| 相机传感器 | **世界侧零件已落地 + 已登记为可装配零件**（task_33 Step 2/3、task_34 Step 3）+ **已由 Step 4 的 `check_camera_shots.gd` 挂进世界拍照**（§4.8.2），**可按 `rate_hz` 出帧** | `SensorCatalog` 已登记 `camera`（§7.6），`sensor_hello` 会经 `Vehicle.AttachSensor()` 把它实例化到 `Vehicle/Sensors/<slot>`，`sensor_ready` 之后 `SetStream()`，随后按 `rate_hz`（默认 **1 Hz**）下发 `type=2` 帧（15 B 头 + JPEG 原始字节，§8.2）；默认 640×480（装配线口径，组件常量仍是 1280×720，见 §7.6）。**仍不推流 / 无请求应答**（无 `camera.capture()`）、**不进 `World.tscn`**（`World.tscn` 不引用相机）、**无碰撞体**（E27）。帧**内容**验收仍需真渲染环境：headless（dummy 渲染器）下只验头部、频率与"零帧"闸门（`A13~A18` / `J1~J7`） |
 | UAV 高度控制 / 三维寻路 / 三维避障 | **不在本任务**（§九） | UAV 决策链仍是 2D（**不控高度**）；世界侧巡航高度 **2.5 m**（`WebSocketManager.UAV_ALTITUDE_M`，task_32 Step 3）由世界给，另有 `[0, 31.8]` 软件 clamp 兜底；本任务只给它"3D 身体" |
 | sim 侧 `WorldLink` | **不在本任务**（§九） | sim 侧接入是另一条线；本任务只做 Godot 世界侧 |
 | 仓库 / 地图编辑 | 不实现 | 世界障碍由 `World.gd` 程序化稀疏生成（D4） |
@@ -1706,6 +1827,7 @@ Modified Date ： YYYY-MM-DD
 | task_33-3 | `src/scenes/sensors/Lidar2D.tscn`（+`Body`）、`src/scenes/sensors/CameraSensor.tscn`（+`Body`）、`src/scenes/Vehicle.tscn`（`ModelUGV` 换 `assets/chassis/ugv_chassis.glb` + 占位 `0.30×0.25×0.25` / `y=0.125`）、`src/scenes/chassis/DiffDrive.tscn`（占位轮位 `z=±0.125`）、`src/vehicle/Vehicle.gd`（`mount.pitch`）、`src/chassis/DiffDrive.gd` + `src/chassis/ChassisCatalog.gd`（默认 `track_width/height 0.24/0.16 -> 0.25/0.25`）、`src/tests/check_models.gd`（**16 -> 24**）、`src/tests/check_vehicle.gd`（**36 -> 40**）、`src/tests/check_diff_drive.gd`（值，断言数仍 41）、`COMPONENTS.md`（§1.1 / §2.2 / §3 / §4.3 / §4.4 / §4.7 / §4.8 / §5.1 / §7.6 / §9.1 E27 / §10 / §11 / 附） | Step 3 传感器接入场景（模型 + 挂点 + pitch + 碰撞盒）：三件 `.glb` 各在**组件场景**里静态 `instance`（**不改 `World.tscn`**）；`Body` 是 glb 实例根（`Node3D`），雷达 identity、相机 `rotation_degrees=(0,90,0)`（光轴 = 局部 `−Z`）；`mount.pitch` 单位度、正抬头 / 负低头、缺省 0（不预置任何角度）；底盘碰撞盒 = 模型 AABB `0.30×0.25×0.25`（D11）。自检：`check_models` **24**（+`M3b-ugv-model-equals-hull` + `S1~S7`）/ `check_vehicle` **40**（+`placeholder-size` + `mount-pitch-default/down/up`）/ `check_diff_drive` **41**（值更新，`wall-stops x=127.3375` 与旧尺寸逐字相同）/ `check_sensor_models` **29**；**传感器零影响**：`check_lidar` **48 条断言数字逐字不变**（`F7-real-wall-distance 2.0000` / `F8-real-wall-hits 152` / `D8-other-vehicle-visible 0.7500`，改前改后日志 diff 仅剩 `.tscn` 字节数与扫描时间戳两项非测量量）、`check_camera_sensor` headless **12**（Xvfb 下 **21**）A 组数字不变；13 条自检全 `SELF-CHECK OK` + `EXIT=0`；`--import` / `--quit` 均 EXIT=0 且 0 ERROR。**不执行** `git add` / `git commit` |
 
 | task_33-4 | `src/tests/check_camera_shots.gd`（**新建**）、`COMPONENTS.md`（§1.1 / §1.4 / §4.8 / **§4.8.2** / §10 / §11 / 附） | Step 4 模拟世界拍照（出图到 `tmp/task33_shots/`，**不在仓库**）：真 `World.tscn` + 静止 UGV（`ApplyChassis("diff_drive_ugv")`）+ 建模雷达/相机，三机位拍 **3 张 1280×720 JPEG**（朝东 / A+90° 朝南 / 外部 3/4）到**绝对路径**。`check_camera_shots.gd`：**S 组 18 项**（结构，headless 也跑）+ **R 组 17 项**（真渲染，`Can_Capture()==false` 时整组 `[skip]` 且不计入 total）→ headless `total=18 failed=0`（`[skip]` ×17）、**Xvfb 下 `total=35 failed=0`**，两条均 `SELF-CHECK OK` + EXIT=0 + 0 ERROR；**13 个既有自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 51` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 12`，`failed=0`）；`--quit` EXIT=0 且 0 ERROR；日志无 `[ws] listening`（脚本在 `add_child` 前关掉 `autolisten`）。实测三张 **26 315 / 24 462 / 29 576 B**（SOF0 均 1280×720、首三字节 `ffd8ff`），灰度 `var 0.009563 / 0.008259 / 0.012607`、网格 `contrast 56/42/48` 与 `midband 28/28/30`，车体投影占屏 **0.0000 / 0.0000 / 0.0689**，`pillar_e` 屏内角点 **8 / 0**（"对着哪拍哪"），两两字节差异 **0.823 / 0.963 / 0.960**。**不改** `CameraSensor.gd` / 任何 `.tscn` / `assets`；**不启动 sim、不连 WS、不跑决策链**；**不执行** `git add` / `git commit` |
+| task_34-3 | `src/sensors/SensorCatalog.gd`（`SCENES` + `"camera"`、`DEFAULTS` + 640×480@1 Hz）、`src/sensors/CameraSensor.gd`（+`rate_hz` / `DEFAULT_RATE_HZ` / `MIN_RATE` / `ACCUM_EPS` / `frame_produced` / `SetStream` / `ClearStream` / `HasStream` / `Tick_Stream` / `Emit_Frame` / `Get_Tick_Count` / `Get_Frame_Count` / `_Capture_Tick` / `_Warn_No_Renderer` / `_Rate_Or` / `_exit_tree` / `_process`）、`src/net/WireProtocol.gd`（+`BuildCameraFrame`）、`src/net/ComponentLink.gd`（+`MAX_FRAME_BUFFER_BYTES`，`Init()` 在 `accept_stream` 前设 4 MiB 双缓冲）、`src/tests/check_camera_sensor.gd`（**12 -> 18**：`A13~A18` + `B10` + 内联 `StubLink` + `_Step_Ticks`）、`src/tests/check_ws_manager.gd`（**51 -> 59**：`A9` / `A10` + J 段 `J1~J6` + `[skip] J7`）、`COMPONENTS.md`（§1.4 / §3 / §4.8 / **§4.8.3** / §7.3 / §7.4 / §7.6 / §8.2 / §10 / §11 / 附） | 世界侧 camera 成为**可装配零件**并按频率出 `type=2` 帧：`sensor_hello(sensor="camera")` → `sensor_ready` → `SetStream` → 按 `rate_hz`（默认 1 Hz）组帧下发（15 B 头 + JPEG 原始字节，§8.2）；`Can_Capture()==false`（headless）时**只 warn 一次、绝不出帧、绝不 await**（E26-③）。`check_camera_sensor`：headless **`total=18 failed=0`**（`[skip]` ×10）、Xvfb 下 **`total=28`**；`check_ws_manager`：**`total=59 failed=0`**（`[skip]` ×1）；**其余 12 个自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_shots 18`，全部 `failed=0`）；`--quit` EXIT=0 且 0 ERROR。实测关键行：`A14 size=25 type=2 slot=7 seq=1` / `A16 1hz=1/1 1hz=1/1 2hz=2/2` / `A17 can=false ticks=1 frames=0 warned=true` / `A9 size=20 type=2 slot=4 seq=11 empty=15` / `A10 in=4194304 out=4194304 closed=true` / `J2 size=(640, 480) fov=70.0 rate=1.00 can_capture=false` / `J4 physics_nodes=0` / `J6 ticks=+1 frames=0`。**不改** `World.tscn` / `Vehicle.gd` / `Lidar2D.gd` / `ChassisModel.gd` / `WebSocketManager.gd` / 任何 `.tscn` / `assets` / 任何 `pleiades-*` crate；Xvfb 档（`B10` / `J7`）本机无 `DISPLAY` **未实测**；**不执行** `git add` / `git commit` |
 
 > **task_31 Step 1 追加**（不属于 task_30 的 Step 1~8）：`pose` 下行（10 Hz，走底盘连接）+ `src/tests/check_pose.gd`（**23 项断言** / `total=23 failed=0` / `SELF-CHECK OK`）。改动文件仅 `src/net/{WireProtocol,WebSocketManager}.gd`、新建 `src/tests/check_pose.gd`、本文；`pleiades-sim/**` 一行未动（消费在 task_31 后续 step）。
 
@@ -1752,13 +1874,13 @@ Step 1（本文 + 骨架）
 | `src/tests/check_world.gd` | ✅ 世界自检（Step 2；Step 3 相机断言改指 `ObserverCamera`，`SELF-CHECK OK` + `exit 0`，26 项断言） |
 | `src/tests/check_camera.gd` | ✅ 相机自检（Step 3；`SELF-CHECK OK` + `exit 0`，32 项断言，含 4 项物理不变量） |
 | `src/scenes/WebSocketManager.tscn` | ✅ Step 6 组件（`Node` + `Heartbeat(Timer, 1 s, autostart)`；无内嵌脚本、无节点引用导出 → 不需要 `node_paths`） |
-| `src/net/WireProtocol.gd` | ✅ Step 6 协议唯一入口（7 个消息名：`chassis_hello` / `chassis_ready` / `sensor_hello` / `sensor_ready` / `motion_cmd` / `assembly_ready` / **`pose`（task_31 Step 1）**；`imu` / `gnss` 已删除不再预留；`ParseJson`/`MakeJson`/`MakeJsonText`/**`BuildPose`**/`BuildLidar2DFrame`/`ParseFrameHeader`/`FramePayloadSize`） |
-| `src/net/ComponentLink.gd` | ✅ Step 6 单连接封装（`RefCounted`；`Init`/`Poll`/`TakePackets`/`SendJson`/`SendBinary`/`NextSeq`/`IsOpen`/`IsConnecting`/`Close`（void）/`Describe`；`last_error`） |
+| `src/net/WireProtocol.gd` | ✅ Step 6 协议唯一入口（7 个消息名：`chassis_hello` / `chassis_ready` / `sensor_hello` / `sensor_ready` / `motion_cmd` / `assembly_ready` / **`pose`（task_31 Step 1）**；`imu` / `gnss` 已删除不再预留；`ParseJson`/`MakeJson`/`MakeJsonText`/**`BuildPose`**/`BuildLidar2DFrame`/**`BuildCameraFrame`（task_34-3）**/`ParseFrameHeader`/`FramePayloadSize`） |
+| `src/net/ComponentLink.gd` | ✅ Step 6 单连接封装（`RefCounted`；`Init`/`Poll`/`TakePackets`/`SendJson`/`SendBinary`/`NextSeq`/`IsOpen`/`IsConnecting`/`Close`（void）/`Describe`；`last_error`）。**task_34 Step 3**：`MAX_FRAME_BUFFER_BYTES = 4 MiB`，`Init()` 在 `accept_stream()` **之前**设 `inbound_buffer_size` / `outbound_buffer_size`（默认 64 KiB 撑不住一张 720p JPEG） |
 | `src/net/WebSocketManager.gd` | ✅ Step 6 服务端（监听 / accept / 两张表 / hello 装配 / manifest 就绪 / `assembly_ready` / 断开清理 / `Heartbeat` 巡检；全静态实例、无 `push_error`；`UAV_ALTITUDE_M` 于 task_32 Step 3 改 **2.5 m**）+ ✅ task_31 Step 1 位姿下行（`POSE_BROADCAST_INTERVAL_S = 0.1` / `_pose_acc` / `_BroadcastPoses()`，只发已握手且活着的底盘连接） |
-| `src/tests/check_ws_manager.gd` | ✅ WebSocketManager 自检（Step 6；`SELF-CHECK OK` + `exit 0`，**51 项断言**：场景形态 / World 接线 / 按序装配 / 运动下行 / 传感器先到 / 空 manifest / 断开清理 / 错误路径 / 规范 lint；Step 8 后 `C14 sensor-geometry-consistency` 由"双双为假"变为**双双为真**） |
+| `src/tests/check_ws_manager.gd` | ✅ WebSocketManager 自检（Step 6；`SELF-CHECK OK` + `exit 0`，**59 项断言**：场景形态 / World 接线 / 按序装配 / 运动下行 / 传感器先到 / 空 manifest / 断开清理 / 错误路径 / 规范 lint；Step 8 后 `C14 sensor-geometry-consistency` 由"双双为假"变为**双双为真**；**task_34 Step 3**：+`A9 camera-frame`（`type=2` 帧格式）+`A10 link-buffer-size`（4 MiB 双缓冲）+ **J 段** `J1 camera-sensor-ready` / `J2 camera-geometry` / `J3 camera-stream-bound` / `J4 camera-no-collision` / `J5 camera-assembly` / `J6 camera-stream-gate` + `[skip] J7 camera-payload-jpeg`（无渲染器不计入 total），`Sim` 额外按序记录 `binaries`） |
 | `src/scenes/sensors/Lidar2D.tscn` | ✅ Step 8 传感器组件（`Node3D` + `DebugPoints(MeshInstance3D, visible=false)`；`node_paths=PackedStringArray("debug_points")`；无内嵌脚本、无 `uid`）。task_33 Step 3：加 `Body`（`lidar_tmini.glb` 实例根，identity，**无碰撞**，E27） |
 | `src/sensors/Lidar2D.gd` | ✅ Step 8 2D 单线激光（360 条水平射线 / 10 Hz / `BuildLidar2DFrame` 二进制下发 + `LaserScan`；不写 position、不发 JSON、不 preload `ComponentLink`） |
-| `src/sensors/SensorCatalog.gd` | ✅ Step 8 传感器目录（`SCENES` / `DEFAULTS` + `Has` / `GetScene`（`load()`+缓存）/ `GetDefaults`；与 `ChassisCatalog` 同构） |
+| `src/sensors/SensorCatalog.gd` | ✅ Step 8 传感器目录（`SCENES` / `DEFAULTS` + `Has` / `GetScene`（`load()`+缓存）/ `GetDefaults`；与 `ChassisCatalog` 同构）。**task_34 Step 3**：`SCENES` 加 `camera`（→ `CameraSensor.tscn`）、`DEFAULTS` 加 `camera = {640×480, fov 70.0, quality 0.8, 1 Hz}`（装配线口径，与组件常量 1280×720 是两个口径，见 §7.6） |
 | `src/tests/check_lidar.gd` | ✅ Lidar2D 自检（Step 8；`SELF-CHECK OK` + `exit 0`，**48 项断言**：场景形态 / 目录 / 装配 / 一圈几何 / 10 Hz 时序 / 帧格式 / 边界与白盒） |
 | `src/tests/check_pose.gd` | ✅ 位姿下行自检（task_31 Step 1；`SELF-CHECK OK` + `exit 0`，**23 项断言**：`A1~A7` 协议形态与白盒 lint（E23 三条禁止）/ `B1~B2` World 接线 / `C1~C14` 端到端（10 Hz = 60 帧 10 条、8 键字段、与 `spawn` 一致、yaw 范围、`world_time` 单调、传感器连接 0 条、forward 的 `x`/`vx`、left 的 `yaw`/`vy`、断开后不再发、`vehicle==null` 守卫、每周期每连接恰好一次）） |
 | `src/tests/check_bounds.gd` | ✅ 空气墙 / 顶盖自检（task_32 Step 2；`SELF-CHECK OK` + `exit 0`，**12 项断言**：`B1` 结构 / layer / 无 mesh + `B1b` 四面墙内侧面贴边界 + `B1c` 顶盖下表面 32 m + `B1d` 由代码构建（`.tscn` 无 `Bounds`）+ `B1e` 幂等重建 + `B2~B5` 四面 20 m/s 冲撞 10 s 出不去 + `B6` 5 m/s 爬升被顶盖挡住 + `B7` 地面自由落体静止 + `B8` 可见 2 m 矮墙各 1024 格仍在） |
@@ -1773,8 +1895,8 @@ Step 1（本文 + 骨架）
 | `Tool/blender/models/export_all.sh` | ✅ task_33 Step 1 一键导出（`blender -b -P build_models.py` → `blend2glb.sh` ×3 → `file` + 体积校验，`set -euo pipefail`） |
 | `Tool/blender/models/{lidar_tmini,camera_module,ugv_chassis}.blend` | ✅ task_33 Step 1 模型源文件（各 ~90 KB，可在任意 Blender 里继续手工编辑） |
 | `src/scenes/sensors/CameraSensor.tscn` | ✅ task_33 Step 2 相机组件（`Node3D` + `Viewport(SubViewport 1280×720, own_world_3d=false, update_mode=0)` + `Lens(Camera3D fov=70 near=0.05 far=200 current=true)`；`node_paths=PackedStringArray("viewport","lens")`；无内嵌脚本、无 `uid`）。task_33 Step 3：加 `Body`（`camera_module.glb` 实例根，`rotation_degrees=(0,90,0)`，不写 position，**无碰撞**，E27） |
-| `src/sensors/CameraSensor.gd` | ✅ task_33 Step 2 相机（`Configure` / `Capture_Jpeg` / `Capture_To_File` / `Get_Image_Size` + `Can_Capture`；warmup 2 帧 + `UPDATE_ONCE` + `await frame_post_draw` + `get_image` + `save_jpg_to_buffer`；抓拍前手工同步 `lens.global_transform`；四类失败 `push_error` + 空数组，路径类失败只 `push_warning`；无碰撞体、无物理 API、不碰网络） |
-| `src/tests/check_camera_sensor.gd` | ✅ task_33 Step 2 相机自检（`SELF-CHECK OK` + `exit 0`，**A 组 12 项 + B 组 9 项**；headless 下 B 组 `[skip]` 不计入 total → `total=12`，Xvfb 下 `total=21`） |
+| `src/sensors/CameraSensor.gd` | ✅ task_33 Step 2 相机（`Configure` / `Capture_Jpeg` / `Capture_To_File` / `Get_Image_Size` + `Can_Capture`；warmup 2 帧 + `UPDATE_ONCE` + `await frame_post_draw` + `get_image` + `save_jpg_to_buffer`；抓拍前手工同步 `lens.global_transform`；四类失败 `push_error` + 空数组，路径类失败只 `push_warning`；无碰撞体、无物理 API、不碰 socket）。**task_34 Step 3**：+`rate_hz`（`DEFAULT_RATE_HZ=1.0` / `MIN_RATE` / `ACCUM_EPS`）+ `frame_produced` 信号 + `SetStream`/`ClearStream`/`HasStream`/`Tick_Stream`/`Emit_Frame`/`Get_Tick_Count`/`Get_Frame_Count` + `_Capture_Tick()`/`_Warn_No_Renderer()`/`_exit_tree()`；`_process` 只转发累加器；`Can_Capture()==false` 时**只 warn 一次、绝不出帧、绝不 await**（§4.8.3） |
+| `src/tests/check_camera_sensor.gd` | ✅ task_33 Step 2 相机自检 + **task_34 Step 3 出帧断言**（`SELF-CHECK OK` + `exit 0`，**A 组 18 项 + B 组 10 项**；headless 下 B 组 `[skip]` 不计入 total → `total=18`（`[skip]` ×10），Xvfb 下 `total=28`。新增 `A13` 流绑定 / `A14` 帧头 / `A15` seq+空图 / `A16` `rate_hz` 节奏 / `A17` 无渲染器闸门 / `A18` 目录登记 / `B10` 真抓拍→真帧，用内联 `StubLink` + 手工 `Tick_Stream()` 推步，不依赖墙钟与像素） |
 | `src/tests/check_camera_shots.gd` | ✅ task_33 Step 4 模拟世界拍照自检（`SELF-CHECK OK` + `exit 0`，**S 组 18 项 + R 组 17 项**；headless 下 R 组 `[skip]` 不计入 total → `total=18`，Xvfb 下 **`total=35`** 并落 3 张 1280×720 JPEG 到 `tmp/task33_shots/`；§4.8.2） |
 | 目录骨架 | ✅ `src/scenes/`（含 `chassis/` `sensors/`）+ `src/{common,world,camera,vehicle,chassis,sensors,net}/` + `src/tests/`（含 `src/tests/doubles/`）+ `assets/`（`.gitkeep` + `README.md` + 2 个旧 glb + `sensors/` + `chassis/`，`sensors/` 与 `chassis/` 为 task_33 Step 1 新增） |
 

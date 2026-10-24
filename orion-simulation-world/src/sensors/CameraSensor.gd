@@ -1,9 +1,10 @@
 # Presented by KeJi
 # Created Date ： 2026-10-23
-# Modified Date ： 2026-10-23
+# Modified Date ： 2026-10-24
 #
-# 传感器组件 camera（task_33 Step 2 / COMPONENTS.md §4.8）：
-#   离屏渲染一台相机 —— 给一个挂载位姿，它渲染"当前对着的画面"并交出一段 JPEG 字节。
+# 传感器组件 camera（task_33 Step 2 / task_34 Step 3 / COMPONENTS.md §4.8）：
+#   离屏渲染一台相机 —— 给一个挂载位姿，它渲染"当前对着的画面"并交出一段 JPEG 字节；
+#   task_34 Step 3 起它同时是**可装配零件**：按 `rate_hz` 把每张图组 `type=2` 帧下发给 sim。
 #
 # 节点形态（.tscn 见 src/scenes/sensors/CameraSensor.tscn）：
 #   CameraSensor (Node3D)            ← 挂载点 = 光心（D8）；position / rotation 由挂载方写
@@ -11,10 +12,13 @@
 #       └── Lens (Camera3D)          ← fov=70 / near=0.05 / far=200 / current=true
 #
 # 做什么 / 不做什么：
-#   - 只做**单张按需拍摄**（D2）：Capture_Jpeg() 调一次拍一张。
-#     **不做** 1 Hz 定时器、**不做**定时推流、**不做**请求/应答、**不碰 socket**
-#     （推流与 camera.capture() 属 sim 接入线，task_33 §九 明确非目标）。
-#   - **不挂模型**（Step 3 才把 camera_module.glb 挂到 Body 上）、无碰撞体（D8：传感器纯视觉）。
+#   - 两种用法，同一个抓拍内核：
+#     ① **按需单拍**（task_33 的交付）：`Capture_Jpeg()` / `Capture_To_File()` 调一次拍一张；
+#     ② **按频率出帧**（task_34 Step 3）：`SetStream()` 绑流后 `_process` 里的累加器按 `rate_hz`
+#        到点 -> `Capture_Jpeg()` -> `WireProtocol.BuildCameraFrame()` -> `link.SendBinary()`。
+#   - **不做** 请求 / 应答（无 `camera.capture()`）、**不做** 队列积压、**不碰 socket**
+#     （只鸭子调用 link 的 NextSeq / IsOpen / SendBinary）。
+#   - **不在脚本里建模型**（`Body` 是 `.tscn` 里的静态 glb 实例，task_33 Step 3）、无碰撞体（D8：传感器纯视觉）。
 #   - 不写 position / 不推物理：外参由 Vehicle.AttachSensor() 写进来。
 #
 # 三条实测事实（4.7.2 + 本机 llvmpipe，违反任一条都会静默出错 → COMPONENTS.md §9.1 E26）：
@@ -30,6 +34,9 @@
 # 不声明全局类名（§9.1 E5）：场景按路径挂脚本。
 
 extends Node3D
+
+const WorldClock := preload("res://src/common/WorldClock.gd")
+const WireProtocol := preload("res://src/net/WireProtocol.gd")
 
 const TAG := "[camera]"
 
@@ -58,6 +65,20 @@ const MAX_QUALITY := 1.0
 ## warmup 帧数：前 2 帧是黑的（step 明令）；改分辨率后要重新 warmup。
 const WARMUP_FRAMES := 2
 
+# ---------------------------------------------------------------- 出帧节奏（task_34 Step 3）
+## 出帧频率默认值（Hz）：task_34 §二 Step 3 的 1 Hz（UAV 相机口径）。
+const DEFAULT_RATE_HZ := 1.0
+## 频率下限（Hz）：防 1/0。`rate_hz` 由 Configure 夹到这里，绝不出现 NaN / INF。
+const MIN_RATE := 1e-3
+## 累加器容差（与 Lidar2D 同款 1e-6）：60 × 1/60 = 0.9999999999999999 < 1.0，
+##   不加容差 1 Hz 会一个整周期只出 0 帧。
+const ACCUM_EPS := 1e-6
+
+## 一张图组好并（可能）下发后发出：seq / world_time / JPEG 字节数。
+## 有 link 但未 OPEN 时**也发**（与 Lidar2D 的 scan_produced 同口径，自检可观察）。
+## 传字节数而不是 PackedByteArray：避免每帧复制大数组 / 避免信号持有大缓冲引用。
+signal frame_produced(seq: int, world_time: float, size_bytes: int)
+
 # ---------------------------------------------------------------- 节点引用（E16：靠 node_paths 绑定）
 ## 离屏渲染目标（SubViewport）。漏写 node_paths 会静默为 null → _Ensure_Refs() 兜底。
 @export var viewport: SubViewport = null
@@ -73,12 +94,24 @@ var height: int = DEFAULT_HEIGHT
 var fov_deg: float = DEFAULT_FOV_DEG
 ## JPEG 质量。
 var quality: float = DEFAULT_QUALITY
+## 出帧频率（Hz）：`SetStream` 之后由累加器按它到点出帧（task_34 Step 3）。
+var rate_hz: float = DEFAULT_RATE_HZ
 
 # ---------------------------------------------------------------- 内部状态
 var _warmed: bool = false          # warmup 是否已过（Configure 后置回 false）
 var _warned_params: bool = false   # 非法参数只告警一次（与 Lidar2D 同款 F1）
 var _capture_count: int = 0        # 成功出图次数（自检 / Step 4 可观察）
 var _last_error: String = ""       # 最近一次失败原因（空 = 没失败过）
+
+# ---- 出帧状态（task_34 Step 3）
+var _accum: float = 0.0            # 时间累加器（秒）；SetStream / Configure 时清零
+var _tick_count: int = 0           # "到点"次数（不区分是否真的出了图；自检用）
+var _frame_count: int = 0          # 真正 SendBinary 成功的帧数（自检 / 排障用）
+var _capturing: bool = false       # 抓拍互斥：上一张没回来时到点也不叠拍（R13）
+var _warned_no_render: bool = false  # 无渲染器只告警一次（E26-③，避免每帧刷屏）
+var _link: Variant = null          # ComponentLink（RefCounted，鸭子契约：NextSeq/IsOpen/SendBinary）
+var _sensor_id: int = 0            # u16 语义，写进帧头 slot_id
+var _seq: int = 0                  # 无 link 时的内部序号（仅 signal 可观察）
 
 
 # ================================================================ 生命周期
@@ -89,9 +122,21 @@ func _ready() -> void:
 	_Apply_To_Nodes()
 
 
+## 每帧一次：只把 delta 交给累加器（引擎回调里**不阻塞、绝不 await**）。
+## 未绑流时 `Tick_Stream()` 首行直接 return -> 全工程既有的相机实例零开销（R6）。
+func _process(delta: float) -> void:
+	Tick_Stream(delta)
+
+
+## 出树即断流：manager 释放 ComponentLink（RefCounted）后本节点可能还在树里存活一帧（R11）。
+func _exit_tree() -> void:
+	_link = null
+	_capturing = false
+
+
 # ================================================================ 装配接口
 
-## 装配参数：width / height / fov_deg / quality。
+## 装配参数：width / height / fov_deg / quality / rate_hz。
 ##   缺键 = 保持当前值；键在但值非法 = 回退**默认常量**并 push_warning 一次（F1）。
 ## 签名说明：形参写 `Variant` 而不是 `Dictionary`，因为 `Configure(null)` 若形参是
 ##   `Dictionary` 会**编译期报错**（`Cannot pass a value of type "null" as "Dictionary"`，
@@ -106,19 +151,106 @@ func Configure(params: Variant = null) -> void:
 		fov_deg = _Fov_Or(p["fov_deg"], DEFAULT_FOV_DEG)
 	if p.has("quality"):
 		quality = _Quality_Or(p["quality"], DEFAULT_QUALITY)
+	if p.has("rate_hz"):
+		rate_hz = _Rate_Or(p["rate_hz"], DEFAULT_RATE_HZ)
 	_Apply_To_Nodes()
 	# 分辨率 / FOV 变了 -> 新尺寸首帧可能还没绘制，重新 warmup（R7）。
 	_warmed = false
+	# 重新起跑：周期可能变了，累加器清零（不带着旧相位起跑，R12）。
+	_accum = 0.0
 
 
 ## 生效参数（副本；自检 / Step 3 / Step 4 用）。
+## 前 4 键的顺序与值沿用 task_33 的口径不变，`rate_hz` 追加在末尾。
 func Get_Params() -> Dictionary:
 	return {
 		"width": width,
 		"height": height,
 		"fov_deg": fov_deg,
 		"quality": quality,
+		"rate_hz": rate_hz,
 	}
+
+
+# ================================================================ 数据流（manager 在 sensor_ready 之后调用）
+
+## 绑定下行流（§5.3 时序铁律：**必须**在 `sensor_ready` 之后；与 `Lidar2D.SetStream` 同签名同时序）。
+## 参数写 Variant + 鸭子调用（R6）：不 preload ComponentLink（net 层与传感器解耦，自检可换替身）。
+## 绑流后累加器清零 = 整周期后出第一张图（自检与 sim 侧都能看到首帧）。
+func SetStream(link: Variant, sensor_id: int) -> void:
+	_link = link
+	_sensor_id = maxi(sensor_id, 0)
+	_accum = 0.0
+
+
+## 解绑：清引用 + 清累加器（不重置参数、不打扰正在进行的抓拍）。
+func ClearStream() -> void:
+	_link = null
+	_sensor_id = 0
+	_accum = 0.0
+
+
+## 有下行流吗（未绑 = false）。
+func HasStream() -> bool:
+	return _link != null
+
+
+## 出帧节奏的唯一实现（照抄 Lidar2D 的累加器写法）：到点 -> 计数 -> 抓拍（协程，**不 await**）。
+## `_link == null` 时**直接 return**：没有收端时不做无谓抓拍（一次抓拍有成本）。
+## 到点计数刻意放在 `Can_Capture()` 闸**之前**：这样 headless 下"1 Hz 到点 1 次"仍可被观测，
+##   而"绝不出帧"同时成立 —— 两条要求不互相掩盖。
+func Tick_Stream(delta: float) -> void:
+	if _link == null:
+		return
+	var period := 1.0 / maxf(rate_hz, MIN_RATE)
+	_accum += maxf(delta, 0.0)
+	if _accum + ACCUM_EPS < period:
+		return
+	_accum = minf(_accum - period, period)      # 卡顿后最多补一张，不"追赶爆拍"
+	_tick_count += 1
+	_Capture_Tick()                             # 协程：**这里绝不 await**（_process 不能阻塞）
+
+
+## 到点次数（不区分有没有真的出图；自检用，对应 `Lidar2D.GetScanCount()`）。
+func Get_Tick_Count() -> int:
+	return _tick_count
+
+
+## 真正 `SendBinary` 成功的帧数（恒 `<= Get_Tick_Count()`：抓拍慢于周期时到点多于帧，见 §4.8.3）。
+func Get_Frame_Count() -> int:
+	return _frame_count
+
+
+## 一张图组好并（可能）下发：算 world_time / seq -> 有 link 且 OPEN 就发 `type=2` 帧 -> 最后 emit signal。
+## 返回 **true** = 已 `SendBinary` 成功；**false** = 空图 / 未绑流 / 未 OPEN
+##   （三者都**不抛、不打 ERROR、不递增 `_frame_count`**）。
+## 有 link 但未 OPEN 时 **signal 照发**（与 `Lidar2D.scan_produced` 同口径，自检可观察）。
+## 这是**出帧的唯一出口**（生产路径 `_Capture_Tick()` 也走它，不是测试专用分支）：
+##   与 `Lidar2D._Publish()` 同构，只是"可注入 payload"——因为相机的 payload 来自一次耗时的 await 抓拍。
+func Emit_Frame(jpeg: PackedByteArray) -> bool:
+	if jpeg.is_empty():
+		return false                              # 空图 = 什么都没发生（不发帧、不发 signal、不递增 seq）
+	var world_time := WorldClock.Now()
+	if _link != null and not is_instance_valid(_link):
+		_link = null                              # 对端对象已释放：就地断引用（R11）
+	var seq := 0
+	if _link != null and _link.has_method("NextSeq"):
+		seq = int(_link.call("NextSeq"))          # 每连接独立递增（§8.2）
+	else:
+		_seq += 1
+		seq = _seq
+	var sent := false
+	if _link != null:
+		var streaming := true
+		if _link.has_method("IsOpen"):
+			streaming = bool(_link.call("IsOpen"))
+		if streaming and _link.has_method("SendBinary"):
+			_link.call("SendBinary",
+				WireProtocol.BuildCameraFrame(_sensor_id, seq, world_time, jpeg))
+			_frame_count += 1
+			sent = true
+	frame_produced.emit(seq, world_time, jpeg.size())
+	return sent
 
 
 # ================================================================ 拍照（本 step 的唯一交付能力）
@@ -239,6 +371,34 @@ func _Has_Renderer() -> bool:
 	return not RenderingServer.get_video_adapter_name().is_empty()
 
 
+## 生产路径（唯一的定时抓拍入口）：`Can_Capture()` 闸 -> `await Capture_Jpeg()` -> `Emit_Frame()`。
+## `Can_Capture() == false`（--headless 的 dummy 渲染器）时**只告警一次、绝不出帧、绝不 await**
+##   —— 否则协程会永久挂在 `frame_post_draw` 上（E26-③，本 step 最硬的一条）。
+## `_capturing` 互斥：上一张还没回来时到点只计数、不叠拍（帧率上限 = 抓拍耗时，R13）。
+func _Capture_Tick() -> void:
+	if not Can_Capture():
+		_Warn_No_Renderer()
+		return
+	if _capturing:
+		return
+	_capturing = true
+	var jpeg: PackedByteArray = await Capture_Jpeg()
+	_capturing = false
+	if jpeg.is_empty():
+		return                                    # 失败原因已由 Capture_Jpeg() 记好并 push_error
+	Emit_Frame(jpeg)
+
+
+## 无渲染器只告警**一次**（E26-③）：绝不 await、绝不 push_error，
+##   否则 headless 下每帧刷屏，还会把「日志 0 ERROR」的验收搞红。
+func _Warn_No_Renderer() -> void:
+	if _warned_no_render:
+		return
+	_warned_no_render = true
+	push_warning("%s 无渲染器（display=%s adapter='%s'）：不抓拍、不出帧"
+		% [TAG, DisplayServer.get_name(), RenderingServer.get_video_adapter_name()])
+
+
 ## 把本节点（光心）的世界变换写进镜头。
 ## 必须手工同步：`SubViewport` 不是 `Node3D`，中间隔了它，`Lens.global_transform`
 ##   就断了继承链（实测本节点在 (64,6,64) 时 Lens 的 global 仍是 IDENTITY）。
@@ -342,3 +502,16 @@ func _Warn_Params(detail: String) -> void:
 		return
 	_warned_params = true
 	push_warning("%s 参数非法（%s），已回退默认值" % [TAG, detail])
+
+
+## 出帧频率：合法 -> `maxf(v, MIN_RATE)`；非数字 / `<= 0` -> fallback + 告警一次（R12）。
+## 与 `_Size_Or / _Fov_Or / _Quality_Or` 同款（不是夹取，是回退）。
+func _Rate_Or(value: Variant, fallback: float) -> float:
+	if not (value is int or value is float):
+		_Warn_Params("rate_hz=%s" % str(value))
+		return fallback
+	var v: float = float(value)
+	if v <= 0.0:
+		_Warn_Params("rate_hz=%s" % str(value))
+		return fallback
+	return maxf(v, MIN_RATE)

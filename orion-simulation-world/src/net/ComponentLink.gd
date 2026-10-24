@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-24
 #
 # 单条连接封装 ComponentLink（COMPONENTS.md §4.5 / §7.4）：RefCounted，**不进场景树**。
 #   一条 TCP+WS 连接 = 一个本对象；它只回答三件事：
@@ -25,6 +25,12 @@ const WireProtocol := preload("res://src/net/WireProtocol.gd")
 
 ## WS 心跳间隔（秒）：只靠它 + get_ready_state() 判死，不做应用层 ping/pong（§8.1-5）。
 const HEARTBEAT_INTERVAL_S := 10.0
+
+## 单帧缓冲区上限（字节）：`WebSocketPeer` 默认只有 **64 KiB**，一次 720p 的 JPEG
+##   就能把它撑爆（task_34 §二 Step 3 硬要点）。提到 4 MiB 一次到位：
+##   1280×720 quality 0.8 实测 ≈ 29 KB，640×480 ≈ 8.9 KB，高熵画面可到数百 KB。
+## 代价：每连接常驻 2 × 4 MiB（世界侧连接数 = sim 数，个位数，可接受）。
+const MAX_FRAME_BUFFER_BYTES := 4 * 1024 * 1024
 
 # ---------------------------------------------------------------- 身份 / 状态
 ## 与 WS 共用同一条 TCP（accept_stream 后由 peer 接管）。
@@ -66,6 +72,9 @@ func Init(p_tcp: StreamPeerTCP, p_conn_id: int) -> void:
 	conn_id = p_conn_id
 	created_ms = Time.get_ticks_msec()
 	peer = WebSocketPeer.new()
+	# 必须在 accept_stream() **之前**设（连上后再改，对已分配的收发缓冲无效）。
+	peer.inbound_buffer_size = MAX_FRAME_BUFFER_BYTES
+	peer.outbound_buffer_size = MAX_FRAME_BUFFER_BYTES
 	peer.set_heartbeat_interval(HEARTBEAT_INTERVAL_S)
 	if tcp == null:
 		last_error = "null tcp"

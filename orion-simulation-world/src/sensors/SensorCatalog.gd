@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-24
 #
 # 传感器目录 SensorCatalog（COMPONENTS.md §7.6 / task_30 §7.2 D6）：sensor 名 -> 场景路径 / 默认参数。
 #   全静态、无状态副作用；被 Step 6 的 WebSocketManager 与自检共用，与 ChassisCatalog 同构。
@@ -17,18 +17,31 @@
 extends RefCounted
 
 
-## sensor 名 -> 场景路径（v1 只有 lidar_2d，§7.2 D6；imu / gnss 在 v1 **不做**：既不是零件
+## sensor 名 -> 场景路径（v1 有 lidar_2d / camera，§7.2 D6；imu / gnss 在 v1 **不做**：既不是零件
 ## 也不发消息——位姿由 `pose` 文本消息提供，见 COMPONENTS.md §8.1-8 / §10）。
+## `camera` 于 task_34 Step 3 登记为**可装配零件**（此前只存在于 `CameraSensor.tscn` 的自检里）。
 const SCENES := {
 	"lidar_2d": "res://src/scenes/sensors/Lidar2D.tscn",
+	"camera": "res://src/scenes/sensors/CameraSensor.tscn",
 }
 
-## sensor 名 -> 默认参数（与 Lidar2D.gd 的默认值逐键一致）。
+## sensor 名 -> 默认参数（与各组件 `Configure()` 的键**逐字一致**，是"目录默认值 -> params ->
+## Configure"这条直通路的契约面）。
+## `camera` 的默认值 = task_34 §二 Step 3 的 **640×480 @ 1 Hz**（UAV 相机口径），
+##   与组件常量 `DEFAULT_WIDTH/HEIGHT = 1280×720` 是**两个口径**（原因见 COMPONENTS.md §7.6）：
+##   组件默认值属 task_33 的既定基线，装配线默认值属本表。
 const DEFAULTS := {
 	"lidar_2d": {
 		"range": 12.0,
 		"rays": 360,
 		"rate_hz": 10.0,
+	},
+	"camera": {
+		"width": 640,
+		"height": 480,
+		"fov_deg": 70.0,
+		"quality": 0.8,
+		"rate_hz": 1.0,
 	},
 }
 

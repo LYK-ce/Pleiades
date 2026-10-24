@@ -40,3 +40,6 @@ serde_json = "1.0"
 #   是无条件编译），写 `features = ["sync"]` 会直接报 "does not have that feature"，
 #   故按默认特性声明即可拿到 tokio_util::sync::CancellationToken。
 tokio-util = "0.7"
+
+# 设备能力注册（实现 base 的 DeviceCapability trait，版本须与 base 严格一致）
+mlua = { version = "0.12.0-rc.1", features = ["lua54", "vendored", "async"] }

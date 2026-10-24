@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-24
 
 //! SIM 设备装配（无硬件）：Robot::new（共享）→ SimDeviceHandler → spawn 主循环
 
@@ -12,6 +12,7 @@ use tracing::info;
 use pleiades_base::config::Get_Peer_Name;
 use pleiades_base::event_bus::EventBus;
 use pleiades_base::network::NodeHandle;
+use pleiades_base::orchestrator::Capabilities;
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
 
 use crate::config::SimConfig;
@@ -24,6 +25,9 @@ pub async fn sim_bootstrap(
     robot_bus: Arc<EventBus>,
     robot_cmd_frame_rx: mpsc::Receiver<Vec<u8>>,
     origin: (f32, f32, f32),
+    // 设备能力容器（task_34 Step 4）：SimDeviceHandler 在 `start()` 里把相机 cap 推进
+    // `device_caps`，Lua 侧才有 `camera_sim`。**只加这一个参数，不碰控制口 / 命令通路。**
+    capabilities: Arc<Capabilities>,
 ) -> Result<Arc<Robot>, String> {
     let peer_name = Get_Peer_Name(&config.base);
 
@@ -43,6 +47,7 @@ pub async fn sim_bootstrap(
         config.clone(),
         node_handle.clone(),
         origin,
+        capabilities,
     ));
 
     // 3. spawn 主循环（后台跑；boot.run() 阻塞 core 主循环）

@@ -16,8 +16,12 @@
 /// 世界底盘目录名（`ChassisCatalog.SCENES` 的键）
 pub const CHASSIS: [&str; 2] = ["diff_drive_ugv", "quadrotor_uav"];
 
-/// 世界传感器目录名（`SensorCatalog.SCENES` 的键；v1 只有 lidar_2d）
-pub const SENSORS: [&str; 1] = ["lidar_2d"];
+/// 世界传感器目录名（`SensorCatalog.SCENES` 的键）
+///
+/// `camera` 于 task_34 Step 3 在世界侧登记为可装配零件，本 step（Step 4）跟进入册：
+/// 名字必须与 `SensorCatalog.SCENES` **逐字一致**，否则 `start()` 会把它当未知传感器跳过
+/// （不建连接、不进 manifest → 世界永远等不到该 slot 的 `sensor_ready`）。
+pub const SENSORS: [&str; 2] = ["lidar_2d", "camera"];
 
 /// 底盘名校验：非法 → `start()` 直接 `Err`（不发起任何连接）。
 pub fn Validate_Chassis(name: &str) -> Result<(), String> {
@@ -65,11 +69,15 @@ mod tests {
     #[test]
     fn test_validate_sensor_ok() {
         assert!(Validate_Sensor("lidar_2d").is_ok());
+        // task_34 Step 4：camera 已入册（世界侧 Step 3 已登记）
+        assert!(Validate_Sensor("camera").is_ok());
+        // 前后空格被 trim（与底盘校验同纪律）
+        assert!(Validate_Sensor(" camera ").is_ok());
     }
 
     #[test]
     fn test_validate_sensor_reject() {
-        for bad in ["imu", "gnss", "camera", ""] {
+        for bad in ["imu", "gnss", "camera_rgb", ""] {
             assert!(Validate_Sensor(bad).is_err(), "'{bad}' 应该被拒");
         }
         let e = Validate_Sensor("imu").unwrap_err();

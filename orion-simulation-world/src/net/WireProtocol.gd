@@ -1,16 +1,18 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-24
 #
 # 消息协议唯一入口（task_30 §六 / COMPONENTS.md §7.3、§8）：
-#   消息名常量 + JSON 文本帧编解码 + LiDAR 二进制帧构造 / 帧头解析。
+#   消息名常量 + JSON 文本帧编解码 + LiDAR / camera 二进制帧构造 + 帧头解析。
 #
 # 只做「协议事实」：不碰 socket、不碰场景树、不查零件目录、不打业务日志。
 #   收发在 ComponentLink，业务分派在 WebSocketManager。
 #
 # 二进制帧（小端，COMPONENTS.md §8.2）：
 #   [0] u8 type | [1] u16 slot_id | [3] u32 seq | [7] f64 world_time | [15] payload
-#   lidar payload = f32[rays] 距离（米，0.0 = 无回波）；总长 = 15 + 4·rays（360 线 = 1455 B）。
+#   lidar  (type=1) payload = f32[rays] 距离（米，0.0 = 无回波）；总长 = 15 + 4·rays（360 线 = 1455 B）。
+#   camera (type=2) payload = **JPEG 原始字节**（不重编码、无长度前缀、无分隔符）；
+#                   宽高从 JPEG 的 SOF0 段读，不上线；总长 = 15 + N（N = jpeg.size()）。
 #
 # 实测（4.7.2，COMPONENTS.md §9.1 E21）：JSON.parse_string() 遇非法输入会向 stderr
 #   打印 "ERROR: Parse JSON failed"（core/io/json.cpp），污染「grep ERROR 必须为空」的验收；
@@ -32,7 +34,7 @@ const MSG_ASSEMBLY_READY := "assembly_ready"
 const MSG_POSE := "pose"
 
 # ---------------------------------------------------------------- 二进制帧（§8.2）
-## 1 = lidar_2d；2 = camera（预留）
+## 1 = lidar_2d；2 = camera（task_34 Step 3 落地，payload = JPEG 原始字节）
 const FRAME_TYPE_LIDAR := 1
 const FRAME_TYPE_CAMERA := 2
 ## u8 type + u16 slot_id + u32 seq + f64 world_time
@@ -93,6 +95,22 @@ static func BuildLidar2DFrame(sensor_id: int, seq: int, world_time: float,
 	frame.encode_u32(3, seq & 0xFFFFFFFF)
 	frame.encode_double(7, world_time)
 	frame.append_array(ranges.to_byte_array())
+	return frame
+
+
+## camera 帧（task_34 Step 3）：15 字节头 + **JPEG 原始字节**。
+## 与 BuildLidar2DFrame **同一套头**（同样的端序 / 同样的字段偏移），只是 payload 语义不同：
+##   不重编码、不加长度前缀——长度由 WS 帧本身给出，宽高从 JPEG 的 SOF0 段读（§8.2）。
+## 长度 = FRAME_HEADER_SIZE + jpeg.size()；jpeg 为空时长度恰为 15（调用方应自行丢弃，别上线）。
+static func BuildCameraFrame(sensor_id: int, seq: int, world_time: float,
+		jpeg: PackedByteArray) -> PackedByteArray:
+	var frame := PackedByteArray()
+	frame.resize(FRAME_HEADER_SIZE)
+	frame.encode_u8(0, FRAME_TYPE_CAMERA)
+	frame.encode_u16(1, sensor_id & 0xFFFF)
+	frame.encode_u32(3, seq & 0xFFFFFFFF)
+	frame.encode_double(7, world_time)
+	frame.append_array(jpeg)
 	return frame
 
 

@@ -4378,6 +4378,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "mlua",
  "pleiades-base",
  "serde",
  "serde_json",

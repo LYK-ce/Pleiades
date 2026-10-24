@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-24
 
 #![allow(non_snake_case)]
 
@@ -11,7 +11,7 @@
 //! 与真机 `LidarDevice::spawn(…, Some(SlamContext))` 内部 `spawn_slam` 同构。
 //!
 //! 三个角色：
-//! - [`Sensor`]：最小接口（本 step 只有 `lidar_2d`；相机以后加同一 trait）
+//! - [`Sensor`]：最小接口（`lidar_2d` 与 `camera` 共用同一 trait）
 //! - [`SensorSet`]：`[sim_world.sensor]`（已过 catalog 过滤）→ 实例，按 slot 索引，统一 `Shutdown`
 //! - [`SensorEndpoint`]：**一条传感器连接 = 一个端点**，连接收包 task 持有 `(slot, sensor_id)`，
 //!   二进制帧就地投递（校验帧头 `sensor_id`），不进 supervisor 的 mpsc（R7）
@@ -25,8 +25,10 @@ use std::time::Instant;
 
 use tracing::{debug, warn};
 
+pub mod camera;
 pub mod lidar;
 
+use crate::sim::sensors::camera::{CameraParams, CameraSensor};
 use crate::sim::sensors::lidar::frame;
 use crate::sim::sensors::lidar::mapping_task::MappingCtx;
 use crate::sim::sensors::lidar::{LidarParams, LidarSensor};
@@ -65,7 +67,7 @@ pub fn Warn_Throttled(key: &'static str, period_ms: u64, msg: impl FnOnce() -> S
 
 // ================================================================ Sensor trait
 
-/// 传感器最小接口（本 step 只有 `lidar_2d`；相机以后加同一 trait）
+/// 传感器最小接口（`lidar_2d` 与 `camera` 共用同一 trait）
 ///
 /// 实现者必须**同步**处理一帧（`try_write` 抢不到就丢）：收包 task 只做同步调用，
 /// 不 `await` → 不阻塞心跳 poll（`world_link/link.rs` 模块头的纪律）。
@@ -88,17 +90,22 @@ pub struct SensorSet {
     /// 而 `Arc<dyn Sensor>` 把 `Get_Scan()` 擦掉了 —— 这里**多留一份同一个 `Arc` 实例**，
     /// 不改任何既有字段/签名/行为（数据零拷贝分歧）
     lidars: Vec<Arc<LidarSensor>>,
+    /// 类型化 camera 句柄（与 `lidars` 同法：**同一个 `Arc` 实例**再留一份，
+    /// `Arc<dyn Sensor>` 把 `Latest()` / `Age_Ms()` 擦掉了；也是 `camera_sim` cap 的数据来源）
+    cameras: Vec<Arc<CameraSensor>>,
 }
 
 impl SensorSet {
-    /// 只认 `lidar_2d`；未知名字 → `Err`（Step 2 的 catalog 已先拦，这里只是兜底）
+    /// 只认 `lidar_2d` / `camera`；未知名字 → `Err`（Step 2 的 catalog 已先拦，这里只是兜底）
     ///
     /// 构造成功时每个 lidar 已经拉起了自己的建图 task（200 ms，位姿不新鲜时空转）；
+    /// camera 不建 task（只保留最新一帧）。
     /// 失败时**先** `Shutdown()` 已经建好的传感器再 `Err`（R18：不留悬空 task）。
     pub fn Build(decls: &[ResolvedSensor], ctx: &MappingCtx) -> Result<Self, String> {
         let mut all: Vec<Arc<dyn Sensor>> = Vec::new();
         let mut by_slot: HashMap<String, Arc<dyn Sensor>> = HashMap::new();
         let mut lidars: Vec<Arc<LidarSensor>> = Vec::new();
+        let mut cameras: Vec<Arc<CameraSensor>> = Vec::new();
 
         for decl in decls {
             match decl.sensor.trim() {
@@ -118,18 +125,28 @@ impl SensorSet {
                     by_slot.insert(decl.slot.clone(), erased.clone());
                     all.push(erased);
                 }
+                "camera" => {
+                    // 相机不建 task、不读外参：`mount` 在世界侧决定（sim 只做"最新帧"快递）
+                    let sensor =
+                        Arc::new(CameraSensor::New(&decl.slot, CameraParams::From_Json(&decl.params)));
+                    // 与 lidar 同法：类型化句柄与擦除后的句柄是**同一个实例**
+                    cameras.push(sensor.clone());
+                    let erased: Arc<dyn Sensor> = sensor;
+                    by_slot.insert(decl.slot.clone(), erased.clone());
+                    all.push(erased);
+                }
                 other => {
                     // 兜底：catalog 已经拦过；这里保证"不建半成品传感器集合"（先停已建好的，R18）
-                    Self { all, by_slot, lidars }.Shutdown();
+                    Self { all, by_slot, lidars, cameras }.Shutdown();
                     return Err(format!(
-                        "未知传感器 '{other}'（slot='{}'）：本 crate 只实现 lidar_2d",
+                        "未知传感器 '{other}'（slot='{}'）：本 crate 只实现 lidar_2d / camera",
                         decl.slot
                     ));
                 }
             }
         }
 
-        Ok(Self { all, by_slot, lidars })
+        Ok(Self { all, by_slot, lidars, cameras })
     }
 
     /// 按 slot 取传感器（连接任务用它把连接和传感器绑在一起）
@@ -140,6 +157,17 @@ impl SensorSet {
     /// 全部 lidar（声明顺序）。急停取哪一个由 `sim_handler::Select_Lidar` 决定（§八.5.2 注）
     pub fn Lidars(&self) -> &[Arc<LidarSensor>] {
         &self.lidars
+    }
+
+    /// 全部 camera（声明顺序）。`camera_sim` 只暴露一个，取哪个由 `sim_handler::Select_Camera` 决定
+    pub fn Cameras(&self) -> &[Arc<CameraSensor>] {
+        &self.cameras
+    }
+
+    /// 按 slot 取 camera（与 `Get(slot)` 同法：都是"按 slot 取回句柄"；本类型用线性扫描，
+    /// N 个传感器不值得再开一张 HashMap）
+    pub fn Get_Camera(&self, slot: &str) -> Option<Arc<CameraSensor>> {
+        self.cameras.iter().find(|c| c.Slot() == slot).cloned()
     }
 
     /// 全部传感器（`shutdown()` 逐个 `Shutdown`，也是"所有权"唯一持有处之一）
@@ -399,6 +427,63 @@ mod tests {
 
         // 先建好 lidar、后一条非法 → 整体 Err，且已建好的传感器被 Shutdown（不留悬空建图 task，R18）
         let decls = [decl("lidar_front", "lidar_2d"), decl("cam_front", "camera_rgb")];
+        assert!(SensorSet::Build(&decls, &ctx).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sensor_set_builds_camera() {
+        let ctx = ctx_for_tests();
+        let set = SensorSet::Build(&[decl("camera_nose", "camera")], &ctx)
+            .expect("camera 应能构造");
+        assert_eq!(set.Len(), 1);
+        assert_eq!(set.All().len(), 1);
+        assert_eq!(set.Cameras().len(), 1);
+        assert!(set.Lidars().is_empty(), "相机不是雷达");
+        assert!(set.Get("camera_nose").is_some());
+        let cam = set.Get_Camera("camera_nose").expect("按 slot 必须能取回 camera 句柄");
+        assert_eq!(cam.Slot(), "camera_nose");
+        assert!(set.Get_Camera("lidar_front").is_none());
+        // 相机不建 task，Shutdown 是 no-op（仍要能重复调）
+        set.Shutdown();
+        set.Shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_sensor_set_builds_mixed() {
+        let ctx = ctx_for_tests();
+        let set = SensorSet::Build(
+            &[decl("lidar_front", "lidar_2d"), decl("camera_nose", "camera")],
+            &ctx,
+        )
+        .expect("lidar + camera 混合清单应能构造");
+        assert_eq!(set.Len(), 2);
+        assert_eq!(set.Lidars().len(), 1);
+        assert_eq!(set.Cameras().len(), 1);
+        assert!(set.Get_Camera("lidar_front").is_none(), "雷达不是相机");
+        assert!(set.Get("camera_nose").is_some());
+        // 擦除句柄与类型化句柄是同一个实例：经 `Arc<dyn Sensor>` 喂帧，类型化句柄能看到
+        let erased = set.Get("camera_nose").expect("必须有该 slot");
+        let jpeg = crate::sim::sensors::camera::frame::Test_Jpeg(320, 240);
+        let frame = crate::sim::sensors::camera::frame::Test_Frame(5, 1, 0.0, &jpeg);
+        erased.On_Binary(&frame);
+        let cam = set.Get_Camera("camera_nose").expect("必须有该 slot");
+        assert_eq!(cam.Latest_Size(), Some((320, 240)), "必须是同一个实例");
+        // 收尾：cancel 建图 task
+        set.Shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_sensor_set_unknown_still_err_and_cleans_up() {
+        let ctx = ctx_for_tests();
+        // "camera_rgb" 仍是未知名字（入册的是精确名 "camera"，不做前缀/别名匹配）
+        let e = SensorSet::Build(&[decl("camera_rgb", "camera_rgb")], &ctx)
+            .err()
+            .expect("未知传感器必须被拒");
+        assert!(e.contains("camera_rgb"), "错误信息缺名字：{e}");
+        assert!(e.contains("lidar_2d"), "错误信息缺可用目录：{e}");
+        assert!(e.contains("camera"), "错误信息缺可用目录：{e}");
+        // 先建好 lidar，后一条非法 → 整体 Err，且已建好的传感器被 Shutdown（R18 保留）
+        let decls = [decl("lidar_front", "lidar_2d"), decl("camera_rgb", "camera_rgb")];
         assert!(SensorSet::Build(&decls, &ctx).is_err());
     }
 }
