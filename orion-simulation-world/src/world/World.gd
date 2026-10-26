@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-25
 #
 # 世界根脚本（COMPONENTS.md §4.1）：启动世界时钟、按 [sim_world] 程序化生成体素世界、
 # 提供尺度/坐标/容器访问。D4 程序化生成，布局确定性、无 RNG。
@@ -79,6 +79,62 @@ const AIR_WALL_BOXES := [
 	[Vector3(64.0, 32.5, 64.0), Vector3(128.0, 1.0, 128.0)],
 ]
 
+# ---------------------------------------------------------------- 静态人物（支线 human_model Step 4）
+## 人物道具场景 + 布局表。位置/朝向一律**世界坐标（Z-up，米）**，由 WorldTransform 换轴。
+## load() 而非 preload()：Person.tscn / glb 尚未 import 时只 warn，不让整个世界脚本解析失败
+## （与 ChassisCatalog / SensorCatalog 同一取舍）。
+const PERSON_SCENE := "res://src/scenes/props/Person.tscn"
+const PERSONS_NODE := "Persons"
+
+## 为什么不是 step.md 举例的 (60,84)：那里是 check_camera_shots 的停车点（SPOT_WORLD），
+## 该自检会在同一格摆一台 UGV 连拍 3 张 → 人车重叠，且污染拍照基线。故沿 x=60 南移到 (60,76)。
+## yaw 一律 0：模型原生朝 +X（世界东），Step 5 从 +X 侧取景正好拍到正脸。
+const PERSONS := [
+	{"name": "person_01", "pos": Vector3(60.0, 76.0, 0.0), "yaw_deg": 0.0},
+	{"name": "person_02", "pos": Vector3(68.0, 70.0, 0.0), "yaw_deg": 0.0},
+]
+
+# ---------------------------------------------------------------- 外部驱动的行人（task_35 Step 3）
+## 行人底盘场景：与 `ChassisCatalog.SCENES["pedestrian"]` 同一路径。
+## 用 load() 而非 preload()（与 PERSON_SCENE 同一取舍）：glb/场景尚未 import 时只 warn，
+## 不让整个世界脚本解析失败（COMPONENTS.md §9.1 E8 的反面）。
+const PEDESTRIAN_SCENE := "res://src/scenes/props/Pedestrian.tscn"
+## 容器名**必须**与 `WebSocketManager.PEDESTRIANS_NODE` 逐字一致（"Pedestrians"）：
+## 同一个容器既装世界预置的人（本表），也装 `chassis_hello{kind:"pedestrian"}` 动态装配的人。
+const PEDESTRIANS_NODE := "Pedestrians"
+
+## 行人布局表：**只有**出生点（世界坐标 Z-up，米）+ 初始朝向 + 数量。
+## **没有**路径 / 巡逻 / 计时 / 速度 —— 世界不再自己让人走（task_35 Step 3）：
+## 人由外部（Python / 自检 / Step 5 的车撞人）通过 Pedestrian.SetCommand 驱动；
+## **没有外部连接时人就站着不动，这是预期行为，不是故障**。
+## yaw_deg：0 = 朝 +X（东），180 = 朝 −X（西）。入树后由 Configure() 把 _yaw_target 对齐到该朝向。
+##
+## 选点依据（逐条按 OBSTACLES 实算；比的是**度**不是"看起来空"）：
+##   ① 无障碍：pedestrian_01 最近的障碍是 wall_c（y∈[92,93]、x∈[36,66]）→ 3.000 m；
+##      pedestrian_02 最近的是 block_1（x∈[60,61]、y∈[100,101]）→ 8.062 m。
+##      判据 > PED_CLEAR_M(0.5) = 胶囊半径 0.25 + 0.25 余量。
+##   ② 离世界边界：min(44, 96, 128−44, 128−96) = 32 m / min(52,102,76,26) = 26 m，判据 ≥ 1.0 m。
+##   ③ 离出生点 SPAWN_WORLD(64,64)：37.736 / 39.850 m，判据 > SPAWN_CLEAR_RADIUS_M(3.0)
+##      （也就远于 manager 的 8 方位 × 2 m/环 avatar 排位）。
+##   ④ 离静态两人 PERSONS(60,76)/(68,70)：25.612/35.384、27.203/35.777 m，判据 ≥ 2.0 m
+##      （**不污染 person 系列取景**：既有 check_person_shots 的机位只看得见 Persons）。
+##   ⑤ 两人互相 10.000 m ≥ 1.0 m（镜像 manager 的 PEDESTRIAN_SPAWN_MIN_GAP_M）。
+##   ⑥ 离雷达热区：check_lidar 的真墙热区 (60,90) 17.088 / 14.422 m、空场热区 (100,60) 66.573 / 63.781 m、
+##      check_camera_shots 的停车点 (60,84) 20.000 / 19.698 m —— 全部 > 12 m 的 radar range。
+##      行人 collision_layer=2 会被 `Lidar2D`（scan_mask=1|2|4）扫到，这是刻意保留的（"雷达看得见人"），
+##      但**绝不能**落进既有雷达/拍照自检的 12 m 热区，否则 F7/F8 的 2.000 m / 152 命中会红。
+##   ⑦ 离协议 spawn 点：默认 (64,56) 44.7/47.5 m、check_ws_manager K1 (70,70) 36.8/36.7 m、
+##      K14 (72,74) / K16 (72,78) 均 > 30 m —— 动态行人与世界行人**不会叠人**。
+##   ⑧ 离车辆路径：距 (64,64) 37.7/39.8 m、距 (126.5,64) > 70 m；人**有碰撞**（Step 1 取舍，
+##      Vehicle.mask=7 含 layer 2），落在车道上会挡车 —— 这几个点不在任何既有自检的行车路线上。
+##   x∈[44,56] × y∈[96,106] 这块 12×10 m 空地是 walking_person 时期就用 1.0 m 臂展余量对 15 个
+##   OBSTACLES 全量断言过的区域，现在正好"站在广场上、离长墙 3 m"。yaw 一东一西，
+##   用来证明初始朝向按表落地（yaw=180° 那个也是 Configure() 对齐逻辑的活体证据）。
+const PEDESTRIANS := [
+	{"name": "pedestrian_01", "pos": Vector3(44.0, 96.0, 0.0), "yaw_deg": 0.0},
+	{"name": "pedestrian_02", "pos": Vector3(52.0, 102.0, 0.0), "yaw_deg": 180.0},
+]
+
 var _voxel_size: float = 0.5
 var _cells_x: int = 256
 var _cells_y: int = 256
@@ -87,6 +143,8 @@ var _built_cells: int = 0
 
 @onready var _voxel_world: GridMap = $VoxelWorld
 @onready var _vehicles_root: Node3D = $Vehicles
+var _persons_root: Node3D = null
+var _pedestrians_root: Node3D = null
 
 
 func _ready() -> void:
@@ -95,6 +153,10 @@ func _ready() -> void:
 	_log_scale()
 	BuildVoxelWorld()
 	_Build_Bounds()
+	BuildPersons()
+	# 放在 BuildPersons 之后：既有自检的幂等组数的是 Persons 前后节点总数，
+	# Pedestrians 在这个区间之外（plan.md §5）。
+	BuildPedestrians()
 
 
 ## 程序化重建体素世界：清空 -> 建 MeshLibrary -> 稀疏填格。可重复调用（幂等）。
@@ -145,6 +207,105 @@ func _Build_Bounds() -> void:
 	add_child(body)
 	print("[world] bounds built: ", AIR_WALL_BOXES.size(), " shapes, layer=", AIR_WALL_LAYER,
 		", mask=0, height=", AIR_WALL_HEIGHT_M, " m, thickness=", AIR_WALL_THICKNESS_M, " m")
+
+
+## 程序化摆放静态人物（纯视觉、无碰撞、无 RNG）：先摘掉同名旧容器再重建（幂等）。
+## 容器由代码建、不写进 World.tscn —— 与 Bounds 同策略（代码建、幂等重建），
+## 这样 check_bounds.gd 的 B1d（读 .tscn 文本数节点）不受影响。
+## 缺资产/缺场景只 push_warning（绝不 push_error：否则 --quit 的 "0 ERROR" 验收假红）。
+func BuildPersons() -> void:
+	var old: Node = get_node_or_null(PERSONS_NODE)
+	if old != null:
+		remove_child(old)
+		old.queue_free()
+
+	_persons_root = Node3D.new()
+	_persons_root.name = PERSONS_NODE
+	add_child(_persons_root)
+
+	if not ResourceLoader.exists(PERSON_SCENE):
+		push_warning("[world] 人物场景缺失（未 import？）：%s" % PERSON_SCENE)
+		return
+	var packed: PackedScene = load(PERSON_SCENE) as PackedScene
+	if packed == null:
+		push_warning("[world] 人物场景不可加载：%s" % PERSON_SCENE)
+		return
+
+	for spec: Dictionary in PERSONS:
+		var person: Node3D = packed.instantiate() as Node3D
+		if person == null:
+			push_warning("[world] 人物实例化失败：%s" % spec.get("name", "?"))
+			continue
+		person.name = String(spec["name"])
+		_persons_root.add_child(person)
+		# 必须在入树之后写 global_transform：树外读 global_* 会 ERROR（与 check_models.gd 头注释 P8 同款）。
+		person.global_transform = WorldTransform.MakeTransform(
+			spec["pos"], deg_to_rad(float(spec["yaw_deg"])))
+
+	print("[world] persons built: ", _persons_root.get_child_count(), " (", PERSONS.size(), " specs)")
+
+
+## 静态人物的父节点（Step 5 取景/自检用；与 GetVehiclesRoot 同风格）。
+func GetPersonsRoot() -> Node3D:
+	if _persons_root == null or not is_instance_valid(_persons_root):
+		_persons_root = get_node_or_null(PERSONS_NODE) as Node3D
+	return _persons_root
+
+
+## 程序化摆放"外部驱动的行人"（task_35 Step 3）：与 BuildPersons 同构 ——
+## 先摘掉同名旧容器再重建（幂等，与 Bounds / Persons 同策略）。
+## **不内置任何行为**：不调 SetCommand、不设速度、不建路径；人站着等外部驱动
+## （无 Python 连接时站住不动 = 预期）。容器代码建、不写进 World.tscn。
+## 缺场景/缺资产只 push_warning（**绝不 push_error**：--quit 的 0 ERROR 验收靠这条）。
+##
+## 注意：运行期重建会**连带移除**已装配的网络行人（manager 的缓存指针会因
+## is_instance_valid()==false 自动重解析，不会悬空，但那个 peer 的 avatar 就没了）。
+## 因此本函数只应在 `_ready()` 与自检里调用（COMPONENTS.md §4.11）。
+func BuildPedestrians() -> void:
+	var old: Node = get_node_or_null(PEDESTRIANS_NODE)
+	if old != null:
+		remove_child(old)
+		old.queue_free()
+
+	_pedestrians_root = Node3D.new()
+	_pedestrians_root.name = PEDESTRIANS_NODE
+	add_child(_pedestrians_root)
+
+	# 前置判断：glb / 场景没 import 时 load() 会打 ERROR；exists() 先探一次，缺了只 warn
+	# （既有自检也会载入 World，不能因为它们没 import 就红）。
+	if not ResourceLoader.exists(PEDESTRIAN_SCENE):
+		push_warning("[world] 行人场景缺失（未 import？）：%s" % PEDESTRIAN_SCENE)
+		return
+	var packed: PackedScene = load(PEDESTRIAN_SCENE) as PackedScene
+	if packed == null:
+		push_warning("[world] 行人场景不可加载：%s" % PEDESTRIAN_SCENE)
+		return
+
+	for spec: Dictionary in PEDESTRIANS:
+		var ped: Node3D = packed.instantiate() as Node3D
+		if ped == null:
+			push_warning("[world] 行人实例化失败：%s" % spec.get("name", "?"))
+			continue
+		ped.name = String(spec["name"])
+		# 先入树再写 global_transform：树外写 global_* 会 ERROR（check_models.gd P8）。
+		_pedestrians_root.add_child(ped)
+		ped.global_transform = WorldTransform.MakeTransform(
+			spec["pos"], deg_to_rad(float(spec.get("yaw_deg", 0.0))))
+		# **必须**在写完 transform 之后 Configure：Pedestrian.Configure() 末尾把
+		# `_yaw_target = rotation.y`；不调它的话 yaw_deg≠0 的人第一帧会被 Step() 拧回 yaw=0
+		# （plan.md §7 R1）。参数用 `{}`：目录默认值（max_speed 1.26 / max_turn_rate 180 °/s）。
+		ped.call("Configure", ped, {})
+
+	print("[world] pedestrians built: ", _pedestrians_root.get_child_count(),
+		" (", PEDESTRIANS.size(), " specs, idle until driven)")
+
+
+## 行人容器（自检 / Step 4/5 / manager 用；与 GetPersonsRoot 同风格）。
+## 每次调用都复检 is_instance_valid：容器可能被 BuildPedestrians() 重建。
+func GetPedestriansRoot() -> Node3D:
+	if _pedestrians_root == null or not is_instance_valid(_pedestrians_root):
+		_pedestrians_root = get_node_or_null(PEDESTRIANS_NODE) as Node3D
+	return _pedestrians_root
 
 
 ## 世界坐标（Z-up，米）-> Godot 体素索引。换轴只在 WorldTransform 里发生。

@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-25
 #
 # WebSocketManager 组件（task_30 §5.1 / COMPONENTS.md §4.5）：世界侧 WS 服务端的唯一实例。
 #   监听一个端口 -> accept N 条连接 -> 每条连接记住「我是谁的、我是什么组件」
@@ -13,6 +13,18 @@
 #   2) 连接 -> (peer_id, 角色)  = 每个 ComponentLink 自己带的字段（_links 保证可枚举）
 #   _manifests / _manifest_parts / _assembly_sent / _pending_sensors 只是**就绪簿记**，
 #   不构成第三套身份。
+#
+# task_35 Step 2（行人）：chassis_hello.kind = "pedestrian" 走**另一条支路** ——
+#   `Pedestrian.tscn` 根节点**就是** avatar（不套 Vehicle.tscn），进 `Pedestrians` 容器
+#   （与 `Vehicles` 平级、同父），**不进** `_peer_vehicles`、**不占** `_PickSpawn` 的 avatar 排位、
+#   不消耗 `_next_avatar_id`。行人有自己的一套表与编号（`_pedestrians` / `_next_pedestrian_id`）。
+#   指令面 `motion_cmd{v, dir}`；**300 ms 没新指令就自动 v=0**（只停、不断连、不刷屏）。
+#   车**没有**超时（既有 D1/G 的语义一字不变）。
+#
+# 第 2 轮（prev_issues #2）：换 kind（同一 peer_id 先后 robot / pedestrian）按"重建 avatar"处理：
+#   注册前**不分类型**先 `_RemoveAvatar(peer_id, except_link=本连接)`（两张表 + 两个容器一起清），
+#   旧连接被关且交出 `link.vehicle`；被关连接的 `_CleanupLink()` 不得再动新 avatar；
+#   `_ApplyMotionCommand()` 只按 `link.vehicle` 的身份分流（不看"表里有没有这个 peer"）。
 #
 # 就绪语义（关键澄清）：`manifest` 就绪 = **manifest 声明的槽位都在对应连接上就位**
 #   （task_30 §五："这辆车应该有几个零件、都连上了没"）。"几何是否实例化成功"是世界侧能力
@@ -31,6 +43,10 @@ signal vehicle_spawned(peer_id: String, vehicle: Node3D)
 signal assembly_completed(peer_id: String)
 ## 一台 avatar 被移除（底盘断开 / 重复 hello / Stop）。
 signal vehicle_removed(peer_id: String)
+## 一个行人 avatar 建好并挂进 `Pedestrians`（与 vehicle_spawned 平级、互不覆盖；task_35 Step 2）。
+signal pedestrian_spawned(peer_id: String, pedestrian: Node3D)
+## 一个行人 avatar 被移除（连接断开 / 重复 hello / Stop）。
+signal pedestrian_removed(peer_id: String)
 ## 一条连接被清理（含未握手的连接；未握手时 peer_id 可能为空）。
 signal link_closed(peer_id: String, role: StringName, slot: String)
 
@@ -71,6 +87,25 @@ const MAX_WIRE_ID := 65535
 ## 位姿下行周期（秒）：对齐真机 state_notifier 的 100 ms（base robot.rs:213）。
 const POSE_BROADCAST_INTERVAL_S := 0.1
 
+# ---------------------------------------------------------------- 行人（task_35 Step 2）
+## 行人（task_35 Step 2）：chassis_hello.kind == "pedestrian" 的 avatar 走这条支路。
+const PEDESTRIAN_CHASSIS := "pedestrian"
+## 行人容器名：与 Vehicles 平级、同父（World 根）。**World.tscn 不绑**，首个行人到达时惰性建。
+const PEDESTRIANS_NODE := "Pedestrians"
+## 默认出生点偏移（世界坐标米）：spawn 缺失/非法时的回退点 = World.SPAWN_WORLD + 该偏移。
+## 为什么是正南 8 m：车 avatar 的环是「8 方位 × 半径 2·ring」，270° 半径 8 处的点是 (64,56)
+##   —— 那要第 31 台车才会出现；且它已在 SPAWN_CLEAR_RADIUS_M(3 m) 之外、与 15 个
+##   World.OBSTACLES 全无交、离 PERSONS(60,76)/(68,70) 与 WALKERS 环路(y≥96) 都很远。
+const PEDESTRIAN_SPAWN_OFFSET_M := Vector3(0.0, -8.0, 0.0)
+## spawn 校验：与已占 avatar 的最小水平中心距（米）。
+const PEDESTRIAN_SPAWN_MIN_GAP_M := 1.0
+## spawn 校验：静态障碍外扩余量（米）≈ 胶囊半径 0.25 + 0.05。
+const PEDESTRIAN_SPAWN_MARGIN_M := 0.3
+## spawn 校验：高度上限（米）—— 行人默认站地面，允许少量抬高，不做"空中出生"。
+const PEDESTRIAN_SPAWN_MAX_Z_M := 2.0
+## 指令超时（毫秒）：超过这么久没收到新 motion_cmd -> 下发 v=0（只停、不断连、不刷屏）。
+const PEDESTRIAN_CMD_TIMEOUT_MS := 300
+
 
 # ================================================================ 装配入口（World.tscn 绑定）
 
@@ -88,6 +123,9 @@ const POSE_BROADCAST_INTERVAL_S := 0.1
 @export var pending_timeout_ms: int = 10000
 ## true 时 Heartbeat 每秒打一行统计（默认关，避免日志爆炸，R19）。
 @export var stats_log: bool = false
+## 行人容器（task_35 Step 2）：**可留空**（World.tscn 不绑）。留空时按"与 vehicles_root
+## 同父的 Pedestrians"惰性解析/建（与 Bounds / Persons / Walkers 的"代码建、幂等"策略一致）。
+@export var pedestrians_root: Node3D = null
 
 
 ## 目录查询结果：区分「目录里没登记这个名字」与「目录脚本还没落地」（§8.3-4 只看前者）。
@@ -98,6 +136,14 @@ const CATALOG_MISSING := 2     ## 目录脚本本身还没落地（SensorCatalog
 
 # ---------------------------------------------------------------- 主表 1：peer_id -> vehicle
 var _peer_vehicles: Dictionary = {}
+# ---------------------------------------------------------------- 主表 1b：peer_id -> Pedestrian（task_35 Step 2）
+## 行人**不进** `_peer_vehicles`（`GetVehicleCount()` / `GetVehicle()` / `_PickSpawn` /
+## `Vehicles` 容器四条既有语义看不到人）。
+var _pedestrians: Dictionary = {}
+## peer_id -> 最近一次 motion_cmd 的墙钟毫秒（超时停车用；墙钟，不用帧数）。
+var _ped_last_motion_ms: Dictionary = {}
+## peer_id -> bool（已经下过 v=0；避免逐帧重复下发 / 重复打日志）。
+var _ped_idle: Dictionary = {}
 # ---------------------------------------------------------------- 主表 2 的可枚举侧：连接对象自己带 (peer_id, 角色)
 var _links: Array = []
 # ---------------------------------------------------------------- 装配簿记
@@ -111,6 +157,8 @@ var _assembly_sent: Dictionary = {}
 var _pending_sensors: Dictionary = {}
 
 var _next_avatar_id: int = 1
+## u16 语义的行人编号（与 _next_avatar_id **完全独立**：人**不占**车的排位）。
+var _next_pedestrian_id: int = 1
 var _next_sensor_id: int = 1
 var _next_conn_id: int = 1
 var _tcp_server: TCPServer = null
@@ -144,11 +192,12 @@ func _exit_tree() -> void:
 	Stop()
 
 
-## 每帧：accept 新连接 -> 逐条 poll 并分派 -> 清理已判死的连接 -> 位姿下行。
+## 每帧：accept 新连接 -> 逐条 poll 并分派 -> 清理已判死的连接 -> 行人超时停车 -> 位姿下行。
 func _process(delta: float) -> void:
 	_AcceptConnections()
 	_PollLinks()
 	_SweepClosed()
+	_Tick_Pedestrian_Timeouts()          # task_35 Step 2：只对行人生效，车没有超时
 	_BroadcastPoses(delta)
 
 
@@ -169,13 +218,14 @@ func Listen(port: int) -> Error:
 	return OK
 
 
-## 全停：关全部连接 + 清 5 张表 + 移除全部 avatar + 关监听（幂等）。
+## 全停：关全部连接 + 清全部表 + 移除全部 avatar + 关监听（幂等）。
 func Stop() -> void:
 	var links: Array = _links.duplicate()
 	for link: Variant in links:
 		_CloseLink(link, CLOSE_GOING_AWAY, "manager stopped")
-	for peer: Variant in _peer_vehicles.keys():
-		_RemoveVehicle(str(peer), null)
+	var avatars: Array = _peer_vehicles.keys() + _pedestrians.keys()
+	for peer: Variant in avatars:
+		_RemoveAvatar(str(peer), null)
 	for link: Variant in links:
 		_CleanupLink(link)
 	_links.clear()
@@ -183,6 +233,9 @@ func Stop() -> void:
 	_manifest_parts.clear()
 	_assembly_sent.clear()
 	_pending_sensors.clear()
+	_pedestrians.clear()
+	_ped_last_motion_ms.clear()
+	_ped_idle.clear()
 	if _tcp_server != null:
 		_tcp_server.stop()
 		_tcp_server = null
@@ -211,6 +264,36 @@ func GetVehicle(peer_id: String) -> Node3D:
 
 func GetVehicleCount() -> int:
 	return _peer_vehicles.size()
+
+
+## 行人 avatar（task_35 Step 2）。不存在 / 已释放 = null。
+func GetPedestrian(peer_id: String) -> Node3D:
+	var pedestrian: Variant = _pedestrians.get(peer_id, null)
+	if pedestrian == null or not is_instance_valid(pedestrian):
+		return null
+	return pedestrian as Node3D
+
+
+func GetPedestrianCount() -> int:
+	return _pedestrians.size()
+
+
+## 这个 peer 是行人吗（车返回 false；不存在的 peer 也 false）。
+func IsPedestrian(peer_id: String) -> bool:
+	return GetPedestrian(peer_id) != null
+
+
+## 行人容器（惰性解析 / 建；没有 Vehicles 容器时返回 null）。只读查询，不改变已有节点的父子关系。
+func GetPedestriansRoot() -> Node3D:
+	return _Pedestrians_Root()
+
+
+## 统一取 avatar：先查车、再查人（车/人两张表**互不相交**，顺序不影响结果）。
+func GetAvatar(peer_id: String) -> Node3D:
+	var vehicle := GetVehicle(peer_id)
+	if vehicle != null:
+		return vehicle
+	return GetPedestrian(peer_id)
 
 
 ## 第二张表的只读快照：每条连接一行（含未握手的；open 字段见 IsOpen）。
@@ -244,6 +327,7 @@ func GetStats() -> Dictionary:
 		"port": _listen_port,
 		"links": _links.size(),
 		"vehicles": _peer_vehicles.size(),
+		"pedestrians": _pedestrians.size(),
 		"pending": pending,
 		"assembled": assembled,
 	}
@@ -334,10 +418,19 @@ func _HandlePacket(link: Variant, bytes: PackedByteArray, was_string: bool) -> v
 
 
 ## motion_cmd 只在底盘连接上有意义（数据面绑在底盘连接，§4.5）。
+## 行人（task_35 Step 2）走**另一条支路**：v/dir 语义 + 记录 last_motion_at；车的分支一字未改。
 func _ApplyMotionCommand(link: Variant, msg: Dictionary) -> void:
 	if link.role != ROLE_CHASSIS:
 		push_warning("[ws] conn=%d motion_cmd 出现在 %s 连接，忽略"
 			% [link.conn_id, str(link.role)])
+		return
+	var peer_key := str(link.peer_id)
+	# 第 2 轮：**不用** `_pedestrians.has(peer_key)` 判 —— 表里有人不代表这条连接就是人
+	# （换 kind 的过渡帧里，旧连接可能还活着）。唯一可信的判据是"这条连接的 avatar 是不是
+	# 人表里那个节点"，与 pose 下行、清理共用同一个字段（`link.vehicle`）。
+	var pedestrian: Node3D = GetPedestrian(peer_key)
+	if pedestrian != null and link.vehicle == pedestrian:
+		_Apply_Pedestrian_Command(link, pedestrian, msg)
 		return
 	var vehicle: Node3D = link.vehicle
 	if vehicle == null or not is_instance_valid(vehicle) \
@@ -345,6 +438,40 @@ func _ApplyMotionCommand(link: Variant, msg: Dictionary) -> void:
 		push_warning("[ws] conn=%d motion_cmd 无可用的 vehicle，忽略" % link.conn_id)
 		return
 	vehicle.call("SetMotionCommand", msg)
+
+
+## 行人指令：v / dir 由 `Pedestrian.SetCommand` 解析（也接受 action/speed 折算）。
+## 每收到一条就刷新时间戳并把 idle 置回 false（**恢复时不打日志**，避免 20~50 Hz 抖动刷屏）。
+func _Apply_Pedestrian_Command(link: Variant, ped: Node3D, msg: Dictionary) -> void:
+	if ped == null or not is_instance_valid(ped) or not ped.has_method("SetCommand"):
+		push_warning("[ws] conn=%d motion_cmd 无可用的 pedestrian，忽略" % link.conn_id)
+		return
+	var peer_key := str(link.peer_id)
+	_ped_last_motion_ms[peer_key] = Time.get_ticks_msec()
+	_ped_idle[peer_key] = false
+	ped.call("SetCommand", msg)
+
+
+## 行人超时停车（task_35 Step 2）：超过 PEDESTRIAN_CMD_TIMEOUT_MS 没有新指令 -> 下发 v=0。
+## **只停**：不断连、不改朝向（不带 dir）、不刷日志（_ped_idle 边沿触发，每段"动->停"只一行）。
+## 只遍历 `_pedestrians`：**车没有超时**（既有 D1/D2、check_pose C 组行为一字不变）。
+func _Tick_Pedestrian_Timeouts() -> void:
+	if _pedestrians.is_empty():
+		return
+	var now := Time.get_ticks_msec()
+	for peer: Variant in _pedestrians.keys():
+		var key := str(peer)
+		var ped: Variant = _pedestrians.get(peer, null)
+		if ped == null or not is_instance_valid(ped):
+			continue
+		if bool(_ped_idle.get(key, true)):
+			continue                                   # 已经停着：什么都不做
+		if now - int(_ped_last_motion_ms.get(key, now)) < PEDESTRIAN_CMD_TIMEOUT_MS:
+			continue
+		_ped_idle[key] = true
+		ped.call("SetCommand", WireProtocol.BuildMotionCommand(0.0))
+		print("[ws] pedestrian idle peer='%s'（%d ms 无新指令）-> v=0"
+			% [key, PEDESTRIAN_CMD_TIMEOUT_MS])
 
 
 ## 位姿下行：只发给已握手、仍活着、挂着 avatar 的**底盘**连接。
@@ -386,6 +513,16 @@ func _RegisterChassis(link: Variant, msg: Dictionary) -> void:
 		_CloseLink(link, CLOSE_PROTOCOL, "unknown chassis")
 		return
 	print("[ws] chassis_hello peer='%s' chassis=%s conn=%d" % [peer_id, chassis_name, link.conn_id])
+	# task_35 Step 2：kind 缺省 = robot（老 sim 一字不改也走老路）；非法值 warn 后按 robot。
+	var kind := _Kind_Of(msg, peer_id)
+	if kind == WireProtocol.KIND_PEDESTRIAN:
+		if chassis_name != PEDESTRIAN_CHASSIS:
+			push_warning("[ws] peer='%s' kind=%s 与 chassis='%s' 不匹配（行人应为 '%s'），按 robot 处理"
+				% [peer_id, kind, chassis_name, PEDESTRIAN_CHASSIS])
+			kind = WireProtocol.KIND_ROBOT
+		else:
+			_Register_Pedestrian(link, msg, peer_id)
+			return
 	var chassis_scene: PackedScene = _ResolveCatalogScene(CHASSIS_CATALOG_PATH, chassis_name)
 	if chassis_scene == null:
 		# 目录里有名字、场景还没落地（如 Step 7 前的 quadrotor_uav）
@@ -394,9 +531,13 @@ func _RegisterChassis(link: Variant, msg: Dictionary) -> void:
 		_CloseLink(link, CLOSE_INTERNAL, "chassis scene missing")
 		return
 
-	# 重复 hello：先拆旧 avatar（**不关这条新 link**，R13）
-	if _peer_vehicles.has(peer_id):
-		_RemoveVehicle(peer_id, link)
+	# 重复 hello / 换 kind：先拆旧 avatar（**不关这条新 link**，R13）。
+	# 第 2 轮修正（prev_issues #2）：**不分类型**地先摘 —— 车换人、人换车都要清场，
+	# 否则旧 avatar 留在另一个容器（Vehicles / Pedestrians）里，pose 与 motion_cmd 会被误路由。
+	# `_RemoveAvatar()` 自己判「两张表里有没有」：都没有就什么都不做（**不 print、不 emit、
+	# 不牵连其它连接**），所以这里无条件调用是安全的 —— 也正因为如此，
+	# 「传感器先于底盘」（E 组 pending）不会被误关。
+	_RemoveAvatar(peer_id, link)
 
 	var vehicle: Node3D = _InstantiateVehicle()
 	if vehicle == null:
@@ -417,7 +558,7 @@ func _RegisterChassis(link: Variant, msg: Dictionary) -> void:
 	var spawn := _PickSpawn(chassis_name)
 	_next_avatar_id = 1 if _next_avatar_id >= MAX_WIRE_ID else _next_avatar_id + 1
 
-	vehicle.name = _UniqueVehicleName(_SanitizePeerId(peer_id))
+	vehicle.name = _UniqueAvatarName(_SanitizePeerId(peer_id), vehicles_root, avatar_id)
 	vehicles_root.add_child(vehicle)                     # 先入树，再设位姿（P8/§4.4 P8）
 	vehicle.global_position = WorldTransform.PosToGodot(
 		Vector3(float(spawn["x"]), float(spawn["y"]), float(spawn["z"])))
@@ -453,6 +594,7 @@ func _RegisterChassis(link: Variant, msg: Dictionary) -> void:
 		"msg": WireProtocol.MSG_CHASSIS_READY,
 		"peer_id": peer_id,
 		"avatar_id": avatar_id,
+		"kind": WireProtocol.KIND_ROBOT,          # task_35 Step 2：只增不改（老消费方忽略新键）
 		"spawn": spawn,
 		"world_time": WorldClock.Now(),
 	})
@@ -460,6 +602,89 @@ func _RegisterChassis(link: Variant, msg: Dictionary) -> void:
 		% [peer_id, chassis_name, avatar_id, manifest.size(), str(vehicle.name),
 			float(spawn["x"]), float(spawn["y"]), float(spawn["z"])])
 	vehicle_spawned.emit(peer_id, vehicle)
+
+	_ReplayPendingSensors(peer_id)      # 先落 manifest，再回放 pending（顺序不能反）
+	_TryAssembly(peer_id)               # manifest 为空数组时这里立刻 assembly_ready
+
+
+# ================================================================ 装配：行人（task_35 Step 2）
+
+## chassis_hello{kind:"pedestrian", spawn?}：`Pedestrian.tscn` **根节点就是 avatar**。
+## 顺序是硬约束（顺序错了会 SCRIPT ERROR 或飘位）：校验 scene -> 取容器 -> 摘旧 -> 实例化 ->
+## 入树 -> 摆位 -> Configure（Configure 读 rotation.y 当初始朝向，必须在摆位**之后**）-> 记账 -> 回执。
+## **不碰** `_next_avatar_id` / `_peer_vehicles` / `Vehicles`：人**不占**车的排位（task_35 §一）。
+func _Register_Pedestrian(link: Variant, msg: Dictionary, peer_id: String) -> void:
+	var chassis_scene: PackedScene = _ResolveCatalogScene(CHASSIS_CATALOG_PATH, PEDESTRIAN_CHASSIS)
+	if chassis_scene == null:
+		push_warning("[ws] peer='%s' 行人场景尚未落地（chassis='%s'），关闭 (1011)"
+			% [peer_id, PEDESTRIAN_CHASSIS])
+		_CloseLink(link, CLOSE_INTERNAL, "pedestrian scene missing")
+		return
+	var root: Node3D = _Pedestrians_Root()
+	if root == null:
+		push_warning("[ws] peer='%s' 缺 Pedestrians 容器（连 Vehicles 容器也没有），关闭 (1011)"
+			% peer_id)
+		_CloseLink(link, CLOSE_INTERNAL, "pedestrians root missing")
+		return
+	# 同上：**不分类型**先摘（robot -> pedestrian 时旧车必须从 Vehicles 消失、旧连接必须被关）
+	_RemoveAvatar(peer_id, link)
+
+	var node: Node = chassis_scene.instantiate()
+	var pedestrian: Node3D = node as Node3D
+	if pedestrian == null or not pedestrian.has_method("SetCommand") \
+			or not pedestrian.has_method("GetPose"):
+		push_warning("[ws] peer='%s' 行人场景缺 SetCommand/GetPose 契约，关闭 (1011)" % peer_id)
+		if node != null and is_instance_valid(node):
+			node.queue_free()
+		_CloseLink(link, CLOSE_INTERNAL, "pedestrian contract missing")
+		return
+
+	var pedestrian_id := _next_pedestrian_id
+	_next_pedestrian_id = 1 if _next_pedestrian_id >= MAX_WIRE_ID else _next_pedestrian_id + 1
+	var spawn := _Pick_Pedestrian_Spawn(msg, peer_id)
+
+	pedestrian.name = _UniqueAvatarName(_SanitizePeerId(peer_id), root, pedestrian_id)
+	root.add_child(pedestrian)                          # 先入树，再设 global_*（P8）
+	pedestrian.global_position = WorldTransform.PosToGodot(
+		Vector3(float(spawn["x"]), float(spawn["y"]), float(spawn["z"])))
+	pedestrian.rotation.y = WorldTransform.YawToGodot(float(spawn["yaw"]))
+
+	var params: Variant = msg.get("params", {})
+	var pedestrian_params: Dictionary = params if params is Dictionary else {}
+	# 宿主 = 自己（行人**自推进**，不经 Vehicle）；必须在摆位之后。
+	pedestrian.call("Configure", pedestrian, _Merge_Avatar_Params(pedestrian, pedestrian_params))
+	pedestrian.set_meta("pedestrian_id", pedestrian_id)
+	pedestrian.set_meta("peer_id", peer_id)
+
+	link.peer_id = peer_id
+	link.role = ROLE_CHASSIS
+	link.slot = &""
+	link.vehicle = pedestrian                          # pose 下行 / 清理共用这一个字段
+	link.handshaken = true
+	_pedestrians[peer_id] = pedestrian
+	_ped_last_motion_ms[peer_id] = Time.get_ticks_msec()
+	_ped_idle[peer_id] = true                          # 还没发过指令：不要立刻"停"一次
+
+	var slots := _ReadManifest(msg)
+	var manifest: Dictionary = {}
+	for slot: Variant in slots.keys():
+		manifest[slot] = false
+	_manifests[peer_id] = manifest
+	_manifest_parts[peer_id] = slots
+	_assembly_sent[peer_id] = false
+
+	link.SendJson({
+		"msg": WireProtocol.MSG_CHASSIS_READY,
+		"peer_id": peer_id,
+		"kind": WireProtocol.KIND_PEDESTRIAN,
+		"pedestrian_id": pedestrian_id,
+		"spawn": spawn,
+		"world_time": WorldClock.Now(),
+	})
+	print("[ws] pedestrian spawned peer='%s' id=%d node=%s spawn=(%.2f, %.2f) yaw=%.2f"
+		% [peer_id, pedestrian_id, str(pedestrian.name),
+			float(spawn["x"]), float(spawn["y"]), float(spawn["yaw"])])
+	pedestrian_spawned.emit(peer_id, pedestrian)
 
 	_ReplayPendingSensors(peer_id)      # 先落 manifest，再回放 pending（顺序不能反）
 	_TryAssembly(peer_id)               # manifest 为空数组时这里立刻 assembly_ready
@@ -491,8 +716,9 @@ func _RegisterSensor(link: Variant, msg: Dictionary) -> void:
 		# Step 8 前 SensorCatalog 不存在：没有可校验的名字表，只能按"已知"登记连接
 		_warned_missing_sensor_catalog = true
 		push_warning("[ws] SensorCatalog 尚未落地（Step 8），传感器名不做目录校验，只登记连接")
-	if not _peer_vehicles.has(peer_id):
+	if not _HasAvatar(peer_id):
 		# §5.1-3：传感器可能先于底盘到达 -> 暂存（pending 期间**不发** sensor_ready，R9）
+		# task_35 Step 2：行人也是 avatar（pedestrian 的 manifest 同样要能就位）
 		var queue: Array = _pending_sensors.get(peer_id, [])
 		queue.append({"link": link, "hello": msg.duplicate(true), "since_ms": Time.get_ticks_msec()})
 		_pending_sensors[peer_id] = queue
@@ -503,11 +729,11 @@ func _RegisterSensor(link: Variant, msg: Dictionary) -> void:
 
 
 ## 把一条传感器连接挂到已有 avatar 上：先 sensor_ready，再 SetStream（§5.3 时序铁律）。
-## 返回 true = 连接已处理（含"场景未落地但已登记"）；false = 没有可用 vehicle。
+## 返回 true = 连接已处理（含"场景未落地但已登记"）；false = 没有可用 avatar。
 func _MountSensor(link: Variant, hello: Dictionary) -> bool:
 	var peer_id: String = link.peer_id
 	var slot := _SanitizeSlot(str(link.slot))
-	var vehicle: Node3D = GetVehicle(peer_id)
+	var vehicle: Node3D = GetAvatar(peer_id)      # 车 / 行人共用（task_35 Step 2）
 	if vehicle == null or slot.is_empty():
 		return false
 	var sensor_name := str(hello.get("sensor", "")).strip_edges()
@@ -515,9 +741,17 @@ func _MountSensor(link: Variant, hello: Dictionary) -> bool:
 	var params: Variant = hello.get("params", {})
 	var sensor_scene: PackedScene = _ResolveCatalogScene(SENSOR_CATALOG_PATH, sensor_name)
 	var node: Node = null
-	if sensor_scene != null:
+	# 行人没有 Chassis/Sensors 挂载点（没有 AttachSensor）：直接调会 Invalid call = SCRIPT ERROR，
+	# 所以先 has_method 守卫，走"几何未落地"的同一分支语义（只登记连接，不影响 manifest 就绪）。
+	var can_mount: bool = vehicle.has_method("AttachSensor")
+	if sensor_scene != null and can_mount:
 		node = vehicle.call("AttachSensor", slot, sensor_scene,
 			mount if mount is Dictionary else {}, params if params is Dictionary else {})
+	elif sensor_scene != null and not can_mount:
+		if not _warned_missing_sensor:
+			push_warning("[ws] peer='%s' slot='%s' 的 avatar 没有传感器挂载点（pedestrian），仅登记连接"
+				% [peer_id, slot])
+			_warned_missing_sensor = true
 	else:
 		# Step 8 前 Lidar2D.tscn 不存在：只登记连接（就绪语义 = 连接就位，见文件头）
 		if not _warned_missing_sensor:
@@ -571,8 +805,9 @@ func _ReplayPendingSensors(peer_id: String) -> void:
 # ================================================================ 就绪判定
 
 ## manifest 全部就位 -> 给底盘连接发 assembly_ready（每 peer 仅一次，§8.1-4）。
+## task_35 Step 2：守卫从 GetVehicle 放宽到 GetAvatar（车的结果不变，空 manifest 的行人也能就绪）。
 func _TryAssembly(peer_id: String) -> void:
-	if GetVehicle(peer_id) == null:
+	if GetAvatar(peer_id) == null:
 		return
 	if not _manifests.has(peer_id):
 		return
@@ -599,27 +834,53 @@ func _TryAssembly(peer_id: String) -> void:
 
 # ================================================================ 清理
 
-## 移除一台 avatar：先从表里摘（R8），再 free；同 peer 的其余连接一并关闭。
+## 移除一台 avatar（车 / 行人共用）：先从**两张表**里摘（R8），再 free；同 peer 的其余连接一并关闭。
 ## except_link = 刚接手的**新**连接（重复 hello 时绝不能把它关掉，R13）。
-func _RemoveVehicle(peer_id: String, except_link: Variant = null) -> void:
-	var vehicle: Variant = _peer_vehicles.get(peer_id, null)
-	_peer_vehicles.erase(peer_id)           # 先摘表，再 free（queue_free 后同帧仍 is_instance_valid）
-	if vehicle != null and is_instance_valid(vehicle):
-		var parent: Node = vehicle.get_parent()
-		if parent != null:
-			parent.remove_child(vehicle)
-		vehicle.queue_free()
+## 返回值 = 是否真的摘到（两张表都没有 -> false：**不打日志、不发信号、不牵连其它连接**）。
+## 第 2 轮要点（prev_issues #2）：
+##   ① 表是两张、容器是两个，摘除必须同时清，否则换 kind 会留幽灵；
+##   ② 被判死刑的连接一律交出 `link.vehicle`（置 null）—— 它们下一帧的 `_CleanupLink()`
+##      绝不能再把**刚注册**的新 avatar 摘掉；
+##   ③ emit / print 只在真的摘到东西时发生（旧实现会对"已经没车的 peer"打 `vehicle removed`）。
+func _RemoveAvatar(peer_id: String, except_link: Variant = null) -> bool:
+	var was_vehicle := _peer_vehicles.has(peer_id)
+	var was_pedestrian := _pedestrians.has(peer_id)
+	if not was_vehicle and not was_pedestrian:
+		return false                                  # 什么都没摘：静默（②/③ 的前提）
+	var avatar: Variant = _pedestrians.get(peer_id, _peer_vehicles.get(peer_id, null))
+	# 先摘表，再 free（queue_free 后同帧仍 is_instance_valid，R9）
+	_peer_vehicles.erase(peer_id)
+	_pedestrians.erase(peer_id)
+	_ped_last_motion_ms.erase(peer_id)
+	_ped_idle.erase(peer_id)
 	for link: Variant in _links.duplicate():
+		if link.vehicle == avatar:
+			link.vehicle = null                       # 交出所有权（含 except_link）
 		if link == except_link:
 			continue
 		if link.peer_id == peer_id:
 			_CloseLink(link, CLOSE_GOING_AWAY, "peer removed")
+	if avatar != null and is_instance_valid(avatar):
+		var parent: Node = avatar.get_parent()
+		if parent != null:
+			parent.remove_child(avatar)
+		avatar.queue_free()
 	_manifests.erase(peer_id)
 	_manifest_parts.erase(peer_id)
 	_assembly_sent.erase(peer_id)
 	_pending_sensors.erase(peer_id)
-	vehicle_removed.emit(peer_id)
-	print("[ws] vehicle removed peer='%s'" % peer_id)
+	if was_vehicle:
+		vehicle_removed.emit(peer_id)
+		print("[ws] vehicle removed peer='%s'" % peer_id)
+	if was_pedestrian:
+		pedestrian_removed.emit(peer_id)
+		print("[ws] pedestrian removed peer='%s'" % peer_id)
+	return true
+
+
+## 兼容壳（既有语义 / 既有调用点：只移除车）。内部走 _RemoveAvatar()，返回值丢弃。
+func _RemoveVehicle(peer_id: String, except_link: Variant = null) -> void:
+	_RemoveAvatar(peer_id, except_link)
 
 
 ## 清理一条连接的业务痕迹（由 _SweepClosed / Stop 调用；**不**从 _links 删除）。
@@ -631,9 +892,13 @@ func _CleanupLink(link: Variant) -> void:
 	var slot := str(link.slot)
 	if link.handshaken:
 		if role == ROLE_CHASSIS:
-			_RemoveVehicle(peer_id, null)   # 底盘断开 = 整台车走了（顺手关该 peer 其余连接）
+			# 底盘断开 = 整台 avatar 走了（顺手关该 peer 其余连接）。
+			# 第 2 轮：只有这条连接仍持有 avatar 才摘。被 `_RemoveAvatar()` 判死刑的连接
+			# 已经把 `link.vehicle` 置 null，**不能再摘**（否则会误删同 peer 刚注册的新 avatar）。
+			if link.vehicle != null:
+				_RemoveAvatar(peer_id, null)
 		elif role == ROLE_SENSOR:
-			var vehicle: Node3D = GetVehicle(peer_id)
+			var vehicle: Node3D = GetAvatar(peer_id)
 			if vehicle != null and vehicle.has_method("DetachSensor"):
 				vehicle.call("DetachSensor", slot)
 			if _manifests.has(peer_id):
@@ -832,14 +1097,20 @@ func _SanitizeSlot(slot: String) -> String:
 	return slot.strip_edges().validate_node_name()
 
 
-## 重名 -> base_<avatar_id>（避免 add_child 把节点自动改名成 "simA2" 导致名字不可预期，R14）。
-func _UniqueVehicleName(base: String) -> String:
+## 重名 -> base_<suffix_id>（避免 add_child 把节点自动改名成 "simA2" 导致名字不可预期，R14）。
+## 车/人共用：root = 该 avatar 的容器，suffix_id = 该容器的编号（车的 avatar_id / 人的 pedestrian_id）。
+func _UniqueAvatarName(base: String, root: Node3D, suffix_id: int) -> String:
 	var name_taken: bool = false
-	if vehicles_root != null and is_instance_valid(vehicles_root):
-		name_taken = vehicles_root.get_node_or_null(NodePath(base)) != null
+	if root != null and is_instance_valid(root):
+		name_taken = root.get_node_or_null(NodePath(base)) != null
 	if not name_taken:
 		return base
-	return "%s_%d" % [base, _next_avatar_id]
+	return "%s_%d" % [base, suffix_id]
+
+
+## 兼容壳（既有语义 / 既有调用点：只按车容器判重名）。
+func _UniqueVehicleName(base: String) -> String:
+	return _UniqueAvatarName(base, vehicles_root, _next_avatar_id)
 
 
 func _TakeNextSensorId() -> int:
@@ -866,6 +1137,170 @@ func _PickSpawn(chassis_name: String) -> Dictionary:
 		"z": z,
 		"yaw": 0.0,
 	}
+
+
+# ================================================================ 内部工具：行人容器 / spawn 校验（task_35 Step 2）
+
+## 行人容器：与 `Vehicles` 平级、同父（World 根）。
+## 每次调用都 `is_instance_valid` 复检：Step 3 的 `World.gd::BuildPedestrians()` 可能重建这个容器，
+## 那时缓存的指针会悬空 —— 复检 + 按名字重新解析，绝不留一个死指针。
+func _Pedestrians_Root() -> Node3D:
+	if pedestrians_root != null and is_instance_valid(pedestrians_root):
+		return pedestrians_root
+	if vehicles_root == null or not is_instance_valid(vehicles_root):
+		_EnsureRefs()
+	var parent: Node = null
+	if vehicles_root != null and is_instance_valid(vehicles_root):
+		parent = vehicles_root.get_parent()
+	if parent == null:
+		return null
+	var found: Node3D = parent.get_node_or_null(NodePath(PEDESTRIANS_NODE)) as Node3D
+	if found == null:
+		found = Node3D.new()
+		found.name = PEDESTRIANS_NODE
+		parent.add_child(found)          # 首个行人到达时才建（无人连入 = 节点树零变化，R11）
+		print("[ws] pedestrians root created: %s" % str(found.get_path()))
+	pedestrians_root = found
+	return found
+
+
+## 这个 peer 已经有 avatar 了吗（车或人）。
+func _HasAvatar(peer_id: String) -> bool:
+	return _peer_vehicles.has(peer_id) or _pedestrians.has(peer_id)
+
+
+## 全部**活着**的 avatar（车 + 人），供 spawn 重叠校验用。
+func _All_Avatars() -> Array:
+	var out: Array = []
+	for table: Dictionary in [_peer_vehicles, _pedestrians]:
+		for peer: Variant in table.keys():
+			var avatar: Variant = table[peer]
+			if avatar != null and is_instance_valid(avatar):
+				out.append(avatar)
+	return out
+
+
+## 默认出生点：World.SPAWN_WORLD + PEDESTRIAN_SPAWN_OFFSET_M = (64, 56, 0)，yaw 0。
+func _Pedestrian_Default_Spawn() -> Dictionary:
+	var origin: Vector3 = World.SPAWN_WORLD
+	return {
+		"x": origin.x + PEDESTRIAN_SPAWN_OFFSET_M.x,
+		"y": origin.y + PEDESTRIAN_SPAWN_OFFSET_M.y,
+		"z": origin.z + PEDESTRIAN_SPAWN_OFFSET_M.z,
+		"yaw": 0.0,
+	}
+
+
+## spawn 校验（task_35 Step 2 / COMPONENTS.md §8.1-9）：
+## 缺失 = 合法用法（默认点、不 warn）；有值但非法 = warn + 默认点。
+func _Pick_Pedestrian_Spawn(msg: Dictionary, peer_id: String) -> Dictionary:
+	if not msg.has("spawn"):
+		return _Pedestrian_Default_Spawn()
+	var raw: Variant = msg["spawn"]
+	if not (raw is Dictionary):
+		push_warning("[ws] peer='%s' spawn 不是对象（%s），回退默认点" % [peer_id, str(raw)])
+		return _Pedestrian_Default_Spawn()
+	var spawn: Dictionary = raw
+	var x := _To_Float(spawn.get("x", NAN), NAN)
+	var y := _To_Float(spawn.get("y", NAN), NAN)
+	var z := _To_Float(spawn.get("z", 0.0), 0.0)
+	var yaw := _To_Float(spawn.get("yaw", 0.0), 0.0)
+	var span := _World_Span_M()
+	if not is_finite(x) or not is_finite(y):
+		push_warning("[ws] peer='%s' spawn 的 x/y 不是有限数（%s），回退默认点" % [peer_id, str(spawn)])
+		return _Pedestrian_Default_Spawn()
+	if x < 0.0 or x >= span or y < 0.0 or y >= span:
+		push_warning("[ws] peer='%s' spawn (%.2f, %.2f) 越界（[0, %.1f)），回退默认点"
+			% [peer_id, x, y, span])
+		return _Pedestrian_Default_Spawn()
+	if not is_finite(z) or z < 0.0 or z > PEDESTRIAN_SPAWN_MAX_Z_M:
+		push_warning("[ws] peer='%s' spawn.z=%s 越界（[0, %.1f]），回退默认点"
+			% [peer_id, str(spawn.get("z", 0.0)), PEDESTRIAN_SPAWN_MAX_Z_M])
+		return _Pedestrian_Default_Spawn()
+	var point := Vector3(x, y, z)
+	if _Spawn_In_Obstacle(point):
+		push_warning("[ws] peer='%s' spawn (%.2f, %.2f) 落在静态障碍内，回退默认点" % [peer_id, x, y])
+		return _Pedestrian_Default_Spawn()
+	if _Spawn_Occupied(point):
+		push_warning("[ws] peer='%s' spawn (%.2f, %.2f) 与已占 avatar 重叠（< %.1f m），回退默认点"
+			% [peer_id, x, y, PEDESTRIAN_SPAWN_MIN_GAP_M])
+		return _Pedestrian_Default_Spawn()
+	return {"x": x, "y": y, "z": z, "yaw": wrapf(yaw, -PI, PI) if is_finite(yaw) else 0.0}
+
+
+## 点是否落在 World.OBSTACLES 的某个 box 内（外扩 PEDESTRIAN_SPAWN_MARGIN_M）。
+## 障碍表是**世界坐标**（origin = 最小角，size = 尺寸），与 World.gd 逐字同源（P8：不复制字面量）。
+func _Spawn_In_Obstacle(p: Vector3) -> bool:
+	var margin := PEDESTRIAN_SPAWN_MARGIN_M
+	for item: Variant in World.OBSTACLES:
+		var box: Dictionary = item
+		var origin: Vector3 = box.get("origin", Vector3.ZERO)
+		var size: Vector3 = box.get("size", Vector3.ZERO)
+		if p.x >= origin.x - margin and p.x <= origin.x + size.x + margin \
+				and p.y >= origin.y - margin and p.y <= origin.y + size.y + margin \
+				and p.z >= origin.z - margin and p.z <= origin.z + size.z + margin:
+			return true
+	return false
+
+
+## 点的水平中心距是否与任何已占 avatar < PEDESTRIAN_SPAWN_MIN_GAP_M（用 GetPose 的世界坐标）。
+func _Spawn_Occupied(p: Vector3) -> bool:
+	for avatar: Variant in _All_Avatars():
+		if avatar == null or not is_instance_valid(avatar) or not avatar.has_method("GetPose"):
+			continue
+		var pose: Dictionary = avatar.call("GetPose")
+		var dx := float(pose.get("x", 0.0)) - p.x
+		var dy := float(pose.get("y", 0.0)) - p.y
+		if sqrt(dx * dx + dy * dy) < PEDESTRIAN_SPAWN_MIN_GAP_M:
+			return true
+	return false
+
+
+## 世界边长（米）：唯一来源是 project.godot 的 [sim_world]（World.gd 同款），不写 128 字面量。
+func _World_Span_M() -> float:
+	var voxel := float(ProjectSettings.get_setting(World.SETTING_VOXEL_SIZE, 0.0))
+	var cells := int(ProjectSettings.get_setting(World.SETTING_CELLS_X, 0))
+	if voxel <= 0.0 or cells <= 0:
+		return World.SPAWN_WORLD.x * 2.0
+	return float(cells) * voxel
+
+
+## 底盘默认参数 <- hello.params 覆盖（行人：{max_speed, max_turn_rate}；与 ChassisModel 同口径）。
+func _Merge_Avatar_Params(avatar: Node, params: Dictionary) -> Dictionary:
+	var merged: Dictionary = {}
+	if avatar != null and is_instance_valid(avatar) and avatar.has_method("GetDefaultParams"):
+		var defaults: Variant = avatar.call("GetDefaultParams")
+		if defaults is Dictionary:
+			merged = (defaults as Dictionary).duplicate(true)
+	for key: Variant in params.keys():
+		merged[key] = params[key]
+	return merged
+
+
+## 宽容的数值解析（与 ChassisModel._to_float 同款）：非法类型 / 非数字字符串 -> fallback。
+func _To_Float(value: Variant, fallback: float) -> float:
+	match typeof(value):
+		TYPE_INT, TYPE_FLOAT:
+			var number := float(value)
+			return number if is_finite(number) else fallback
+		TYPE_STRING, TYPE_STRING_NAME:
+			var text := str(value).strip_edges()
+			return text.to_float() if text.is_valid_float() else fallback
+		_:
+			return fallback
+
+
+## chassis_hello.kind -> LEGAL 值；缺省 = robot；非法值 warn（一次一条）后按 robot 处理。
+func _Kind_Of(msg: Dictionary, peer_id: String = "") -> String:
+	if not msg.has("kind"):
+		return WireProtocol.KIND_ROBOT
+	var raw: Variant = msg["kind"]
+	var kind := WireProtocol.NormalizeKind(raw)
+	if kind.is_empty():
+		push_warning("[ws] peer='%s' chassis_hello.kind 非法（%s），按 robot 处理"
+			% [peer_id, str(raw)])
+		return WireProtocol.KIND_ROBOT
+	return kind
 
 
 ## manifest 数组 -> {slot: sensor}（去重、丢弃非法项；保持声明顺序）。

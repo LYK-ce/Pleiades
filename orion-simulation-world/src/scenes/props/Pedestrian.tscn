@@ -1,0 +1,35 @@
+; Presented by KeJi
+; Created Date ： 2026-10-25
+; Modified Date ： 2026-10-25
+;
+; 行人底盘 pedestrian（task_35 Step 1，COMPONENTS.md §3 第 11 个 .tscn / §4.11）。
+; 根 = CharacterBody3D + src/chassis/Pedestrian.gd（extends ChassisModel）：
+;   这个节点**同时**是底盘模型和宿主（行人不是 Vehicle：没有 Chassis/Sensors 挂载点、没有轮式外观）。
+; CollisionShape3D = CapsuleShape3D r=0.25 / h=1.75 / 中心 y=0.875 → 胶囊底面正好 y=0（脚底）。
+; Body = 走路 glb 实例（rp_nathan_animated_003_walk/model.glb，内含 AnimationPlayer + 88 骨 + 1 条动画）。
+;   **不另建 AnimationPlayer 节点**：glb 自带那个就是"动画节点"，另建一个空播放器会让
+;   find_child() 先命中空壳（= 找不到动画），是纯负收益（plan.md §6 R3）。
+; 碰撞层：layer=2（雷达 scan_mask 含 2 → 能扫到）、mask=1|4=5（地面 + 车辆；车 mask=7 含 2 → 车会被人挡住）。
+;   mask **不含** 2（VoxelWorld 可见矮墙/建筑的层）：行人会被车挡、但**不进建筑碰撞**；
+;   与既有"静态人物零碰撞"是同一取舍，Step 3 靠出生点选点避开障碍（plan.md §6 R2）。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://src/chassis/Pedestrian.gd" id="1_ped"]
+[ext_resource type="PackedScene" path="res://assets/humans/rp_nathan_animated_003_walk/model.glb" id="2_model"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_ped"]
+radius = 0.25
+height = 1.75
+
+[node name="Pedestrian" type="CharacterBody3D"]
+collision_layer = 2
+collision_mask = 5
+script = ExtResource("1_ped")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+position = Vector3(0, 0.875, 0)
+shape = SubResource("CapsuleShape3D_ped")
+
+[node name="Body" parent="." instance=ExtResource("2_model")]

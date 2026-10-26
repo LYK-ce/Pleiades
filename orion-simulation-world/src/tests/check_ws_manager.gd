@@ -1,15 +1,24 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-24
+# Modified Date ： 2026-10-25
 #
 # WebSocketManager 自检：场景形态 / World.tscn 接线 / 底盘+传感器装配 / 运动下行 /
 # 传感器先于底盘 / 空 manifest / 断开清理 / 错误路径 / camera 装配与出帧闸门 / 规范 lint。
-# 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
-#          --script res://src/tests/check_ws_manager.gd
+# 用法（两档都要绿，COMPONENTS.md §11 Step 6）：
+#   timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 \
+#     --script res://src/tests/check_ws_manager.gd
+#   DISPLAY=:99 timeout 400 godot --path orion-simulation-world --fixed-fps 60 \
+#     --rendering-driver opengl3 --audio-driver Dummy \
+#     --script res://src/tests/check_ws_manager.gd
 # 期望：failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR/SCRIPT ERROR（COMPONENTS.md §11 Step 6）。
+#   两档 total 差 1（76 / 77）：headless = dummy 渲染器，J7 必然 [skip]。
 #
 # task_34 Step 3 追加：A9（`type=2` 帧格式）/ A10（连接缓冲 4 MiB）/
 #   J1~J6（`sensor="camera"` 真装配 + 出帧闸门）/ [skip] J7（帧内容，无渲染器时不计入 total）。
+#
+# task_35 Step 2：A11（kind 规范化 + `motion_cmd{v,dir}`）/ K1~K13（行人装配、超时停车、spawn 校验）。
+# task_35 Step 2 第 2 轮：H5/K4/K5/K6 的等待窗口改用引擎帧（Xvfb 下 ~10~14 fps 也必须绿）；
+#   K14~K16 锁跨 kind 清场（robot->pedestrian / pedestrian->robot / 同一连接重建）。
 #
 # 关键手法：**同一个进程里既当世界、又当 sim**。真 World.tscn + 真 WebSocketPeer 客户端
 #   （P1/P6 实测 --headless 下 TCPServer + accept_stream + connect_to_url 完整可用），
@@ -61,11 +70,24 @@ const CAMERA_PARAMS := {"width": 640, "height": 480, "fov_deg": 70.0,
 ## 90 个引擎帧 = 引擎时间 1.5 s（1 Hz 下至少到点 1 次）。
 const CAMERA_GATE_FRAMES := 90
 
+## task_35 Step 2：行人（kind="pedestrian"）+ v/dir + 300 ms 超时
+const PEDESTRIAN_SCRIPT := "res://src/chassis/Pedestrian.gd"
+const PED_ID := "human-01"
+const PED_SPAWN := {"x": 70.0, "y": 70.0, "z": 0.0, "yaw": 0.0}
+const PED_SPAWN_TOL := 0.05
+const PED_CONVERGE_FRAMES := 60      # 1 s：180 °/s 转 90° 只需 0.5 s
+const PED_IDLE_WAIT_MS := 600        # > 300 ms，留一倍余量（墙钟）
+## 默认出生点（非法 / 缺失 spawn 的回退点）= World.SPAWN_WORLD + PEDESTRIAN_SPAWN_OFFSET_M。
+const PED_DEFAULT_X := 64.0
+const PED_DEFAULT_Y := 56.0
+
 var _total: int = 0
 var _failed: int = 0
 var _skipped: int = 0
 var _harness_errors: int = 0
 var _sims: Array = []
+## 移除事件流水（K14~K16 用 slice(n) 只看本用例新增的部分）。
+var _removed_events: Array = []
 
 
 # ================================================================ 测试替身：sim 侧 WS 客户端
@@ -150,6 +172,16 @@ class Sim:
 			var dict: Dictionary = msg
 			out.append(str(dict.get("msg", "")))
 		return out
+
+	## 数 inbox 里某 msg 的条数（task_35 Step 2：K3 数 `pose` 条数用）。
+	## 只读，不改 Connect/Poll/Send/Take/Has/Names 的任何行为。
+	func Count(msg_name: String) -> int:
+		var n: int = 0
+		for msg: Variant in inbox:
+			var dict: Dictionary = msg
+			if str(dict.get("msg", "")) == msg_name:
+				n += 1
+		return n
 
 
 # ================================================================ 入口
@@ -281,6 +313,28 @@ func _run() -> void:
 			str(probe_link.closed)])
 	probe_link.peer = null
 	probe_link = null
+
+	# ---- A11（task_35 Step 2）：kind 规范化 + motion_cmd{v, dir} 编解码形态
+	var motion_round: Dictionary = WireProtocol.ParseJson(
+		WireProtocol.MakeJson(WireProtocol.BuildMotionCommand(1.0, PI / 2.0, 7)))
+	var stop_round: Dictionary = WireProtocol.ParseJson(
+		WireProtocol.MakeJson(WireProtocol.BuildMotionCommand(0.0)))
+	_check("A11 wire-pedestrian",
+		WireProtocol.KIND_ROBOT == "robot"
+		and WireProtocol.KIND_PEDESTRIAN == "pedestrian"
+		and WireProtocol.NormalizeKind(" PEDESTRIAN ") == "pedestrian"
+		and WireProtocol.NormalizeKind("robot") == "robot"
+		and WireProtocol.NormalizeKind("quadcopter").is_empty()
+		and WireProtocol.NormalizeKind(3).is_empty()
+		and WireProtocol.NormalizeKind(null).is_empty()
+		and str(motion_round.get("msg", "")) == WireProtocol.MSG_MOTION_CMD
+		and int(motion_round.get("seq", -1)) == 7
+		and absf(float(motion_round.get("v", -1.0)) - 1.0) < 1e-9
+		and absf(float(motion_round.get("dir", -9.0)) - PI / 2.0) < 1e-9
+		and not motion_round.has("action") and not motion_round.has("speed")
+		and absf(float(stop_round.get("v", -1.0))) < 1e-9
+		and not stop_round.has("dir"),
+		"motion=%s stop=%s" % [motion_round, stop_round])
 	probe.free()
 
 	# ============================================================ B. World.tscn 接线
@@ -302,6 +356,10 @@ func _run() -> void:
 	manager.autolisten = false          # 自检自带 Listen(0)，不抢 9999
 	root.add_child(world)
 	await process_frame
+	# 第 2 轮：移除事件用**信号**记（日志是给人看的，断言要可数）。
+	# `_RemoveAvatar()` 现在只在真摘到东西时才 emit —— 换 kind 的"幽灵移除"会多出一条，K14~K16 直接红。
+	manager.vehicle_removed.connect(_On_Vehicle_Removed)
+	manager.pedestrian_removed.connect(_On_Pedestrian_Removed)
 
 	var manager_script: Script = manager.get_script()
 	var vehicles_root: Node3D = world.get_node_or_null("Vehicles") as Node3D
@@ -612,7 +670,13 @@ func _run() -> void:
 	manager.handshake_timeout_ms = 300
 	var sim_h5: Variant = _new_sim(port)
 	await _wait_open(sim_h5, 1500)
-	var h5_closed: bool = await _wait_closed(sim_h5, 2500)
+	# 握手超时由 `Heartbeat`（Timer，1.0 s = **60 引擎帧**）巡检，判据是墙钟 300 ms。
+	# 旧写法 `_wait_closed(sim_h5, 2500)` 是纯墙钟：Xvfb（~10~14 fps）2.5 s 只跑 25~35 帧，
+	# 一次心跳都没到 -> 必红（HEAD 上就红，不是本任务的回归）。
+	# 修法：**两个时钟都满足**才允许判"没关" —— ≥70 帧（至少一次心跳）+ ≥400 ms 墙钟（时间戳真的过期）。
+	await _wait_frames(70)
+	await _wait_ms(400)
+	var h5_closed: bool = await _wait_closed_frames(sim_h5, 90)
 	manager.handshake_timeout_ms = 5000
 	_check("H5 handshake-timeout", h5_closed, "closed=%s code=%d" % [h5_closed, sim_h5.close_code])
 
@@ -738,6 +802,341 @@ func _run() -> void:
 			% DisplayServer.get_name())
 		_skipped += 1
 
+	# ============================================================ K. 行人（task_35 Step 2）
+	# 刻意放在 J 之后：C5/F1/G2/G5 这些计数断言全在前面，K 段新增的车/人**不影响**它们。
+	# 帧数用 _wait_physics / _wait_frames，墙钟用 _wait_ms（--fixed-fps 只定 delta，不定实际帧率）。
+	var vehicles_before_ped: int = manager.GetVehicleCount()
+	var sim_ped: Variant = _new_sim(port)
+	await _wait_open(sim_ped, 1500)
+	sim_ped.Send({
+		"msg": "chassis_hello",
+		"peer_id": PED_ID,
+		"chassis": "pedestrian",
+		"kind": "pedestrian",
+		"params": {},
+		"spawn": PED_SPAWN,
+		"manifest": [],
+	})
+	var ped_ready: Dictionary = await _wait_msg(sim_ped, "chassis_ready", 1500)
+	var ped_spawn: Dictionary = ped_ready.get("spawn", {}) if not ped_ready.is_empty() else {}
+	_check("K1 pedestrian-assembled",
+		not ped_ready.is_empty()
+		and str(ped_ready.get("kind", "")) == WireProtocol.KIND_PEDESTRIAN
+		and int(ped_ready.get("pedestrian_id", -1)) >= 1
+		and absf(float(ped_spawn.get("x", -999.0)) - float(PED_SPAWN["x"])) < PED_SPAWN_TOL
+		and absf(float(ped_spawn.get("y", -999.0)) - float(PED_SPAWN["y"])) < PED_SPAWN_TOL
+		and absf(float(ped_spawn.get("z", -999.0)) - float(PED_SPAWN["z"])) < PED_SPAWN_TOL
+		and absf(float(ped_spawn.get("yaw", -999.0)) - float(PED_SPAWN["yaw"])) < PED_SPAWN_TOL,
+		"ready=%s" % [ped_ready])
+
+	var ped_node: Node3D = manager.GetPedestrian(PED_ID)
+	var ped_parent: Node = ped_node.get_parent() if ped_node != null else null
+	var ped_script: Script = ped_node.get_script() as Script if ped_node != null else null
+	var ped_script_path: String = ped_script.resource_path if ped_script != null else ""
+	var ped_in_vehicles: Node = vehicles_root.get_node_or_null(NodePath(PED_ID)) \
+		if vehicles_root != null else null
+	_check("K2 pedestrian-routing",
+		ped_node != null and manager.GetVehicle(PED_ID) == null
+		and manager.GetVehicleCount() == vehicles_before_ped
+		and ped_in_vehicles == null
+		and ped_parent != null and str(ped_parent.name) == "Pedestrians"
+		and ped_script_path == PEDESTRIAN_SCRIPT,
+		"node=%s parent=%s script=%s vehicles=%d (was %d) in_vehicles=%s" % [
+			ped_node, ped_parent.name if ped_parent != null else "null", ped_script_path,
+			manager.GetVehicleCount(), vehicles_before_ped, ped_in_vehicles])
+
+	# K3：pose 照常 10 Hz 只发底盘连接（与 check_pose.C2 同口径：引擎帧数窗口）
+	var pose_before: int = sim_ped.Count("pose")
+	await _wait_frames(60)
+	var pose_delta: int = sim_ped.Count("pose") - pose_before
+	_check("K3 pedestrian-pose-10hz", pose_delta >= 9, "pose=+%d in 60 frames" % pose_delta)
+
+	# K4：v + dir -> 先转后走（弧线，不是瞬移）。等待窗口内**每帧重发**（Python 客户端的真实节奏），
+	# 否则 300 ms 超时会在窗口中途把 v 归零（Xvfb 下实测只走 3 帧）。
+	await _drive_physics(sim_ped, {"msg": "motion_cmd", "seq": 1, "v": 1.0, "dir": PI / 2.0},
+		PED_CONVERGE_FRAMES)
+	var pose_turned: Dictionary = ped_node.GetPose() if ped_node != null else {}
+	var yaw_err: float = absf(wrapf(float(pose_turned.get("yaw", 0.0)) - PI / 2.0, -PI, PI))
+	_check("K4 pedestrian-motion",
+		ped_node != null and yaw_err < 0.05
+		and float(pose_turned.get("y", -999.0)) > float(PED_SPAWN["y"]) + 0.2
+		and absf(float(pose_turned.get("x", -999.0)) - float(PED_SPAWN["x"])) < 0.6,
+		"pose=%s yaw_err=%.4f（dir=%.4f）" % [pose_turned, yaw_err, PI / 2.0])
+
+	# K5：老协议 action/speed 对行人也生效（forward 50% -> 1.26 × 0.5 m/s）。同样每帧重发。
+	await _drive_physics(sim_ped, {"msg": "motion_cmd", "seq": 2, "action": "forward", "speed": 50}, 4)
+	var speed_legacy: float = float(ped_node.call("Get_Speed")) if ped_node != null else -1.0
+	_check("K5 pedestrian-legacy-action", absf(speed_legacy - 0.63) < 0.02,
+		"speed=%.4f（want 0.63）" % speed_legacy)
+
+	# K6：白盒 —— 超时阈值 + "刚发过指令" 的簿记。用同一 helper，保证最后一帧刚下发。
+	var ped_manager_script: Script = manager.get_script()
+	var ped_manager_consts: Dictionary = ped_manager_script.get_script_constant_map() \
+		if ped_manager_script != null else {}
+	var timeout_ms: int = int(ped_manager_consts.get("PEDESTRIAN_CMD_TIMEOUT_MS", -1))
+	await _drive_physics(sim_ped, {"msg": "motion_cmd", "seq": 3, "v": 1.0, "dir": PI / 2.0}, 2)
+	var motion_seen: bool = manager._ped_last_motion_ms.has(PED_ID)
+	var idle_now: bool = bool(manager._ped_idle.get(PED_ID, true))
+	_check("K6 pedestrian-timeout-meta",
+		timeout_ms == 300 and motion_seen and not idle_now,
+		"timeout=%d last_motion=%s idle=%s" % [timeout_ms, motion_seen, idle_now])
+
+	# K7：停发指令 -> 300 ms 后自动 v=0（只停、不断连），随后位姿完全不动
+	await _wait_ms(PED_IDLE_WAIT_MS)
+	var speed_idle: float = float(ped_node.call("Get_Speed")) if ped_node != null else -1.0
+	var idle_after: bool = bool(manager._ped_idle.get(PED_ID, false))
+	var still_a: Dictionary = ped_node.GetPose() if ped_node != null else {}
+	await _wait_physics(10)
+	var still_b: Dictionary = ped_node.GetPose() if ped_node != null else {}
+	var dx_still: float = absf(float(still_b.get("x", 0.0)) - float(still_a.get("x", 0.0)))
+	var dy_still: float = absf(float(still_b.get("y", 0.0)) - float(still_a.get("y", 0.0)))
+	_check("K7 pedestrian-timeout-stop",
+		absf(speed_idle) < 0.01 and idle_after and sim_ped.IsOpen()
+		and dx_still < 1e-4 and dy_still < 1e-4,
+		"speed=%.4f idle=%s open=%s dx=%.6f dy=%.6f" % [
+			speed_idle, idle_after, sim_ped.IsOpen(), dx_still, dy_still])
+
+	# K8：非法 spawn（越界）-> warn + 回退默认点；回执 spawn == pose 静止值
+	var sim_ped2: Variant = _new_sim(port)
+	await _wait_open(sim_ped2, 1500)
+	sim_ped2.Send({
+		"msg": "chassis_hello",
+		"peer_id": "human-02",
+		"chassis": "pedestrian",
+		"kind": "pedestrian",
+		"params": {},
+		"spawn": {"x": 200.0, "y": 5.0, "z": 0.0},
+		"manifest": [],
+	})
+	var ready_ped2: Dictionary = await _wait_msg(sim_ped2, "chassis_ready", 1500)
+	var spawn_ped2: Dictionary = ready_ped2.get("spawn", {}) if not ready_ped2.is_empty() else {}
+	var pose_ped2: Dictionary = await _wait_msg(sim_ped2, "pose", 1000)
+	_check("K8 pedestrian-spawn-invalid",
+		not ready_ped2.is_empty()
+		and float(spawn_ped2.get("x", -999.0)) >= 0.0
+		and float(spawn_ped2.get("x", -999.0)) < 128.0
+		and absf(float(spawn_ped2.get("x", -999.0)) - 200.0) > 1.0
+		and absf(float(spawn_ped2.get("x", -999.0)) - PED_DEFAULT_X) < PED_SPAWN_TOL
+		and absf(float(spawn_ped2.get("y", -999.0)) - PED_DEFAULT_Y) < PED_SPAWN_TOL
+		and absf(float(pose_ped2.get("x", -999.0)) - float(spawn_ped2.get("x", 0.0))) < PED_SPAWN_TOL
+		and absf(float(pose_ped2.get("y", -999.0)) - float(spawn_ped2.get("y", 0.0))) < PED_SPAWN_TOL,
+		"spawn=%s pose=%s" % [spawn_ped2, pose_ped2])
+
+	# K9：不带 spawn -> 默认点（合法用法，不 warn）
+	var sim_ped3: Variant = _new_sim(port)
+	await _wait_open(sim_ped3, 1500)
+	sim_ped3.Send({
+		"msg": "chassis_hello",
+		"peer_id": "human-03",
+		"chassis": "pedestrian",
+		"kind": "pedestrian",
+		"params": {},
+		"manifest": [],
+	})
+	var ready_ped3: Dictionary = await _wait_msg(sim_ped3, "chassis_ready", 1500)
+	var spawn_ped3: Dictionary = ready_ped3.get("spawn", {}) if not ready_ped3.is_empty() else {}
+	_check("K9 pedestrian-spawn-default",
+		not ready_ped3.is_empty()
+		and absf(float(spawn_ped3.get("x", -999.0)) - PED_DEFAULT_X) < PED_SPAWN_TOL
+		and absf(float(spawn_ped3.get("y", -999.0)) - PED_DEFAULT_Y) < PED_SPAWN_TOL
+		and absf(float(spawn_ped3.get("z", -999.0))) < PED_SPAWN_TOL
+		and absf(float(spawn_ped3.get("yaw", -999.0))) < PED_SPAWN_TOL,
+		"spawn=%s（want %.1f, %.1f, 0, 0）" % [spawn_ped3, PED_DEFAULT_X, PED_DEFAULT_Y])
+
+	# K10：非法 kind（"quadcopter"）-> 不断连、按 robot 处理、进 Vehicles
+	var sim_kind: Variant = _new_sim(port)
+	await _wait_open(sim_kind, 1500)
+	sim_kind.Send({
+		"msg": "chassis_hello",
+		"peer_id": "simKind",
+		"chassis": "diff_drive_ugv",
+		"kind": "quadcopter",
+		"params": {},
+		"manifest": [],
+	})
+	var ready_kind: Dictionary = await _wait_msg(sim_kind, "chassis_ready", 1500)
+	_check("K10 kind-invalid-robot",
+		not ready_kind.is_empty() and sim_kind.IsOpen()
+		and str(ready_kind.get("kind", "")) == WireProtocol.KIND_ROBOT
+		and manager.GetVehicle("simKind") != null
+		and manager.GetPedestrian("simKind") == null,
+		"ready=%s open=%s vehicle=%s pedestrian=%s" % [ready_kind, sim_kind.IsOpen(),
+			manager.GetVehicle("simKind"), manager.GetPedestrian("simKind")])
+
+	# K11：不带 kind -> 缺省 robot（老 sim 一字不改也走老路）
+	var peds_before_plain: int = manager.GetPedestrianCount()
+	var sim_plain: Variant = _new_sim(port)
+	await _wait_open(sim_plain, 1500)
+	sim_plain.Send({
+		"msg": "chassis_hello",
+		"peer_id": "simPlain",
+		"chassis": "diff_drive_ugv",
+		"params": {},
+		"manifest": [],
+	})
+	var ready_plain: Dictionary = await _wait_msg(sim_plain, "chassis_ready", 1500)
+	_check("K11 kind-default-robot",
+		not ready_plain.is_empty()
+		and str(ready_plain.get("kind", "")) == WireProtocol.KIND_ROBOT
+		and manager.GetVehicle("simPlain") != null
+		and manager.GetPedestrianCount() == peds_before_plain,
+		"ready=%s peds=%d (was %d)" % [ready_plain,
+			manager.GetPedestrianCount(), peds_before_plain])
+
+	# K12：行人没有传感器挂载点 -> 不许 Invalid call（SCRIPT ERROR），只登记连接
+	var sim_ped4: Variant = _new_sim(port)
+	await _wait_open(sim_ped4, 1500)
+	sim_ped4.Send({
+		"msg": "chassis_hello",
+		"peer_id": "human-04",
+		"chassis": "pedestrian",
+		"kind": "pedestrian",
+		"params": {},
+		"spawn": {"x": 74.0, "y": 70.0, "z": 0.0, "yaw": 0.0},
+		"manifest": [{"slot": "lidar_front", "sensor": "lidar_2d"}],
+	})
+	var ready_ped4: Dictionary = await _wait_msg(sim_ped4, "chassis_ready", 1500)
+	var sim_ped4_sensor: Variant = _new_sim(port)
+	await _wait_open(sim_ped4_sensor, 1500)
+	sim_ped4_sensor.Send({
+		"msg": "sensor_hello",
+		"peer_id": "human-04",
+		"slot": "lidar_front",
+		"sensor": "lidar_2d",
+		"mount": {"x": 0.0, "y": 0.0, "z": 0.2},
+		"params": {"range": 12.0, "rays": 360, "rate_hz": 10},
+	})
+	var sensor_ready_ped: Dictionary = await _wait_msg(sim_ped4_sensor, "sensor_ready", 1500)
+	_check("K12 pedestrian-sensor-no-crash",
+		not ready_ped4.is_empty() and not sensor_ready_ped.is_empty()
+		and str(sensor_ready_ped.get("slot", "")) == "lidar_front"
+		# 行人没有 Chassis/Sensors 挂载点 -> 走"几何未落地"分支：回执里**没有** geometry 键。
+		# 这才是"没发生 Invalid call"的直接证据（此前只靠外部 grep 0 ERROR 间接兜住）。
+		and not sensor_ready_ped.has("geometry")
+		and sim_ped4.IsOpen() and sim_ped4_sensor.IsOpen(),
+		"ready=%s sensor_ready=%s geometry=%s open=%s/%s" % [ready_ped4, sensor_ready_ped,
+			str(sensor_ready_ped.get("geometry", "<absent>")),
+			sim_ped4.IsOpen(), sim_ped4_sensor.IsOpen()])
+
+	# K13：底盘连接断开 -> 行人被移除（计数先取快照，不硬编码）
+	var peds_before_close: int = manager.GetPedestrianCount()
+	sim_ped.CloseClient()
+	await _wait_ms(500)
+	var peds_root: Node3D = manager.GetPedestriansRoot()
+	var ped_node_after: Node = peds_root.get_node_or_null(NodePath(PED_ID)) \
+		if peds_root != null else null
+	_check("K13 pedestrian-removed-on-close",
+		manager.GetPedestrian(PED_ID) == null
+		and not manager._pedestrians.has(PED_ID)
+		and ped_node_after == null
+		and manager.GetPedestrianCount() == peds_before_close - 1,
+		"GetPedestrian=%s in_table=%s node=%s count=%d (was %d)" % [
+			manager.GetPedestrian(PED_ID), manager._pedestrians.has(PED_ID), ped_node_after,
+			manager.GetPedestrianCount(), peds_before_close])
+
+	# K14（第 2 轮，prev_issues #2-①）：robot -> pedestrian 换 kind（**新连接**同 peer_id）。
+	#   旧车必须从 Vehicles/_peer_vehicles 消失、旧连接必须被关；pose 必须来自新行人；
+	#   旧连接下一帧的 _CleanupLink() 不得把**刚注册**的行人再摘一次。
+	var vehicles_before_k14: int = manager.GetVehicleCount()
+	var peds_before_k14: int = manager.GetPedestrianCount()
+	var ev_k14: int = _removed_events.size()
+	var sim_k14a: Variant = _new_sim(port)
+	await _wait_open(sim_k14a, 1500)
+	sim_k14a.Send({"msg": "chassis_hello", "peer_id": "human-05", "chassis": "diff_drive_ugv",
+		"params": {}, "manifest": []})
+	var ready_k14a: Dictionary = await _wait_msg(sim_k14a, "chassis_ready", 1500)
+	var sim_k14b: Variant = _new_sim(port)
+	await _wait_open(sim_k14b, 1500)
+	sim_k14b.Send({"msg": "chassis_hello", "peer_id": "human-05", "chassis": "pedestrian",
+		"kind": "pedestrian", "spawn": {"x": 72.0, "y": 74.0, "z": 0.0, "yaw": 0.0},
+		"params": {}, "manifest": []})
+	var ready_k14b: Dictionary = await _wait_msg(sim_k14b, "chassis_ready", 1500)
+	var k14_old_closed: bool = await _wait_closed_frames(sim_k14a, 120)
+	await _wait_frames(2)                       # 让旧连接的 _CleanupLink 跑完
+	var pose_k14: Dictionary = await _wait_msg(sim_k14b, "pose", 1500)
+	var ped_k14: Node3D = manager.GetPedestrian("human-05")
+	_check("K14 kind-switch-robot-to-pedestrian",
+		not ready_k14a.is_empty() and not ready_k14b.is_empty()
+		and str(ready_k14b.get("kind", "")) == WireProtocol.KIND_PEDESTRIAN
+		and k14_old_closed and ped_k14 != null
+		and manager.GetVehicle("human-05") == null
+		and manager.GetVehicleCount() == vehicles_before_k14      # 快照在注册前：+1（车）-1（摘）= 回到原值
+		and manager.GetPedestrianCount() == peds_before_k14 + 1
+		and vehicles_root.get_node_or_null(NodePath("human-05")) == null
+		and absf(float(pose_k14.get("x", -999.0)) - 72.0) < 0.1
+		and absf(float(pose_k14.get("y", -999.0)) - 74.0) < 0.1
+		and _removed_events.slice(ev_k14) == ["v:human-05"],
+		"vehicles=%d(was %d) peds=%d(was %d) old_closed=%s pose=%s events=%s" % [
+			manager.GetVehicleCount(), vehicles_before_k14, manager.GetPedestrianCount(),
+			peds_before_k14, k14_old_closed, pose_k14, _removed_events.slice(ev_k14)])
+
+	# K15（prev_issues #2-②）：pedestrian -> robot 换 kind（新连接同 peer_id）。
+	#   残留行人必须消失；车指令必须作用在**车**上（旧实现里会打到残留行人、车纹丝不动）。
+	var vehicles_before_k15: int = manager.GetVehicleCount()
+	var peds_before_k15: int = manager.GetPedestrianCount()
+	var ev_k15: int = _removed_events.size()
+	var sim_k15a: Variant = _new_sim(port)
+	await _wait_open(sim_k15a, 1500)
+	sim_k15a.Send({"msg": "chassis_hello", "peer_id": "human-06", "chassis": "pedestrian",
+		"kind": "pedestrian", "spawn": {"x": 76.0, "y": 74.0, "z": 0.0, "yaw": 0.0},
+		"params": {}, "manifest": []})
+	var ready_k15a: Dictionary = await _wait_msg(sim_k15a, "chassis_ready", 1500)
+	var sim_k15b: Variant = _new_sim(port)
+	await _wait_open(sim_k15b, 1500)
+	sim_k15b.Send({"msg": "chassis_hello", "peer_id": "human-06", "chassis": "diff_drive_ugv",
+		"params": {}, "manifest": []})
+	var ready_k15b: Dictionary = await _wait_msg(sim_k15b, "chassis_ready", 1500)
+	var k15_old_closed: bool = await _wait_closed_frames(sim_k15a, 120)
+	await _wait_frames(2)
+	var vehicle_k15: Node3D = manager.GetVehicle("human-06")
+	var k15_pose_before: Dictionary = vehicle_k15.GetPose() if vehicle_k15 != null else {}
+	await _drive_physics(sim_k15b,
+		{"msg": "motion_cmd", "seq": 1, "action": "forward", "speed": 100}, 20)
+	var k15_pose_after: Dictionary = vehicle_k15.GetPose() if vehicle_k15 != null else {}
+	var peds_root_k15: Node3D = manager.GetPedestriansRoot()
+	_check("K15 kind-switch-pedestrian-to-robot",
+		not ready_k15a.is_empty() and not ready_k15b.is_empty()
+		and str(ready_k15b.get("kind", "")) == WireProtocol.KIND_ROBOT
+		and k15_old_closed and vehicle_k15 != null
+		and manager.GetPedestrian("human-06") == null
+		and not manager._pedestrians.has("human-06")
+		and manager.GetPedestrianCount() == peds_before_k15          # 快照在注册前：+1（人）-1（摘）= 回到原值
+		and manager.GetVehicleCount() == vehicles_before_k15 + 1
+		and peds_root_k15 != null and peds_root_k15.get_node_or_null(NodePath("human-06")) == null
+		and float(k15_pose_after.get("x", 0.0)) > float(k15_pose_before.get("x", 0.0)) + 0.05
+		and _removed_events.slice(ev_k15) == ["p:human-06"],
+		"vehicles=%d(was %d) peds=%d(was %d) old_closed=%s pose=%s->%s events=%s" % [
+			manager.GetVehicleCount(), vehicles_before_k15, manager.GetPedestrianCount(),
+			peds_before_k15, k15_old_closed, k15_pose_before, k15_pose_after,
+			_removed_events.slice(ev_k15)])
+
+	# K16（prev_issues #2-③ / R13）：**同一条连接**上 robot -> pedestrian 重建。
+	#   本连接不许被自己关掉；旧车只许摘一次（多一条 v: 就是幽灵移除）。
+	var ev_k16: int = _removed_events.size()
+	var sim_k16: Variant = _new_sim(port)
+	await _wait_open(sim_k16, 1500)
+	sim_k16.Send({"msg": "chassis_hello", "peer_id": "human-07", "chassis": "diff_drive_ugv",
+		"params": {}, "manifest": []})
+	var ready_k16a: Dictionary = await _wait_msg(sim_k16, "chassis_ready", 1500)
+	sim_k16.Send({"msg": "chassis_hello", "peer_id": "human-07", "chassis": "pedestrian",
+		"kind": "pedestrian", "spawn": {"x": 72.0, "y": 78.0, "z": 0.0, "yaw": 0.0},
+		"params": {}, "manifest": []})
+	var ready_k16b: Dictionary = await _wait_msg(sim_k16, "chassis_ready", 1500)
+	await _wait_frames(2)
+	var peds_root_k16: Node3D = manager.GetPedestriansRoot()
+	_check("K16 kind-switch-same-connection",
+		not ready_k16a.is_empty() and not ready_k16b.is_empty()
+		and str(ready_k16b.get("kind", "")) == WireProtocol.KIND_PEDESTRIAN
+		and sim_k16.IsOpen()
+		and manager.GetVehicle("human-07") == null
+		and manager.GetPedestrian("human-07") != null
+		and vehicles_root.get_node_or_null(NodePath("human-07")) == null
+		and peds_root_k16 != null and peds_root_k16.get_node_or_null(NodePath("human-07")) != null
+		and _removed_events.slice(ev_k16) == ["v:human-07"],
+		"open=%s vehicle=%s ped=%s events=%s" % [sim_k16.IsOpen(),
+			manager.GetVehicle("human-07"), manager.GetPedestrian("human-07"),
+			_removed_events.slice(ev_k16)])
+
 	# ============================================================ I. 规范 lint
 	var lint_bad: Array = []
 	for path: String in NET_SCRIPTS:
@@ -845,6 +1244,38 @@ func _wait_ms(ms: int) -> void:
 		_pump()
 		await process_frame
 	_pump()
+
+
+## 按**引擎帧**等连接关闭（第 2 轮 H5 的教训）：`--fixed-fps` 只固定 delta、不限制实际帧率，
+## Xvfb 下一帧可到 ~100 ms。凡是"世界必须再跑 N 帧才会发生"的事都用帧数，不用墙钟。
+func _wait_closed_frames(sim: Variant, frames: int) -> bool:
+	for _i in range(frames):
+		_pump()
+		if sim.closed:
+			return true
+		await process_frame
+	_pump()
+	return sim.closed
+
+
+## 按物理帧推进 n 帧，**每帧重发**同一条 motion_cmd（模拟 20~50 Hz 的 Python 客户端）。
+## 为什么必须重发：行人 300 ms 超时按**墙钟**判，而 Xvfb 下一帧可达 70~100 ms ——
+## 只发一次会让世界在等待窗口中途把 v 归零（第 2 轮 K4/K5 的教训）。车没有超时，重发也无害。
+func _drive_physics(sim: Variant, msg: Dictionary, frames: int) -> void:
+	for _i in range(frames):
+		sim.Send(msg)
+		_pump()
+		await physics_frame
+
+
+## 移除事件 -> "v:<peer>"（K14~K16 用它锁"只 emit 一次"）。
+func _On_Vehicle_Removed(peer_id: String) -> void:
+	_removed_events.append("v:" + peer_id)
+
+
+## 移除事件 -> "p:<peer>"。
+func _On_Pedestrian_Removed(peer_id: String) -> void:
+	_removed_events.append("p:" + peer_id)
 
 
 func _wait_physics(frames: int) -> void:

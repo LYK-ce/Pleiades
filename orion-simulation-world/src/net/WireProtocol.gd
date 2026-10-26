@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-24
+# Modified Date ： 2026-10-25
 #
 # 消息协议唯一入口（task_30 §六 / COMPONENTS.md §7.3、§8）：
 #   消息名常量 + JSON 文本帧编解码 + LiDAR / camera 二进制帧构造 + 帧头解析。
@@ -24,6 +24,9 @@ extends RefCounted
 
 
 # ---------------------------------------------------------------- 文本帧消息名（§8.1）
+## chassis_hello{peer_id, chassis, params, manifest}（task_35 Step 2 追加两个**可选**键）：
+##   kind  : "robot"（缺省）| "pedestrian"；非法值由 manager warn 后按 robot 处理。
+##   spawn : {x, y, z, yaw}，**只有** kind="pedestrian" 读；世界坐标 Z-up、米、yaw 弧度。
 const MSG_CHASSIS_HELLO := "chassis_hello"
 const MSG_CHASSIS_READY := "chassis_ready"
 const MSG_SENSOR_HELLO := "sensor_hello"
@@ -32,6 +35,12 @@ const MSG_MOTION_CMD := "motion_cmd"
 const MSG_ASSEMBLY_READY := "assembly_ready"
 ## 位姿下行（task_31 §三；`imu` / `gnss` 在 v1 **不做**，位姿走本条消息，见 §10）。
 const MSG_POSE := "pose"
+
+# ---------------------------------------------------------------- chassis_hello.kind（task_35 Step 2）
+## 两个**合法** kind 值：robot = 车 / 无人机（缺省，老 sim 一字不改也走这条），
+## pedestrian = 行人（不进 Vehicles 容器、不占 _PickSpawn 的 avatar 排位）。
+const KIND_ROBOT := "robot"
+const KIND_PEDESTRIAN := "pedestrian"
 
 # ---------------------------------------------------------------- 二进制帧（§8.2）
 ## 1 = lidar_2d；2 = camera（task_34 Step 3 落地，payload = JPEG 原始字节）
@@ -67,6 +76,29 @@ static func MakeJson(msg: Dictionary) -> PackedByteArray:
 ## Dictionary -> JSON 文本（ComponentLink.SendJson 用 send_text 时取这一份）。
 static func MakeJsonText(msg: Dictionary) -> String:
 	return JSON.stringify(msg)
+
+
+## 规范化 `chassis_hello.kind`（task_35 Step 2）：strip + lower，只认 robot / pedestrian。
+## 缺失 / 空 / 非字符串 / 其它值一律返回 ""（**本文件不打日志**：调用方 warn 之后按 robot 处理）。
+static func NormalizeKind(raw: Variant) -> String:
+	if raw == null:
+		return ""
+	var text := str(raw).strip_edges().to_lower()
+	if text == KIND_ROBOT or text == KIND_PEDESTRIAN:
+		return text
+	return ""
+
+
+## `motion_cmd` 的「速度 + 方向」形态（task_35 Step 2）：{msg, seq, v} / {msg, seq, v, dir}。
+##   v   : m/s（行人侧 clamp 0~1.26，不倒着走）
+##   dir : 世界系朝向角，弧度，0 = +X（东），逆时针为正
+##   dir 省略（缺省 NAN）= 只改速度、**保持原朝向** —— 超时停车就是这么发的（BuildMotionCommand(0.0)）
+## **不含 action/speed**：两套字段并存、互不覆盖（§8.1-9）。
+static func BuildMotionCommand(v: float, dir_rad: float = NAN, seq: int = 0) -> Dictionary:
+	var msg := {"msg": MSG_MOTION_CMD, "seq": seq, "v": v}
+	if is_finite(dir_rad):
+		msg["dir"] = dir_rad
+	return msg
 
 
 ## 位姿下行帧（世界坐标 Z-up、米、yaw 弧度绕 +z、归一化 [-PI,PI)）。

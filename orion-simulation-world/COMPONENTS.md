@@ -2,10 +2,18 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-21
-> Modified Date ： 2026-10-24
+> Modified Date ： 2026-10-25
 >
 > 对应任务：`Task/task_30_sim_world.md`（sim 接入 Godot 模拟世界）；`Task/task_33_camera_simulation.md`（相机仿真 + 传感器 / 底盘建模，2026-10-23 起）；`Task/task_34_camera.md`（camera 传感器全链路，2026-10-24 起）
-> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。本文是 Step 2~8 的唯一施工依据；后续 step 若需偏离，必须**先改本文并说明理由**。
+> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。**支线 `human_model` Step 4（静态人物道具 `Person`）亦已落地**：§3 增第 9 个 `.tscn`（`src/scenes/props/Person.tscn`），`World.gd` 在 `World/Persons` 下**运行时**静态摆 2 人（纯视觉、**零碰撞**、不进装配线，§4.9）。**支线 `walking_person` Step 2（走路人物道具 `PersonWalking`）亦已落地**：§3 增第 10 个 `.tscn`（`src/scenes/props/PersonWalking.tscn`），`World.gd` 在 `World/Walkers` 下**运行时**放 1 个沿 44 m 闭合路径走动的人（自带骨骼 + 走路动画、`speed_scale` 跟速度、**零碰撞**、不进装配线，§4.10）。**`walking_person` Step 3（走动收口）亦已落地**：走动能力**并入 `Person.gd`**（新增 `walk_speed` / `path` / `loop` 三个字段，**默认静态 = 向后兼容**，`Person.tscn` 一个字节不动）、`PersonWalking.tscn` 与静态人物**共用同一个 `Person.gd`**（`PersonWalking.gd` 已删除）、资产目录改名 `assets/humans/rp_nathan_animated_003_walk/`、自检换成 `check_person_walk.gd`（20 项 headless / 26 项含渲染，§4.10-⑤）。**`walking_person` Step 4（三帧真渲染证明"人在走"）亦已落地**：新增 `src/tests/check_person_walk_shots.gd`（**14 项**：结构 4 + 渲染 10），在环路第一段**侧前方**架固定机位、以 `--fixed-fps 60` **真推进 0/40/80 物理帧**（**帧间绝不瞬移**）拍 `walk_t{0,1,2}.jpg`，把「物理帧数 / 弧长增量 / 每帧步长 == v/60」与「框位移 / 框内外差分 / 64×64 对齐裁剪差」一起断言（§4.10-⑦）。**task_35 Step 3（世界布局：用外部驱动的行人替换自动绕圈的 walkers）亦已落地**：`World.gd` 的 `WALKERS` /
+`BuildWalkers()` / `GetWalkersRoot()` 整节删除，换成 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()`
+（容器 `Walkers` → `Pedestrians`，与 `WebSocketManager` 动态装配的行人**共用同一容器**）；世界**不再内置任何路径 / 巡逻 / 计时**，
+没有外部驱动时人**站着不动**（idle = 预期，§4.11.1 / §4.10-⑧）。`PERSONS`（静态两人）一字不动。**task_35 Step 5（端到端验收）亦已落地**：只**新增**两个自检
+（`src/tests/check_pedestrian_physics.gd` **22 项** / `src/tests/check_pedestrian_shots.gd` **14 项**），
+生产代码**一字未改**；把「直行 10 s 位移 ≈ v×t（+0.03%）/ `dir` 阶跃 180.0 °/s 弧线转弯（Kasa 拟合 r=0.3199 m vs v/ω=0.3183，+0.5%）
+/ 停发 300 ms 后 `v→0` 且 1.1 世界秒位移 0.000000 m / 人推车 300 物理帧车位移 0.000000000 m 且不穿透 / 车头雷达 ±45° 扇区 2.2500 m 命中人 /
+Xvfb 下走-转-停三帧 1280×720 JPEG」全部跑成实测（§4.11.2）。既有 19 项自检断言数**逐字不变**。
+本文是 Step 2~8 的唯一施工依据；后续 step 若需偏离，必须**先改本文并说明理由**。
 > 引擎：Godot **4.7.2**（`4.7.2.stable.custom_build.ed1daf0bf`），渲染后端 `gl_compatibility`。
 
 ---
@@ -28,7 +36,7 @@
 ### 0.2 组件化铁律
 
 1. **一个组件 = 一个 `.tscn` + 一个同名脚本**；场景不内嵌脚本代码（不写 `[sub_resource type="GDScript"]`）。
-2. 组件清单固定 **8 个 `.tscn`**（§3），Step 1 只落 `src/scenes/World.tscn` 的**占位**版本，其余 7 个由 Step 3~8 与 task_33 产出。
+2. 组件清单固定 **10 个 `.tscn`**（§3）：task_30 / task_33 / task_34 的 8 个 + 支线 `human_model` Step 4 的 `src/scenes/props/Person.tscn` + 支线 `walking_person` Step 2/3 的 `src/scenes/props/PersonWalking.tscn`（**与 `Person.tscn` 共用根脚本 `src/props/Person.gd`**，只把 `Body` 换成带骨骼 + 动画的 glb）。Step 1 只落 `src/scenes/World.tscn` 的**占位**版本，其余 7 个由 Step 3~8 与 task_33 产出。**`Person` 不进装配线**（没有 `chassis_hello` / `sensor_hello` 语义、不被 `ChassisCatalog` / `SensorCatalog` 登记、不由 manager 实例化）。
 3. **全项目不使用全局 `class_name`**（见 §9.1 E5）。跨脚本引用一律 `const X := preload("res://…gd")`，类型继承一律 `extends "res://…gd"`。
 4. 坐标、时间、消息格式只有**唯一入口**：`WorldTransform` / `WorldClock` / `WireProtocol`。
 5. 世界尺度、端口、物理频率只有**唯一来源**：`project.godot` 的 `[sim_world]`（禁止在脚本里散落字面量）。
@@ -45,7 +53,7 @@ orion-simulation-world/
 ├── COMPONENTS.md                 # 本文
 ├── .gitignore                    # 已有：.godot/ .import/ export*.cfg …
 ├── src/                          # 代码与场景的唯一根（task_32 Step 1 起）
-│   ├── scenes/                   # 全部 .tscn（组件场景，§3 的 8 个）
+│   ├── scenes/                   # 全部 .tscn（组件场景，§3 的 10 个）
 │   │   ├── World.tscn            # 主场景（Step 2 完成态；Step 3/6 加挂点实例）
 │   │   ├── ObserverCamera.tscn   # [Step 3] ✅ 已落地
 │   │   ├── Vehicle.tscn          # [Step 4] ✅ 已落地
@@ -53,9 +61,11 @@ orion-simulation-world/
 │   │   ├── chassis/
 │   │   │   ├── DiffDrive.tscn    # [Step 5] ✅ 已落地
 │   │   │   └── Quadrotor.tscn    # [Step 7] ✅ 已落地
-│   │   └── sensors/
+│   │   ├── sensors/
 │   │       ├── Lidar2D.tscn      # [Step 8] ✅ 已落地
 │   │       └── CameraSensor.tscn # [task_33 Step 2] ✅ 已落地（离屏渲染 → JPEG）
+│   │   └── props/
+│   │       └── Person.tscn       # [human_model Step 4] ✅ 静态人物道具（纯视觉、零碰撞、不进装配线）
 │   ├── common/                   # WorldTransform.gd / WorldClock.gd            [Step 2]
 │   ├── world/                    # World.gd                                      [Step 2]
 │   ├── camera/                   # ObserverCamera.gd                             [Step 3] ✅
@@ -64,6 +74,7 @@ orion-simulation-world/
 │   │                             # Quadrotor.gd                                  [Step 7] ✅
 │   ├── sensors/                  # Lidar2D.gd / SensorCatalog.gd                 [Step 8] ✅
 │   │                             # CameraSensor.gd                               [task_33 Step 2] ✅
+│   ├── props/                    # Person.gd                                   [human_model Step 4] ✅
 │   ├── net/                      # WebSocketManager.gd / ComponentLink.gd / WireProtocol.gd  [Step 6] ✅
 │   └── tests/
 │       ├── check_project.gd      # 工程骨架自检（Step 1，非组件）
@@ -71,7 +82,7 @@ orion-simulation-world/
 │       ├── check_camera.gd       # 相机自检（Step 3，非组件）
 │       ├── check_vehicle.gd      # Vehicle 自检（Step 4，非组件；40 项断言）
 │       ├── check_diff_drive.gd   # DiffDrive 自检（Step 5，非组件；41 项断言）
-│       ├── check_ws_manager.gd   # WebSocketManager 自检（Step 6，非组件；51 项断言）
+│       ├── check_ws_manager.gd   # WebSocketManager 自检（Step 6，非组件；76 / 77 项断言）
 │       ├── check_quadrotor.gd    # Quadrotor 自检（Step 7，非组件；48 项断言）
 │       ├── check_lidar.gd        # Lidar2D 自检（Step 8，非组件；48 项断言）
 │       ├── check_pose.gd         # 位姿下行自检（task_31 Step 1，非组件；23 项断言）
@@ -80,6 +91,7 @@ orion-simulation-world/
 │       ├── check_sensor_models.gd # 传感器 / 底盘模型资产自检（task_33 Step 1，非组件；29 项断言）
 │       ├── check_camera_sensor.gd # 相机组件自检（task_33 Step 2，非组件；A 组 12 + B 组 9 = 21 项断言）
 │       ├── check_camera_shots.gd # 模拟世界拍照自检（task_33 Step 4，非组件；S 组 18 + R 组 17 = 35 项断言）
+│       ├── check_person_assets.gd # 静态人物自检（human_model Step 4，非组件；32 项断言）
 │       └── doubles/              # 测试替身（**不是组件**、不落 .tscn）
 │           ├── TestChassis.gd    #   底盘鸭子契约：Configure / GetDefaultParams / SetCommand / Step
 │           └── TestSensor.gd     #   传感器鸭子契约：Configure / Sample / ScanOnce
@@ -93,15 +105,20 @@ orion-simulation-world/
     │                             #     Step 3 起由 `Lidar2D.tscn` / `CameraSensor.tscn` 的 `Body` 静态挂载
     │   ├── lidar_tmini.glb       #     2D 激光雷达：⌀0.080 × 高 0.054；原点 = 扫描面中心
     │   └── camera_module.glb     #     相机模组：0.055 × 0.036 × 0.030；原点 = 镜片前表面中心
-    └── chassis/                  #   [task_33 Step 1] 底盘模型
-        └── ugv_chassis.glb       #     UGV 外观：0.30 × 0.25 × 0.25；原点 = 底面中心、车头 +x
+    ├── chassis/                  #   [task_33 Step 1] 底盘模型
+    │   └── ugv_chassis.glb       #     UGV 外观：0.30 × 0.25 × 0.25；原点 = 底面中心、车头 +x
+    └── humans/                   #   [human_model Step 4] 人形资产（**只放最终选用 + 1 个备选**）
+        ├── README.md             #     来源 URL / 许可 / 处理方式（单位·缩放·朝向·贴图·三角数）/ 摆位 / 换备选方法
+        ├── LICENSE_renderpeople.txt  # Renderpeople 免费页条款原文（883 B；与 tmp 侧原件逐字节相同）
+        ├── rp_carla_rigged_001/  #     **首选**：model.glb（1.7307 m / 19 988 tri）+ 2 张贴图 + 4 个 .import
+        └── rp_eric_rigged_001/   #     **备选**：model.glb（1.8400 m / 20 542 tri）+ 2 张贴图 + 4 个 .import
 ```
 
 > 模型源文件（`.blend`）与构建 / 导出脚本**不在工程内**：`Tool/blender/models/`
 > （`build_models.py` + `export_all.sh`，工程根下的同级目录）；`assets/` 只放导出后的 `.glb`。
 > 建模口径与验收证据见 `tmp/task33/impl.md`。
 
-`src/tests/doubles/` 只被 `src/tests/check_vehicle.gd` 用 `PackedScene.pack()` 现场打包，不进 §3 的 8 个 `.tscn` 清单。
+`src/tests/doubles/` 只被 `src/tests/check_vehicle.gd` 用 `PackedScene.pack()` 现场打包，不进 §3 的 10 个 `.tscn` 清单。
 
 **目录铁律（task_32 Step 1）**：代码（`.gd`）与场景（`.tscn`）一律在 `src/` —— `src/scenes/` 放 `.tscn`、`src/<模块>/` 放 `.gd`、`src/tests/` 放自检；`assets/` 只放媒体与建模资源。`assets/` 用 `.gitkeep` 占位；`src/` 各目录均有真实文件，不需占位（Godot 忽略未知扩展名，不影响加载）。
 
@@ -212,8 +229,13 @@ DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --ren
 
 # camera 装配线（task_34 Step 3）：`check_ws_manager` 现在覆盖 `sensor="camera"` 的整套装配
 # （J1~J6：sensor_ready -> 几何 -> SetStream -> zero-collision -> assembly_ready -> 出帧闸门；
-#  帧内容 J7 在 headless 下 [skip]），59 项断言（原 51 项 + A9/A10 + J1~J6）。
+#  帧内容 J7 在 headless 下 [skip]）+ 行人装配线（task_35 Step 2：A11 / K1~K16），
+# 76 项断言（headless 档；Xvfb 档 77 项 —— J7 有渲染器才计。
+# 原 51 项 + A9/A10 + J1~J6 + A11 + K1~K13，第 2 轮再加 K14~K16）。
+# **两档都要 `SELF-CHECK OK`**（第 2 轮起 Xvfb 档是硬门槛，不是"可选"）：
 timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_ws_manager.gd
+DISPLAY=:99 timeout 400 godot --path orion-simulation-world --fixed-fps 60 --rendering-driver opengl3 \
+  --audio-driver Dummy --script res://src/tests/check_ws_manager.gd
 
 # 模拟世界拍照（task_33 Step 4，§4.8.2）：① 纯 headless 只跑 S 组（结构）18 项，R 组 17 项自动 [skip]
 timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_shots.gd
@@ -224,6 +246,45 @@ timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --scri
 bash tmp/task33/xvfb/start_xvfb.sh
 DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 \
   --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_shots.gd
+
+# 静态人物（human_model Step 4，§4.9）：新增自检 32 项；跑前**必须先** `--import`
+# （E28：`.godot/` 缺失时 glb / Person.tscn 的 load() 会静默返回 null → 世界 0 人）
+timeout 300 godot --headless --path orion-simulation-world --import
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_person_assets.gd
+
+# 走路人物（walking_person Step 3，§4.10）：① 结构档 20 项（headless）；② 渲染档 26 项（三帧 JPEG 落
+# tmp/walking_person/shots/，**绝不能加 --headless**）。走满一圈要 2096 个物理帧，渲染档因此只走半圈（见 §4.10-⑥）。
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_person_walk.gd
+DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 300 godot --display-driver x11 --rendering-driver opengl3 \
+  --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_person_walk.gd
+
+# 走路人物三帧「真推进」（walking_person Step 4，§4.10-⑦）：① 渲染档 14 项（**绝不能加 --headless**，
+# 帧间不瞬移：用 await physics_frame 真推进 0/40/80 帧，Δs/Δframes 必须 == v/60）；② headless 冒烟只跑 A 组 4 项。
+DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 \
+  --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_person_walk_shots.gd
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_person_walk_shots.gd
+
+# 行人端到端验收（task_35 Step 5，§4.11.2）——两张档位、两种参数，别混：
+# ① 第 4 + 5 项（人撞车 / 雷达可见）：**自检脚本**一律 `--fixed-fps 60`（靠 await physics_frame 自己数帧）
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_pedestrian_physics.gd
+# ② 第 6 项（走 / 转 / 停三帧）：
+#    headless 冒烟必须"假绿为零"（10 条 [skip] + total=4，R 组不计入 total）
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_pedestrian_shots.gd
+#    真验收（出图到 tmp/task35/shots/）：**绝不加 --headless**、**必须 --audio-driver Dummy**
+DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot \
+  --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy \
+  --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_pedestrian_shots.gd
+# ③ 第 1~3 项（Python 墙钟驱动直行 / 转弯 / 超时）：一把梭起**实时档**世界再跑客户端。
+#    ★ 世界**绝对不能**带 `--fixed-fps`（实测 21~37 倍速，10 s 墙钟 = 360 s 世界时间，人会撞空气墙）；
+#      实时档只有 `--max-fps 60`（实测 ratio 1.00、pose 10.2 Hz）。脚本自带端口独占检查与日志摘要。
+bash tmp/task35/s5_e2e.sh
+# ④ 全量回归（21 项 headless + 5 项 Xvfb + --quit 冒烟，逐条与硬编码基线比对）
+bash tmp/task35/s5_checks.sh && cat tmp/task35/logs/s5_checks_summary.txt
 
 # 单文件脚本语法检查（Step 2+ 推荐）
 # 注意：裸 `--check-only`（不带 `--script`）不检查任何脚本，而是把主场景跑起来且**永不退出**；
@@ -262,6 +323,22 @@ World (Node3D)                              script: res://src/world/World.gd    
 │                                            不可见（无 MeshInstance3D，§9.1 E24）
 ├── Vehicles (Node3D)                        运行时 avatar 容器（由 WebSocketManager 填充）       [Step 6]
 │   └── <peer_id> (Vehicle.tscn 实例)        动态；见 §4.3                                   [Step 6]
+├── Persons (Node3D)                         **运行时**静态人物容器（无碰撞、无物理）      [human_model Step 4]
+│   ├── person_01 (Person.tscn 实例)        世界 (60, 76, 0)、yaw 0；`Body` = rp_carla 的 glb   [human_model Step 4]
+│   └── person_02 (Person.tscn 实例)        世界 (68, 70, 0)、yaw 0；同上                          [human_model Step 4]
+│                                            ※ 由 `World.gd::BuildPersons()` **运行时**建并摆放，
+│                                              **不在 World.tscn 里**（与 `Bounds` 同策略，§9.1 E16 / §4.9）
+├── Pedestrians (Node3D)                     **运行时**外部驱动的行人容器（**有胶囊碰撞**、无 AI）  [task_35 Step 3]
+│   ├── pedestrian_01 (Pedestrian.tscn 实例) 世界 (44, 96, 0)、yaw 0（朝 +X 东）；**idle**：谁也没驱动时站住不动
+│   └── pedestrian_02 (Pedestrian.tscn 实例) 世界 (52, 102, 0)、yaw 180°（朝 −X 西）；同上
+│                                            根脚本 = `src/chassis/Pedestrian.gd`（`extends ChassisModel`）：
+│                                            `CharacterBody3D` + `CapsuleShape3D` r0.25 / h1.75 / 中心 y0.875、
+│                                            `collision_layer=2` / `collision_mask=5 (1|4)`；见 §4.11
+│                                            ※ **同一个容器**既装上面这几个**世界预置（idle）**行人，也装
+│                                              `WebSocketManager` 动态装配的 `chassis_hello{kind:"pedestrian"}`
+│                                              行人（`Pedestrians/<peer_id>`）；容器名逐字 = `PEDESTRIANS_NODE`
+│                                            ※ 由 `World.gd::BuildPedestrians()` 在 `BuildPersons()` **之后**
+│                                              运行时建，**不在 World.tscn 里**（与 `Bounds`/`Persons` 同策略，§4.11）
 ├── Systems (Node3D)                                                                          [Step 6]
 │   └── WebSocketManager (instance: res://src/scenes/WebSocketManager.tscn)             [Step 6] ✅
 │                                            @export vehicle_scene → res://src/scenes/Vehicle.tscn
@@ -293,6 +370,10 @@ World (Node3D)                              script: res://src/world/World.gd    
 | `VoxelWorld` | `GridMap` | — | 静态节点 / 运行时填格 | `cell_center_*=true`；`mesh_library` 运行时构建 |
 | `Bounds` | `StaticBody3D` | —（`World.gd` 内建） | **运行时** | 不可见硬边界；`collision_layer=1`、`collision_mask=0`；5 个 `CollisionShape3D`（4 面 32 m 空气墙 + 32 m 顶盖）；**内侧面贴世界边界平面**（`x=0/128`、`y=0/128`、`z=32`），厚度一律向外（§9.1 E24）；无任何 mesh 子节点 |
 | `Vehicles` | `Node3D` | — | 静态容器 | 所有 avatar 的父节点；子节点名 = `peer_id`（净化后） |
+| `Persons` | `Node3D` | —（`World.gd` 内建） | **运行时** | 静态人物容器（human_model Step 4）；纯视觉、**无碰撞体**、无物理；幂等重建（`BuildPersons()`）；子节点名 = `PERSONS` 常量表的 `name` |
+| `Persons/person_0x` | `Node3D` | `src/props/Person.gd` | **运行时**实例 | 1 个 `Person.tscn` 实例；子节点 `Body` = `assets/humans/rp_carla_rigged_001/model.glb` 的静态实例（glb 根 `Node3D` → 1 个 `MeshInstance3D`）；世界坐标见 §4.9 |
+| `Pedestrians` | `Node3D` | —（`World.gd` 内建） | **运行时** | 外部驱动的行人容器（task_35 Step 3）；**世界预置 2 人 + manager 动态装配的人共用一个容器**（名字逐字 = `WebSocketManager.PEDESTRIANS_NODE`）；幂等重建（`BuildPedestrians()`；运行期重建会连带移除已装配的网络行人，见 §4.11）；子节点名 = `PEDESTRIANS` 常量表的 `name`（预置）/ `<peer_id>`（动态） |
+| `Pedestrians/pedestrian_0x` | `CharacterBody3D` | `src/chassis/Pedestrian.gd` | **运行时**实例 | 1 个 `Pedestrian.tscn` 实例：**有胶囊碰撞**（r0.25 / h1.75 / 中心 y0.875）、`layer 2` / `mask 1\|4`、`motion_mode=GROUNDED`；子节点 `CollisionShape3D` + `Body` = `assets/humans/rp_nathan_animated_003_walk/model.glb`（glb 根 `Node3D` → `Armature` → `Skeleton3D`(88 骨) + `MeshInstance3D` + `AnimationPlayer`）；出生点 / 朝向 / idle 语义 / 与协议行人的分工见 §4.11 |
 | `Systems` | `Node3D` | — | 静态容器 | 非物理系统（网络等）的父节点 |
 | `Systems/WebSocketManager` | `Node` | `src/net/WebSocketManager.gd` | 静态实例 | **全进程唯一** manager，管全部连接；子节点 `Heartbeat(Timer, 1 s)`；`autolisten=true`、`listen_port=0`（→ `[sim_world]` 的 9999） |
 | `ObserverCamera` | `Camera3D` | `src/camera/ObserverCamera.gd` | 静态实例 | 观察者相机；不参与任何物理/传感计算 |
@@ -309,7 +390,12 @@ World (Node3D)                              script: res://src/world/World.gd    
 | 6 | **已执行**：在 `Systems` 下加 `WebSocketManager` 实例（`node_paths=PackedStringArray("vehicles_root")`），绑定 `vehicle_scene = res://src/scenes/Vehicle.tscn`、`vehicles_root = ../../Vehicles`；`load_steps` 9 → 11 |
 | 7 / 8 | 不改（`src/scenes/chassis/Quadrotor.tscn` / `src/scenes/sensors/Lidar2D.tscn` 独立产出） |
 | task_32-2 | **不改 .tscn**：`World.gd` 的 `_Build_Bounds()` 在运行时把 `Bounds`（5 个 box，layer 1）挂到 `World` 下；可见的 4 面 2 m 体素矮墙保留不动 |
+| human_model-4 | **不改 `World.tscn`**：`World.gd::BuildPersons()` 在运行时把 `Persons`（`Node3D` + 2 个 `Person.tscn` 实例）挂到 `World` 下；`PERSONS` 常量表给固定世界坐标 |
+| walking_person-2 | **不改 `World.tscn`**：`World.gd::BuildWalkers()` 在 `_ready()` 里 `BuildPersons()` **之后**把 `Walkers`（`Node3D` + 1 个 `PersonWalking.tscn` 实例）挂到 `World` 下；`WALKERS` 常量表给闭合路径 / 速度 / 相位（`PERSONS` 一字不动） |
+| walking_person-3 | **不改 `World.tscn`**：走动能力并入 `Person.gd`（`PersonWalking.gd` 删除），`PersonWalking.tscn` 的根脚本改指 `Person.gd`、`Body` 改指 `_walk` 资产；`WALKERS` 的键名统一为 `walk_speed` / `loop`（`speed_mps` 仅作 `Configure()` 别名）；`_ready()` 顺序（`BuildPersons()` → `BuildWalkers()`）不变 |
+| walking_person-4 | `src/tests/check_person_walk_shots.gd`（**新增**，14 项：A 组结构 4 + R 组渲染 10）+ 同名 `.gd.uid`（`--import` 生成）、`COMPONENTS.md`（L8 状态 / §3 脚本表 / §4.10-⑤ 与 **⑦** / §11 / 附） | 三帧**真推进**证明「人在走」（支线，**不进装配线**）：在环路第一段侧前方（世界 `(48,101)`+1.5 m 瞄 `(44.8,96,0.92)`）架**固定**机位，用 `await physics_frame` **逐帧**推进 0/40/80 帧拍 `tmp/walking_person/shots/walk_t{0,1,2}.jpg`（`27 862 / 28 368 / 28 541 B`，**帧间不瞬移**）。`DISPLAY=:99` **`total=14 failed=0`** + `SELF-CHECK OK` + `EXIT=0` + 0 ERROR；`s = 0.000/0.840/1.680 m`、`frames = 0/40/80`、`Δs/Δframes = 0.021000 = v/60`（偏差 0.00%）；投影框 `Δx = 57.0 / 68.1 / 125.1 px`（判据 30）；框内/框外差分 `1020× / 422× / 566×`（判据 3×）；64×64 对齐裁剪差 `0.06871 / 0.06780 / 0.08183`（判据 0.010）；机位三次变换逐位相同（偏差 0.000000）；headless 冒烟 `[skip]` ×10 + **`total=4 failed=0`**；**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `person_assets 32` / `person_walk 20`（headless）/ `person_shots 7`（headless），全部 `failed=0`、0 ERROR；渲染档 `person_shots 22` / `person_walk 26` 同样逐字不变）；`--import` EXIT=0 且 0 ERROR（生成 `.gd.uid`）；三张旧图 `walker_t{0,1,2}.jpg` 的 `md5` 未被改变。**只做「走动」**：不加碰撞、不改雷达 / 建图 / 决策链、**不做 YOLO**；**不改** `Person.gd` / `World.gd` / `Person*.tscn` / `project.godot` / `assets/**` / 既有自检；**不碰** `pleiades-*` / `Task/` / `Workbook/` / `programs/` / 根 Cargo；**不执行** `git add` / `git commit` |
 | task_33-3 | **不改 `World.tscn`**：三件 `.glb` 各自在**组件场景**里 `instance` —— `Vehicle.tscn` 的 `ModelUGV` 换 `chassis/ugv_chassis.glb`，`sensors/Lidar2D.tscn` / `sensors/CameraSensor.tscn` 各加一个 `Body`（§4.3 / §4.7 / §4.8） |
+| task_35-3 | **不改 `World.tscn`**：`World.gd` 的 `WALKERS` / `BuildWalkers()` / `GetWalkersRoot()` **整节删除**，换成 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()` —— 容器改名 `Walkers` → `Pedestrians`（`pedestrian_01` / `pedestrian_02`），**世界不再实例化 `PersonWalking.tscn`、不再内置任何路径 / 巡逻 / 计时**；人在无外部驱动时**站着不动**（idle = 预期，§4.11） |
 
 ### 2.3 世界坐标 ↔ Godot 坐标（写死，勿改）
 
@@ -334,8 +420,11 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 
 ## 3 组件 `.tscn` 清单
 
-固定 **8 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补、task_34 Step 3 起进入
-`sensor_hello` 装配线，见 §4.8 / §4.8.3）：
+固定 **11 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补、task_34 Step 3 起进入
+`sensor_hello` 装配线，见 §4.8 / §4.8.3；第 9 个由支线 `human_model` Step 4 增补，**不进装配线**，见 §4.9；
+第 10 个由支线 `walking_person` Step 2 增补，**不进装配线、零碰撞、自带走路动画**，见 §4.10；
+第 11 个由 task_35 Step 1 增补：**行人底盘**——登记在 `ChassisCatalog` 里、有胶囊碰撞、由外部脚本经
+`motion_cmd{v,dir}` 驱动，但它**不是车**（不进 `Vehicles`、不占 avatar 排位），见 §4.11）：
 
 | # | 文件（`res://`，相对工程根） | 根节点类型 | 脚本 | 职责 | Step | 静态挂载位置 | 运行时实例化者 |
 |---|---|---|---|---|---|---|---|
@@ -347,18 +436,22 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | 6 | `src/scenes/chassis/Quadrotor.tscn` | `Node3D` | `src/chassis/Quadrotor.gd` | 四旋翼底盘（`FLOATING`） | 7 ✅ | — | `Vehicle.ApplyChassis()` → `Vehicle/Chassis` |
 | 7 | `src/scenes/sensors/Lidar2D.tscn` | `Node3D` | `src/sensors/Lidar2D.gd` | 2D 单线激光（真射线）+ `Body` 外观实例（`lidar_tmini.glb`，纯视觉、无碰撞） | 8 ✅ | — | `Vehicle.AttachSensor()` → `Vehicle/Sensors/<slot>` |
 | 8 | `src/scenes/sensors/CameraSensor.tscn` | `Node3D` | `src/sensors/CameraSensor.gd` | 相机：`SubViewport` 离屏渲染 → JPEG + 按 `rate_hz` 组 `type=2` 帧下发（task_34 Step 3）+ `Body` 外观实例（`camera_module.glb`，纯视觉、无碰撞） | task_33-2 ✅ / task_34-3 ✅ | — | `sensor_hello` 装配线（`SensorCatalog` 登记 `camera`）→ `Vehicle/Sensors/<slot>`（task_34-3 起）；自检仍直接实例化 |
+| 9 | `src/scenes/props/Person.tscn` | `Node3D` | `src/props/Person.gd` | 静态人物道具：纯视觉、**零碰撞**、无行为、不进装配线 | human_model-4 ✅ | `World/Persons/person_0x`（**运行时**） | — （不由 manager 实例化） |
+| 10 | `src/scenes/props/PersonWalking.tscn` | `Node3D` | `src/props/Person.gd` | 走路人物道具：纯视觉、**零碰撞**、**带骨骼 + 走路动画**，自带闭合路径走动能力（`walk_speed` / `path` / `loop`）、不进装配线（**与第 9 个共用同一个脚本**，只换 `Body`） | walking_person-3 ✅ | **无**（task_35 Step 3 起世界**不再**实例化它：自动绕圈已移除；资产与走动能力保留给 §4.10 的人形自检，`Body` 与第 11 个共用同一 glb） | — （不由 manager 实例化） |
+| 11 | `src/scenes/props/Pedestrian.tscn` | `CharacterBody3D` | `src/chassis/Pedestrian.gd` | 行人底盘（**特殊底盘**，`GROUNDED`）：`CapsuleShape3D` r0.25 / h1.75 / 中心 y0.875，`layer 2` / `mask 1\|4`，`Body` = 走路 glb（含 `AnimationPlayer`）；**自宿主**推进（`_physics_process` → `move_and_slide()`），`speed_scale = v / 1.26`；外部脚本经 `motion_cmd{v,dir}` 驱动 | task_35-1 / task_35-3 | `World.BuildPedestrians()` → `World/Pedestrians/pedestrian_0x`（**世界预置、idle**，§4.11）；`WebSocketManager` → `World/Pedestrians/<peer_id>`（动态、同一容器） | `WebSocketManager`（Step 2 起，`kind="pedestrian"` 直接实例化，**不经** `Vehicle.ApplyChassis`） |
 
 非组件脚本（无 `.tscn`）：
 
 | 文件 | 类型 | 职责 |
 |---|---|---|
-| `src/world/World.gd` | 挂 `World` | 世界时钟启动、体素/地面程序化生成、尺度日志 |
+| `src/world/World.gd` | 挂 `World` | 世界时钟启动、体素/地面程序化生成、尺度日志、静态人物摆位（`BuildPersons()`，§4.9） |
 | `src/common/WorldTransform.gd` | 静态工具 | **坐标转换唯一入口**（§7.3） |
 | `src/common/WorldClock.gd` | 静态工具 | 统一 `world_time`（单调墙钟） |
 | `src/vehicle/Vehicle.gd` | 挂 `Vehicle` | 装配、物理步进、位姿查询（§4.3） |
 | `src/chassis/ChassisModel.gd` | 底盘基类 | 底盘接口契约 + 速度环 / 指令解析公共工具（§7.5） |
 | `src/chassis/ChassisCatalog.gd` | 静态目录 | `chassis` 名 → 场景路径 / 默认参数（运行时 `load()`；Step 5 ✅） |
 | `src/chassis/DiffDrive.gd` / `Quadrotor.gd` | 底盘实现 | 运动学 + 速度环（`DiffDrive` ✅ Step 5 / `Quadrotor` ✅ Step 7） |
+| `src/chassis/Pedestrian.gd` | 挂 `Pedestrian` | **行人底盘实现 + 自宿主推进**（task_35-1）：`v`/`dir` 解析、180 °/s 限速转向、`move_and_slide()` 唯一位置更新点、`GetPose()` / `Play_Walk()`（§4.11） |
 | `src/sensors/SensorCatalog.gd` | 静态目录 | `sensor` 名 → 场景路径 / 默认参数（运行时 `load()`；Step 8 ✅，task_34-3 加 `camera`） |
 | `src/sensors/Lidar2D.gd` | 挂 `Lidar2D` | 射线扫描 + 二进制下发（Step 8 ✅） |
 | `src/sensors/CameraSensor.gd` | 挂 `CameraSensor` | 离屏渲染 + `Configure` + 按 `rate_hz` 出 `type=2` 帧（`SetStream` / `Emit_Frame`，task_34-3 ✅） |
@@ -372,9 +465,16 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | `src/tests/check_camera.gd` | `SceneTree` 脚本 | 相机自检（Step 3） |
 | `src/tests/check_diff_drive.gd` | `SceneTree` 脚本 | 差速底盘自检（Step 5，41 项断言） |
 | `src/tests/check_quadrotor.gd` | `SceneTree` 脚本 | 四旋翼底盘自检（Step 7，48 项断言） |
-| `src/tests/check_ws_manager.gd` | `SceneTree` 脚本 | WebSocketManager 自检（Step 6，**59 项断言**：51 + task_34-3 的 `A9/A10` + `J1~J6`；真 World + 真 WS 客户端） |
+| `src/tests/check_ws_manager.gd` | `SceneTree` 脚本 | WebSocketManager 自检（Step 6，**76 项断言**（headless）/ 77（Xvfb）：51 + task_34-3 的 `A9/A10` + `J1~J6` + task_35-2 的 `A11` + `K1~K16`；真 World + 真 WS 客户端） |
 | `src/tests/check_lidar.gd` | `SceneTree` 脚本 | Lidar2D 自检（Step 8，48 项断言；真 World + 自建 box 障碍） |
 | `src/tests/check_bounds.gd` | `SceneTree` 脚本 | 空气墙 / 顶盖自检（task_32 Step 2，12 项断言） |
+| `src/props/Person.gd` | 挂 `Person` / `PersonWalking` | **唯一**人物脚本（walking_person Step 3 起）：静态常量（`MODEL_GLB` / `HEIGHT_MIN_M` / `HEIGHT_MAX_M`）+ 走动扩展（`WALK_GLB` / `CLIP_MPS` / 导出字段 `walk_speed` / `path` / `loop`）+ 闭合路径采样 / 摆位 + 动画播放（`find_child("AnimationPlayer", true, false)`、播第 0 条、`speed_scale = walk_speed / CLIP_MPS`）；**默认静态**（不给参数 = 站着不动）、**无碰撞、不进装配线**（§4.9 / §4.10） |
+| `src/tests/check_person_assets.gd` | `SceneTree` 脚本 | 静态人物自检（human_model Step 4，32 项断言：资产 16 + 场景 5 + 常量 2 + 摆位 9） |
+| `src/tests/check_person_walk.gd` | `SceneTree` 脚本 | 走路人物自检（walking_person Step 3，**26 项断言**：资产 8 + 场景 4 + 世界 3 + 运行 5 + 渲染 6；headless 下渲染组 6 项 `[skip]` 且不计入 total → `total=20`） |
+| `src/tests/check_person_walk_shots.gd` | `SceneTree` 脚本 | 走路人物三帧**真渲染**自检（walking_person Step 4，**14 项断言**：A 组结构 4 + R 组渲染 10；`--fixed-fps 60` 下真推进 0/40/80 物理帧拍 `walk_t{0,1,2}.jpg`，**帧间不瞬移**；headless 下 R 组 10 项 `[skip]` 且不计入 total → `total=4`） |
+| `src/tests/check_pedestrian_physics.gd` | `SceneTree` 脚本 | 行人**端到端物理**自检（task_35-5，**22 项断言**：S 组结构 7 + P 组人推车 8 + L 组雷达可见 7；全 headless、无 `[skip]`）。`--fixed-fps 60` 下推 300 个物理帧：逐帧 `gap = 胶囊轴到车身盒水平距离 − 0.25` 取 min（不穿透）、人**被挡停**（最后 60 帧前进 < 5 mm）、**车位移 0.000000000 m**（人推不动车）；雷达装**车头**（`x=0.15`、`z=0.6`）扫 `Lidar2D.ScanOnce()`，±45° 扇区最近 `2.2500 m` = 2.50 − 0.25，把人挪到 10 m 外变 `9.7500 m`（证明命中的是这个人） |
+| `src/tests/check_pedestrian_shots.gd` | `SceneTree` 脚本 | 行人**走 / 转 / 停三帧真渲染**自检（task_35-5，**14 项断言**：A 组结构 4 + R 组渲染 10；headless 下 R 组 10 项 `[skip]` 且不计入 total → `total=4`）。`--fixed-fps 60` 自己数帧推进 40 / 45 / 20 / 12 / 15 帧（**帧间不瞬移**），驱动只发 **3 条** `Pedestrian.SetCommand`；断言 = 文件体积 / JPEG 魔数 / SOF0 1280×720 / 非全黑 / 三张互不相同 / 框水平中心相距 ≥ 20 px（实测 74.2 / 141.6 / 67.5）/ 转向段速率 180.0 °/s 且此帧 `yaw=90.00°` / 停帧冻结 15 帧 `Δpose=0` 且 `speed_scale=0` / 抓拍簿记 / 源码 lint（0 连网、0 写位姿、`SetCommand` 恰 3 发） |
+| `src/tests/check_pedestrian.gd` | `SceneTree` 脚本 | 行人底盘自检（task_35-1，**40 项断言**：场景形态 7 + 目录装配 6 + `SetCommand`→`Step` 控制量 11 + 老协议 `action/speed` 回退 5 + 真 World 自宿主推进与动画 8 + 白盒 3；前 4 组全在树外调 `Step`，无渲染依赖） |
 
 ---
 
@@ -402,7 +502,17 @@ func BuildVoxelWorld() -> void               # 建 MeshLibrary(0.5³ 立方 + Bo
 func _Build_Bounds() -> void                 # 建 `Bounds`(StaticBody3D) + 5 个 CollisionShape3D；layer 1、mask 0；幂等；**不建 mesh**
 func WorldToCell(world_pos: Vector3) -> Vector3i   # (floor(x/v), floor(z/v), floor(y/v))
 func GetVehiclesRoot() -> Node3D             # $Vehicles
+func BuildPersons() -> void                  # [human_model Step 4] 按 `PERSONS` 常量表实例化 `Person.tscn` 并摆位；幂等
+func GetPersonsRoot() -> Node3D              # [human_model Step 4] `World/Persons`（见 §4.9）
+func BuildPedestrians() -> void              # [task_35 Step 3] 按 `PEDESTRIANS` 常量表实例化 `Pedestrian.tscn`，入树摆位后 `Configure(self, {})`；**不内置任何行为**；幂等
+func GetPedestriansRoot() -> Node3D          # [task_35 Step 3] `World/Pedestrians`（见 §4.11）
 ```
+
+**三个容器（`Bounds` / `Persons` / `Pedestrians`）与 `Bounds` 同策略**：**由代码建、不写进 `World.tscn`**
+（避开 §9.1 E16 的 `node_paths` 坑，也让 `check_bounds.gd` 的 `B1d`（读 `.tscn` 文本数节点）保持 0 命中）；
+三者都**幂等**（重复调用先摘旧容器再重建）。`Pedestrians` 额外有一条约束：它与 `WebSocketManager` 的
+`kind="pedestrian"` 动态装配**共用同一个容器名**，运行期重建会连带移除已装配的网络行人（§4.11）。
+缺资产 / 缺场景时只 `push_warning`、**绝不 `push_error`**（否则 `--quit` 的 0 ERROR 验收假红）。
 
 体素构建要点（D4 程序化生成，实测可行）：
 
@@ -716,10 +826,13 @@ extends Node
 signal vehicle_spawned(peer_id: String, vehicle: Node3D)
 signal assembly_completed(peer_id: String)
 signal vehicle_removed(peer_id: String)
+signal pedestrian_spawned(peer_id: String, pedestrian: Node3D)   # task_35 Step 2
+signal pedestrian_removed(peer_id: String)                       # task_35 Step 2
 signal link_closed(peer_id: String, role: StringName, slot: String)
 
 @export var vehicle_scene: PackedScene      # World.tscn 里指向 res://src/scenes/Vehicle.tscn
 @export var vehicles_root: Node3D           # World.tscn 里指向 ../../Vehicles（相对自身！§9.1 E20）
+@export var pedestrians_root: Node3D        # task_35 Step 2：**World.tscn 不绑**，留空则惰性解析/建
 @export var listen_port: int = 0            # 0 → 读 sim_world/network/ws_port（9999）
 @export var autolisten: bool = true         # false = 不自动监听（自检用）
 @export var handshake_timeout_ms: int = 5000   # 连上后多久没 hello 就关
@@ -728,12 +841,16 @@ signal link_closed(peer_id: String, role: StringName, slot: String)
 
 # 两张表（§5.1）+ 装配簿记
 var _peer_vehicles: Dictionary = {}         # 表 1：peer_id -> Vehicle
+var _pedestrians: Dictionary = {}           # 表 1b：peer_id -> Pedestrian（task_35 Step 2，与表 1 互不相交）
+var _ped_last_motion_ms: Dictionary = {}    # 表 1b 簿记：peer_id -> 最近一条 motion_cmd 的墙钟毫秒
+var _ped_idle: Dictionary = {}              # 表 1b 簿记：peer_id -> bool（已经下过 v=0）
 var _links: Array = []                      # 表 2 的可枚举侧：Array[ComponentLink]
 var _pending_sensors: Dictionary = {}       # peer_id -> Array[{link, hello, since_ms}]
 var _manifests: Dictionary = {}             # peer_id -> {slot: bool}
 var _manifest_parts: Dictionary = {}        # peer_id -> {slot: sensor}
 var _assembly_sent: Dictionary = {}         # peer_id -> bool（每 peer 只发一次）
-var _next_avatar_id: int = 1                # u16 语义
+var _next_avatar_id: int = 1                # u16 语义（**只给车**）
+var _next_pedestrian_id: int = 1            # u16 语义（**只给人**；与 _next_avatar_id 完全独立）
 var _next_sensor_id: int = 1                # u16 语义，>65535 回绕到 1
 var _next_conn_id: int = 1                  # 连接号（日志 / 自检）
 var _tcp_server: TCPServer
@@ -743,35 +860,65 @@ var _pose_acc: float = 0.0                  # 位姿下行累加器（秒），�
 # 位姿下行周期（task_31 Step 1）：对齐真机 state_notifier 的 100 ms，硬编码、不做配置项
 const POSE_BROADCAST_INTERVAL_S := 0.1
 
+# 行人（task_35 Step 2）
+const PEDESTRIAN_CHASSIS := "pedestrian"                 # kind=pedestrian 的 chassis 名
+const PEDESTRIANS_NODE := "Pedestrians"                  # 容器名（与 Vehicles 平级、同父）
+const PEDESTRIAN_SPAWN_OFFSET_M := Vector3(0.0, -8.0, 0.0)   # 默认点 = SPAWN_WORLD + 本偏移 = (64, 56)
+const PEDESTRIAN_SPAWN_MIN_GAP_M := 1.0                  # 与已占 avatar 的最小水平中心距
+const PEDESTRIAN_SPAWN_MARGIN_M := 0.3                   # 静态障碍外扩余量
+const PEDESTRIAN_SPAWN_MAX_Z_M := 2.0                    # 高度上限（不做"空中出生"）
+const PEDESTRIAN_CMD_TIMEOUT_MS := 300                   # 指令超时 -> 自动 v=0（只停、不断连）
+
 # 生命周期 / 监听
 func _ready() -> void                        # _EnsureRefs() + 连 Heartbeat.timeout + autolisten 则 Listen()
 func _exit_tree() -> void                    # Stop()
-func _process(delta: float) -> void          # _AcceptConnections() → _PollLinks() → _SweepClosed() → _BroadcastPoses(delta)
+func _process(delta: float) -> void          # _AcceptConnections() → _PollLinks() → _SweepClosed()
+                                             #   → _Tick_Pedestrian_Timeouts() → _BroadcastPoses(delta)
 func Listen(port: int) -> Error              # port<=0 = OS 临时端口；幂等（先 Stop()）
-func Stop() -> void                          # 关全部连接 + 清 5 张表 + 移除全部 avatar + tcp.stop()
+func Stop() -> void                          # 关全部连接 + 清全部表 + 移除全部 avatar（车 + 人）+ tcp.stop()
 func GetListenPort() -> int
 func IsListening() -> bool
 func GetVehicle(peer_id: String) -> Node3D
 func GetVehicleCount() -> int
+func GetPedestrian(peer_id: String) -> Node3D    # task_35 Step 2（不存在 / 已释放 = null）
+func GetPedestrianCount() -> int
+func IsPedestrian(peer_id: String) -> bool
+func GetAvatar(peer_id: String) -> Node3D         # = GetVehicle() 或 GetPedestrian()
+func GetPedestriansRoot() -> Node3D               # 惰性解析 / 建；没有 Vehicles 容器时 null
 func GetLinkInfos() -> Array                 # 表 2 只读快照 [{conn_id, peer_id, role, slot, sensor_id, open, handshaken}]
-func GetStats() -> Dictionary                # {listening, port, links, vehicles, pending, assembled}
+func GetStats() -> Dictionary                # {listening, port, links, vehicles, pedestrians, pending, assembled}
 # 私有
 func _AcceptConnections() -> void
 func _PollLinks() -> void
 func _HandlePacket(link, bytes: PackedByteArray, was_string: bool) -> void
 func _ApplyMotionCommand(link, msg: Dictionary) -> void
+func _Apply_Pedestrian_Command(link, ped: Node3D, msg: Dictionary) -> void
+func _Tick_Pedestrian_Timeouts() -> void                  # 300 ms 无新指令 -> v=0（只对行人生效）
 func _BroadcastPoses(delta: float) -> void               # 位姿下行（task_31 Step 1；唯一的发送者）
-func _RegisterChassis(link, msg: Dictionary) -> void
+func _RegisterChassis(link, msg: Dictionary) -> void      # 按 kind 分流：robot -> 车，pedestrian -> 人
+func _Register_Pedestrian(link, msg: Dictionary, peer_id: String) -> void
 func _RegisterSensor(link, msg: Dictionary) -> void
 func _MountSensor(link, hello: Dictionary) -> bool
 func _ReplayPendingSensors(peer_id: String) -> void
 func _TryAssembly(peer_id: String) -> void
-func _RemoveVehicle(peer_id: String, except_link = null) -> void
-func _CleanupLink(link) -> void
+func _RemoveAvatar(peer_id: String, except_link = null) -> bool   # 车 / 人共用（两张表一起摘；返回是否真摘到）
+func _RemoveVehicle(peer_id: String, except_link = null) -> void  # 兼容壳 -> _RemoveAvatar()
+func _CleanupLink(link) -> void                           # 所有权守卫：只有 link.vehicle != null 才摘 avatar
 func _CloseLink(link, code: int, reason: String) -> void
 func _SweepClosed() -> void
 func _OnHeartbeatTimeout() -> void
-func _PickSpawn(chassis_name: String) -> Dictionary      # {x, y, z, yaw}
+func _PickSpawn(chassis_name: String) -> Dictionary      # {x, y, z, yaw}（**只给车**）
+func _Pedestrians_Root() -> Node3D                        # 惰性解析 / 建 Pedestrians（每次复检有效性）
+func _Pick_Pedestrian_Spawn(msg: Dictionary, peer_id: String) -> Dictionary
+func _Pedestrian_Default_Spawn() -> Dictionary
+func _Spawn_In_Obstacle(p: Vector3) -> bool
+func _Spawn_Occupied(p: Vector3) -> bool
+func _World_Span_M() -> float
+func _All_Avatars() -> Array
+func _HasAvatar(peer_id: String) -> bool
+func _Merge_Avatar_Params(avatar: Node, params: Dictionary) -> Dictionary
+func _To_Float(value: Variant, fallback: float) -> float
+func _Kind_Of(msg: Dictionary, peer_id: String = "") -> String
 func _ReadManifest(msg: Dictionary) -> Dictionary        # {slot: sensor}
 func _ResolveCatalogScene(catalog_path: String, name: String) -> PackedScene
 func _CatalogStatus(catalog_path: String, name: String) -> int   # KNOWN / UNKNOWN / MISSING
@@ -833,13 +980,13 @@ func Describe() -> String
 
 **④ spawn 规则（确定性、无 RNG）**：第 1 台 = `World.SPAWN_WORLD`（`(64, 64, 0)`）；之后按 8 方位环错开，`ring = floor((idx-1)/8)+1`、`slot = (idx-1) mod 8`、`offset = (cos, sin, 0) * 2.0 * ring` 米；`quadrotor_uav` 的 `z = 2.5`（§7.1 巡航高度；task_32 Step 3 由 2.0 提高，`UAV_ALTITUDE_M`），UGV `z = 0`。`idx = _next_avatar_id - 1`，**必须在自增之前取**。
 
-**⑤ 连接的角色是单值**：已握手的**传感器连接**发来 `chassis_hello` 属于协议错误 → `push_warning` + **忽略**（不改角色、不建车、不关别人的链路）。"重复 `chassis_hello` 重建 avatar"（§8.3-7）只在**该连接本身是底盘连接**时生效，且 `_RemoveVehicle(peer_id, except_link=本连接)` 绝不把新连接关掉。
+**⑤ 连接的角色是单值**：已握手的**传感器连接**发来 `chassis_hello` 属于协议错误 → `push_warning` + **忽略**（不改角色、不建车、不关别人的链路）。"重复 `chassis_hello` 重建 avatar"（§8.3-7）只在**该连接本身是底盘连接**时生效，且注册前无条件调用 `_RemoveAvatar(peer_id, except_link=本连接)`，绝不把新连接关掉。**跨 kind 一样**：机器人换行人、行人换机器人都在**两张表 + 两个容器**里一起清（`_peer_vehicles`+`Vehicles` 与 `_pedestrians`+`Pedestrians`），不会留下幽灵节点（第 2 轮，`prev_issues` #2）。
 
 **⑥ 监听与端口**：`TCPServer.listen(port)` 绑定全地址；失败（如 9999 被占）**只 `push_warning`**，世界继续跑（不可接入）。`listen_port = 0` 时读 `[sim_world] network/ws_port`；自检用 `Listen(0)` 取 OS 临时端口，**不抢 9999**。
 
 **⑦ 日志指纹（供 grep 验收）**：`[ws] listening on port …` / `accept conn=…` / `chassis_hello peer=…` / `vehicle spawned peer=…` / `sensor pending …` / `sensor_ready peer=…` / `assembly_ready peer=…` / `link closed conn=…` / `vehicle removed peer=…` / `stopped (was port …)`。只在事件处打印，逐帧无输出。
 
-**⑧ 自检证据**：`src/tests/check_ws_manager.gd`（51 项断言 / `total=51 failed=0` / `SELF-CHECK OK`）在同一进程里既当世界又当 sim（真 World.tscn + 真 `WebSocketPeer` 客户端），覆盖：装配链路、运动下行、传感器先到、空 manifest、断开清理、6 条错误路径、规范 lint。
+**⑧ 自检证据**：`src/tests/check_ws_manager.gd`（**76 项断言** / `total=76 failed=0`（headless）、`total=77 failed=0`（Xvfb，J7 有渲染器才计）/ `SELF-CHECK OK`；51 → 59 是 task_34-3 的 camera，59 → 73 是 task_35-2 的 A11 + K1~K13，73 → 76 是第 2 轮的 K14~K16）在同一进程里既当世界又当 sim（真 World.tscn + 真 `WebSocketPeer` 客户端），覆盖：装配链路、运动下行、传感器先到、空 manifest、断开清理、6 条错误路径、camera 装配线、**行人装配线**、**跨 kind 重建**、规范 lint。**两档都要 `SELF-CHECK OK`**：headless 与 `DISPLAY=:99 … --rendering-driver opengl3 --audio-driver Dummy`（不加 `--headless`）都是硬门槛（第 2 轮把 Xvfb 从"可选"改成权重 1）。
 
 **⑨ 位姿下行（task_31 Step 1，`pose` 文本帧）**：
 
@@ -847,10 +994,29 @@ func Describe() -> String
 - **只发四种条件全满足的连接**：`role == ROLE_CHASSIS && handshaken && !closed && vehicle 有效（is_instance_valid）`。传感器连接**一条都不发**；读取 `link.vehicle` 之前先判 `role`/`handshaken`/`closed`，`call("GetPose")` 之前必须有 `is_instance_valid` 守卫（失效 avatar 上调用会打 `Invalid call` = `SCRIPT ERROR` 且进程不退出）。
 - **取值来源（E23）**：位置/朝向 = `link.vehicle.call("GetPose")`（= `WorldTransform.PoseFromTransform(global_transform)`，已是世界坐标）；速度 = `WorldTransform.VelToWorld(vehicle.velocity)`（`vz` 丢弃，不进帧）。
 - **累加器与解耦**：`_pose_acc += delta`，`if _pose_acc + 1e-6 < POSE_BROADCAST_INTERVAL_S: return`（`+1e-6` 容差与 `Lidar2D` 同款：60 fps 下 `1/60` 累加 6 帧才恰好到 0.1，无容差会漏帧）；落后超过 2 个周期只补发一帧并清零（不积压）。`--fixed-fps 60` 下一整个 1 s 窗口稳定 **10 条**。
-- **`_process` 内顺序**：`_AcceptConnections → _PollLinks → _SweepClosed → _BroadcastPoses`（本帧已判死的连接先清出 `_links`，再下发）。
+- **`_process` 内顺序**：`_AcceptConnections → _PollLinks → _SweepClosed → _Tick_Pedestrian_Timeouts → _BroadcastPoses`（本帧已判死的连接先清出 `_links`，再按行人超时停车，最后下发位姿；`_Tick_Pedestrian_Timeouts()` 来自 task_35 Step 2，只对 `_pedestrians` 生效，车没有超时）。
 - **发送失败不处理**：`SendJson` 在非 `STATE_OPEN` 返回 `ERR_UNCONFIGURED` 属正常路径 —— 不检查返回值、不打日志、不断连（与 `ComponentLink` 既有语义一致）。
 - **无新增日志**：逐帧零 `print` / `push_warning` / `push_error`；`stats_log` 保持 `false`。
 - **自检证据**：`src/tests/check_pose.gd`（23 项断言 / `total=23 failed=0` / `SELF-CHECK OK`），同一进程真 `src/scenes/World.tscn` + 真 `WebSocketPeer` 客户端 + `Listen(0)` 临时端口，覆盖 task_31 §三 6.3 的 P1~P9（A1~A7 树外协议形态 / B1~B2 接线 / C1~C14 端到端与白盒）。
+
+**⑩ 行人支路（task_35 Step 2 落地，**不改变上文车/传感器的任何语义**）**：
+
+- **分流键**：`chassis_hello.kind`（`"robot"` 缺省 | `"pedestrian"`）。`kind == "pedestrian"` **且** `chassis == "pedestrian"` 时才走行人支路；`kind` 非法（任何其它值）只 `push_warning` 一次并**按 robot 处理**（连接不关）；`kind == "pedestrian"` 但 `chassis != "pedestrian"` 同样 warn + 按 robot。
+- **两个表、两套编号**：车 → `_peer_vehicles` + `Vehicles` 容器 + `_next_avatar_id`；人 → `_pedestrians` + `Pedestrians` 容器 + `_next_pedestrian_id`。人**不进** `_peer_vehicles`、**不占** `_PickSpawn` 的 avatar 排位、**不消耗** `_next_avatar_id`，所以 `GetVehicleCount()` / `GetVehicle()` / `Vehicles` 容器三条既有语义**看不到人**。`link.vehicle` 是两者唯一共用字段（pose 下行 / 清理都靠它）。
+- **容器是惰性建的**：`World.tscn` **不**加 `Pedestrians` 节点（无人连入时世界节点树**零变化**）；首个行人到达时由 `_Pedestrians_Root()` 在 `vehicles_root` 的父节点（World 根）下建一个同名 `Node3D`，与 `Bounds` / `Persons` / `Pedestrians` 的"代码建、幂等"策略一致（task_35 Step 3 起世界侧由 `BuildPedestrians()` **在 `_ready()` 里就建好**这个同名容器，manager 直接复用、不再自己建）。`_Pedestrians_Root()` 每次调用都 `is_instance_valid` 复检：**Step 3 的 `World.gd::BuildPedestrians()` 若重建这个容器，契约是"复用同名节点"或"重建后 manager 下次调用自动重新解析"**，否则已装的人会一起消失。
+- **装配顺序（硬约束）**：校验场景 → 取容器 → 摘旧 avatar → 实例化 `Pedestrian.tscn`（**根节点就是 avatar**，不套 `Vehicle.tscn`）→ `add_child` → 写 `global_position` / `rotation.y` → `Configure(self, params)`（`Pedestrian._yaw_target` 取 `rotation.y`，所以**必须在摆位之后**）→ 记账 → 回 `chassis_ready{kind, pedestrian_id, spawn}`。
+- **`chassis_ready` 只增不改**：robot 多一个 `"kind": "robot"` 键；pedestrian 用 `pedestrian_id`（不是 `avatar_id`）并回**校验后**的真实 `spawn`。`pose` 一个字节都没改（行人也是 `CharacterBody3D`，有 `velocity` 与 `GetPose()`）。
+- **spawn 校验**（只有 pedestrian 读 `spawn`）：缺省 = 合法（默认点 `(64, 56, 0)`、不 warn）；有值但任一条件不满足 = `push_warning` + 回退默认点：`x/y` 非有限数 / 不在 `[0, span)`（`span` = `cells_x × voxel_size`，走 `ProjectSettings`，**不写 128 字面量**）/ `z ∉ [0, 2.0]` / 落在 `World.OBSTACLES` 内（外扩 0.3 m）/ 与任何已占 avatar 水平中心距 < 1.0 m。`yaw` 归一化到 `[-PI, PI)`。
+- **指令面**：`motion_cmd{v, dir}`（`dir` 可省略 = 只改速度、保持朝向），老的 `action/speed` 照样接受（折算是 `Pedestrian.SetCommand` 的事，manager 只转发）。每收到一条刷新 `_ped_last_motion_ms` 并把 `_ped_idle` 置 false（**恢复时不打日志**）。
+- **300 ms 超时停车**：`_process` 里 `_Tick_Pedestrian_Timeouts()` 只遍历 `_pedestrians`；`now - last_motion_at >= 300 ms` 且当前不是 idle → 下发 `SetCommand({v: 0})` + **一行**日志。**只停、不断连、不刷屏**（边沿触发）；刚注册的行人 `_ped_idle = true`，不会立刻被"停"一次。**车没有超时**（老 sim 不发指令时不会被强制停车）。
+- **传感器**：行人没有 `AttachSensor`（没有 Chassis/Sensors 挂载点），`_MountSensor()` 用 `has_method` 守卫后走"几何未落地"的同一分支（回 `sensor_ready`、manifest 可置位、**绝不** `Invalid call`）。`_RegisterSensor` / `_TryAssembly` / `_CleanupLink` 的 avatar 查询从 `GetVehicle` 放宽到 `GetAvatar` / `_HasAvatar`（车的结果不变）。
+- **日志指纹（新增，供 grep）**：`pedestrian spawned peer='…' id=… node=… spawn=(x, y) yaw=…` / `pedestrian idle peer='…'（300 ms 无新指令）-> v=0` / `pedestrian removed peer='…'` / `pedestrians root created: …`。无人连入时**一行都没有**。
+- **跨 kind 重建（第 2 轮，`prev_issues` #2；两种 avatar 共用一套规则）**：
+  - 注册前**不分类型**先 `_RemoveAvatar(peer_id, except_link=本连接)`：`_RegisterChassis` / `_Register_Pedestrian` 都无条件调用，两张表 + 两个容器一起清，`Vehicles` / `Pedestrians` 里都不留幽灵节点。两张表都空时**立即早退**（不 print、不 emit、不牵连其它连接）—— 这也是"传感器先于底盘"（E 组 pending）不被误关的原因。
+  - 被判死刑的旧连接一律**交出所有权**（`link.vehicle = null`），于是它们下一帧的 `_CleanupLink()` 绝不会再摘掉同一个 `peer_id` **刚注册**的新 avatar。`_CleanupLink()` 只在 `link.vehicle != null` 时才摘。
+  - `_ApplyMotionCommand()` **只按 `link.vehicle` 的身份分流**（"这条连接的 avatar 是不是 `_pedestrians` 里那个节点"），不看"表里有没有这个 peer"—— 换 kind 的过渡帧里旧连接可能还活着，用表判定会把车指令打到残留行人上。
+  - `_RemoveAvatar(peer_id, except_link) -> bool`：返回值 = 是否真的摘到（`false` = 两张表都没有 → **静默**，不打 `vehicle removed` / `pedestrian removed`、不发 `vehicle_removed` / `pedestrian_removed`）。`_RemoveVehicle()` 作为兼容壳保留（内部转调，返回值丢弃）。
+  - 自检：`K14`（robot → pedestrian，新连接）/ `K15`（pedestrian → robot，新连接）/ `K16`（**同一连接**重建）。三者都用 `vehicle_removed` / `pedestrian_removed` 的**信号流水** `slice(n) == ["v:…"] / ["p:…"]` 精确锁"只 emit 一次"，并把断言放宽到 `>= 1` 就会漏掉幽灵移除。
 
 ### 4.6 `src/scenes/chassis/Quadrotor.tscn`（Step 7 ✅）
 
@@ -1301,6 +1467,371 @@ headless 下无法经 `Capture_Jpeg()` 出图，帧头 / 魔数只能这样验�
 
 ---
 
+### 4.9 `src/scenes/props/Person.tscn`（human_model Step 4 ✅）
+
+**定位**：§3 的**第 9 个** `.tscn`，但它**不是装配零件** —— 没有 `chassis_hello` / `sensor_hello` 语义、
+不在 `ChassisCatalog` / `SensorCatalog` 里、不由 `WebSocketManager` 实例化、不参与任何决策链。
+它只做一件事：在世界里站一个"能被相机拍到、能被 YOLO 认出"的人。
+
+```
+Person (Node3D)                          script: res://src/props/Person.gd
+└── Body                                 instance: res://assets/humans/rp_carla_rigged_001/model.glb
+                                         静态实例；transform = IDENTITY；**无 CollisionShape3D**
+    └── (glb 内部) 1 个 MeshInstance3D     ← glb 根是 Node3D，子节点才是 mesh（与 E27 同款形态）
+```
+
+```gdscript
+# src/props/Person.gd  （**唯一**人物脚本：静态 + 走动；walking_person Step 3 起）
+extends Node3D
+
+const MODEL_GLB := "res://assets/humans/rp_carla_rigged_001/model.glb"   # 静态人形；与 Person.tscn 的 Body 逐字一致（自检 C1 锁）
+const WALK_GLB := "res://assets/humans/rp_nathan_animated_003_walk/model.glb"  # 走动人形；与 PersonWalking.tscn 的 Body 逐字一致
+const HEIGHT_MIN_M := 1.60                                               # step.md 判据：人高 ∈ [1.60, 1.85] m
+const HEIGHT_MAX_M := 1.85
+@export var walk_speed: float = 0.0     # m/s；**<=0 表示不走**（默认值 = 静态站立，向后兼容 Person.tscn）
+@export var path: Array[Vector3] = []   # 世界坐标（Z-up，米），隐式闭合；空 = 静态
+@export var loop: bool = true           # true=循环；false=到终点停在末点
+
+func Get_Body() -> Node3D            # "Body"（glb 实例根）；缺失返回 null（自检据此报红）
+# 走动侧接口（仅 PersonWalking.tscn 用，见 §4.10）：Configure / Set_Progress_M / Get_Progress_M /
+# Get_Path_Length / Get_Speed_Mps / Get_Position_W / Get_Yaw_W / Get_Anim_Player / Is_Anim_Playing /
+# Path_Hits_Rect
+```
+
+**① 为什么零碰撞（E27 的延伸，本次的硬理由）**：人一旦带 `CollisionShape3D`，
+`check_lidar` 的 `F7-real-wall-distance=2.0000` / `F8-real-wall-hits=152` 这两条**逐字基线**就会多出回波；
+UGV 还会把行人当障碍绕行 / 顶开，`goto` 冒烟语义被改。所以 `Person` 子树、`Persons` 子树的
+`CollisionShape3D` / `CollisionPolygon3D` / `PhysicsBody3D` / `Area3D` 计数**必须恒为 0**
+（`check_person_assets` 的 `asset-no-collision` / `scene-no-collision` / `world-persons-no-collision` 三重锁）。
+
+**② 为什么不进 `World.tscn`**：容器由 `World.gd::BuildPersons()` 在 `_ready()` 末尾建，理由与 `Bounds` 完全相同
+（不写 `.tscn` → 不碰 `check_bounds.B1d` 的文本断言、不改 `load_steps`、避开 E16）；且**幂等**——
+重复调用先 `remove_child` + `queue_free` 旧容器再重建，`check_person_assets` 的 `world-persons-idempotent`
+连调两次后断言"子节点仍 2、同名节点仍 1、节点总数不增长"。
+
+**③ 摆位（世界坐标，Z-up，米；yaw 0 = 朝 +X = 世界东）**：常量表 `World.PERSONS` 是唯一来源。
+
+| 名 | 世界坐标 | 到出生点 (64,64) | 最近障碍 | 说明 |
+|---|---|---|---|---|
+| `person_01` | `(60, 76, 0)` | 12.65 m ≫ 3 m 净空 | `wall_c`（`y∈[92,93]`）16.0 m | 出生点西南开阔地 |
+| `person_02` | `(68, 70, 0)` | 7.21 m ≫ 3 m 净空 | `pillar_e` 12.8 m | 出生点东南开阔地 |
+
+> **与 `step.md` 举例 `(60,84)` 的差异（必须记录）**：`(60,84)` 正是 `check_camera_shots.gd` 的
+> `SPOT_WORLD` —— 该自检会在同一格摆一台静止 UGV 连拍 3 张。人在那里会**与车重叠**（人无碰撞，不会被推开），
+> 且无谓扰动 R 组的图像统计基线。故沿同一条 `x=60` **南移 8 m 到 `(60,76)`**，保持"出生点西南侧空地、
+> 两人相距 10 m、都在开阔地面"的原意；第二个例子 `(68,70)` 不变。`check_person_assets` 的
+> `world-persons-spawn-clear` / `world-persons-obstacle-clear` 把净空与"不压障碍"变成机检。
+
+**④ 资产口径**（细节与来源 URL / 许可原文见 `assets/humans/README.md`）：
+`rp_carla_rigged_001` = Renderpeople Free Rigged，**米制、人朝 +X、脚底 `y=0`（glTF/Godot Y-up）、
+单 mesh / 单 surface / 无骨骼 / 无动画**，`1.7307 m` / `19 988 tri` / glb `2 664 856 B`；
+备选 `rp_eric_rigged_001`（`1.8400 m` / `20 542 tri` / `2 438 336 B`）**进库但不进世界**——
+换用只改 `Person.tscn` 的 `ext_resource` 与 `Person.MODEL_GLB` 两处（自检 `script-model-const` 会逼两处一致）。
+
+**⑤ 导入副产物（§9.1 E28）**：Godot 4 的 glTF 导入默认把内嵌贴图**抽取**成 `.glb` 旁的独立文件
+（`model_rp_*_dif.jpg` + `model_rp_*_norm.png` + 各自 `.import`）。**这 4 个文件必须与 `.glb` 一起提交**，
+否则任何人重导都会 `ERROR: Cannot open file`；且运行前必须先 `--import`（`.godot/` 缺失时 glb 的 `load()` 返回 `null` → `Body` 空壳、**看不到人** + 12 行 `ERROR`，自检 14/32 红）。
+
+**⑥ 自检证据**：`src/tests/check_person_assets.gd`（**32 项断言** / `total=32 failed=0` / `SELF-CHECK OK`），
+A 组资产 16（每件 8：loads / instantiates / aabb / feet / no-collision / material / tri-budget / sha256）、
+B 组场景 5、C 组常量自洽 2、D 组世界摆位 9。
+
+---
+
+### 4.10 `src/scenes/props/PersonWalking.tscn`（walking_person Step 3 ✅）
+
+**定位**：§3 的**第 10 个** `.tscn`，与 §4.9 的 `Person` 平级 —— **不是装配零件**（无 `chassis_hello` /
+`sensor_hello` 语义、不在 `ChassisCatalog` / `SensorCatalog` 里、不由 `WebSocketManager` 实例化）。
+它只做一件事：**让世界里的这个人沿路径走起来**（走路动画在播 + 位置随时间变），
+**不做**碰撞体、**不接**雷达 / 建图 / 决策链、**不做** YOLO 验证。
+
+**与 §4.9 的关系（Step 3 的收口）**：两者**共用同一个根脚本 `src/props/Person.gd`** ——
+走动能力并入 `Person.gd`（`walk_speed` / `path` / `loop` 三字段 + 路径采样 + 动画播放），
+**不给参数时默认静态 = `Person.tscn` 行为逐字不变**；`PersonWalking.gd` 已删除（不再有两份要同步的人形脚本）。
+`Person.tscn` 本身**一个字节都不动**（`check_person_assets` 的 32 项把它的 Body 路径 / 高度 / 三角数 / sha256 逐位钉死）。
+
+```
+PersonWalking (Node3D)                   script: res://src/props/Person.gd
+└── Body                                 instance: res://assets/humans/rp_nathan_animated_003_walk/model.glb
+                                         静态实例；transform = IDENTITY；**无 CollisionShape3D**
+    └── (glb 内部) Armature (Node3D) → Skeleton3D(88 骨) → rp_nathan_animated_003_walking_geo (MeshInstance3D)
+                   AnimationPlayer（1 条动画 "Armature|Take 001|BaseLayer"，2.2333 s）
+```
+
+```gdscript
+# src/props/Person.gd（走动部分；静态部分见 §4.9，同一个文件）
+extends Node3D
+
+const WALK_GLB := "res://assets/humans/rp_nathan_animated_003_walk/model.glb"   # 与 .tscn 的 Body 逐字一致（自检锁）
+const CLIP_MPS := 1.260              # 资产自带步速 = normalized/…/convert.json 的 speed_mps（滑步判据基准）
+const SPEED_TOL_RATIO := 0.10        # 允许 ±10%，超了只在日志里提示"滑步风险"，不阻断
+const FEET_TOL_M := 2.0e-3
+
+@export var walk_speed: float = 0.0           # m/s；<=0 = 不走（默认静态）
+@export var path: Array[Vector3] = []         # 世界坐标（Z-up 米），隐式闭合
+@export var loop: bool = true                 # true=回绕；false=停在末点
+
+func Configure(spec: Dictionary) -> void      # {path, walk_speed（别名 speed_mps）, loop, phase_m}
+func Set_Progress_M(s: float) -> void         # 瞬移到指定弧长（渲染档取样用；结构档不靠它证明位移）
+func Get_Progress_M() -> float
+func Get_Path_Length() -> float
+func Get_Speed_Mps() -> float                 # = walk_speed
+func Get_Position_W() -> Vector3              # 世界坐标（Z-up）—— 自检据此与路径采样点逐位对比
+func Get_Yaw_W() -> float
+func Get_Body() -> Node3D
+func Get_Anim_Player() -> AnimationPlayer
+func Is_Anim_Playing() -> bool
+func Path_Hits_Rect(origin_xy: Vector2, size_xy: Vector2, margin_m: float) -> bool   # 路径净空（slab 法）
+func _ready() -> void                         # 建弧长表 → 找 AnimationPlayer → 播第 0 条 → 有路径则摆到 s=phase
+func _physics_process(delta: float) -> void   # s = fposmod(s + walk_speed·delta, L) → 采样 → global_transform
+```
+
+**四条动画/推进硬规则**（导入器给的节点名会随版本变，所以一律不按名字硬编码）：
+
+1. `AnimationPlayer` 先按 step.md 的字面调用 `find_child("AnimationPlayer", true, false)`
+   （`owned=false` 才看得见 glb 实例**内部**的子节点），找不到再**按类型递归**兜底（`_Find_Anim_Player`）；
+2. 播 `get_animation_list()` 的**第 0 条**，不硬编码 `"Animation"` / `"Take 001"`；
+3. `loop_mode` 只在 `LOOP_NONE` 时设一次 `LOOP_LINEAR`，`speed_scale = walk_speed / CLIP_MPS`
+   （改速度时步频跟着变，脚不滑）；`walk_speed <= 0` 时 `speed_scale = 1.0`（静止但动画不冻在第一帧）；
+4. 只在 **`_physics_process`** 推进（`_process` 里不再推一次，否则速度翻倍）；
+   找不到 `AnimationPlayer` / 动画列表为空时**只 `push_warning`（每实例一次）**，绝不 `push_error`
+   （静态人形本来就没有 `AnimationPlayer`，push_error 会把 `--quit` 的 0 ERROR 验收搞成假红）。
+
+**摆位**：`s → (pos_world, yaw_world)`，`yaw = atan2(d.y, d.x)`（世界 Z-up、逆时针为正），
+一律 `global_transform = WorldTransform.MakeTransform(pos, yaw)` —— 本文件**不出现** `(x, z, y)` 换轴字面量。
+`_physics_process` 用 `fposmod` 回绕（纯函数、无累积漂移），不用 Tween。
+
+**路径（世界坐标，Z-up，米；隐式闭合）**：`World.WALKERS` 是唯一来源（**历史口径** ——
+`WALKERS` / `BuildWalkers()` 已在 task_35 Step 3 整节删除，见本节 ⑧；现在世界只按 `PEDESTRIANS`
+摆出生点与朝向，**没有任何路径**）。下表是 walking_person 时期的口径，保留作为资产/自检的说明。
+
+| 名 | 路径 | 周长 | walk_speed | 相位 |
+|---|---|---|---|---|
+| `walker_01` | `(44,96) → (56,96) → (56,106) → (44,106)`（闭合回 `(44,96)`） | 44.0 m | 1.260 m/s（= `CLIP_MPS`） | 0 m |
+
+> **选址依据（逐条对 `World.OBSTACLES` 实测）**：`wall_c` 在 `y∈[92,93]`、`wall_d` 在 `x∈[34,35]`、
+> `block_1/2` 在 `y=100` 但 `x=60/66`、`block_3` 在 `(72,104)` → 环路与 15 个障碍**全部无交**
+> （自检 `world-walkers-path-clear` 用 1.0 m 臂展余量直接断言）；距 spawn `(64,64)` 32 m、
+> 距 `person_01 (60,76)` 20 m。**刻意放在 `y≥96`**：既有拍照机位在世界 `(60..68, 76)` 朝 −X，
+> 扫不到这里 → 不污染 `check_person_shots` / `check_camera_shots` 的既有基线。
+> **机位注意**：想拍这个环路**不能**从正南平视 —— `wall_c`（30 m 长、2 m 高）正好挡在中间
+> （实测整帧拍空）。可用机位：世界 `(37,101)` 光心 1.6 m 朝东（`check_person_walk.gd` 用的就是这个）。
+
+**① 零碰撞**：与 §4.9 同一条铁律（E27）。`Walkers` 子树里（**历史口径**：task_35 Step 3 起世界不再建
+`Walkers`，改成**有**胶囊碰撞的 `Pedestrians`，见 §4.11.1）`CollisionShape3D` / `CollisionPolygon3D` /
+`PhysicsBody3D` / `Area3D` 计数恒为 0（`check_person_walk` 的 `scene-no-collision` 锁）；
+`check_lidar` 的 `F7/F8` 逐字不变（48 项）。
+
+**② 与既有静态人物的关系：并入，不新开第二份脚本（Step 3）。** 走动能力搬进 `Person.gd` 后，
+`PersonWalking.gd` 删除；`Person.tscn` / `Person.gd::MODEL_GLB` / `World.PERSONS` 的摆位与资产
+**一个字都不改**（`check_person_assets` 的 32 项把高度 / 三角数 / sha256 逐位钉死，仍然全绿）。
+两件资产、两个容器（`Persons` / `Walkers` —— 后者 task_35 Step 3 起换成 `Pedestrians`）、
+两条 `.tscn` 各自独立，**互不影响**。
+
+**③ 资产口径**（细节见 `assets/humans/README.md` 与 `tmp/walking_person/downloads/README.md`）：
+Renderpeople Free **Animated** People（下载名 `rp_nathan_animated_003_walking`，**仓库目录 `assets/humans/rp_nathan_animated_003_walk/`**）
+→ 剥掉根位移、压到 **1.84 m**、
+脚底 `y≈0`、人朝 **+X**，转成**带 skin + 1 条动画**的 glb：`3 263 492 B` / `21 506 tri` / `88 骨` /
+`duration 2.2333 s`（68 键 @30 fps；源首帧是零位 T-pose，已裁）/ 原地循环接缝 `0.1145 m`（`ratio 0.97`）/
+`POSITION` 跨度 `0.3425 × 1.8490 × 1.8722`（x < z = 朝 ±X 的弱几何证据）。
+最省事的复现路径：`tmp/walking_person/tools/w_convert.py`（Blender 4.5 `-b`，十步全在文件头注释里）。
+
+**④ 导入副产物（§9.1 E28 同款）**：`model.glb.import` + 抽出的 `model_rp_nathan_animated_003_dif.jpg` +
+`model_rp_nathan_animated_003_norm.png` + 各自 `.import` 必须与 `.glb` 一起在盘上（共 **6 个文件**），否则重导会
+`ERROR: Cannot open file`、贴图全丢。资产目录在 Step 3 改名为 `rp_nathan_animated_003_walk/`（只改目录名，
+`glb` 字节与 `sha256` 不变），旧 `.import` 的 dest hash 按资源路径算 → **必须删掉旧 `.import` 重跑 `--import`**
+（`animation/import` 等 params 段与改名前的备份逐行相同）。
+
+**⑤ 自检**：`src/tests/check_person_walk.gd` —— 结构 20 项（资产 8 / 场景 4 / 世界 3 / 运行 5）+
+渲染 6 项（三帧 JPEG / 非全黑 / 投影框在动 / 框内像素在变）。headless `total=20 failed=0`；
+`DISPLAY=:99` 下 `total=26 failed=0`。**（task_35 Step 3 起改为 15 项、两档同值** ——
+D 组运行 5 + R 组渲染 6 + C 组旧 3 共 11 项被移除、C 组换成"世界预置行人"3 项，理由见本节末尾
+**⑧**；本条与 ⑥ 记的是 walking_person 时期的历史数字。）运行组（5 项）在 `--fixed-fps 60` 下**手动推进物理帧**：
+`run-anim-playing`（在播 + 骨骼姿态逐帧在变）、`run-progress-monotonic`（**逐帧** `Δs>0` 且
+步长 ≤ `walk_speed/60×1.5`）、`run-lap-close`（真跑 2096 帧走满一圈回起点 ≤0.05 m，不用 `Set_Progress_M` 掺假）、
+`run-path-dev`（节点位置 == 独立实现的路径采样点 ≤1 mm）、`run-hip-drift`（髋骨相对节点水平偏移 <1 m——
+root motion 没剥干净会漂 2.9 m）。三帧的**真推进**版见 ⑦（`check_person_walk_shots.gd`）。
+
+**⑥ 渲染档为什么只走半圈**：一整圈 2096 个物理帧在软件 OpenGL 下 >70 s（实测未完成），会把 300 s 验收窗口吃掉；
+故 `DisplayServer.get_name() != "headless"` 时跑 **1/2 圈**测单调性，再用 `Set_Progress_M(L)`（等价 `s=0`）
+验证闭合；整圈回起点由 **headless 档真跑**证明。两档都会打印实际帧数与圈数（`mode=headless-full-lap` /
+`mode=render-half-lap`），不会出现"看起来跑了其实没跑"。
+**⑦ 三帧"真推进"证明「人在走」（Step 4，`src/tests/check_person_walk_shots.gd`，14 项）**：
+⑤ 的三帧是 `Set_Progress_M()` **瞬移**出来的，只能证明"三个位置不一样"；⑦ 用 `await physics_frame`
+**逐帧真推进** 0 / 40 / 80 物理帧再抓拍，**帧间绝不瞬移**（源码 lint 锁死：全文只允许 1 处归零调用）。
+- **机位**（世界 Z-up 米，只摆一次）：光心 `(48, 101)` 地面 + `1.50 m`，瞄 `(44.8, 96, 0.92)`。
+  人在 `(44,96)` 朝 **+X**（yaw=0），机位在 `(+4, +5)` → 前方 4 m / 左侧 5 m、夹角 `51°` → **左前 3/4 面**
+  （既看得到步态也看得到正脸），且 1.68 m 的走位主要**横向**投在画面上（不会被"迎面走近"吃掉）。
+  `y=101` 在环路内侧，与 `wall_c`（`y∈[92,93]`）隔 8 m —— 避开 ⑥ 记录的"正南拍空"。
+- **判据**：三帧 JPEG（`>10 KiB` / `ffd8ff` / SOF0 1280×720 / 灰度 `var>0.002`、`0.05<mean<0.95`）、
+  机位三次逐位相同（≤1e-9）、AABB 8 角点全在画面内且框高占比 ∈[0.15,0.45]、
+  **物理帧差 40±2 且 Δs=0.84±0.05 m 且 Δs/Δframes == v/60（±2%）**、
+  框**水平**中心位移 `≥30 px`、框内灰度差 `≥0.02` 且 `≥3×` 框外、框裁到同一 64×64 后 `mean_abs ≥0.010`
+  （最后一条是**平移不变量**：把"整体平移"消掉，剩下的只能是姿态变化）。
+- **实测**（`DISPLAY=:99`，`logs/s4_check_person_walk_shots_render.log`，`total=14 failed=0`）：
+  `s = 0.000 / 0.840 / 1.680 m`（`frames = 0 / 40 / 80`，`Δs/Δframes = 0.021000 = v/60`，偏差 **0.00%**）；
+  框 `P(523.7,276.2) S(119.2,173.0)` → `P(583.0,273.2) S(114.7,187.9)` → `P(654.8,269.5) S(107.2,206.2)`；
+  `Δx = 57.0 / 68.1 / 125.1 px`；`in/out = 0.0931/0.0001 (1020×)`、`0.0659/0.0002 (422×)`、`0.0872/0.0002 (566×)`；
+  64×64 裁剪差 `0.06871 / 0.06780 / 0.08183`。
+- **跑法**（**绝不能加 `--headless`**；headless 冒烟只跑 A 组 4 项）：
+  `DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_person_walk_shots.gd`
+  → `total=14 failed=0`；`timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_person_walk_shots.gd`
+  → `[skip]` ×10 + `total=4 failed=0`。产物：`tmp/walking_person/shots/walk_t{0,1,2}.jpg` + `walk_report.md`。
+
+**⑧ task_35 Step 3 起：世界不再实例化 `PersonWalking.tscn`（自动绕圈已移除）。**
+`World.WALKERS`（44 m 闭合矩形 + `walk_speed` + `loop` + `phase_m`）/ `BuildWalkers()` / `GetWalkersRoot()`
+与 `Walkers` 容器**整节删除**，换成 §4.11 的 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()`
+（只给出生点 + 朝向，**没有任何路径 / 巡逻 / 计时**）；没有外部驱动时人**站着不动**（idle = 预期，不是故障）。
+本节的走动能力（`Person.gd` 的 `walk_speed` / `path` / `loop` / `Set_Progress_M`）与资产**一个字都没删**：
+`PersonWalking.tscn` 仍被本节的 A/B 组自检与 `assets/humans/README.md` 引用，
+而且 `Pedestrian.tscn` 的 `Body` 就是同一件 glb。
+
+随之调整的两个自检（**数字见 §11 的 `task_35-3` 行**）：
+`check_person_walk.gd` **20 → 15**（删 D 组运行 5 / R 组渲染 6 / C 组旧 3，加 C 组新 3）；
+`check_person_walk_shots.gd` **4 / 14 不变**，但主语从 `walker_01` 换成 `World.PEDESTRIANS[0]` 的 `pedestrian_01`、
+驱动从 `Set_Progress_M()` 瞬移换成**一次** `Pedestrian.SetCommand({"v": 1.26, "dir": 0.0})`，
+R7 的尺子从"弧长 Δs"换成"`GetPose().x` 的 Δx"。机位几何（世界 `(48,101)`+1.5 m 瞄 `(44.8,96,0.92)`）
+**逐位不变** —— 因为 `pedestrian_01` 的出生点 `(44,96)` 就是旧环路首点。
+
+---
+
+### 4.11 `src/scenes/props/Pedestrian.tscn`（task_35 Step 1 ✅）
+
+**定位**：行人 = 世界里的一个**可动物体**，不是 Pleiades 节点。它挂在 `ChassisCatalog` 里（Step 1 只登记），
+用**与车同一套** `chassis_hello` / `motion_cmd` / `pose` 协议被外部脚本驱动；`peer_id` 由客户端自定义
+（如 `human-01`），**不参与任何 P2P 广播**。
+
+```
+Pedestrian (CharacterBody3D)          collision_layer = 2 , collision_mask = 5 (1|4)
+  ├─ CollisionShape3D                 CapsuleShape3D r=0.25 / h=1.75 / position y=0.875
+  └─ Body                             res://assets/humans/rp_nathan_animated_003_walk/model.glb
+                                      （内含 Skeleton3D 88 骨 + AnimationPlayer 1 条 clip；**不再另建** AnimationPlayer）
+
+# src/chassis/Pedestrian.gd   (extends "res://src/chassis/ChassisModel.gd")
+const CHASSIS_NAME := "pedestrian"    /  const CLIP_MPS := 1.26
+func GetDefaultParams() -> Dictionary            # {"max_speed": 1.26, "max_turn_rate": 180.0}（与目录表逐键一致）
+func Configure(vehicle, params) -> void          # 读参 -> 状态清零 -> GROUNDED；**不调** ApplyBodySize()
+func SetCommand(cmd: Dictionary) -> void         # v / dir 独立解析；缺省回退 action/speed
+func Step(velocity, delta) -> Dictionary         # 纯控制量 {velocity(全局), yaw_rate(rotation.y 角速度)}
+func Play_Walk() -> void                         # 播第 0 条 clip、loop、speed_scale = v / CLIP_MPS
+func _physics_process(delta) -> void             # 自宿主：Step -> rotation.y += yaw_rate*dt -> move_and_slide()
+func GetPose() -> Dictionary                     # {x, y, z, yaw}，口径同 Vehicle.GetPose()（§7.3）
+func Get_Speed() / Get_Dir_Target_W() / Get_Yaw_Rate_Limit() / Get_Body()   # 只读查询
+```
+
+- **指令语义**（`motion_cmd`，Step 2 起由 manager 转发）：`v` = 线速度 m/s（**clamp 0~1.26**，行人倒着走一律当 0）；
+  `dir` = **世界系朝向角（弧度，0 = +X 东，逆时针为正）**，内部存 `rotation.y = -dir`。
+  `v` 与 `dir` **各自独立**：`{v:1.2}` 只改速度（保持朝向直走）、`{dir:1.57}` 只改朝向（边走边转）。
+  缺 `v`/`dir` 时回退老协议：`forward` → `v = 1.26×speed/100`；`left`/`right` → **只改朝向**（`v` 不动）；
+  `stop` / `backward` / 未知 → `v = 0`。
+- **运动学**：转向是**限速**的（`max_turn_rate` = 180 °/s，`params` 单位是**度/秒**，内部 rad/s），
+  沿**当前** yaw 前进（与 `Vehicle` 的 1 帧滞后同款）。**没有加速度斜坡**（与 `DiffDrive` 的 `Approach()`
+  不同，是有意为之）：`v=0` 当帧归零、`dir` 阶跃第一帧就饱和到 180 °/s。
+- **自宿主**：`Step()` 只产出控制量，**位置只由 `_physics_process()` 里的 `move_and_slide()` 推进**（唯一位置更新点）。
+  宿主是别的节点（`Configure` 传的不是自己）时 `_physics_process` **不推进**，避免双推。
+- **动画**：`speed_scale = v / 1.26`（与动画自带步速同值 → 脚不滑）；`v = 0` 时 `speed_scale = 0`
+  （人物定格，仍 `is_playing()`）。找不到 `AnimationPlayer` / clip 为空**只 `push_warning`（每类一次）**，
+  **绝不 `push_error`**（`--quit` 的 0 ERROR 验收靠这条）。
+- **碰撞口径**：`layer=2` → 雷达 `scan_mask = 1|2|4` 能扫到它；`mask=1|4` → 只与地面 + 车辆碰撞，
+  **不与 VoxelWorld（layer 2）碰撞**（人走不进建筑碰撞体，Step 3 靠出生点选点避开障碍，见 §6 R2 记录）。
+  车辆 `mask = 7` 含 layer 2 → **车会被人挡住**。
+- **`.tscn` 手写维护**，不要用编辑器另存（会丢头注释，§9.1 E8）；`Body` 变换必须是恒等（模型原点 = 脚底中心）。
+- **自检**：`check_pedestrian.gd` **40 项**（`total=40 failed=0`）。跑法：
+  `timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_pedestrian.gd`
+- **本 step 的过渡 gap（如实记录）**：Step 1 只登记目录，`WebSocketManager` 仍把它当 robot 走 `_RegisterChassis`；
+  真正按 `kind="pedestrian"` 分流到 `World/Pedestrians` 是 Step 2/Step 3 的事。
+
+#### 4.11.1 世界预置行人（task_35 Step 3 ✅）
+
+`World.gd` 的 `PEDESTRIANS` 常量表在 `_ready()`（`BuildPersons()` 之后）把 **2 个人**摆进 `World/Pedestrians`：
+
+| 名 | 世界坐标（Z-up，米） | 初始朝向 | 说明 |
+|---|---|---|---|
+| `pedestrian_01` | `(44, 96, 0)` | `yaw_deg = 0`（朝 **+X 东**） | 最近障碍 = `wall_c` **3.000 m**；`check_person_walk_shots` 的被拍对象（机位世界 `(48,101)`+1.5 m） |
+| `pedestrian_02` | `(52, 102, 0)` | `yaw_deg = 180`（朝 **−X 西**） | 最近障碍 = `block_1` **8.062 m**；`yaw≠0` 是 `Configure()` 对齐逻辑的活体证据 |
+
+两人相距 **10.000 m**。选点判据（全部由 `check_person_walk.gd` 的 `world-pedestrians-spawn-clear` 逐条断言）：
+
+- **不压障碍**：与 15 个 `OBSTACLES` 矩形外扩 `0.5 m`（胶囊 0.25 + 0.25 余量）**无交**；
+- **离世界边界** ≥ `1.0 m`（实测 32 / 26 m）；
+- **离出生点** `SPAWN_WORLD (64,64)` > `SPAWN_CLEAR_RADIUS_M (3 m)`（实测 37.736 / 39.850 m，也远于 manager 的 8 方位 × 2 m/环排位）；
+- **离静态两人** `PERSONS(60,76)/(68,70)` ≥ `2.0 m`（实测 25.6 / 27.2 / 35.4 / 35.8 m —— 不污染 person 系列取景）；
+- **两人互距** ≥ `1.0 m`；
+- **离雷达/拍照热区 > 12 m**（人 `layer=2` 会被 `Lidar2D` 的 `scan_mask=1|2|4` 扫到）：`check_lidar` 真墙热区 `(60,90)` **17.088 / 14.422 m**、空场热区 `(100,60)` **66.573 / 63.781 m**、`check_camera_shots` 停车点 `(60,84)` **20.000 / 19.698 m** → F7/F8 的 `2.0000 m` / `152` 逐字不变；
+- **离协议 spawn 点 > 30 m**（默认 `(64,56)` 44.7 / 47.5、K1 `(70,70)` 36.8 / 36.7、K16 `(72,78)` 33.3 / 31.2）→ 动态行人与世界行人**不会叠人**。
+
+**idle 语义（本 step 最重要的一条）**：`BuildPedestrians()` **不调 `SetCommand`、不设速度、不建路径**。
+没有外部驱动时人**站住不动**（`_speed_now = 0` → `Play_Walk()` 把 `speed_scale` 置 `0.0`，动画定格但仍 `is_playing`）。
+**"世界里的人不动"是预期行为，不是故障。**
+
+**`Configure(self, {})` 必须在写完 `global_transform` 之后调**（`World.gd` 里就是这个顺序）：
+`Pedestrian.Configure()` 末尾执行 `_yaw_target = rotation.y`；漏调它，`yaw_deg = 180` 的 `pedestrian_02`
+第一帧就会被 `Step()` 拧回 `yaw = 0`（plan §7 R1）。
+
+**世界预置行人 vs 协议行人（职责划分，别混）**：
+
+| | 世界预置行人（本节） | 协议行人（§4.5.1-⑩，task_35 Step 2） |
+|---|---|---|
+| 来源 | `World.PEDESTRIANS` 常量表，`_ready()` 里建 | `chassis_hello{kind:"pedestrian", spawn?}`，manager 建 |
+| 身份 | **无** `peer_id`、无 `chassis_ready`、不进 `_pedestrians` 表、**不参与任何网络** | 有 `peer_id`，10 Hz `pose` 回传，300 ms 无指令自动停车 |
+| 运动 | 站住不动，直到有人在进程内 `SetCommand`（自检 / Step 5 的车撞人） | 由外部客户端连续 `motion_cmd{v,dir}` 驱动 |
+| 容器 | `World/Pedestrians/pedestrian_0x` | `World/Pedestrians/<peer_id>`（**同一容器、不同名**） |
+
+> **本 step 明确不做**：让外部客户端"认领"世界预置的那两个人需要给 `chassis_hello` 加"按名字认领"语义 ——
+> 那是协议面的增量（Step 2/4），不在本 step（世界只负责布局）。**判据**（`check_person_walk.gd` 的 C 组 3 项）：
+> `world-pedestrians-count`（容器名 / 父节点 / 孩子数 / 孩子名 / 场景 / 脚本 / 底盘契约面 `SetCommand`+`GetPose`）、
+> `world-pedestrians-spawn-clear`（上面 5 条判据）、`world-pedestrians-idempotent`（`BuildPedestrians()` 连调两次
+> 节点总数不变、同名容器恰 1 个、孩子数不变）。
+
+**两条已知取舍（照实写）**：① 人**会穿建筑**（`mask` 不含 VoxelWorld 所在层，Step 1 既定），本 step 靠出生点选点避开；
+② 运行期重建 `Pedestrians` 容器会**连带移除**已装配的网络行人（manager 的缓存指针因 `is_instance_valid()==false`
+自动按名重解析，不会悬空，但那个人就没了）→ `BuildPedestrians()` 只应在 `_ready()` 与自检里调用。
+
+#### 4.11.2 端到端验收（task_35 Step 5 ✅）
+
+**定位**：Step 1~4 的产出物在这里**全部当黑盒**用 —— 本 step **只新增两个自检脚本 + `tmp/task35/` 下的驱动脚本与报告**，
+生产代码（`World.gd` / `Pedestrian.gd` / `WebSocketManager.gd` / `WireProtocol.gd` / `Lidar2D.gd` /
+`Vehicle.gd` / `ChassisCatalog.gd` / `src/scenes/**` / `project.godot` / `assets/**` / `tool/pedestrian/**`）**一个字节没改**。
+六项验收的逐项实测在 `tmp/task35/e2e_report.md`，第 1~3 项指标表在 `tmp/task35/s5_metrics.md`。
+
+| # | 场景 | 判据 | 落地 | 实测（本轮） |
+|---|---|---|---|---|
+| 1 | Python 驱动**直行** 10 s | 位移 ≈ `v×t`（±10%）、`yaw` 误差 < 2° | `tmp/task35/e2e_drive.py --phases straight` | `dtw=10.100 s` / `\|d\|=10.102 m` / `v_eff=1.0003 m/s`（**+0.03%**）/ `yaw_max=0.000°` / `Δy=0.0000 m` |
+| 2 | Python 驱动**转弯**（`dir` 阶跃 0→π/2） | `yaw` 以 ≤180 °/s 收敛、轨迹是弧线 | 同上 `--phases turn` | `rate=180.0 °/s` / `conv=0.600 s` / Kasa `r_fit=0.3199 m` vs `v/ω=0.3183 m`（**+0.5%**）/ 弧长差 −2.5% |
+| 3 | **停发 300 ms** 后 `v→0` | 位置不再变化（两次采样 < 1 mm） | 同上 `--phases timeout` | `stop_latency=0.384 s`（墙钟）/ 冻结 1.100 世界秒位移 **0.000000 m** / 末条 `v=(0,0)` / 世界日志 `pedestrian idle` **恰 1 行** |
+| 4 | **人撞车**（车静止，推 300 物理帧） | 不穿透 / 被挡停或滑开 / **车位移 < 1 mm** | `check_pedestrian_physics.gd` P 组 8 项 | `gap_min=0.019952 m`（逐帧 min ≥ −1 mm，= 一帧步长）/ **挡停**（最后 60 帧前进 0.000000 m）/ `moved=0.000000000 m`、`Δyaw=0` |
+| 5 | **雷达可见**（顺带，不做建图断言） | ±45° 扇区最近 ≈ 车头→胶囊表面（±5 cm）且 < 3 m | 同上 L 组 7 项 | `d=2.2500 m`（= 2.50 − 0.25，差 **0.0000**）/ `ranges[0]=2.2500` / 扇区 11 条命中（≈11.5° 张角）/ 挪到 10 m 后 `9.7500 m` |
+| 6 | **走 / 转 / 停三帧**真渲染 | 非全黑、三张互不相同、人物框位置/姿态有变化 | `check_pedestrian_shots.gd`（Xvfb 档 14 项） | 31 123 / 31 317 / 32 122 B、SOF0 均 1280×720、框水平中心 **74.2 / 141.6 / 67.5 px**、框内灰度差 0.068~0.100、`yaw=90.00°`、`speed_scale=0.000` |
+
+**跑法**（三条命令，见 §1.4 的 "行人端到端验收" 段）：自检脚本 `--headless --fixed-fps 60`；
+三帧真渲染 `--display-driver x11 --rendering-driver opengl3 --audio-driver Dummy`（**绝不加 `--headless`**）；
+Python 侧 `bash tmp/task35/s5_e2e.sh`（世界 `--headless --max-fps 60`，**绝对不带 `--fixed-fps`**，见 E29）。
+
+**这四条实测事实是本节的核心，下一轮别推翻**：
+
+1. **`--fixed-fps` 只给"自己数帧"的自检用**：它在 headless 下会关掉实时同步，实测跑到 **21~37 倍速**
+   （10 s 墙钟 = 360 s 世界时间，人一路撞到东侧空气墙，`|d| ≈ v·t` 必红）。实时档只有 `--max-fps 60`。
+2. **时间基必须分开**：速率 / 位移一律用 pose 的 `world_time`；**只有** 300 ms 超时那条用墙钟
+   （世界侧 `_Tick_Pedestrian_Timeouts` 用的就是 `Time.get_ticks_msec()`），且只在实时档里比较。
+3. **接触判据要带离散步长**：1.2 m/s @ 60 fps = 0.02 m/帧，`move_and_slide` 在"整步都会穿透"的那一帧就停住
+   ⇒ 静止间隙必然 ∈ [0, 0.02]（实测 `0.019952`，恰好一整步）。所以"碰到了"的阈值取 `PUSH_V/60 + 5 mm`，
+   而"不穿透"另用 `GAP_MIN_M = −1 mm`（`safe_margin`）兜底；想量**真实**接触距离就再用 `0.05 m/s` 贴实 60 帧
+   （实测 `0.1508 m` vs `CAR_HALF_X = 0.15`）。
+4. **雷达必须装车头**（`mount.x = 0.15`、`mount.z = 0.6`）：`Lidar2D` 量的是"雷达到命中点"，
+   而判据是"**车头到**胶囊表面"；装原点差 0.15 m > ±5 cm 必红。高度 0.6 m 落在胶囊圆柱段
+   （Godot y ∈ [0.25, 1.50]，横截面恰好 r = 0.25），再低会掉进下半球白吃 5 mm 容差。
+
+**第 6 项的机位**（本 step 唯二动过的常量，`CAM_EYE_W` / `CAM_AIM_W`）：`(48.37, 96.79)` 抬 1.50 m、瞄 `(44.9, 96.5, 1.0)`。
+旧机位 `(48,101)` 的视线与走位几乎重合（位移落在**深度**上），三帧框水平中心只差 4.1 / 13.6 / 17.7 px；
+换到"路径侧面"后投出 74.2 / 141.6 / 67.5 px，且"走"是正脸（夹角 12°）、"转"是侧身（86~92°）。
+
+**回归**：`bash tmp/task35/s5_checks.sh` → `FAILS=0 / ALL CHECKS GREEN`
+（`--quit` 冒烟 + **21 项 headless** + **5 项 Xvfb**）。既有 19 项的 `total` 与历史基线逐字一致
+（`check_ws_manager` 以本文 §1.4 与 `tmp/task35/logs/review4_ws_manager.log` 的 **76 / 77** 为准，
+不是 plan.md §2.4 表里那个过期的 73）。两个新脚本依次是 **22**（无 skip）与 **4 / 14**（headless / Xvfb）。
+
+---
+
 ## 5 挂载关系
 
 ### 5.1 静态挂载（场景内 `instance`，随场景加载）
@@ -1363,20 +1894,21 @@ WebSocketManager._RegisterChassis()
                             → sensor.SetStream(link, sensor_id)  # 先 ready 再发数据
     → _TryAssembly(peer_id)：manifest 全就绪 → assembly_ready（每 peer 仅一次）
 
-卸载（Step 6 实际顺序）:
-  chassis link 断 → _RemoveVehicle：先 _peer_vehicles.erase（再 free，防同帧二次访问）
-                    → remove_child + queue_free(vehicle)
-                    → 关闭该 peer 其余全部 link（1001 "peer removed"）
+卸载（Step 6 实际顺序；第 2 轮改成车/人**共用** `_RemoveAvatar()`）:
+  chassis link 断 → _RemoveAvatar（只有 link.vehicle != null 时才摘）：先从**两张表** erase（`_peer_vehicles` 与 `_pedestrians`，再 free，防同帧二次访问）
+                    → remove_child + queue_free(avatar)
+                    → 关闭该 peer 其余全部 link（1001 "peer removed"），它们一律交出 `link.vehicle`
                     → 清 _manifests / _manifest_parts / _assembly_sent / _pending_sensors
+                    → 只在**真摘到**时才 emit `vehicle_removed`/`pedestrian_removed` + 打一行日志
   sensor  link 断 → vehicle.DetachSensor(slot) + manifest[slot] = false + 从 pending 队列摘除
-  同一 peer_id 重复 chassis_hello（**只在该连接是底盘连接时**）→ 先 _RemoveVehicle(peer, except_link=本连接)
-                    再新建；except_link 保证刚接手的连接不被误关
+  同一 peer_id 重复 chassis_hello（**只在该连接是底盘连接时**；**含跨 kind**）→ 先 _RemoveAvatar(peer, except_link=本连接)
+                    再新建；except_link 保证刚接手的连接不被误关，两张表都空时立即早退（静默）
   未握手连接超时 → 关（1002）；pending 等待底盘超时 → 关（1008）
   assembly_ready 发出后，部件断开再连**不重发**（_assembly_sent 每 peer 只置一次）
 ```
 
 **时序铁律**：`sensor_ready` 一定先于该传感器的第一条二进制帧（否则 sim 侧会因未知 `slot_id` 丢包）。
-> 实现说明：`Close()` 只置状态，真正的移除留到**下一帧** `_SweepClosed()`（遍历中不删数组）；`WebSocketManager._process(delta)` 每帧顺序固定为 accept → poll → sweep → **broadcast**（`_BroadcastPoses(delta)`，task_31 Step 1；先清掉本帧已判死的连接再下发位姿）。
+> 实现说明：`Close()` 只置状态，真正的移除留到**下一帧** `_SweepClosed()`（遍历中不删数组）；`WebSocketManager._process(delta)` 每帧顺序固定为 accept → poll → sweep → **行人超时停车** → broadcast（`_Tick_Pedestrian_Timeouts()`（task_35 Step 2，只对 `_pedestrians` 生效）与 `_BroadcastPoses(delta)`（task_31 Step 1）；先清掉本帧已判死的连接，再判超时，最后下发位姿）。
 
 ---
 
@@ -1499,9 +2031,15 @@ const FRAME_TYPE_CAMERA := 2      # task_34 Step 3 落地（payload = JPEG 原�
 const FRAME_HEADER_SIZE := 15
 const LIDAR_SAMPLE_BYTES := 4     # 每个距离 f32
 
+const KIND_ROBOT := "robot"           # task_35 Step 2：chassis_hello.kind 的缺省值
+const KIND_PEDESTRIAN := "pedestrian" # task_35 Step 2：行人（不进 Vehicles / 不占 avatar 排位）
+
 static func ParseJson(bytes: PackedByteArray) -> Dictionary           # 失败返回 {}，不抛、**不打印**
 static func MakeJson(msg: Dictionary) -> PackedByteArray              # JSON.stringify(...).to_utf8_buffer()
 static func MakeJsonText(msg: Dictionary) -> String                   # send_text() 用
+static func NormalizeKind(raw: Variant) -> String                     # task_35 Step 2：strip+lower，非 robot/pedestrian -> ""
+static func BuildMotionCommand(v: float, dir_rad: float = NAN, seq: int = 0) -> Dictionary
+                                                                      # task_35 Step 2：{msg, seq, v[, dir]}；**不含** action/speed
 static func BuildPose(world_time: float, pose: Dictionary, velocity: Vector3) -> Dictionary
 static func BuildLidar2DFrame(sensor_id: int, seq: int, world_time: float,
         ranges: PackedFloat32Array) -> PackedByteArray
@@ -1521,6 +2059,11 @@ static func FramePayloadSize(bytes: PackedByteArray) -> int            # max(siz
   宽高从 JPEG 的 `SOF0` 段读（不上线，与 lidar 的"角度不上线"同理）；空 payload 时长度恰为 15，
   **调用方应自行丢弃**（sim 侧按短包忽略）。解析侧复用 `ParseFrameHeader()` / `FramePayloadSize()`，无需新增函数。
 - `BuildPose`（task_31 Step 1）：固定 **8 键** `{msg, world_time, x, y, z, yaw, vx, vy}`，`z` **必带**（UGV 0 / UAV 2.5）；`velocity.z` 丢弃（`vz` 不上线），不发 `valid` / `sub_gx` / `sub_gy` / `rtk_fixed`；`velocity` 由**调用方**传 `WorldTransform.VelToWorld(vehicle.velocity)` 的结果（本文件**不** preload `WorldTransform`，保持"只做协议事实"的分层）；`pose` 缺 key 时四字段回 `0.0`（不崩）。
+- `NormalizeKind` / `BuildMotionCommand`（task_35 Step 2）：**纯协议事实**，不打日志、不查场景。
+  `NormalizeKind()` 只认 `robot` / `pedestrian`（strip + lower），缺省 / 空 / 非字符串 / 其它值一律返回 `""`，
+  由 **manager** warn 一次后按 robot 处理（分层：判断在 manager、字面量在协议层）。
+  `BuildMotionCommand(v, dir=NAN, seq=0)` 返回 `{msg:"motion_cmd", seq, v}`，`dir` **只有当它是有限数时**才带上
+  —— 超时停车就靠这个语义发"只改速度、不动朝向"的 `v=0`；**不写** `action` / `speed`（两套字段并存、互不覆盖，§8.1-9）。
 - **只做协议事实**：不碰 socket、不碰场景树。
 
 ### 7.4 `ComponentLink`（`src/net/ComponentLink.gd`，`RefCounted`）
@@ -1576,16 +2119,18 @@ func ApplyBodySize(size: Vector3) -> bool              # has_method("SetBodySize
 `SensorCatalog`：Step 8 ✅ 已落地（`src/sensors/SensorCatalog.gd`，签名同构）。
 
 ```gdscript
-# src/chassis/ChassisCatalog.gd —— 不声明 class_name；Step 5 ✅
+# src/chassis/ChassisCatalog.gd —— 不声明 class_name；Step 5 ✅ / task_35-1 加 pedestrian
 const SCENES := {
     "diff_drive_ugv": "res://src/scenes/chassis/DiffDrive.tscn",
     "quadrotor_uav":  "res://src/scenes/chassis/Quadrotor.tscn",
+    "pedestrian":     "res://src/scenes/props/Pedestrian.tscn",     # task_35 Step 1
 }
 const DEFAULTS := {
     "diff_drive_ugv": {"max_speed": 1.5, "max_turn_rate": 90.0,
                        "wheel_base": 0.30, "track_width": 0.25, "height": 0.25},
     "quadrotor_uav":  {"max_speed": 2.0, "max_climb_rate": 1.0,
                        "max_yaw_rate": 90.0, "size": 0.40},
+    "pedestrian":     {"max_speed": 1.26, "max_turn_rate": 180.0},  # task_35 Step 1
 }
 static func Has(p_name: String) -> bool                # 目录外名字 = false（不 load、不报错）
 static func GetScene(p_name: String) -> PackedScene    # load() + 缓存；不存在返回 null 并 push_error
@@ -1625,6 +2170,13 @@ const DEFAULTS := {
 > `default-params` 断言直接比对两份字典）。task_33 Step 3 起其中的几何三项（`wheel_base 0.30` / `track_width 0.25` /
 > `height 0.25`）= `assets/chassis/ugv_chassis.glb` 的 AABB（D11：模型 = 碰撞盒）。
 
+> **`pedestrian` 是"特殊底盘"（task_35 Step 1）**：`DEFAULTS["pedestrian"]` = `{max_speed 1.26, max_turn_rate 180.0}`
+> 必须与 `Pedestrian.GetDefaultParams()` **逐键一致**（`check_pedestrian` 的 `default-params` 断言三处一起比对：
+> 对象 / 目录 / 期望字面量）。**只有两个键**——task 文档正文提到的 `turn_rate_deg` 别名**没有采纳**：
+> 它与 `max_turn_rate` 同义，再加一个无消费者的键会让"逐键一致"这条不变量变成三处同步负担
+> （理由记在 `tmp/task35/plan.md` §2.3 / §6 R7）。`pedestrian` 的 `SCENES` 指向 `src/scenes/props/`（不是
+> `src/scenes/chassis/`），因为它带胶囊碰撞、自宿主推进，和"车体里的底盘零件"不是一回事（§4.11）。
+
 ### 7.7 `Vehicle` / `WebSocketManager` / `Lidar2D`
 
 见 §4.3 / §4.5 / §4.7。
@@ -1641,12 +2193,25 @@ const DEFAULTS := {
   "params": { "max_speed": 1.5, "max_turn_rate": 90 },
   "manifest": [ { "slot": "lidar_front", "sensor": "lidar_2d" } ] }
 
+// sim → world（行人首包，task_35 Step 2；kind / spawn **都是可选键**）
+{ "msg": "chassis_hello", "peer_id": "human-01", "chassis": "pedestrian",
+  "kind": "pedestrian",
+  "spawn": { "x": 70.0, "y": 70.0, "z": 0.0, "yaw": 0.0 },
+  "params": {}, "manifest": [] }
+
 // world → sim
-{ "msg": "chassis_ready", "peer_id": "12D3Koo...", "avatar_id": 7,
+{ "msg": "chassis_ready", "peer_id": "12D3Koo...", "avatar_id": 7, "kind": "robot",
   "spawn": { "x": 64.0, "y": 64.0, "z": 0.0, "yaw": 0.0 }, "world_time": 12345.678 }
 
-// sim → world（20~50 Hz）
+// world → sim（行人回执：kind + pedestrian_id，**没有** avatar_id；spawn 是校验后的真实值）
+{ "msg": "chassis_ready", "peer_id": "human-01", "kind": "pedestrian", "pedestrian_id": 1,
+  "spawn": { "x": 70.0, "y": 70.0, "z": 0.0, "yaw": 0.0 }, "world_time": 12345.678 }
+
+// sim → world（20~50 Hz；老形态）
 { "msg": "motion_cmd", "seq": 1234, "action": "forward", "speed": 50 }
+
+// sim → world（20~50 Hz；行人形态，task_35 Step 2；dir 可省略 = 只改速度、保持朝向）
+{ "msg": "motion_cmd", "seq": 1235, "v": 1.0, "dir": 1.5707963 }
 
 // world → sim（manifest 到齐，每 peer 仅一次）
 { "msg": "assembly_ready", "peer_id": "12D3Koo...", "world_time": 12345.678 }
@@ -1679,6 +2244,13 @@ const DEFAULTS := {
 6. 未知 `msg`：记 warning 后忽略，不断连接、不崩。
 7. `sensor_id` / `avatar_id` 均由 manager 单调分配（`u16` 语义，v1 用 `int`）。
 8. **`pose`（world → sim，task_31 Step 1）**：频率 **10 Hz**（`POSE_BROADCAST_INTERVAL_S = 0.1`，对齐真机 `state_notifier` 的 100 ms）；**只走底盘连接**（与 `motion_cmd` 同一条，传感器连接一条都不发）；`world_time` 单位=**秒**，与 `chassis_ready` / `assembly_ready` 同时间基（`WorldClock.Now()`）；`x`/`y`/`z`/`yaw` 取自 `Vehicle.GetPose()`（世界坐标 Z-up、米、yaw 弧度绕 +z、归一化 `[-PI, PI)`，**与 `chassis_ready.spawn` 同构**，静止时逐字段相等）；`vx`/`vy` 取自 `WorldTransform.VelToWorld(vehicle.velocity)`（世界 x=东、y=南）；`z` **必带**（UGV `0.0` / UAV `2.5`，消费方不得假设 `z==0`）；**不发** `vz` / `valid` / `sub_gx` / `sub_gy` / `rtk_fixed`（决策链产物归 sim、世界无 RTK）。
+9. **`kind` / `spawn` / `v` / `dir`（task_35 Step 2，全部"只增不改"）**：
+   - `chassis_hello.kind` ∈ `{"robot", "pedestrian"}`，**缺省 `"robot"`**（老 sim 一字不改照旧走车）。非法值（大小写 / 空白不敏感，其它任何字符串、数字、null）→ manager `push_warning` 一次后**按 robot 处理，连接不关**。`kind="pedestrian"` 要求 `chassis="pedestrian"`，否则 warn + 按 robot。
+   - `chassis_hello.spawn` `{x, y, z, yaw}`：**只有 `kind="pedestrian"` 读**；缺省 = 合法（默认点 `World.SPAWN_WORLD + (0, -8, 0) = (64, 56, 0)`，yaw 0，不 warn）。有值但非法 → warn + 回退默认点：`x/y` 非有限数 / `x,y ∉ [0, 128)`（`cells_x × voxel_size`，走 `ProjectSettings`）/ `z ∉ [0, 2.0]` / 落在 15 个 `World.OBSTACLES` 内（外扩 0.3 m）/ 与已占 avatar（车 + 人）水平中心距 < 1.0 m。`yaw` 归一化 `[-PI, PI)`。robot 的 `spawn` 仍由世界按 §4.5.1-④ 决定（hello 里的 spawn 对车**无意义**、被忽略）。
+   - `chassis_ready` 增 `kind`（两种 avatar 都带）与 `pedestrian_id`（仅 pedestrian，u16 语义，与 `avatar_id` **两套编号**）；pedestrian 回执里的 `spawn` 是**校验后**的真实出生点，静止时与 `pose` 逐字段相等。
+   - `motion_cmd.v`（m/s，行人侧 clamp `0~1.26`）/ `motion_cmd.dir`（世界系朝向角，弧度，0 = +X 东，逆时针为正，可省略 = 保持原朝向）。**与 `action/speed` 并存、互不覆盖**：带 `v` 就按 m/s，带 `action` 才走老的百分比折算；`dir` 与 `v` 各自独立解析（`{v:1.2}` 只改速度，`{dir:1.57}` 只改朝向）。
+   - **超时停车**：行人**超过 300 ms**（`PEDESTRIAN_CMD_TIMEOUT_MS`）没收到新 `motion_cmd` → 世界侧自动下发 `v=0`（**只停、不断连、不刷屏**，日志每段"动→停"一行）。**车没有超时**。
+   - **同一 `peer_id` 换 `kind` = 重建 avatar**（第 2 轮）：注册前**不分类型** `_RemoveAvatar(peer_id, except_link=本连接)`（两张表 + 两个容器一起清，旧连接被关且置 `link.vehicle = null`）；`chassis_ready` **重发**、`assembly_ready` **不重发**；`_RemoveAvatar` 只在真摘到节点时才 emit `*_removed` / 打日志。细节见 §4.5.1-⑩。
 
 ### 8.2 二进制帧（LiDAR / camera，**小端**）
 
@@ -1720,12 +2292,18 @@ const DEFAULTS := {
 | `sensor` 与 manifest 声明不一致 | 以 `slot` 为准照常挂载 + `push_warning` |
 | 传感器先于底盘到达 | 进 `_pending_sensors`；pending 期间**不发** `sensor_ready`；底盘到位后回放 |
 | pending 等待底盘超过 `pending_timeout_ms`（10 s） | 断开该连接（**1008**，`pending timeout`） |
-| 同一 `peer_id` 重复 `chassis_hello`（该连接本身是底盘连接） | 先移除旧 avatar（`except_link=本连接`，不误关新链路），再新建；`assembly_ready` 不重发 |
+| 同一 `peer_id` 重复 `chassis_hello`（该连接本身是底盘连接；**含跨 kind**：同一 `peer_id` 先后 robot / pedestrian） | 注册前**不分类型** `_RemoveAvatar(peer_id, except_link=本连接)`（两张表 + 两个容器一起清、旧连接被关且交出 `link.vehicle`），再新建；`chassis_ready` 重发、`assembly_ready` 不重发 |
 | 已握手的**传感器**连接发 `chassis_hello` | `push_warning` + **忽略**（角色是单值，不改角色、不建车） |
 | `motion_cmd` 出现在非底盘连接 | `push_warning` + 忽略（数据面只在底盘连接上） |
 | 已握手连接发未知 `msg` | `push_warning` + 忽略，**不断连、不崩**（§8.1-6） |
 | sim 发二进制帧 | `push_warning` + 丢弃该帧（二进制只下行，§8.2），不断连 |
 | 连接断开 | 按 §5.3 清理；`_manifests` / `_manifest_parts` / `_assembly_sent` / `_pending_sensors` 同步清除 |
+| `chassis_hello.kind` **非法**（非 `robot`/`pedestrian`） | `push_warning` 一次 + **按 robot 处理**，连接**不关**（task_35 Step 2） |
+| `kind="pedestrian"` 但 `chassis != "pedestrian"` | `push_warning` + **按 robot 处理**（不建行人、连接不关） |
+| `chassis_hello.spawn` 非法（越界 / 非有限数 / `z` 越界 / 落在障碍内 / 与已占 avatar 重叠） | `push_warning` + **回退默认点** `(64, 56, 0)`，照常装配并在 `chassis_ready.spawn` 回**真实**出生点（只有 pedestrian 读 `spawn`） |
+| 行人**超过 300 ms** 没有新 `motion_cmd` | `_Tick_Pedestrian_Timeouts()` 下发 `v=0`（**只停、不断连、不刷屏**；日志 `pedestrian idle …` 每段一行）；**车没有超时** |
+| 行人的 `sensor_hello`（manifest 声明的槽位） | 行人没有 `AttachSensor` → `has_method` 守卫后走"几何未落地"同一分支：回 `sensor_ready`（`geometry=false`）、manifest 可置位、**绝不** `Invalid call` |
+| 行人底盘连接断开 / 重复 `chassis_hello` | `_RemoveAvatar()`：先从 `_pedestrians` 摘表再 free（R9）+ 清 `_ped_last_motion_ms` / `_ped_idle` + 关该 peer 其余连接；日志 `pedestrian removed peer=…`。**只在真摘到节点时才 emit / 打日志**（两张表都空 = 静默，第 2 轮） |
 
 ---
 
@@ -1752,6 +2330,8 @@ const DEFAULTS := {
 | E25 | **UAV 高度软件限幅的口径**（task_32 Step 3）：`Quadrotor.ClampAltitude()` 是**安全限幅**、不是运动学——位置推进仍只由 `Vehicle.move_and_slide()` 完成（D8）。写法硬约束：①夹的必须是**宿主车身**（`CharacterBody3D` 在 `Vehicle` 根节点上），夹 `Quadrotor` 自身（local 恒 0）毫无作用；②必须用 `global_transform`（只改 `origin.y`，保留 `basis`），**不得**出现 `global_position`——`src/tests/check_quadrotor.gd` 的 `BANNED_TOKENS` 会直接 FAIL（唯一合法例外是**整行** `#` 注释，该 lint 只剥离整行注释）；③上限取 `World.AIR_WALL_HEIGHT_M - CLAMP_MARGIN_M`（= 31.8），**不得**再写一个 `31.8` 字面量（`clamp-ceiling-derivation` 断言两份常量自洽）；④越界只 `push_warning` 且 **1 s 限流**，**不得** `push_error`（验收要求 0 ERROR）；⑤不引入参数、不进 `params`（参数表固定 4 键，§7.2 / §7.6） | 无 clamp → 物理失效时 UAV 能飞出 32 m 顶盖；用 `global_position` → 白盒 lint 红（若改用别的写法绕开 lint，就把"位置只由 Vehicle 推进"这条硬约束悄悄废掉了）；把 `31.8` 写死第二遍 → 改世界高度时两处不一致，限幅变成隐性 bug |
 | E26 | **相机组件（`SubViewport` 离屏渲染）的四条硬约束**（task_33 Step 2）：① `SubViewport.own_world_3d` **必须 `false`**（共享父视口的 `World3D`；`true` 会渲空世界）；② **必须 `await RenderingServer.frame_post_draw`** 之后才 `get_image()`，否则读到上一帧 / 空缓冲 —— 而渲染信号**只能 `await`、绝不能 `connect()`**（连 Callable 会让进程退出时 SIGABRT / EXIT=134）；③ 本机 **`godot --headless` = `--display-driver headless`，只支持 dummy 渲染驱动**：`frame_post_draw` 永不触发、`get_texture().get_image()` 返回 null 并打 `ERROR: Parameter "t" is null`、`await` 会**永久挂住**（实测被 240 s timeout 杀掉）→ 组件与自检都必须**先过 `Can_Capture()` 闸、再 await**，出图验收只能在虚拟显示下跑（`tmp/task33/xvfb` 的 `Xvfb :99` + `--rendering-driver opengl3` + **`--audio-driver Dummy`**，否则无声卡会多一行 ALSA `ERROR`）；④ **`SubViewport` 不是 `Node3D`**：`Node3D → SubViewport → Camera3D` 会**断掉变换继承链**（实测根节点在 `(64, 6, 64)` 时 `Lens.global_transform` 仍是 IDENTITY），抓拍前必须手工 `lens.global_transform = global_transform` | ①渲空世界；②③静默读到空 / 上一帧，或永久挂住（看起来像死循环）；④拍到"世界原点的画面"而不是挂载点的画面，且**不报任何错**。执行者：`src/tests/check_camera_sensor.gd` 的 `A3-viewport-node`（`own_world_3d=false` + 初始 `update_mode==0`）/ `A4-lens-node`（`Lens` 在 `SubViewport` 下 + 光心在原点）/ `A12-no-physics-lint`（禁 `UPDATE_ALWAYS`）/ `B1~B9`（真渲染九项）。另有三个同级坑写在 §4.8.1-⑤⑥⑦：`Configure(null)` 形参不能写 `Dictionary`、`make_dir_recursive_absolute()` 失败会打 ERROR |
 | E27 | **传感器模型不得带碰撞体**（task_33 Step 3）：`Lidar2D.tscn` / `CameraSensor.tscn` 里的 `Body` 只是 `assets/sensors/*.glb` 的实例（glb 本身 0 碰撞），**整个传感器子树里 `CollisionShape3D` / `CollisionPolygon3D` / `PhysicsBody3D` / `Area3D` 计数必须为 0**——不允许为了"能放置/能站住"给传感器加形状。配套口径：① `Body` 是 glb 实例根（`Node3D`），子节点才是 `MeshInstance3D`（多网格模型无法直接做成单个 `MeshInstance3D`）；② 相机光轴 = 传感器局部 `−Z`，模型镜头朝 `+X` 故 `Body.rotation_degrees=(0,90,0)`（写 `-90` 会朝车尾）；③ `Body.position` 不写：模型原点已是光心 / 扫描面中心 | 加了碰撞体 → 雷达**扫到自己**（`0.0x m` 的假回波堆在车顶，SLAM 直接崩）、相机被自己的壳挡（`near=0.05` 也救不了）、且 `SelfRidArray()` 只排除宿主 `Vehicle` 一个 RID，**不会**排除传感器自己的形状。执行者：`src/tests/check_models.gd` 的 `S5-sensor-no-collision`（两个已挂传感器子树计数 = 0）+ `check_sensor_models.gd` 的 `*-no-collision`（资产层 9 项/件）+ `check_camera_sensor.gd` 的 `A5-no-collision`（组件层）三重守卫 |
+| E28 | **glTF 内嵌贴图会被导入器抽取成 `.glb` 旁的独立贴图文件**（human_model Step 4 实测）：Godot 4.7.2 的场景导入参数默认 `gltf/embedded_image_handling=1`（Extract）→ `assets/humans/<name>/model.glb` 导入后**额外生成** `model_<glTF 内图名>.jpg/.png`（本资产是 `model_rp_*_dif.jpg` + `model_rp_*_norm.png`）以及各自的 `.import`。① 这 4 个文件**必须与 `.glb`、`.glb.import` 一起提交** —— 只提交 `.glb` + `.import` 时，任何人在干净检出上重导都会 `ERROR: Cannot open file …_dif.jpg`；② 运行 / 自检**之前必须先** `godot --headless --path orion-simulation-world --import`，`.godot/` 缓存缺失时 `load(model.glb)` 返回 `null`（.tscn 仍能加载但 `Body` 为 `null`）——实测 `Person` 节点仍被建出却是**空壳**（0 mesh，画面里看不到人），引擎打 **12 行** `ERROR: Cannot open file 'res://.godot/imported/…*.scn'`，`check_person_assets` 报 **`total=32 failed=14`**；③ 反过来把参数改 `2`（Basis Universal 内嵌）能换回“只有 `.glb`”，但那是**有损压缩**、对下游 YOLO 判据是负收益，本支线不采用 | 漏提交 sidecar → 别人重导即 ERROR 或贴图全丢；忘了先 `--import` → `Person.tscn` 的 `Body` 拿不到 glb、世界里 0 个人，而 `--quit` 仍可能 EXIT=0（“0 ERROR”假红）。执行者：`src/tests/check_person_assets.gd` 的 `asset-loads-*`（缓存缺失即红）/ `asset-material-*` 与 `scene-material`（贴图真在）/ `asset-sha256-*`（字节未被悄悄替换）+ `World.gd::BuildPersons()` 的 `ResourceLoader.exists()` 守护（缺场景只 warn） || E28 | **glTF 内嵌贴图会被导入器抽取成 `.glb` 旁的独立贴图文件**（human_model Step 4 实测）：Godot 4.7.2 的场景导入参数默认 `gltf/embedded_image_handling=1`（Extract）→ `assets/humans/<name>/model.glb` 导入后**额外生成** `model_<glTF 内图名>.jpg/.png`（本资产是 `model_rp_*_dif.jpg` + `model_rp_*_norm.png`）以及各自的 `.import`。① 这 4 个文件**必须与 `.glb`、`.glb.import` 一起提交** —— 只提交 `.glb` + `.import` 时，任何人在干净检出上重导都会 `ERROR: Cannot open file …_dif.jpg`；② 运行 / 自检**之前必须先** `godot --headless --path orion-simulation-world --import`，`.godot/` 缓存缺失时 `load(model.glb)` 返回 `null`（.tscn 仍能加载但 `Body` 为 `null`）——实测 `Person` 节点仍被建出却是**空壳**（0 mesh，画面里看不到人），引擎打 **12 行** `ERROR: Cannot open file 'res://.godot/imported/…*.scn'`，`check_person_assets` 报 **`total=32 failed=14`**；③ 反过来把参数改 `2`（Basis Universal 内嵌）能换回“只有 `.glb`”，但那是**有损压缩**、对下游 YOLO 判据是负收益，本支线不采用 | 漏提交 sidecar → 别人重导即 ERROR 或贴图全丢；忘了先 `--import` → `Person.tscn` 的 `Body` 拿不到 glb、世界里 0 个人，而 `--quit` 仍可能 EXIT=0（“0 ERROR”假红）。执行者：`src/tests/check_person_assets.gd` 的 `asset-loads-*`（缓存缺失即红）/ `asset-material-*` 与 `scene-material`（贴图真在）/ `asset-sha256-*`（字节未被悄悄替换）+ `World.gd::BuildPersons()` 的 `ResourceLoader.exists()` 守护（缺场景只 warn） |
+| E29 | **`--fixed-fps 60` 只给"自己数帧"的自检用，墙钟驱动的端到端**绝对不能**带**（task_35 Step 5 实测）：它在 headless 下会**关掉实时同步**，实测跑到 **21~37 倍速**（`--max-fps 60` 也救不了）。判据"`\|d\| ≈ v×t`"会因此必红（10 s 墙钟 = 360 s 世界时间，人撞到东侧空气墙）。**正确姿势**：① 自检脚本（`await physics_frame` 自己数帧、需要 `delta` 恒 = 1/60）→ `--headless --fixed-fps 60`；② Python / 墙钟驱动的端到端 → `--headless --max-fps 60`（实测 ratio 1.00、pose 10.2 Hz），并且**速率类断言一律用 pose 的 `world_time`** 当时间基（只有"300 ms 超时"那条必须用墙钟，因为世界侧 `_Tick_Pedestrian_Timeouts` 用的就是 `Time.get_ticks_msec()`）。反例与本轮实测见 §4.11.2 |
 
 ### 9.2 命名规范
 
@@ -1794,6 +2374,9 @@ Modified Date ： YYYY-MM-DD
 | 位姿下行 | `pose`（10 Hz，走底盘连接） | task_31 Step 1；**理想真值**，无噪声 / 无延迟 / 无丢包；`z` 由世界给（UGV `0.0` / UAV `2.5`），消费方不得假设 `z==0`；`vz` 不上线 |
 | 底盘 | `diff_drive_ugv` / `quadrotor_uav` 两种（D6） | 目录外名字直接拒绝。`diff_drive_ugv` 的几何默认值 = `ugv_chassis.glb` 的 AABB **`0.30 × 0.25 × 0.25`**（D11：模型 = 碰撞盒，task_33 Step 3）；车体截面由 `0.16/0.24` 变 `0.25/0.25` **会改变贴墙 / 绕行 / 急停余量**（同样的墙面，车头更早接触），goto 冒烟需按新尺寸复核 |
 | 世界边界 | **可见 2 m 体素矮墙 + 不可见 32 m 空气墙 + 32 m 顶盖**（空气墙在 layer 1，与地面同层） | task_32 Step 2；矮墙只作视觉 / 近距障碍，真正的硬边界是空气墙：20 m/s 四面冲撞 10 s 与 5 m/s 持续爬升 10 s 都出不去（`src/tests/check_bounds.gd` 的 B2~B6）；雷达贴边时会把空气墙扫成静态障碍 → SLAM 地图边缘出现"墙"，**预期行为**（task_32 §三.5-3）。另：UAV 还有 `[0, 31.8]` **软件 clamp 兜底**（`Quadrotor.ClampAltitude()`，task_32 Step 3），即使物理失效也飞不出 32 m 顶盖 |
+| 静态人物 | **2 个实例**（`rp_carla_rigged_001` ×2；备选 `rp_eric` **在库但未摆**） | human_model Step 4：纯视觉 / **零碰撞** / 无动画 / 无 AI / 不进装配线 / 不参与决策链；不随 `motion_cmd` 移动、不被射线扫到（`check_lidar` F7/F8 逐字不变）；只在 Step 5 用于"相机拍得到 + YOLOv8n 能认出人"的视觉验证 |
+| 行走人物 | **0 个自动走动实例**（task_35 Step 3 起自动绕圈已移除） | walking_person Step 2/3 曾用 1 个 `rp_nathan_animated_003_walk` 沿 44 m 闭合矩形路径以 `1.260 m/s` 走动；**task_35 Step 3 把 `World.WALKERS` / `BuildWalkers()` 整节删除**，世界**不再**自己让人走（走动能力与 `PersonWalking.tscn` 资产保留给 §4.10 的人形自检，`Person.gd` / `Person.tscn` 一字未改）。世界里现在的人见下一行 |
+| 外部驱动的行人 | **`kind="pedestrian"` 的 avatar 已可装配**（task_35 Step 2）+ **世界预置 2 个 idle 行人**（task_35 Step 3） | 世界侧把它当"特殊底盘"：`Pedestrian.tscn`（`CharacterBody3D` + 胶囊 + 走路 glb，`layer 2` / `mask 1\|4`）**根节点就是 avatar**，进 `Pedestrians` 容器（**不进** `Vehicles`、**不占** `_PickSpawn` 排位），由 `chassis_hello{kind, spawn?}` 装配、`motion_cmd{v, dir}` 驱动、`pose` 10 Hz 回传、**300 ms 无指令自动停车**。**非目标**：不经 `pleiades-sim` / 不连 libp2p / 不参与任何决策链；**不涉及 SLAM / 建图 / 地图一致性 / 动态障碍 / 避让**（人写进地图、离开后被后续观测抹掉都是正常现象，**不做任何掩蔽或衰减**）；不做 YOLO、不做 tensor 图传、不做多行人编队。"人会穿建筑"是 Step 1 的既定取舍（`mask` 不含 VoxelWorld 所在层），选点由 spawn 校验兜住。**同一 `peer_id` 换 `kind`**（robot ↔ pedestrian）= 重建 avatar：两张表 + 两个容器一起清、旧连接交出所有权、`_RemoveAvatar` 只在真摘到节点时才 emit / 打日志（§4.5.1-⑩、§8.1-9）。**task_35 Step 3 起**：世界里还预置 **2 个 idle 行人**（`World.PEDESTRIANS` → `World/Pedestrians/pedestrian_01`(44,96) / `pedestrian_02`(52,102)），它们**没有任何 `peer_id`、不参与网络、没有外部驱动时站着不动**（不是故障），与动态行人**共用同一个 `Pedestrians` 容器**；动态行人的 300 ms 超时停车、`pose` 10 Hz、`_pedestrians` 表计数**都不受它们影响**（`GetPedestrianCount()` 只数注册的 peer）。世界预置的人**不会**被 `_Pick_Spawn` / `_Spawn_Occupied` 看见（那套只查已注册 avatar），所以选点靠常量表硬保证离协议 spawn 点 > 30 m（§4.11.1） |
 | LiDAR 噪声 | 默认关闭 | `_rng` 保留，`params.noise` 未启用 |
 | 相机传感器 | **世界侧零件已落地 + 已登记为可装配零件**（task_33 Step 2/3、task_34 Step 3）+ **已由 Step 4 的 `check_camera_shots.gd` 挂进世界拍照**（§4.8.2），**可按 `rate_hz` 出帧** | `SensorCatalog` 已登记 `camera`（§7.6），`sensor_hello` 会经 `Vehicle.AttachSensor()` 把它实例化到 `Vehicle/Sensors/<slot>`，`sensor_ready` 之后 `SetStream()`，随后按 `rate_hz`（默认 **1 Hz**）下发 `type=2` 帧（15 B 头 + JPEG 原始字节，§8.2）；默认 640×480（装配线口径，组件常量仍是 1280×720，见 §7.6）。**仍不推流 / 无请求应答**（无 `camera.capture()`）、**不进 `World.tscn`**（`World.tscn` 不引用相机）、**无碰撞体**（E27）。帧**内容**验收仍需真渲染环境：headless（dummy 渲染器）下只验头部、频率与"零帧"闸门（`A13~A18` / `J1~J7`） |
 | UAV 高度控制 / 三维寻路 / 三维避障 | **不在本任务**（§九） | UAV 决策链仍是 2D（**不控高度**）；世界侧巡航高度 **2.5 m**（`WebSocketManager.UAV_ALTITUDE_M`，task_32 Step 3）由世界给，另有 `[0, 31.8]` 软件 clamp 兜底；本任务只给它"3D 身体" |
@@ -1828,6 +2411,16 @@ Modified Date ： YYYY-MM-DD
 
 | task_33-4 | `src/tests/check_camera_shots.gd`（**新建**）、`COMPONENTS.md`（§1.1 / §1.4 / §4.8 / **§4.8.2** / §10 / §11 / 附） | Step 4 模拟世界拍照（出图到 `tmp/task33_shots/`，**不在仓库**）：真 `World.tscn` + 静止 UGV（`ApplyChassis("diff_drive_ugv")`）+ 建模雷达/相机，三机位拍 **3 张 1280×720 JPEG**（朝东 / A+90° 朝南 / 外部 3/4）到**绝对路径**。`check_camera_shots.gd`：**S 组 18 项**（结构，headless 也跑）+ **R 组 17 项**（真渲染，`Can_Capture()==false` 时整组 `[skip]` 且不计入 total）→ headless `total=18 failed=0`（`[skip]` ×17）、**Xvfb 下 `total=35 failed=0`**，两条均 `SELF-CHECK OK` + EXIT=0 + 0 ERROR；**13 个既有自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 51` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 12`，`failed=0`）；`--quit` EXIT=0 且 0 ERROR；日志无 `[ws] listening`（脚本在 `add_child` 前关掉 `autolisten`）。实测三张 **26 315 / 24 462 / 29 576 B**（SOF0 均 1280×720、首三字节 `ffd8ff`），灰度 `var 0.009563 / 0.008259 / 0.012607`、网格 `contrast 56/42/48` 与 `midband 28/28/30`，车体投影占屏 **0.0000 / 0.0000 / 0.0689**，`pillar_e` 屏内角点 **8 / 0**（"对着哪拍哪"），两两字节差异 **0.823 / 0.963 / 0.960**。**不改** `CameraSensor.gd` / 任何 `.tscn` / `assets`；**不启动 sim、不连 WS、不跑决策链**；**不执行** `git add` / `git commit` |
 | task_34-3 | `src/sensors/SensorCatalog.gd`（`SCENES` + `"camera"`、`DEFAULTS` + 640×480@1 Hz）、`src/sensors/CameraSensor.gd`（+`rate_hz` / `DEFAULT_RATE_HZ` / `MIN_RATE` / `ACCUM_EPS` / `frame_produced` / `SetStream` / `ClearStream` / `HasStream` / `Tick_Stream` / `Emit_Frame` / `Get_Tick_Count` / `Get_Frame_Count` / `_Capture_Tick` / `_Warn_No_Renderer` / `_Rate_Or` / `_exit_tree` / `_process`）、`src/net/WireProtocol.gd`（+`BuildCameraFrame`）、`src/net/ComponentLink.gd`（+`MAX_FRAME_BUFFER_BYTES`，`Init()` 在 `accept_stream` 前设 4 MiB 双缓冲）、`src/tests/check_camera_sensor.gd`（**12 -> 18**：`A13~A18` + `B10` + 内联 `StubLink` + `_Step_Ticks`）、`src/tests/check_ws_manager.gd`（**51 -> 59**：`A9` / `A10` + J 段 `J1~J6` + `[skip] J7`）、`COMPONENTS.md`（§1.4 / §3 / §4.8 / **§4.8.3** / §7.3 / §7.4 / §7.6 / §8.2 / §10 / §11 / 附） | 世界侧 camera 成为**可装配零件**并按频率出 `type=2` 帧：`sensor_hello(sensor="camera")` → `sensor_ready` → `SetStream` → 按 `rate_hz`（默认 1 Hz）组帧下发（15 B 头 + JPEG 原始字节，§8.2）；`Can_Capture()==false`（headless）时**只 warn 一次、绝不出帧、绝不 await**（E26-③）。`check_camera_sensor`：headless **`total=18 failed=0`**（`[skip]` ×10）、Xvfb 下 **`total=28`**；`check_ws_manager`：**`total=59 failed=0`**（`[skip]` ×1）；**其余 12 个自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_shots 18`，全部 `failed=0`）；`--quit` EXIT=0 且 0 ERROR。实测关键行：`A14 size=25 type=2 slot=7 seq=1` / `A16 1hz=1/1 1hz=1/1 2hz=2/2` / `A17 can=false ticks=1 frames=0 warned=true` / `A9 size=20 type=2 slot=4 seq=11 empty=15` / `A10 in=4194304 out=4194304 closed=true` / `J2 size=(640, 480) fov=70.0 rate=1.00 can_capture=false` / `J4 physics_nodes=0` / `J6 ticks=+1 frames=0`。**不改** `World.tscn` / `Vehicle.gd` / `Lidar2D.gd` / `ChassisModel.gd` / `WebSocketManager.gd` / 任何 `.tscn` / `assets` / 任何 `pleiades-*` crate；Xvfb 档（`B10` / `J7`）本机无 `DISPLAY` **未实测**；**不执行** `git add` / `git commit` |
+| human_model-4 | `assets/humans/`（**新建**：`README.md` + `LICENSE_renderpeople.txt` + `rp_carla_rigged_001/` + `rp_eric_rigged_001/`，每件 = `model.glb` + `.glb.import` + 2 张贴图 + 2 个贴图 `.import`）、`src/scenes/props/Person.tscn`（**新建**，§3 第 9 个）、`src/props/Person.gd`（**新建**）、`src/tests/check_person_assets.gd`（**新建**）、`src/world/World.gd`（+`PERSON_SCENE` / `PERSONS_NODE` / `PERSONS` / `_persons_root` / `BuildPersons()` / `GetPersonsRoot()`）、`COMPONENTS.md`（§0.2 / §1.1 / §1.4 / §2 / §2.1 / §2.2 / §3 / §4.1 / **§4.9** / §9.1 E28 / §10 / §11 / 附） | 静态人物接入 Godot（支线，**不进装配线**）：2 件人形 `model.glb` 落 `assets/humans/`（sha256 与 Step 3 证据链逐位一致），`Person.tscn` = `Node3D` + glb 静态实例（**零碰撞**），`World.gd` 以常量表 `PERSONS` **程序化、幂等**摆 2 人（世界 `(60,76)` / `(68,70)`，yaw 0）。`check_person_assets.gd`：**32 项断言** / `total=32 failed=0` / `SELF-CHECK OK`（资产 16 + 场景 5 + 常量 2 + 摆位 9）；**14 个既有自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `camera_shots 18`，全部 `failed=0`）；`--import` / `--quit` 均 EXIT=0 且 0 ERROR（日志有 `[world] persons built: 2 (2 specs)`）；真渲染出图 3 张 1600×900（`DISPLAY=:99` + `opengl3` + `Dummy`，非 headless）。**不改** `World.tscn` / `project.godot` / 既有自检的断言与节点树；**不碰** `pleiades-*` / `Task/` / `Workbook/`；**不执行** `git add` / `git commit` |
+| walking_person-2 | `assets/humans/rp_nathan_animated_003/`（**新建**：`model.glb` + `.glb.import` + 抽出的 `model_*_dif.jpg` / `model_*_norm.png` + 两个 `.import`）、`src/scenes/props/PersonWalking.tscn`（**新建**，§3 第 10 个）、`src/props/PersonWalking.gd`（**新建**）、`src/tests/check_walking_person.gd`（**新建**）、`src/world/World.gd`（+`WALKER_SCENE` / `WALKERS_NODE` / `WALKERS` / `_walkers_root` / `BuildWalkers()` / `GetWalkersRoot()`；`_ready()` 末尾在 `BuildPersons()` 之后调用）、`assets/humans/README.md`（只追加 1 行 + 1 段）、`COMPONENTS.md`（§1.4 / §2 / §2.1 / §2.2 / §3 / §4.1 / **§4.10** / §10 / §11） | 走路人物接入 Godot（支线，**不进装配线**）：Renderpeople Free **Animated** People 的 `rp_nathan_animated_003_walking` → 剥根位移 / 压到 **1.84 m** / 脚底 `y≈0` / 朝 **+X** → 带 skin + 1 条动画的 glb（`3 263 492 B` / `21 506 tri` / `88 骨` / `duration 2.2333 s`，源首帧零位 T-pose 已裁、原地循环接缝 `0.1145 m`）。`PersonWalking.tscn` = `Node3D` + glb 实例（**零碰撞**），`World.gd::BuildWalkers()` 幂等建 `Walkers` 并 `Configure` 一条 44 m 闭合路径（1.260 m/s）。`check_walking_person.gd`：headless **`total=16 failed=0`**、`DISPLAY=:99` **`total=22 failed=0`**（三帧 1280×720 JPEG 落 `tmp/walking_person/shots/`，28 900 / 27 183 / 27 750 B，投影框中心两两相距 300.5 / 582.7 / 283.6 px，框内灰度 `mean_abs` 0.201 / 0.253 / 0.172）；**13 个既有自检断言数与基线逐字一致**（`project` / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18`，全部 `failed=0`）+ `check_person_assets 32` / `check_person_shots 7`（headless）；`--import` EXIT=0 且 0 ERROR（日志有 `[world] walkers built: 1 (1 specs)`）。**不做**碰撞体 / 雷达 / 建图 / 决策链 / YOLO；**不改** `World.tscn` / `project.godot` / `Person.*` / 既有自检断言；**不碰** `pleiades-*` / `Task/` / `Workbook/`；**不执行** `git add` / `git commit` |
+| walking_person-3 | `assets/humans/rp_nathan_animated_003_walk/`（**目录改名**：6 文件、`glb` `sha256` 不变、3 个 `.import` 重建且 params 段与备份逐行相同）、`src/props/Person.gd`（**改写**：走动并入 `walk_speed` / `path` / `loop` + 弧长采样 + `_physics_process` 推进 + 动画播放，**默认静态**）、`src/props/PersonWalking.gd`（**删除**）、`src/scenes/props/PersonWalking.tscn`（改 2 行：根脚本 → `Person.gd`、`Body` → `_walk` 资产）、`src/world/World.gd`（`WALKERS` 键名统一 `walk_speed` + `loop`，`Configure` 传三字段；`PERSONS` / `BuildPersons()` 一字不动）、`src/tests/check_person_walk.gd`（**新增**，headless 20 项）、`src/tests/check_walking_person.gd`（**删除**）、`assets/humans/README.md`、`COMPONENTS.md`（§1 状态 / §1.4 / §2 / §2.1 / §2.2 / §3 / §4 / §4.9 / §4.10 / §10 / §11） | 走动收口（支线，**不进装配线**）：世界里有 1 个人**真的在走**（动画在播 + 位置随时间变）。`check_person_walk.gd`：headless **`total=20 failed=0`**、`DISPLAY=:99` **`total=26 failed=0`**；运行组实测 `L=44.000 m` / `v=1.260 m/s` / `frames=2096`（真跑一整圈）/ `Δs` 逐帧 `0.02100 m`（上限 `0.03150`）/ `close=0.0160 m`（≤0.05）/ `path_dev=0.000000 m` / `hip_drift=0.0239 m`；三帧 1280×720 JPEG 落 `tmp/walking_person/shots/`，`28 877 / 27 165 / 27 775 B`，投影框中心两两相距 `301.6 / 583.8 / 283.6 px`，框内灰度 `mean_abs` `0.20178 / 0.25179 / 0.17722`；**14 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `person_assets 32` / `person_shots 7`（headless）或 `22`（DISPLAY），全部 `failed=0`、0 ERROR）；`--quit` EXIT=0 且 0 ERROR（日志有 `[world] walkers built: 1 (1 specs)` + `[person] walker_01 configured: ... walk_speed=1.260 m/s loop=true`）。**不做**碰撞体 / 雷达 / 建图 / 决策链 / YOLO；**不改** `World.tscn` / `project.godot` / `Person.tscn` / `PERSONS` / 既有自检断言；**不碰** `pleiades-*` / `Task/` / `Workbook/`；**不执行** `git add` / `git commit` |
+
+| task_35-2 | `src/net/WireProtocol.gd`（+`KIND_ROBOT` / `KIND_PEDESTRIAN` / `NormalizeKind()` / `BuildMotionCommand()`）、`src/net/WebSocketManager.gd`（+`PEDESTRIAN_CHASSIS`·`PEDESTRIANS_NODE`·`PEDESTRIAN_SPAWN_*`·`PEDESTRIAN_CMD_TIMEOUT_MS` / `pedestrians_root` / `_pedestrians`·`_ped_last_motion_ms`·`_ped_idle`·`_next_pedestrian_id` / `pedestrian_spawned`·`pedestrian_removed` / `GetPedestrian`·`GetPedestrianCount`·`IsPedestrian`·`GetAvatar`·`GetPedestriansRoot` / `_Register_Pedestrian`·`_Apply_Pedestrian_Command`·`_Tick_Pedestrian_Timeouts`·`_Pedestrians_Root`·`_Pick_Pedestrian_Spawn`·`_Pedestrian_Default_Spawn`·`_Spawn_In_Obstacle`·`_Spawn_Occupied`·`_World_Span_M`·`_All_Avatars`·`_HasAvatar`·`_Merge_Avatar_Params`·`_To_Float`·`_Kind_Of`·`_RemoveAvatar`·`_UniqueAvatarName`；`_process` 加超时停车、`Stop()` 清行人表、`GetStats()` 加 `pedestrians`、`chassis_ready` 加 `kind`。**第 2 轮**：`_RemoveAvatar(peer_id, except_link) -> bool`（两张表 + 两个容器一起摘、只摘到时才 emit/print、被判死刑的连接交出 `link.vehicle`）、`_CleanupLink()` 所有权守卫（`link.vehicle != null` 才摘）、`_ApplyMotionCommand()` 按 `link.vehicle` 身份分流、`_RegisterChassis` / `_Register_Pedestrian` 注册前**不分类型**先摘）、`src/tests/check_ws_manager.gd`（**59 -> 76**：`A11` + `K1~K13`，第 2 轮再加 `K14~K16`（跨 kind 重建）+ `_drive_physics` / `_wait_closed_frames` 装置）、`COMPONENTS.md`（§1.4 / §4.5 / **§4.5.1-⑩** / §7.3 / §8.1 / §8.3 / §10 / §11） | Step 2 协议扩展：世界**认得"人"**。`chassis_hello.kind`（缺省 `robot`）+ 行人可选 `spawn`；`motion_cmd{v, dir}` 连续驱动；**300 ms 无新指令自动 `v=0`**（只停、不断连、不刷屏）；pedestrian **不进** `Vehicles`、**不占** `_PickSpawn` 排位、用独立的 `_next_pedestrian_id`。`check_ws_manager`：**headless `total=76 failed=0` / Xvfb `total=77 failed=0`**（两档都 `SELF-CHECK OK`、EXIT=0、0 ERROR；差 1 是 J7 需要渲染器）。第 2 轮 Xvfb 整轮墙钟 **65 s**（规划期基线 `total=74 failed=2`、50.95 s）。`A11` 协议形态白盒 + `K1` 装配回执 / `K2` 路由与容器 / `K3` pose 10 Hz / `K4` v+dir 弧线 / `K5` 老 `action/speed` 折算 / `K6` 超时阈值白盒 / `K7` 超时停车且位姿不动 / `K8` 非法 spawn 回退 / `K9` 缺省 spawn / `K10` 非法 kind 按 robot / `K11` 缺省 kind 按 robot / `K12` 行人传感器不崩（回执**无** `geometry` 键）/ `K13` 断连移除 / `K14` robot→pedestrian 换 kind / `K15` pedestrian→robot 换 kind / `K16` 同一连接重建。实测关键行（Xvfb 档）：`K1 spawn=(70.00, 70.00) yaw=0.00` / `K2 parent=Pedestrians vehicles=3 (was 3)` / `K3 pose=+10 in 60 frames` / `K4 yaw_err=0.0000 pose=(70.3266, 70.7934)` / `K5 speed=0.6300` / `K7 speed=0.0000 idle=true open=true dx=0 dy=0` / `K8 spawn=(64.00, 56.00)` / `K13 count=3 (was 4)` / `K14 vehicles=5(was 5) peds=4(was 3) events=["v:human-05"]` / `K15 pose=(64.0, 62.0)->(64.158, 62.0) events=["p:human-06"]` / `K16 open=true events=["v:human-07"]` / `H5 closed=true code=1002`。**断言"一项不能少"是机器化的**：标签 diff（`comm -23`）缺 0 条，既有 59 项 + A11 的 grep 计数 = 60。**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `camera_shots 18` / `person_assets 32` / `person_walk 20` / `person_shots 7` / `pedestrian 40`，全部 `failed=0`、0 ERROR）；`--quit` EXIT=0 且 0 ERROR、日志**零** pedestrian 行（无人连入 = 节点树零变化）。**不改** `World.tscn` / `World.gd` / `Vehicle.tscn` / `Vehicle.gd` / `Pedestrian.gd` / `Pedestrian.tscn` / `project.godot` / 任何既有自检断言；**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不碰** `pleiades-*` / `Task/`；**不执行** `git add` / `git commit` |
+
+| task_35-1 | `src/scenes/props/Pedestrian.tscn`（**新建**，§3 第 11 个）、`src/chassis/Pedestrian.gd`（**新建**，`extends ChassisModel`）、`src/chassis/ChassisCatalog.gd`（`SCENES` + `"pedestrian"`、`DEFAULTS` + `{max_speed 1.26, max_turn_rate 180.0}`）、`src/tests/check_pedestrian.gd`（**新建**，40 项）、`COMPONENTS.md`（§3 首句 / §3 表 / §3 非组件表 / **§4.11** / §7.6 / §11） | 世界侧**行人底盘**（task_35 Step 1，只登记、不改任何既有语义）：`CharacterBody3D` + `CapsuleShape3D` r0.25 / h1.75 / 中心 y0.875 + 走路 glb（内含 `AnimationPlayer`，**不另建**）；`layer 2` / `mask 1\|4`（雷达扫得到、车撞得到、不撞 VoxelWorld）；`Step()` 是**纯控制量**（树外可调）、`move_and_slide()` 只在 `_physics_process()`（白盒锁 1 处）；`v`/`dir` 独立解析 + `action/speed` 回退；转向限速 180 °/s、**无加速度斜坡**（`v=0` 当帧归零）；`speed_scale = v/1.26`（`v=0` 定格）；缺动画只 `push_warning`。`check_pedestrian`：**`total=40 failed=0`** / `SELF-CHECK OK` / EXIT=0 / 0 ERROR（场景形态 7 + 目录 6 + `Step` 控制量 11 + 老协议 5 + 真 World 推进与动画 8 + 白盒 3）。实测关键行：`world-walk-60f dx=1.2602 dy=0 dz=0` / `world-turn-limited-1f d_world_yaw=0.0523599`（= 180 °/s × 1/60）/ `world-turn-converge-30f world_yaw=1.570796` / `world-stop-still moved=0.000000` / `pose-getter yaw=1.57079637`（与 `WorldTransform.PoseFromTransform` 逐键一致）/ `anim-play-walk clip=Armature\|Take 001\|BaseLayer loop=true scale=1.000/0.500/0.000 playing=true` / `white-box-single-mover move_and_slide x1`。**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `person_assets 32` / `person_walk 20` / `person_shots 7`，全部 `failed=0`、0 ERROR）；`--import` / `--quit` 均 EXIT=0 且 0 ERROR。**不改** `Vehicle.tscn` / `Vehicle.gd` / `Lidar2D.gd` / `World.tscn` / `World.gd` / `Person.gd` / `WebSocketManager.gd` / `assets`；**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不碰** `pleiades-*` / `Task/`；**不执行** `git add` / `git commit` |
+
+| task_35-3 | `src/world/World.gd`（**删**：`WALKER_SCENE` / `WALKERS_NODE` / `WALKERS` / `_walkers_root` / `BuildWalkers()` / `GetWalkersRoot()`；**加**：`PEDESTRIAN_SCENE` / `PEDESTRIANS_NODE` / `PEDESTRIANS` / `_pedestrians_root` / `BuildPedestrians()` / `GetPedestriansRoot()`；`_ready()` 里 `BuildWalkers()` → `BuildPedestrians()`，位置不变）、`src/tests/check_person_walk.gd`（**20 -> 15**：删 C 旧 3 / D 5 / R 6，加 C 新 3）、`src/tests/check_person_walk_shots.gd`（**总数 4 / 14 不变**，主语 `walker_01` -> `pedestrian_01`、驱动 `Set_Progress_M()` -> 一次 `SetCommand({"v": 1.26, "dir": 0.0})`、R7 尺子 `Δs` -> `Δx`；**step.md 名单之外但验收必需** —— 旧文件强依赖 `GetWalkersRoot()`，不改必红）、`COMPONENTS.md`（§2 / §2.1 / §2.2 / §3 / §4.1 / §4.10-⑤⑧ / **§4.11.1** / §10 / §11 / 附） | Step 3 世界布局：**世界不再自己让人走**，交给人（外部）驱动。`World.WALKERS`（1 条 44 m 闭合矩形路径）/ `BuildWalkers()` / `GetWalkersRoot()` 与 `Walkers` 容器**整节删除**，换成 `PEDESTRIANS`（**只有**出生点 + 初始朝向 + 数量，**无路径 / 无巡逻 / 无计时 / 无速度**）+ `BuildPedestrians()`（先摘同名旧容器再建，幂等）+ `GetPedestriansRoot()`；容器名 `Pedestrians` **逐字 = `WebSocketManager.PEDESTRIANS_NODE`**（与动态装配的人共用）。`PERSONS` / `BuildPersons()` **一字不动**；`Person.gd` / `Person.tscn` / `PersonWalking.tscn` / `World.tscn` / `project.godot` / `Pedestrian.*` / `WebSocketManager.gd` / 其余 13 个自检**一行未改**。**2 个世界预置 idle 行人**：`pedestrian_01` 世界 `(44,96)` yaw 0 / `pedestrian_02` `(52,102)` yaw 180`（互距 10.000 m）；选点判据逐条实测（离最近障碍 3.000 / 8.062 m；离边界 32 / 26 m；离 `SPAWN_WORLD` 37.736 / 39.850 m；离 `PERSONS` ≥ 25.6 m；离 `check_lidar` 热区 `(60,90)` **17.088 / 14.422 m** —— 全部 > 12 m range；离 `check_camera_shots` 停车点 `(60,84)` 20.000 / 19.698 m；离协议 spawn 点 `(64,56)` / K1 `(70,70)` / K16 `(72,78)` 均 > 30 m）。**无外部驱动时人站着不动 = 预期**（`speed_scale = 0.0`、仍 `is_playing`）。`check_person_walk`：**`total=15 failed=0`**，**headless 与 Xvfb 两档同值**（A 8 / B 4 逐字保留 + C 新 3：`world-pedestrians-count`（容器名 / 父 / 孩子数 2 / 名字逐字 / `Pedestrian.tscn` / `Pedestrian.gd` / `SetCommand`+`GetPose` 契约面）、`world-pedestrians-spawn-clear`（五条判据全过，`bad=[]`）、`world-pedestrians-idempotent`（`nodes 40->40`、同名容器 1 个、孩子数 2））。`check_person_walk_shots`：**headless `[skip]` ×10 + `total=4 failed=0`**、**Xvfb `total=14 failed=0`**（三张 `walk_t{0,1,2}.jpg` = `27 857 / 28 321 / 28 614 B`、SOF0 均 1280×720；`x = 44.000 / 44.840 / 45.680 m`、`frames = 0 / 40 / 80`、`Δx = 0.8400 m`、`Δx/Δframes = 0.021000 = v/60`（偏差 **0.00%**）；框 `P(523.7,276.2) S(119.2,173.0)` → `P(583.0,273.2) S(114.7,187.9)` → `P(654.8,269.5) S(107.2,206.2)`；`h_frac 0.240 / 0.261 / 0.286`；框水平位移 `57.0 / 68.1 / 125.1 px`；框内/框外 `0.0962/0.0001 (996.5×)`、`0.0666/0.0002 (406.4×)`、`0.0881/0.0002 (545.4×)`；64×64 裁剪差 `0.06694 / 0.07616 / 0.08532`；源码 lint `Set_Progress_M=0 / _ped.global_position=0 / SetCommand=1`）。**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `camera_shots 18` / `lidar 48` / `person_assets 32` / `person_shots 7` / `pedestrian 40`，全部 `failed=0`、0 ERROR、EXIT=0）+ `ws_manager` **headless 76 / Xvfb 77** 逐字不变（K1/K2/K13/K15/K16 全绿；`[ws] pedestrians root created` **0 行** —— manager 直接复用世界已建的同名容器，`K2 parent=Pedestrians` 即证据）。`--quit` / `--quit --fixed-fps 60` 均 EXIT=0 且 **0 ERROR**，日志：`[world] persons built: 2 (2 specs)` + `[world] pedestrians built: 2 (2 specs, idle until driven)`、`walkers built` **0 行**、`[pedestrian]` 告警 **0 行**；`--import` EXIT=0 且 0 ERROR。**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不改** `World.tscn` / `project.godot` / `PERSONS` / `pleiades-*` / `Task/` / `programs/` / 根 Cargo；**不执行** `git add` / `git commit` |
+| task_35-5 | `src/tests/check_pedestrian_physics.gd`（**新建**，**22 项**：S 7 / P 8 / L 7）、`src/tests/check_pedestrian_shots.gd`（**新建**，**14 项**：A 4 / R 10；headless 档 4 + 10 `[skip]`）、两个自动生成的 `.gd.uid`、`COMPONENTS.md`（顶部状态段 / §1.4 / §3 脚本表两行 / **§4.11.2** / §9.1 **E29** / §11）；工程外 `tmp/task35/{e2e_drive.py,s5_e2e.sh,s5_checks.sh,s5_metrics.md,e2e_report.md,impl.md,pose_*.csv,shots/ped_*.jpg,logs/*}` | Step 5 **端到端验收**（**生产代码一字未改**，Step 1~4 的产出物全部当黑盒）。**① 直行**：Python → WS → 世界，10.100 世界秒位移 10.102 m（`v_eff=1.0003 m/s`，+0.03%）、`yaw_max=0.000°`、`Δy=0.0000 m`、pose 10.10 Hz。**② 转弯**：`dir` 阶跃 0→π/2，只用**严格内部点**拟合得 `180.0 °/s`（被 clamp 的端点会把 180 压成 160.7 —— 第一版实测）、`conv=0.600 s`（中间经过 15/33/51/69/87 五个 yaw ⇒ 不是瞬转）、Kasa（**零 numpy**，手写 3×3 高斯消元）`r_fit=0.3199 m` vs `v/ω=0.3183 m`（+0.5%）、弧长差 −2.5%。**③ 超时**：停发后 `stop_latency=0.384 s`（= 世界 300 ms 阈值 + 一条 pose 量化）、冻结 1.100 世界秒位移 **0.000000 m**、末条 `v=(0,0)`、世界日志 `pedestrian idle` **恰 1 行**。**④ 人撞车**：车静在世界 `(60,84)` 朝东、人自 `(62.5,84)` 以 1.2 m/s 正碰后**再推 300 物理帧** —— 逐帧 `gap_min=0.019952 m`（= 一帧步长 0.02，≥ −1 mm 不穿透）、**挡停**（最后 60 帧前进 0.000000 m、横向 0.000000 m）、**车位移 0.000000000 m**、`Δyaw=0`、`min(ped.x−car.x)=0.4200 m`（没被挤穿）；再用 0.05 m/s 贴实 60 帧量得真实车头→胶囊表面 `0.1508 m`（`\|0.150−v\|=0.0008`）。**⑤ 雷达可见**：雷达装**车头**（`x=0.15`、`z=0.6`）扫 `ScanOnce()`，±45° 扇区最近 `2.2500 m` = 2.50 − 0.25（差 **0.0000**）、`ranges[0]` 与该最小值一致、扇区 11 条命中（≈11.5° 张角 = 一个人的宽度）、后向扇区只有 11.31 m 外的 `wall_c`、把人挪到 10 m 外变 `9.7500 m`。**⑥ 三帧真渲染**（Xvfb `:99` + llvmpipe，**绝不 `--headless`**、必带 `--audio-driver Dummy`）：`tmp/task35/shots/ped_{walk,turn,stop}.jpg` = 31 123 / 31 317 / 32 122 B、SOF0 均 1280×720、`var 0.0235~0.0242`、逐字节差 0.669/0.681/0.682、框内灰度差 0.068~0.100、框水平中心 **74.2 / 141.6 / 67.5 px**、`h_frac 0.375/0.525/0.530`；`R7` 此帧 `yaw=90.00°` 且转向段 60 Hz 逐帧拟合 **180.0 °/s**；`R8` 冻结 15 帧 `Δpose=0.000000 m` + `speed_scale=0.000` + 停帧与前两帧各差 ≥ 67 px。**回归**：`bash tmp/task35/s5_checks.sh` → `FAILS=0 / ALL CHECKS GREEN`（`--quit` EXIT=0/0 ERROR + **21 项 headless** + **5 项 Xvfb**），既有 19 项 `total` 逐字不变（`check_ws_manager` 按本文 §1.4 的 **76 / 77**，非 plan.md §2.4 过期的 73）。**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不碰** `pleiades-*` / `Task/` / `programs/` / 根 Cargo；**未起停 Xvfb**（用现成 `:99`）；**不执行** `git add` / `git commit` |
 
 > **task_31 Step 1 追加**（不属于 task_30 的 Step 1~8）：`pose` 下行（10 Hz，走底盘连接）+ `src/tests/check_pose.gd`（**23 项断言** / `total=23 failed=0` / `SELF-CHECK OK`）。改动文件仅 `src/net/{WireProtocol,WebSocketManager}.gd`、新建 `src/tests/check_pose.gd`、本文；`pleiades-sim/**` 一行未动（消费在 task_31 后续 step）。
 
@@ -1877,7 +2470,7 @@ Step 1（本文 + 骨架）
 | `src/net/WireProtocol.gd` | ✅ Step 6 协议唯一入口（7 个消息名：`chassis_hello` / `chassis_ready` / `sensor_hello` / `sensor_ready` / `motion_cmd` / `assembly_ready` / **`pose`（task_31 Step 1）**；`imu` / `gnss` 已删除不再预留；`ParseJson`/`MakeJson`/`MakeJsonText`/**`BuildPose`**/`BuildLidar2DFrame`/**`BuildCameraFrame`（task_34-3）**/`ParseFrameHeader`/`FramePayloadSize`） |
 | `src/net/ComponentLink.gd` | ✅ Step 6 单连接封装（`RefCounted`；`Init`/`Poll`/`TakePackets`/`SendJson`/`SendBinary`/`NextSeq`/`IsOpen`/`IsConnecting`/`Close`（void）/`Describe`；`last_error`）。**task_34 Step 3**：`MAX_FRAME_BUFFER_BYTES = 4 MiB`，`Init()` 在 `accept_stream()` **之前**设 `inbound_buffer_size` / `outbound_buffer_size`（默认 64 KiB 撑不住一张 720p JPEG） |
 | `src/net/WebSocketManager.gd` | ✅ Step 6 服务端（监听 / accept / 两张表 / hello 装配 / manifest 就绪 / `assembly_ready` / 断开清理 / `Heartbeat` 巡检；全静态实例、无 `push_error`；`UAV_ALTITUDE_M` 于 task_32 Step 3 改 **2.5 m**）+ ✅ task_31 Step 1 位姿下行（`POSE_BROADCAST_INTERVAL_S = 0.1` / `_pose_acc` / `_BroadcastPoses()`，只发已握手且活着的底盘连接） |
-| `src/tests/check_ws_manager.gd` | ✅ WebSocketManager 自检（Step 6；`SELF-CHECK OK` + `exit 0`，**59 项断言**：场景形态 / World 接线 / 按序装配 / 运动下行 / 传感器先到 / 空 manifest / 断开清理 / 错误路径 / 规范 lint；Step 8 后 `C14 sensor-geometry-consistency` 由"双双为假"变为**双双为真**；**task_34 Step 3**：+`A9 camera-frame`（`type=2` 帧格式）+`A10 link-buffer-size`（4 MiB 双缓冲）+ **J 段** `J1 camera-sensor-ready` / `J2 camera-geometry` / `J3 camera-stream-bound` / `J4 camera-no-collision` / `J5 camera-assembly` / `J6 camera-stream-gate` + `[skip] J7 camera-payload-jpeg`（无渲染器不计入 total），`Sim` 额外按序记录 `binaries`） |
+| `src/tests/check_ws_manager.gd` | ✅ WebSocketManager 自检（Step 6；`SELF-CHECK OK` + `exit 0`，**76 项断言**（headless）/ **77 项**（Xvfb）：场景形态 / World 接线 / 按序装配 / 运动下行 / 传感器先到 / 空 manifest / 断开清理 / 错误路径 / 规范 lint；Step 8 后 `C14 sensor-geometry-consistency` 由"双双为假"变为**双双为真**；**task_34 Step 3**：+`A9 camera-frame`（`type=2` 帧格式）+`A10 link-buffer-size`（4 MiB 双缓冲）+ **J 段** `J1 camera-sensor-ready` / `J2 camera-geometry` / `J3 camera-stream-bound` / `J4 camera-no-collision` / `J5 camera-assembly` / `J6 camera-stream-gate` + `[skip] J7 camera-payload-jpeg`（无渲染器不计入 total），`Sim` 额外按序记录 `binaries`） |
 | `src/scenes/sensors/Lidar2D.tscn` | ✅ Step 8 传感器组件（`Node3D` + `DebugPoints(MeshInstance3D, visible=false)`；`node_paths=PackedStringArray("debug_points")`；无内嵌脚本、无 `uid`）。task_33 Step 3：加 `Body`（`lidar_tmini.glb` 实例根，identity，**无碰撞**，E27） |
 | `src/sensors/Lidar2D.gd` | ✅ Step 8 2D 单线激光（360 条水平射线 / 10 Hz / `BuildLidar2DFrame` 二进制下发 + `LaserScan`；不写 position、不发 JSON、不 preload `ComponentLink`） |
 | `src/sensors/SensorCatalog.gd` | ✅ Step 8 传感器目录（`SCENES` / `DEFAULTS` + `Has` / `GetScene`（`load()`+缓存）/ `GetDefaults`；与 `ChassisCatalog` 同构）。**task_34 Step 3**：`SCENES` 加 `camera`（→ `CameraSensor.tscn`）、`DEFAULTS` 加 `camera = {640×480, fov 70.0, quality 0.8, 1 Hz}`（装配线口径，与组件常量 1280×720 是两个口径，见 §7.6） |
@@ -1885,7 +2478,18 @@ Step 1（本文 + 骨架）
 | `src/tests/check_pose.gd` | ✅ 位姿下行自检（task_31 Step 1；`SELF-CHECK OK` + `exit 0`，**23 项断言**：`A1~A7` 协议形态与白盒 lint（E23 三条禁止）/ `B1~B2` World 接线 / `C1~C14` 端到端（10 Hz = 60 帧 10 条、8 键字段、与 `spawn` 一致、yaw 范围、`world_time` 单调、传感器连接 0 条、forward 的 `x`/`vx`、left 的 `yaw`/`vy`、断开后不再发、`vehicle==null` 守卫、每周期每连接恰好一次）） |
 | `src/tests/check_bounds.gd` | ✅ 空气墙 / 顶盖自检（task_32 Step 2；`SELF-CHECK OK` + `exit 0`，**12 项断言**：`B1` 结构 / layer / 无 mesh + `B1b` 四面墙内侧面贴边界 + `B1c` 顶盖下表面 32 m + `B1d` 由代码构建（`.tscn` 无 `Bounds`）+ `B1e` 幂等重建 + `B2~B5` 四面 20 m/s 冲撞 10 s 出不去 + `B6` 5 m/s 爬升被顶盖挡住 + `B7` 地面自由落体静止 + `B8` 可见 2 m 矮墙各 1024 格仍在） |
 | `src/tests/check_models.gd` | ✅ 低模外观 + 传感器模型接入自检（Step 2 / task_33 Step 3；`SELF-CHECK OK` + `exit 0`，**24 项断言**：`M1~M8` 模型显隐 / AABB / 车头朝向 / 碰撞盒 = 模型 / 幂等 / 换底盘循环 + `M3b` 模型 = 碰撞盒 + `S1~S7` 两个传感器场景的 `Body` 挂载 / AABB / 光心 / 零碰撞 / `pitch`） |
-| `src/world/World.gd` | ✅ Step 2 世界根脚本 + **task_32 Step 2 空气墙 / 顶盖**（`_Build_Bounds()`、`World/Bounds` layer 1、5 个 box、`AIR_WALL_*` 常量与 `AIR_WALL_BOXES` 几何表；`.tscn` 零改动） |
+| `assets/humans/README.md` | ✅ human_model Step 4 资产说明（来源 URL `https://renderpeople.com/sample/free/renderpeople_free_rigged_people_FBX.zip` + 许可原文 + 处理方式（单位修正 / 缩放 / 朝向 / 贴图 / 三角数）+ 导入副产物 + 换备选方法 + 使用边界 + 摆位差异） |
+| `assets/humans/LICENSE_renderpeople.txt` | ✅ Renderpeople 免费页条款原文（883 B，`sha256 aa4f1583…`，与 `tmp/human_model/normalized/` 原件逐字节相同） |
+| `assets/humans/rp_carla_rigged_001/{model.glb,model.glb.import,model_rp_carla_rigged_001_dif.jpg(+.import),model_rp_carla_rigged_001_norm.png(+.import)}` | ✅ **首选**人形（`2 664 856 B` / `sha256 bc9677b8…` / 1.7307 m / 19 988 tri / 1 mesh / 1 surface / 无骨骼无动画 / 脚底 y=0 / 朝 +X）；贴图与 `.import` 是 Godot 抽取的 sidecar（E28），**必须一起提交** |
+| `assets/humans/rp_eric_rigged_001/{同上 6 个文件}` | ✅ **备选**人形（`2 438 336 B` / `sha256 12e959ba…` / 1.8400 m / 20 542 tri）；**在库但未摆进世界**，换用只改 `Person.tscn` + `Person.MODEL_GLB` 两处 |
+| `src/scenes/props/Person.tscn` | ✅ human_model Step 4 人物道具（§3 第 9 个 `.tscn`）：`Node3D` + `Body`（`rp_carla_rigged_001/model.glb` 静态实例，identity）+ 根脚本 `Person.gd`；**无 CollisionShape3D**、无 `node_paths`、无内嵌脚本；`load_steps=3` |
+| `src/props/Person.gd` | ✅ **唯一**人物脚本（human_model Step 4 静态 + walking_person Step 3 走动**并入同一文件**）：静态常量 `MODEL_GLB` / `HEIGHT_MIN_M`(1.60) / `HEIGHT_MAX_M`(1.85)、走动常量 `WALK_GLB` / `CLIP_MPS`(1.260)，导出字段 `walk_speed`(默认 0.0=静态) / `path` / `loop`，`Configure` / `Set_Progress_M` / `Get_*` / `Path_Hits_Rect`，闭合路径弧长采样 + `_physics_process` 推进 + 动画播放（`find_child("AnimationPlayer", true, false)` → 播第 0 条 → `speed_scale = walk_speed/CLIP_MPS`）；**默认静态、零碰撞、不进装配线**（§4.9 / §4.10） |
+| `src/tests/check_person_assets.gd` | ✅ human_model Step 4 自检（`SELF-CHECK OK` + `exit 0`，**32 项断言**：A 组资产 16（每件 loads / instantiates / aabb / feet / no-collision / material / tri-budget / sha256）+ B 组 `Person.tscn` 5 + C 组常量自洽 2 + D 组世界摆位 9（root / count / placement / feet / no-collision / idempotent / spawn-clear / obstacle-clear / not-vehicles）） |
+| `assets/humans/rp_nathan_animated_003_walk/{model.glb,model.glb.import,model_rp_nathan_animated_003_dif.jpg(+.import),model_rp_nathan_animated_003_norm.png(+.import)}`（**共 6 个文件**；Step 3 只把目录改名，`glb` 字节与 `sha256` 不变） | ✅ **走路人形**（walking_person Step 2/3）：`3 263 492 B` / `sha256 0e907fc9…` / **1.8490 m**（rest 姿态；动画峰值 1.8400 m）/ 21 506 tri / 88 骨蒙皮 / 1 条动画 `2.2333 s`（68 键，已裁源首帧）/ 脚底 `y=0.000510` / 朝 +X；**只有这一件带骨骼与动画** |
+| `src/scenes/props/PersonWalking.tscn` | ✅ walking_person Step 2/3 走路人物道具（§3 第 10 个 `.tscn`）：`Node3D` + `Body`（`rp_nathan_animated_003_walk/model.glb` 实例，identity）+ 根脚本 **`Person.gd`**（与 `Person.tscn` 同一个脚本）；**无 CollisionShape3D**、无 `node_paths`、无内嵌脚本 |
+| `src/tests/check_person_walk.gd` | ✅ walking_person Step 3 / **task_35 Step 3 改写**自检（`SELF-CHECK OK` + `exit 0`，**15 项断言**：A 组资产 8 + B 组场景 4 + C 组世界 3（世界预置行人：容器形态 / 出生点净空 / 幂等重建）；D 组运行 5 + R 组渲染 6 已随自动绕圈一并移除 → headless 与 `DISPLAY=:99` **两档都是 `total=15`**） |
+| `src/tests/check_person_walk_shots.gd` | ✅ walking_person Step 4 / **task_35 Step 3 换主语**自检（`SELF-CHECK OK` + `exit 0`，**14 项断言**：A 组结构 4 + R 组渲染 10；`--fixed-fps 60` 真推进 0/40/80 物理帧拍 `walk_t{0,1,2}.jpg`，帧间不瞬移；主语 = `World.PEDESTRIANS[0]` 的 `pedestrian_01`，驱动 = **一次** `SetCommand({"v": 1.26, "dir": 0.0})`，尺子 = `GetPose().x` 的 Δx；headless 下 R 组 10 项 `[skip]` 不计入 total → `total=4`，`DISPLAY=:99` 下 `total=14`） |
+| `src/world/World.gd` | ✅ Step 2 世界根脚本 + **task_32 Step 2 空气墙 / 顶盖**（`_Build_Bounds()`、`World/Bounds` layer 1、5 个 box、`AIR_WALL_*` 常量与 `AIR_WALL_BOXES` 几何表；`.tscn` 零改动）+ **task_35 Step 3 世界预置行人**（`PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()`，`WALKERS` / `BuildWalkers()` 已删；`.tscn` 仍然零改动） |
 | `COMPONENTS.md` | ✅ 本文 |
 | `assets/sensors/lidar_tmini.glb` | ✅ task_33 Step 1 雷达模型（17 444 B / 324 tri / 4 网格 / 材质 `ORION_MetalGray` + `ORION_GlassBlue`(BLEND) + `ORION_MatteBlack`；原点 = 罐体底面中心，AABB `0.080 × 0.054 × 0.080`） |
 | `assets/sensors/camera_module.glb` | ✅ task_33 Step 1 相机模组（11 944 B / 208 tri / 4 网格；原点 = 镜片前表面中心，AABB `0.055 × 0.036 × 0.030`） |
