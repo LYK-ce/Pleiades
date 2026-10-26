@@ -1,0 +1,26 @@
+; Presented by KeJi
+; Created Date ： 2026-10-25
+; Modified Date ： 2026-10-25
+;
+; 走路的动态人物道具（支线 walking_person Step 3，COMPONENTS.md §3 第 10 个 .tscn / §4.10）。
+; 根 Node3D(PersonWalking) + Body = assets/humans/rp_nathan_animated_003_walk/model.glb 的实例
+; （glb 自带 Skeleton3D 88 骨 + AnimationPlayer 1 条走路动画）。
+; 根脚本与静态人物**同一个** src/props/Person.gd（走动能力已并入，默认静态）；
+; 路径 / 速度 / 循环由 World.gd::BuildWalkers() 在入树后调 Configure() 给出。
+; **不加任何碰撞体**（纯视觉；check_person_walk 断言整个子树零物理节点）；
+; **无传感器、不进装配线**（没有 chassis_hello / sensor_hello 语义）。
+;
+; Body 的 transform 必须是 IDENTITY（原点 = 脚底中心）；自检 scene-body-mount 会断言。
+; 换模型 = 只改本文件第二条 ext_resource 的 path + Person.gd 的 WALK_GLB
+; （两处必须一致，自检 scene-const-consistent 会盯住）。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://src/props/Person.gd" id="1_walk"]
+[ext_resource type="PackedScene" path="res://assets/humans/rp_nathan_animated_003_walk/model.glb" id="2_model"]
+
+[node name="PersonWalking" type="Node3D"]
+script = ExtResource("1_walk")
+
+[node name="Body" parent="." instance=ExtResource("2_model")]

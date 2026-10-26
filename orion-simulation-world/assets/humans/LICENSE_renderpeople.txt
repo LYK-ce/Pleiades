@@ -1,0 +1,14 @@
+Renderpeople — Free 3D People（Posed / Rigged）条款留档
+抓取日期：2026-10-24（页面快照本地留存：tmp/human_model/probe_logs/rp_free.html）
+来源页  ：https://renderpeople.com/free-3d-people/
+下载直链：
+  https://renderpeople.com/sample/free/rp_posed_00178_29_GLB.zip
+  https://renderpeople.com/sample/free/renderpeople_free_rigged_people_FBX.zip
+
+页面原文（逐字，未改写）：
+all free models are subject to the same terms of use as the charged models in the shop, so they may be used for commercial purposes, like visualization.
+
+用法边界（本支线的自限，不是许可条款）：
+  仅用于本地仿真视觉验证；不训练模型、不发布权重、不把资产提交进仓库
+  （tmp/ 已被仓库 .gitignore 的 /tmp/ 规则忽略）。
+  站点另售 ML / CV 授权（https://humandataset.com/），本支线不涉及。

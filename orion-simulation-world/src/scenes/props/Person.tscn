@@ -1,0 +1,21 @@
+; Presented by KeJi
+; Created Date ： 2026-10-24
+; Modified Date ： 2026-10-24
+;
+; 静态人物道具（支线 human_model Step 4，COMPONENTS.md §3 第 9 个 .tscn / §4.9）。
+; 根 Node3D + Body = assets/humans/rp_carla_rigged_001/model.glb 的静态实例。
+; **不加任何碰撞体**（纯视觉；check_person_assets 断言整个子树零物理节点）；
+; **无行为、不进装配线**（没有 chassis_hello / sensor_hello 语义）。
+; 换备选模型 = 只改本文件第二行 ext_resource 的 path + Person.gd 的 MODEL_GLB
+; （两处必须一致，自检 script-model-const 会盯住）。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://src/props/Person.gd" id="1_person"]
+[ext_resource type="PackedScene" path="res://assets/humans/rp_carla_rigged_001/model.glb" id="2_model"]
+
+[node name="Person" type="Node3D"]
+script = ExtResource("1_person")
+
+[node name="Body" parent="." instance=ExtResource("2_model")]
