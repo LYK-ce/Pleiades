@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-27
 
 //! Robot 主循环（Task 23 阶段 C：base 骨架 + DeviceHandler trait）
 //!
@@ -17,8 +17,9 @@ use tracing::{info, warn};
 
 use async_trait::async_trait;
 
+use super::behavior_tree::FailCode;
 use super::command::{AutoCmd, Command, ManualCmd, ModeCmd};
-use super::mission::MissionQueue;
+use super::mission_queue::{MissionQueue, QueuedTask, TaskId};
 use super::mode::OpMode;
 use crate::robot::core::state::{ExecuteState, RobotState};
 use crate::robot::core::grid::OccupancyGrid;
@@ -33,6 +34,9 @@ use crate::robot::core::protocol::{
     COMPID_ROBOT, MSGID_POSE, PoseData,
 };
 
+/// 决策循环节拍（毫秒）：`main_loop` 用它调度，设备端用它填 `Frame.dt_ms`
+pub const AUTO_TICK_MS: u64 = 50;
+
 /// 位姿广播消息
 #[derive(Debug, Clone)]
 pub struct Pose {
@@ -42,6 +46,17 @@ pub struct Pose {
     pub vx: f32, pub vy: f32,
     /// 本车意图：D* 寻路下一格（Task 13_1，WS 下行带）
     pub sub_target: Option<(i32, i32)>,
+}
+
+/// 设备 tick 的结果（Task 36 §12.4.3）
+///
+/// - `Running`：任务还在跑（或本拍无事可做）
+/// - `Terminated(None)`：树给了成功终值
+/// - `Terminated(Some(code))`：树给了失败终值 + 原因码（§十一 #31）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    Running,
+    Terminated(Option<FailCode>),
 }
 
 /// Robot — 机器人系统中枢（base：只含共享状态，不含设备）
@@ -71,10 +86,25 @@ pub trait DeviceHandler: Send + Sync {
     async fn start(&self) -> Result<(), String>;
     /// 处理手动命令（设备自己解析支持的命令子集）
     async fn handle_manual_cmd(&self, cmd: &ManualCmd);
-    /// 任务重置（停车 + 清 goal + 清意图；模式切换 / 任务替换时调用）
+    /// 任务重置（停车 + 清 goal + 清树实例 + 清意图；模式切换 / 任务替换 / 建树失败时调用）
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>);
-    /// 50ms 决策循环（急停 + 寻路 + 决策 + 发动作，设备端完整实现）
-    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>);
+    /// 任务挂起（`preempt` 用，§十一 #38 / §12.8.2 第 2 条）：**不停树、不清实例表**。
+    ///
+    /// 设备只要做三件事：停车 → 清 nav 目标 → 清执行意图。
+    /// 树实例与节点进度（RUNNING 位置 / 重试计数 / 计时）原样保留，恢复时继续 tick。
+    ///
+    /// 与 [`DeviceHandler::reset`] 的分界：`reset` 丢弃实例（`replace` / 切模式），
+    /// `suspend` 保留实例（`preempt`）。叶子在 `nav.status() == Idle` 时会重新 `set_goal`，
+    /// 所以"清 nav"不会让恢复后的树空转（§十一 #38 的配套要求）。
+    async fn suspend(&self, execute_state: &Arc<RwLock<ExecuteState>>);
+    /// 任务开始：为该任务建树。
+    ///
+    /// **幂等**：该 `TaskId` 已有实例（抢占恢复）→ 只激活、不重建（§十一 #34 / #36）。
+    async fn build_task(&self, task: &QueuedTask) -> Result<(), String>;
+    /// 50 ms 决策循环（急停 → 树 → 决策 → 终值，设备端完整实现）
+    ///
+    /// 返回 `Terminated` 时 `main_loop` 才会 `pop_next`（唯一出队口，§十一 #16）。
+    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) -> TickOutcome;
     /// 停车
     fn stop(&self);
     /// 关设备（停车 + 停雷达 + 关设备）
@@ -277,8 +307,10 @@ async fn main_loop(
     }
     info!("Robot 主循环启动（base 骨架 + 设备 handler）");
 
-    let auto_tick_ms = 50u64;
+    let auto_tick_ms = AUTO_TICK_MS;
     let mut next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
+    // 当前任务的 TaskId（base 本地状态；设备端不碰队列）
+    let mut current_task_id: Option<TaskId> = None;
 
     loop {
         select! {
@@ -291,11 +323,13 @@ async fn main_loop(
                                 *op_mode.write().await = OpMode::Manual;
                                 mission_queue.write().await.clear();
                                 device.reset(&execute_state).await;
+                                current_task_id = None;
                             }
                             ModeCmd::SwitchToAuto => {
                                 info!("[Robot] 切换到 Auto 模式");
                                 *op_mode.write().await = OpMode::Auto;
                                 device.reset(&execute_state).await;
+                                current_task_id = None;
                                 next_tick = Instant::now() + Duration::from_millis(auto_tick_ms);
                             }
                         }
@@ -311,13 +345,22 @@ async fn main_loop(
 
                     Some(Command::Auto(a)) => {
                         if *op_mode.read().await == OpMode::Auto {
-                            match a {
-                                AutoCmd::Set(list) => {
-                                    // ORION_TASK_SET 替换语义（2026-08-07）：立即中断当前任务 + 整体替换队列
-                                    info!("[Robot] Auto 任务队列已替换");
-                                    mission_queue.write().await.replace(list);
+                            // 队列操作（同步、不持锁跨 await）→ 再按返回的动作叫设备
+                            let follow = {
+                                let mut q = mission_queue.write().await;
+                                apply_auto_cmd(&mut q, a).1
+                            };
+                            match follow {
+                                AutoFollowUp::Reset => {
                                     device.reset(&execute_state).await;
+                                    current_task_id = None;
                                 }
+                                AutoFollowUp::Suspend => {
+                                    // 队首已换成新任务 → 下一拍 auto_tick 会 build_task（幂等）
+                                    device.suspend(&execute_state).await;
+                                    current_task_id = None;
+                                }
+                                AutoFollowUp::None => {}
                             }
                         } else {
                             warn!("[Robot] 忽略 Auto 命令：当前为 Manual 模式");
@@ -333,8 +376,7 @@ async fn main_loop(
 
             // auto_tick：仅 Auto 模式激活（决策循环下沉到设备端）
             _ = tokio::time::sleep_until(next_tick.into()), if *op_mode.read().await == OpMode::Auto => {
-                let rs = robot_state.read().await.clone();
-                device.on_tick(&rs, &execute_state).await;
+                auto_tick(&device, &mission_queue, &robot_state, &execute_state, &mut current_task_id).await;
 
                 next_tick += Duration::from_millis(auto_tick_ms);
                 if next_tick <= Instant::now() {
@@ -354,4 +396,309 @@ async fn main_loop(
     device.stop();
     device.shutdown().await;
     info!("Robot 主循环已退出");
+}
+
+// ============================================================
+// AutoCmd → 队列操作 + 设备后续动作（纯函数，便于单测）
+// ============================================================
+
+/// 队列操作做完之后，base 还要对设备做什么
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoFollowUp {
+    /// 追加队尾：设备一行不动（当前任务继续跑）
+    None,
+    /// 整体替换 / 取消：`reset()`（halt 树 + 清实例表 + 停车）
+    Reset,
+    /// 抢占：`suspend()`（不停树 + 保留实例表 + 停车）
+    Suspend,
+}
+
+/// 执行一条 `AutoCmd`：**只动队列**，返回（队列条数，设备后续动作）。
+///
+/// `main_loop` 拿到返回值后再去 await 设备 —— 这样"哪种命令配哪种设备动作"是纯函数，
+/// 不会被 `main_loop` 的 select 结构藏起来（§11 #38 的分界就靠这张表）。
+fn apply_auto_cmd(queue: &mut MissionQueue, cmd: AutoCmd) -> (usize, AutoFollowUp) {
+    match cmd {
+        AutoCmd::Set(list) => {
+            let n = list.len();
+            info!("[Robot] Auto 任务队列已替换（{n} 条）");
+            queue.replace(list);
+            (n, AutoFollowUp::Reset)
+        }
+        AutoCmd::Append(list) => {
+            let n = list.len();
+            info!("[Robot] Auto 任务已追加队尾（{n} 条，当前任务不受影响）");
+            queue.append(list);
+            (n, AutoFollowUp::None)
+        }
+        AutoCmd::Preempt(list) => {
+            let n = list.len();
+            info!("[Robot] Auto 任务已抢占队头（{n} 条，当前任务挂起待恢复）");
+            queue.preempt(list);
+            (n, AutoFollowUp::Suspend)
+        }
+    }
+}
+
+// ============================================================
+// auto_tick — 一拍自动决策（建树 + 设备 tick + 出队）
+// ============================================================
+
+/// 一拍自动决策：base 负责「发现队首变化 → 建树」，设备负责「tick → 终值」（§十一 #36）
+///
+/// 出队只有一条路径：`on_tick` 返回 `Terminated` → 弹出队首（§十一 #16）。
+async fn auto_tick(
+    device: &Arc<dyn DeviceHandler>,
+    mission_queue: &Arc<RwLock<MissionQueue>>,
+    robot_state: &Arc<RwLock<RobotState>>,
+    execute_state: &Arc<RwLock<ExecuteState>>,
+    current_task_id: &mut Option<TaskId>,
+) {
+    // ① 队首变化 → build_task（队首不离队；同 id 不重复建，§十一 #36）
+    let head = mission_queue.read().await.head().cloned();
+    match head {
+        Some(task) if Some(task.id) != *current_task_id => {
+            match device.build_task(&task).await {
+                Ok(()) => {
+                    info!("[Robot] 开始任务 {:?}：{:?}", task.id, task.mission);
+                    *current_task_id = Some(task.id);
+                }
+                Err(e) => {
+                    // 建树失败 = 停住待命（§十一 #35）：清队列 + 停车，不拿后面的任务去试
+                    warn!("[Robot] 建树失败（任务 {:?}）：{e}；清空队列 + 停车待命", task.id);
+                    mission_queue.write().await.clear();
+                    device.reset(execute_state).await;
+                    *current_task_id = None;
+                }
+            }
+        }
+        Some(_) => {}
+        // 队列空了：复位「当前任务」，等下一条命令重新建树
+        None => *current_task_id = None,
+    }
+
+    // ② 设备 tick（急停 → 树 → 决策 → 终值，全在设备端）
+    let rs = robot_state.read().await.clone();
+    match device.on_tick(&rs, execute_state).await {
+        TickOutcome::Running => {}
+        TickOutcome::Terminated(code) => {
+            match code {
+                None => info!("[Robot] 任务完成"),
+                Some(c) => warn!("[Robot] 任务失败，原因码 {}", c.code()),
+            }
+            // 唯一出队口（§十一 #16）
+            let _ = mission_queue.write().await.pop_next();
+            *current_task_id = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::robot::core::mission_queue::Mission;
+    use crate::robot::core::state::DecisionState;
+
+    /// 记录 build / reset 调用次数的假设备（`on_tick` 返回脚本化终值）
+    struct MockHandler {
+        build_calls: AtomicU32,
+        fail_build: bool,
+        built_ids: std::sync::Mutex<Vec<TaskId>>,
+        reset_calls: AtomicU32,
+        suspend_calls: AtomicU32,
+        outcome: TickOutcome,
+    }
+
+    impl MockHandler {
+        fn new(outcome: TickOutcome, fail_build: bool) -> Self {
+            Self {
+                build_calls: AtomicU32::new(0),
+                fail_build,
+                built_ids: std::sync::Mutex::new(Vec::new()),
+                reset_calls: AtomicU32::new(0),
+                suspend_calls: AtomicU32::new(0),
+                outcome,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DeviceHandler for MockHandler {
+        async fn start(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn handle_manual_cmd(&self, _cmd: &ManualCmd) {}
+        async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
+            self.reset_calls.fetch_add(1, Ordering::SeqCst);
+            *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
+        }
+        async fn suspend(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
+            self.suspend_calls.fetch_add(1, Ordering::SeqCst);
+            *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
+        }
+        async fn build_task(&self, task: &QueuedTask) -> Result<(), String> {
+            self.build_calls.fetch_add(1, Ordering::SeqCst);
+            self.built_ids.lock().unwrap().push(task.id);
+            if self.fail_build { Err("mock build failed".to_string()) } else { Ok(()) }
+        }
+        async fn on_tick(&self, _rs: &RobotState, _es: &Arc<RwLock<ExecuteState>>) -> TickOutcome {
+            self.outcome
+        }
+        fn stop(&self) {}
+        async fn shutdown(&self) {}
+    }
+
+    fn goto(x: f32) -> Mission {
+        Mission::Goto { x, y: 0.0 }
+    }
+
+    /// 建树所需的三个共享状态（每次新建，测试之间不共享）
+    fn ctx() -> (Arc<MockHandler>, Arc<dyn DeviceHandler>, Arc<RwLock<MissionQueue>>, Arc<RwLock<RobotState>>, Arc<RwLock<ExecuteState>>) {
+        let mock = Arc::new(MockHandler::new(TickOutcome::Running, false));
+        let dev: Arc<dyn DeviceHandler> = mock.clone();
+        (
+            mock,
+            dev,
+            Arc::new(RwLock::new(MissionQueue::default())),
+            Arc::new(RwLock::new(RobotState::default())),
+            Arc::new(RwLock::new(ExecuteState::default())),
+        )
+    }
+
+    /// #9 建树时机：队首 id 变化才调 `build_task`，同 id 不重复调
+    #[tokio::test]
+    async fn test_build_task_only_when_head_changes() {
+        let (mock, dev, mq, rs, es) = ctx();
+        let mut current: Option<TaskId> = None;
+        mq.write().await.replace(vec![goto(1.0), goto(2.0)]);
+
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mock.build_calls.load(Ordering::SeqCst), 1, "首次 auto_tick 应建树");
+        let first = mq.read().await.head().map(|t| t.id).expect("队首存在");
+        assert_eq!(current, Some(first), "current_task_id 应为队首 id");
+
+        // 同一 id 再来一拍：不重复建
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mock.build_calls.load(Ordering::SeqCst), 1, "同 id 不应重复建树");
+
+        // 出队后队首换 id → 再建一次
+        let _ = mq.write().await.pop_next();
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mock.build_calls.load(Ordering::SeqCst), 2, "队首 id 变化应重新建树");
+
+        let ids = mock.built_ids.lock().unwrap().clone();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "两次建的应是不同任务");
+        assert_eq!(ids[1], current.expect("第二个任务已激活"));
+    }
+
+    /// #10 出队：只有 `Terminated` 才 `pop_next` 一次；`Running` 不出队
+    #[tokio::test]
+    async fn test_pop_next_only_on_terminated() {
+        // 终值分支：两条任务，逐拍各出队一次
+        let mock = Arc::new(MockHandler::new(TickOutcome::Terminated(None), false));
+        let dev: Arc<dyn DeviceHandler> = mock.clone();
+        let mq = Arc::new(RwLock::new(MissionQueue::default()));
+        let rs = Arc::new(RwLock::new(RobotState::default()));
+        let es = Arc::new(RwLock::new(ExecuteState::default()));
+        let mut current: Option<TaskId> = None;
+        mq.write().await.replace(vec![goto(1.0), goto(2.0)]);
+
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mq.read().await.len(), 1, "一次 Terminated 只出队一条");
+        assert_eq!(current, None, "出队后 current_task_id 复位");
+
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mq.read().await.len(), 0);
+
+        // 队列已空：不再建树，也不 panic
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+        assert_eq!(mock.build_calls.load(Ordering::SeqCst), 2, "空队列不应再建树");
+        assert_eq!(mq.read().await.len(), 0);
+
+        // Running 分支：不出队
+        let (mock2, dev2, mq2, rs2, es2) = ctx();
+        let mut current2: Option<TaskId> = None;
+        mq2.write().await.replace(vec![goto(1.0), goto(2.0)]);
+        auto_tick(&dev2, &mq2, &rs2, &es2, &mut current2).await;
+        assert_eq!(mq2.read().await.len(), 2, "Running 不出队");
+        assert!(current2.is_some());
+        assert_eq!(mock2.build_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// #11 建树失败：清空队列 + `reset` 一次 + 当前任务复位
+    #[tokio::test]
+    async fn test_build_failure_clears_queue_and_resets() {
+        let mock = Arc::new(MockHandler::new(TickOutcome::Running, true));
+        let dev: Arc<dyn DeviceHandler> = mock.clone();
+        let mq = Arc::new(RwLock::new(MissionQueue::default()));
+        let rs = Arc::new(RwLock::new(RobotState::default()));
+        let es = Arc::new(RwLock::new(ExecuteState::default()));
+        let mut current: Option<TaskId> = Some(TaskId(99)); // 故意留个旧值，验证会被复位
+        mq.write().await.replace(vec![goto(1.0), goto(2.0)]);
+
+        auto_tick(&dev, &mq, &rs, &es, &mut current).await;
+
+        assert!(mq.read().await.is_empty(), "建树失败应清空队列（不拿后面的任务去试）");
+        assert_eq!(mock.reset_calls.load(Ordering::SeqCst), 1, "建树失败应 reset 一次");
+        assert_eq!(current, None, "建树失败应复位当前任务");
+        assert_eq!(mock.build_calls.load(Ordering::SeqCst), 1, "失败后不再继续建树");
+    }
+
+    /// #12 `Set` → 整队替换 + `Reset`（丢弃、不恢复）
+    #[tokio::test]
+    async fn test_apply_auto_cmd_set_replaces_and_resets() {
+        let mut q = MissionQueue::default();
+        q.append(vec![goto(1.0), goto(2.0)]);
+        let (n, follow) = apply_auto_cmd(&mut q, AutoCmd::Set(vec![goto(3.0)]));
+        assert_eq!(n, 1);
+        assert_eq!(follow, AutoFollowUp::Reset);
+        assert_eq!(q.len(), 1, "Set 必须整队替换");
+    }
+
+    /// #13 `Append` → 队尾追加 + `None`（设备一行不动，队首 id 不变）
+    #[tokio::test]
+    async fn test_apply_auto_cmd_append_keeps_head() {
+        let mut q = MissionQueue::default();
+        q.append(vec![goto(1.0)]);
+        let head_before = q.head().map(|t| t.id);
+        let (n, follow) = apply_auto_cmd(&mut q, AutoCmd::Append(vec![goto(2.0)]));
+        assert_eq!(n, 1);
+        assert_eq!(follow, AutoFollowUp::None, "append 不得触发 reset/suspend");
+        assert_eq!(q.head().map(|t| t.id), head_before, "队首不变 = 当前任务不受影响");
+        assert_eq!(q.len(), 2);
+    }
+
+    /// #14 `Preempt` → 插队头 + `Suspend`（当前任务退到第二位、仍留在队列里）
+    #[tokio::test]
+    async fn test_apply_auto_cmd_preempt_suspends_and_moves_head() {
+        let mut q = MissionQueue::default();
+        q.append(vec![goto(1.0)]);
+        let old_head = q.head().map(|t| t.id).expect("队首");
+        let (n, follow) = apply_auto_cmd(&mut q, AutoCmd::Preempt(vec![goto(9.0)]));
+        assert_eq!(n, 1);
+        assert_eq!(follow, AutoFollowUp::Suspend, "preempt 必须走 suspend 而不是 reset");
+        assert_eq!(q.len(), 2, "被抢占任务**留在队列里**（可恢复）");
+        assert_ne!(q.head().map(|t| t.id), Some(old_head), "队首必须换成新任务");
+
+        // 顺带卡死：`Suspend` 这条后续动作确实调设备 `suspend`、且**不**调 `reset`（§十一 #38 分界）
+        let (mock, dev, _mq, _rs, es) = ctx();
+        dev.suspend(&es).await;
+        assert_eq!(mock.suspend_calls.load(Ordering::SeqCst), 1, "suspend 必须调到设备");
+        assert_eq!(mock.reset_calls.load(Ordering::SeqCst), 0, "suspend 不得走 reset");
+    }
+
+    /// #15 `Set(vec![])` → 取消 + `Reset`（队列空、head 为空）
+    #[tokio::test]
+    async fn test_apply_auto_cmd_empty_set_is_cancel() {
+        let mut q = MissionQueue::default();
+        q.append(vec![goto(1.0)]);
+        let (n, follow) = apply_auto_cmd(&mut q, AutoCmd::Set(vec![]));
+        assert_eq!(n, 0);
+        assert_eq!(follow, AutoFollowUp::Reset);
+        assert!(q.is_empty());
+        assert!(q.head().is_none());
+    }
 }

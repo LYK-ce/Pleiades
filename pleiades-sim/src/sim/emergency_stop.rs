@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-27
 
 #![allow(non_snake_case)]
 
@@ -11,7 +11,7 @@
 //! 1. 无 scan → `false`
 //! 2. 前方 ±45° 扇区（`a < π/4 || a >= 7π/4`，先把 `angle` 归一到 `[0,2π)`）内
 //!    取得最近的有效回波（`range >= 0.1`；世界侧无回波是 `0.0`，正好被这条过滤掉）
-//! 3. 最近点 `range < 0.3` → `chassis.Stop()` + `goal_service.mark_obstacle(格)` + `true`
+//! 3. 最近点 `range < 0.3` → `chassis.Stop()` + `nav.mark_obstacle(格)` + `true`
 //!
 //! **关键理解（决定实现对不对，task_31 §八.3）**：`mark_obstacle` 只是促使 D* 重算受影响邻居，
 //! 本身**不改地图**；真正让 D* 改路的是 mapper 把那格写进 `grid` 并累积到 `Occupied`
@@ -30,7 +30,7 @@ use pleiades_base::robot::core::grid::CELL_RESOLUTION;
 use pleiades_base::robot::core::state::RobotState;
 
 use crate::sim::chassis::Chassis;
-use crate::sim::goal::GoalService;
+use crate::sim::ugv_sim::nav::Navigator;
 use crate::sim::sensors::lidar::mapper::HIT_EPS_M;
 use crate::sim::sensors::lidar::mapping_task::Sensor_Pose;
 use crate::sim::sensors::lidar::types::LaserScan;
@@ -89,7 +89,7 @@ pub fn Obstacle_Cell(
 ///
 /// 返回 `true` = 已触发（调用方必须：`Stop` + `ExecuteState = Idle` + **保留 goal** + return）
 ///
-/// 参数形态与真机一致（`lidar.get_scan()` / `robot_state` / `stm32` / `&goal_service`），
+/// 参数形态与真机一致（`lidar.get_scan()` / `robot_state` / `stm32` / `&nav`），
 /// 只是「雷达」按 task_31 §八.3 的签名换成**已经取出的** `Option<LaserScan>`，
 /// 「底盘」用 [`Chassis`] trait 对象（真机是 `STM32Device`，§八.3 里写作 `chunk_move`）。
 /// 第 5 个参数 `mount` 是传感器外参（[`LidarSensor::Mount`](crate::sim::sensors::lidar::LidarSensor::Mount)），
@@ -98,7 +98,7 @@ pub async fn Check_Emergency_Stop(
     scan: Option<LaserScan>,
     rs: &RobotState,
     chassis: &dyn Chassis,
-    goal_service: &Arc<Mutex<GoalService>>,
+    nav: &Arc<Mutex<Navigator>>,
     mount: &MountOut,
 ) -> bool {
     // ① 无 scan（无雷达 / 还没收到帧）→ 不急停（真机 `let Some(scan) = ... else { return false }`）
@@ -136,7 +136,7 @@ pub async fn Check_Emergency_Stop(
     // 真机 `stm32.stop()`；sim 走 `Chassis::Stop` → `Send_Stop_Priority`（G1，不静默丢）
     chassis.Stop();
     // 促 D* 局部修补（**不改地图**：真正改路靠 mapper 把该格推成 Occupied）
-    goal_service.lock().await.mark_obstacle(cell).await;
+    nav.lock().await.mark_obstacle(cell).await;
     true
 }
 
@@ -167,11 +167,10 @@ mod tests {
     use pleiades_base::robot::core::cluster::ClusterInfoTable;
     use pleiades_base::robot::core::command::ManualCmd;
     use pleiades_base::robot::core::grid::{world_to_grid, CellState, OccupancyGrid};
-    use pleiades_base::robot::core::mission::MissionQueue;
     use pleiades_base::robot::core::state::MotionAction;
 
     use crate::sim::chassis::{PoseFields, SpawnFields};
-    use crate::sim::goal::ARRIVAL_THRESHOLD_M;
+    use crate::sim::ugv_sim::nav::{ARRIVAL_THRESHOLD_M, ObstacleMode};
     use crate::sim::sensors::lidar::mapper;
     use crate::sim::sensors::lidar::types::LaserPoint;
 
@@ -212,14 +211,14 @@ mod tests {
         }
     }
 
-    /// 无 pathfinder 的 GoalService（`mark_obstacle` 为空操作，副作用不由单测断言，§八 R6）
-    fn test_goal_service() -> Arc<Mutex<GoalService>> {
-        Arc::new(Mutex::new(GoalService::new(
+    /// 未武装的导航器（`mark_obstacle` 为空操作，副作用不由单测断言，§八 R6）
+    fn test_nav() -> Arc<Mutex<Navigator>> {
+        Arc::new(Mutex::new(Navigator::new(
             Arc::new(RwLock::new(RobotState::default())),
-            Arc::new(RwLock::new(MissionQueue::default())),
-            b"self".to_vec(),
             Arc::new(RwLock::new(OccupancyGrid::new())),
             Arc::new(ClusterInfoTable::new()),
+            ObstacleMode::Respect,
+            None,
             0.2,
             ARRIVAL_THRESHOLD_M,
         )))
@@ -259,8 +258,8 @@ mod tests {
         chassis: &MockChassis,
         mount: &MountOut,
     ) -> bool {
-        let gs = test_goal_service();
-        Check_Emergency_Stop(scan, rs, chassis, &gs, mount).await
+        let nav = test_nav();
+        Check_Emergency_Stop(scan, rs, chassis, &nav, mount).await
     }
 
     // 1) 前方 0.2 m → true
@@ -408,12 +407,12 @@ mod tests {
     #[tokio::test]
     async fn test_emergency_stop_rechecks_every_call() {
         let ch = MockChassis::new();
-        let gs = test_goal_service();
+        let nav = test_nav();
         let rs = robot_at_64();
         let scan = Some(scan_of(&[(0.0, 0.2)]));
 
-        assert!(Check_Emergency_Stop(scan.clone(), &rs, &ch, &gs, &MountOut::default()).await);
-        assert!(Check_Emergency_Stop(scan, &rs, &ch, &gs, &MountOut::default()).await);
+        assert!(Check_Emergency_Stop(scan.clone(), &rs, &ch, &nav, &MountOut::default()).await);
+        assert!(Check_Emergency_Stop(scan, &rs, &ch, &nav, &MountOut::default()).await);
         assert_eq!(ch.stop_count(), 2, "第 2 次调用必须再停一次（不能锁存）");
     }
 }

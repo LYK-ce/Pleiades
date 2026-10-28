@@ -506,10 +506,10 @@ pleiades-base/src/Robot/
 ├── mod.rs                  ← 模块入口 + public export
 └── core/
     ├── robot.rs            ← Robot::new() + DeviceHandler trait + 主循环骨架
-    ├── command.rs          ← 三层命令（Mode/Manual/Auto）+ Mission（Goto / Circle{x,y,members}）
+    ├── command.rs          ← 三层命令（Mode/Manual/Auto）+ Mission re-export（定义见 mission_queue/element.rs）
     ├── command_consumer.rs ← 命令入站消费（ORION 帧 → Command）
     ├── state.rs            ← RobotState + ExecuteState + DecisionState
-    ├── mission.rs          ← MissionQueue（FIFO，replace 替换语义）
+    ├── mission_queue/      ← 任务队列（element.rs: Mission/TaskId/QueuedTask；queue.rs: MissionQueue）
     ├── mode.rs             ← OpMode（Manual/Auto，默认 Auto）
     ├── protocol/           ← ORION 协议（frame.rs 帧编解码 + messages.rs 消息 payload）
     ├── cluster/            ← 集群数据面（ClusterInfoTable + consumer + maintenance）

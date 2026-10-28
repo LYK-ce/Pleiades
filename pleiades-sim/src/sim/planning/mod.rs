@@ -1,18 +1,13 @@
 //Presented by KeJi
 //Created Date ： 2026-08-12
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-27
 
-//! planning — 规划层（决策：去哪 + 怎么走）
+//! planning — 他车动态障碍（Task 15）
 //!
-//! - assignment.rs：任务分配（群发 Goto 散布目标点计算，Task 14）
-//! - pathfinder.rs：D* Lite 路径规划（从 slam/ 迁入，Task 14）
-//! - cluster_obstacles.rs：他车 → 动态障碍格转换（Task 15）
-//!
-//! 分层语义：本层消费地图（只读 `core::grid`），不产生地图。
+//! ⚠️ Task 36 Step 6：`pathfinder.rs` 已迁入 `ugv_sim/nav/` 与 `uav_sim/nav/`（两栈各一份副本，
+//! 与真机 `nav/` 结构一致）；本模块只剩 `cluster_obstacles`，调用方是
+//! `sensors/lidar/mapping_task.rs`（他车 → 障碍格，**写 grid 的是传感器**）。
 
-pub mod assignment;
-pub mod pathfinder;
 pub mod cluster_obstacles;
 
-pub use pathfinder::DStarLite;
 pub use cluster_obstacles::cluster_to_obstacle_cells;

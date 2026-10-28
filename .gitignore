@@ -89,3 +89,12 @@ Tool/__pycache__/
 
 # 封控研究（本地撰写，不提交远程）
 /control_research/
+
+# UAV 摄像头测试工程（独立 Rust 试验目录，不提交）
+/rust_uav_camera_test/
+
+# rust_uav_camera_test 源码打包（本地传输用，不提交）
+/rust_uav_camera_test.tgz
+
+# Pictor 地面站（独立 Git 仓，本地 clone，不提交到本仓）
+/Pictor/

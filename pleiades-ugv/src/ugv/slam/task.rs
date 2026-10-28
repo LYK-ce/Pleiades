@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-10-27
 
 //! SLAM 建图 task（Task 22 步骤 4：从 robot.rs 移入，归雷达设备 spawn 内部）
 
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use pleiades_base::network::{NodeHandle, TOPIC_ROBOT_MAP};
 use pleiades_base::robot::core::cluster::ClusterInfoTable;
-use crate::ugv::planning::cluster_to_obstacle_cells;
+use crate::ugv::nav::cluster_to_obstacle_cells;
 use pleiades_base::robot::core::protocol::{
     encode_frame, encode_map_delta, now_boot_ms, COMPID_ROBOT, MapDeltaEntry, MSGID_MAP_DELTA,
 };

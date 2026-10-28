@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-27
 
 //! 急停检查（Task 23 决策 D1：从 robot.rs 拆出，车端独有）
 //!
@@ -16,7 +16,7 @@ use pleiades_base::robot::core::grid::CELL_RESOLUTION;
 use pleiades_base::robot::core::state::RobotState;
 use crate::ugv::lidar::LidarDevice;
 use crate::ugv::stm32::STM32Device;
-use crate::ugv::goal::GoalService;
+use crate::ugv::nav::Navigator;
 
 /// 急停距离阈值（米）
 const OBSTACLE_THRESHOLD_M: f32 = 0.3;
@@ -26,7 +26,7 @@ pub async fn check_emergency_stop(
     lidar: &LidarDevice,
     robot_state: &RobotState,
     stm32: &STM32Device,
-    goal_service: &Arc<tokio::sync::Mutex<GoalService>>,
+    nav: &Arc<tokio::sync::Mutex<Navigator>>,
 ) -> bool {
     let Some(scan) = lidar.get_scan().await else {
         return false;
@@ -56,7 +56,7 @@ pub async fn check_emergency_stop(
         let ob_wy = wy + p.range * ob_angle.sin();
         let ob_gx = (ob_wx / CELL_RESOLUTION).floor() as i32;
         let ob_gy = (ob_wy / CELL_RESOLUTION).floor() as i32;
-        goal_service.lock().await.mark_obstacle((ob_gx, ob_gy)).await;
+        nav.lock().await.mark_obstacle((ob_gx, ob_gy)).await;
         return true;
     }
     false

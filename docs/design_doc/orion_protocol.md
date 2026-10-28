@@ -1,7 +1,7 @@
 # Orion 统一通信协议（Orion Communication Protocol）
 
 > 创建日期：2026-08-07
-> 修改日期：2026-10-19
+> 修改日期：2026-10-27
 > 状态：设计中（消息字段以本文件为准，后续讨论补充其余章节）
 
 ---
@@ -269,45 +269,42 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 
 映射：`ORION_MANUAL_CONTROL` → `Command::Manual(ManualCmd::*)` / `Command::Mode(ModeCmd::*)`。
 
-### 3.5 ORION_TASK_SET（msgid 5）— 任务队列（Task 14：members 群发扩展）
+### 3.5 ORION_TASK_SET（msgid 5）— 任务队列（Task 36：单分支，无群发段）
 
 **整体替换语义**（非追加）：收到即丢弃当前任务队列（含正在执行的任务，立即中断），装载新队列从头执行。
 
-**payload 布局**（大端，Task 14 起）：
+**payload 布局**（大端，Task 36 §十二 Step 3 起）：
 
 | 偏移 | 字段 | 类型 | 说明 |
 |---|---|---|---|
 | 0 | `mission_count` | uint8 | 任务数；**协议上限 255 任务/帧** |
-| 1 | `member_count` | uint8 | 参与车辆数（见三分支语义） |
-| 2 | `members[member_count]` | 变长数组 | 每项 = `len` u8 + `peer_id`（完整 libp2p PeerId 二进制，与帧头 sysid 同构） |
-| ... | `missions[mission_count]` | 结构数组 | 每项 9 字节（见下） |
-
-`members[i]` 布局：`len` u8 [0..1) + `peer_id` [1..1+len)
+| 1 | `missions[mission_count]` | 结构数组 | 每项 9 字节（见下） |
 
 `missions[i]` 布局（9 字节）：`type` u8 [0..1) + `x` f32 [1..5) + `y` f32 [5..9)
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `type` | uint8 | 任务类型：0 = `Goto`，1 = `Circle`（其余类型预留扩展） |
-| `x` | float | 目标点 X（全局世界坐标，米）；`Circle` 时为圆心 X |
-| `y` | float | 目标点 Y（全局世界坐标，米）；`Circle` 时为圆心 Y |
+| `type` | uint8 | 任务类型：0 = `Goto`（其余值预留，收到即 warn 丢弃） |
+| `x` | float | 目标点 X（全局世界坐标，米） |
+| `y` | float | 目标点 Y（全局世界坐标，米） |
 
-> `Circle`（Task 18）：半径写死 0.5m（= 与圆心隔 1 格），车在环上均匀铺开，见 multi_robot_control.md §4.3。
-**总大小 = 2 + Σ(1+len(member_i)) + 9×mission_count 字节**
+**总大小 = 1 + 9×mission_count 字节**
 
-**三分支语义**（Task 14 定稿 2026-08-12）：
+**单分支语义**（Task 36 定稿；取代 Task 14 的 `member_count` 三分支）：
 
-| member_count | 语义 | 处理 |
+| 条件 | 语义 | 处理 |
 |---|---|---|
-| `0` | **取消全部任务**（老 count=0 语义） | 空队列替换，车停车待命；mission_count 忽略 |
-| `1` | **单车任务**（老行为） | `missions` 直接替换本地队列，逐项执行（未知 type 过滤丢弃） |
-| `> 1` | **群发任务**（每车自算散布） | 取 missions 中**第一个 `Goto` 或 `Circle`** 为目标点，members 名单随任务下发；每车确认自己在名单内 → 确定性分配自算散布位置（见 multi_robot_control.md §4），不在名单 → 忽略 |
+| `mission_count == 0` | **取消全部任务**（唯一取消入口） | 空队列替换，车停车待命 |
+| `mission_count > 0`，`type == 0` | **逐条入队** | 每条 `Mission::Goto { x, y }` 依序替换本地队列 |
+| `mission_count > 0`，`type != 0` | 该条 `warn` + 丢弃 | 若**全部**被丢 → **整帧不生效（队列不动）** |
+| 长度 ≠ `1 + 9×mission_count` | 非法帧 | `decode_task_set` 返回 `None`（旧帧在此被拒） |
 
-行为约束（2026-08-07 + 2026-08-12 决策）：
+行为约束：
 - **替换**：新队列到达即替换旧队列，不合并、不追加
 - **立即中断**：正在执行的任务立即终止（`executor.reset()` + `stm32.stop()`），从新队列第一个任务开始
-- **成员身份校验**：群发任务每车校验自己 `PeerId::to_bytes()` 是否在 members（字节一致，帧内为终端原样回填）；排序用字节升序，不信任帧序
-- ⚠️ **同批升级无过渡期**：本布局于 Task 14 变更（加入 member_count + members 段），车端与 Pictor 必须同批上线；旧帧（1+9n 布局）不再兼容（长度恰好匹配的旧帧会被解析为 member_count=0 → 取消，语义安全）
+- **协同上移指挥层**（Task 36 §十一 #27）：地面站逐车算点、**逐车单独发帧**，`missions[0]` 即该车自己的目标点；
+  车端不再持有名单、不做分配（`planning/assignment.rs` 三份已删）
+- ⚠️ **同批升级无过渡期**：车端与 Pictor 必须同批上线；旧帧（含 `member_count`/`members` 段）因长度校验必然被拒
 
 ### 3.6 ORION_RTCM（msgid 6）— RTK 改正数据（Task 24 新增）
 

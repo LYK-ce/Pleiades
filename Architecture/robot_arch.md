@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-10-19（workspace 五 crate 化；task_24~29 落地：RTK / node_type 广播 / Godot 命令通道 / UAV 寻路 / CameraDevice / YOLO-v8）
+> 更新日期：2026-10-27（Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -19,7 +19,7 @@ members = ["pleiades-base", "pleiades-ugv", "pleiades-uav", "pleiades-terminal",
 ```mermaid
 flowchart TB
     BASE["🟦 pleiades-base（lib 共享底座）<br/>协议/集群/状态/世界/命令/网络/事件总线"]
-    UGV["🟧 pleiades-ugv（bin 车）<br/>stm32/lidar/lg290p/executor/goal/planning/slam"]
+    UGV["🟧 pleiades-ugv（bin 车）<br/>stm32/lidar/lg290p/executor/nav/mission/slam"]
     UAV["🟧 pleiades-uav（bin 机）<br/>mavlink + camera + 复制 2D 决策"]
     TERM["🟧 pleiades-terminal（cdylib 地面站）<br/>PleiadesKernel GDExtension + UM960 RTK 基站"]
     SIM["🟪 pleiades-sim（bin 仿真）<br/>无硬件，跑完整决策链（动作只打印）"]
@@ -53,9 +53,18 @@ pleiades-base/                    # 🟦 lib 共享底座（车/机/地面站同
         ├── mod.rs                # pub mod core; pub mod util; + re-export
         ├── core/                 # 🟦 底座核心（共享，车机同一份）
         │   ├── robot.rs          # Robot::new() + DeviceHandler trait + 主循环骨架
-        │   ├── command.rs        # 三层命令（Mode/Manual/Auto）+ Mission
+        │   ├── command.rs        # 三层命令（Mode/Manual/Auto）；Mission 已迁至 mission_queue/element.rs
         │   ├── command_consumer.rs  # 命令入站消费（ORION 帧 → Command）
-        │   ├── mission.rs        # MissionQueue（FIFO，replace 替换语义）
+        │   ├── mission_queue/    # 任务队列（Task 36：元素 + 队列）
+        │   │   ├── element.rs    # Mission / TaskId / QueuedTask
+        │   │   └── queue.rs      # MissionQueue（replace/append/preempt/head/pop_next）
+        │   ├── behavior_tree/    # 行为树引擎（Task 36：非泛型 + async + 失败码）
+        │   │   ├── status.rs     # Status / FailCode（通用码 0~4 + Device(u16) 1000+）
+        │   │   ├── frame.rs      # Frame{dt_ms,tick_no,out} / MotionOut{next_cell}
+        │   │   ├── node.rs       # trait Node（async tick + halt；halt 幂等）
+        │   │   ├── composite.rs  # Sequence / ReactiveSequence / Fallback / ReactiveFallback
+        │   │   ├── decorator.rs  # Timeout / Retry / Guard / Inverter / Repeat / RepeatForever
+        │   │   └── leaf.rs       # Wait / Action / Condition
         │   ├── mode.rs           # OpMode（Manual/Auto，默认 Auto）
         │   ├── state.rs          # RobotState / ExecuteState / DecisionState
         │   ├── protocol/         # ORION 统一协议
@@ -85,9 +94,9 @@ pleiades-ugv/                     # 🟧 bin 车设备端（独有）
         ├── stm32/                # STM32 底盘驱动（mod.rs + protocol.rs + constants.rs）
         ├── lidar/                # YDLIDAR Tmini 驱动（mod.rs + parser.rs + checksum.rs + types.rs + constants.rs）
         ├── executor.rs           # DecisionExecutor 决策执行器（三状态机，纯决策零副作用）
-        ├── goal.rs               # GoalService 目标服务（到达检测 + 任务切换 + D* 寻路）
+        ├── nav/                  # 导航层（navigator + pathfinder + cluster_obstacles）
+        ├── mission/              # 任务层（mod：Mission → 树分派；goto：Goto 树）
         ├── emergency_stop.rs     # 急停（前方扇形障碍强制 stop）
-        ├── planning/             # 规划层（assignment + pathfinder + cluster_obstacles）
         ├── slam/                 # lidar_mapper + task + odometry（车 2D 建图）
         └── robot_handler.rs      # CarDeviceHandler（实现 DeviceHandler）
 
@@ -119,11 +128,28 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
     ├── config.rs                 # SimConfig = flatten BaseConfig + obstacle_inflation_radius
     ├── bootstrap.rs              # sim_bootstrap()：Robot::new + SimDeviceHandler
     └── sim/
-        ├── sim_handler.rs        # SimDeviceHandler（实现 DeviceHandler，动作只打印）
-        ├── executor.rs           # 车 2D 三状态机
-        ├── goal.rs               # 目标服务
-        └── planning/             # 车 2D 寻路（assignment + pathfinder + cluster_obstacles）
+        ├── sim_handler.rs        # SimDeviceHandler（DeviceHandler；持 TaskStack 并转发 build/tick/reset）
+        ├── executor.rs           # 车 2D 三状态机（两栈共用一份）
+        ├── ugv_sim/              # ★ 车栈：复刻 pleiades-ugv 的 nav/ + mission/（树文件逐字相同）
+        │   ├── mod.rs            # Stack：nav + 树实例表 + build/tick/finish/reset
+        │   ├── nav/              # navigator（sim 到达判据）/ pathfinder / cluster_obstacles
+        │   └── mission/          # mod.rs（Mission → 树穷尽分派）+ goto.rs（Goto 树）
+        ├── uav_sim/              # ★ 机栈：复刻 pleiades-uav 的 nav/ + mission/
+        │   ├── mod.rs            # 同形（ObstacleMode::Ignore、不订建图增量）
+        │   ├── nav/
+        │   └── mission/
+        └── planning/             # 只剩 cluster_obstacles（他车 → 动态障碍格；建图 task 在用）
 ```
+
+**sim 双栈差异登记表（Task 36 Step 6，§12.6.4）**
+
+| 编号 | 差异 | 位置 | 理由 / 归属 |
+|---|---|---|---|
+| D-S1 | `pathfinder.rs`：`MAX_COMPUTE_ITERS = 60_000`（真机 10_000）+ 等代价迟滞 `Choose_Step`/`TIE_EPS` + `Value() = min(g,rhs)` | `sim/*_sim/nav/pathfinder.rs` | task_31 Step 7 实测修复：10k 在空地图远目标下提前 break → `rhs[start]=INF` → **首条远目标指令被静默丢弃**。**建议后续单独 task 反哺 ugv/uav**（本 step 不改真机） |
+| D-S2 | 到达判据：预测停点 + 逐轴 0.06 + 格内逼近 0.26（真机世界距离 0.3 m + 入格即到达） | `sim/*_sim/nav/navigator.rs` | §十一 #37 明确接受（仿真底盘 3 m/s² 惯性，1.2 m/s 时滑行 0.3 m） |
+| D-S3 | `cluster_obstacles.rs` 在 sim 有 3 份（`planning/` + 两栈） | `sim/planning/`、`sim/*_sim/nav/` | `sensors/` 不动（`mapping_task.rs` 依赖 `planning::`），而 `nav/` 要复刻真机结构 → 只能多一份 |
+| D-S4 | 建图增量：车栈 `subscribe_map(Some)`，真机 `None` | `sim/ugv_sim/mod.rs` | Step 4 已登记（D6）；sim 的 mapper 会广播 `map_tx`，不订就会「画出来的墙对规划不可见」 |
+| D-S5 | `Chassis` 判型走世界零件名（`Kind_Of_World("diff_drive_ugv"｜"quadrotor_uav")`），不加 `Chassis::Kind()` | `pleiades-sim/src/sim/sim_handler.rs` | §12.6.5 的两个选项中选了第 2 个（「按 `world_name` 判断，省一次 trait 改动」），因为 §12.6.2 要求「不动 `chassis/`」 |
 
 **分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
@@ -137,7 +163,7 @@ flowchart TB
         LIDAR["lidar 雷达"]
         LG["lg290p RTK 流动站"]
         SLAM["slam 建图"]
-        PLAN["planning 寻路"]
+        PLAN["nav 寻路"]
         EXEC["executor 决策"]
     end
     subgraph UAV["pleiades-uav 机"]
@@ -166,8 +192,9 @@ flowchart TB
 | `ExecuteState` | `base/robot/core/state.rs` | main_loop 唯一写：`state`（DecisionState）+ `sub_target: Option<(i32,i32)>`（本车意图，供遥测） |
 | `DecisionState`/`MotionAction`/`DecisionResult` | `base/robot/core/state.rs` | 决策层三件套（Idle/Turning/Moving + 动作意图），设备端决策器消费 |
 | `Robot` | `base/robot/core/robot.rs` | 中枢：共享状态/广播通道/模式/队列/集群表句柄；`new()` 建共享态，`run(device)` 跑主循环骨架 |
-| `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`on_tick`/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
-| `Mission` | `base/robot/core/command.rs` | `Goto { x, y, members }` / `Circle { x, y, members }` |
+| `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`build_task`（建树，幂等）/`on_tick`（返回 `TickOutcome`）/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
+| `TickOutcome` | `base/robot/core/robot.rs` | 设备 tick 的结果：`Running` / `Terminated(Option<FailCode>)`；`Terminated` 才由 `main_loop` 出队 |
+| `Mission` | `base/robot/core/mission_queue/element.rs` | 单变体 `Goto { x, y }`（Task 36 删 `Circle` 与 `members`）；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
 | `OpMode` | `base/robot/core/mode.rs` | `Manual` / `Auto`，**默认 Auto** |
 | `ClusterInfoTable` | `base/robot/core/cluster/cluster_info.rs` | `HashMap<peer_id, ClusterInfo>`，他车位姿（x/y/yaw/vx/vy/sub_target） |
 | `OccupancyGrid` | `base/robot/core/grid.rs` | 地图表示（own/merged 双表 + log-odds），CRDT 合并前提 |
@@ -185,17 +212,20 @@ stateDiagram-v2
     Idle --> Moving : 角偏差 ≤ 5°
     Turning --> Idle : 角度对齐
     Moving --> Idle : 到达 sub_target
-    note right of Idle : 到 goal → 清 goal，下一 tick pop 下一 Mission
+    note right of Idle : 树给终值（Arrived）→ base 出队 → main_loop 为下一任务建树
 ```
 
 - `DecisionExecutor::decide(next_cell, x, y, yaw, current) -> DecisionResult`：**纯决策、零副作用**（不发命令不写状态，结果由 main_loop 单点执行）。
-- `auto_tick` 每 **50ms** 调 `DeviceHandler::on_tick()`（仅 Auto 模式激活）。
+- `auto_tick` 每 **50ms**（`AUTO_TICK_MS`）先比对「队首 `TaskId`」与当前任务：不同 → `build_task`（建树，幂等）；再 `on_tick`；返回 `Terminated` → `pop_next`（唯一出队口）。仅 Auto 模式激活。
 - 决策阈值：`sub_target_threshold_m=0.2`、`arrival_threshold_m=0.3`、`turn_speed=10`、`move_speed=30`、`turn_align_threshold_deg=5.0`、`straight_align_threshold_deg=10.0`。
 
 **`on_tick` 流程**（车端 `CarDeviceHandler`，每次 tick）：
 
-1. **① 急停**：LiDAR 前方扇形（±45°）最近点 `range < 0.3m` → 立即 `stop()` + `GoalService::mark_obstacle` + 清意图（`ugv/emergency_stop.rs`）。
-2. **② 决策**：`GoalService::get_path()` 寻路得下一格 → `DecisionExecutor::decide` 得 `DecisionResult` → 写 `ExecuteState` → 若有 `action` 则 `stm32.apply_action(action)`。
+1. **① 门闩**：无底盘 → 写 `ExecuteState{Idle, None}`，什么都不做，返回 `Running`。
+2. **② 急停**：LiDAR 前方扇形（±45°）最近点 `range < 0.3m` → 立即 `stop()` + `Navigator::mark_obstacle` + 写 `Idle`；**保留 goal**，且**这一拍树不 tick**（时间冻结，`ugv/emergency_stop.rs`）。
+3. **③ 树**：当前任务的树 `tick(&mut frame)`（`dt_ms = AUTO_TICK_MS`），叶子把「下一格」写进 `Frame.out.next_cell`；无树则跳过。
+4. **④ 决策**：`DecisionExecutor::decide(frame.out.next_cell, …)` → 写 `ExecuteState`（**唯一写点**）→ 若有 `action` 则 `stm32.apply_action(action)`。
+5. **⑤ 终值**：树返回 `Success`/`Failure(code)` → `halt` 树 + 从实例表删除 + 清 goal → 返回 `TickOutcome::Terminated(code)`，出队由 base `main_loop` 独占。
 
 ### 1.4 启动流程 + 主循环（Robot::new + DeviceHandler）
 
@@ -219,21 +249,21 @@ stateDiagram-v2
 
 | 分支 | 逻辑 |
 |---|---|
-| 启动 | `device.start()`（设备自管理启动：车 spawn stm32+lidar+goal_service，机 spawn mavlink） |
+| 启动 | `device.start()`（设备自管理启动：车 spawn stm32+lidar+Navigator，机 spawn mavlink） |
 | `cmd_rx.recv()` | `Mode`→停车+切模式+清队列+`device.reset()`；`Manual`→仅 Manual 模式 `device.handle_manual_cmd()`；`Auto`→仅 Auto 模式 `Set` 替换队列 + `device.reset()` |
-| `auto_tick`（50ms，仅 Auto） | 读 `RobotState` 快照 → `device.on_tick(&rs, &execute_state)`（急停+决策+发动作，设备端实现） |
+| `auto_tick`（50ms，仅 Auto） | 队首 `TaskId` 变化 → `device.build_task()`；读 `RobotState` 快照 → `device.on_tick(&rs, &execute_state)`（急停+树+决策+终值，设备端实现）；返回 `Terminated` → `pop_next` |
 | `cancel.cancelled()` | `device.stop()` → `device.shutdown()`（停车 + 关设备） |
 
 ---
 
-## 2. 寻路机制（`ugv/planning/`，车）
+## 2. 寻路机制（`ugv/nav/`，车）
 
 ### 2.1 D* Lite + 动态障碍
 
-- 规划器：`ugv/planning/pathfinder.rs` 的 `DStarLite`（`g/rhs/u/km/start/goal/dynamic_obstacles`）。
+- 规划器：`ugv/nav/pathfinder.rs` 的 `DStarLite`（`g/rhs/u/km/start/goal/dynamic_obstacles`）。
 - **`cost()` 判定顺序**（`pathfinder.rs`）：先查 `dynamic_obstacles`（命中 → ∞）→ 越界（∞）→ 静态 `Occupied`（∞）→ 其余 1.0。**4 连通**（无对角移动），Manhattan 启发。
-- **动态障碍注入**（`ugv/planning/cluster_obstacles.rs`，Task 17）：`cluster_to_obstacle_cells(others, radius)` 把每辆他车（`ClusterInfo.x/y`）按「圆心 + 半径圆盘」映射为障碍格集合。
-- **寻路下沉**（Task 23 决策 D1）：`DStarLite` 由 `GoalService`（`ugv/goal.rs`）直接持有；`world` 只保留纯地图只读接口 `get_cell`/`get_agents`，不再内嵌寻路。
+- **动态障碍注入**（`ugv/nav/cluster_obstacles.rs`，Task 17）：`cluster_to_obstacle_cells(others, radius)` 把每辆他车（`ClusterInfo.x/y`）按「圆心 + 半径圆盘」映射为障碍格集合。
+- **寻路下沉**（Task 23 决策 D1）：`DStarLite` 由 `Navigator`（`ugv/nav/navigator.rs`）直接持有；`world` 只保留纯地图只读接口 `get_cell`/`get_agents`，不再内嵌寻路。**出队在 base `main_loop`**，导航层不接触任务队列。
 
 **圆形几何膨胀算法**（Task 17，半径 20cm，config `obstacle_inflation_radius = 0.2`，ugv 顶层键）：
 
@@ -253,15 +283,16 @@ flowchart TD
     C --> D["CarDeviceHandler::on_tick"]
     D --> E{"前方 LiDAR < 0.3m ?"}
     E -- 是 --> F["急停 + mark_obstacle"]
-    E -- 否 --> G["GoalService::get_path<br/>move_to → set_dynamic_obstacles → next_step"]
+    E -- 否 --> G["Navigator::step<br/>move_to → set_dynamic_obstacles → next_step"]
     G --> H["DStarLite 返回下一格"]
     H --> I["DecisionExecutor::decide → 转向 / 直行"]
     I --> D
 ```
-- 每次寻路前（`GoalService::get_path`）注入最新障碍：`move_to(当前格)` → `set_dynamic_obstacles(动态障碍)` → `next_step()`。
+- 每次寻路前（`Navigator::step`）注入最新障碍：`move_to(当前格)` → `set_dynamic_obstacles(动态障碍)` → `next_step()`。
 - 静态地图**不兜底**他车：`lidar_mapper` 对他车格做 `-DYNAMIC_OBSTACLE_DECAY` 主动抵消，使他车格稳定在 Unknown（可通行），避让他车**完全依赖**动态障碍膨胀。
 
 ### 2.2 Goto 命令（棋盘散布，Task 14）
+> **Task 36 起本节逻辑已从车端删除**：`planning/assignment.rs`（三份）已删，`Mission` 不再带群发名单；群发改由指挥层逐车算点、逐车发帧。以下为历史记录。
 
 `Mission::Goto { x, y, members }`：
 
@@ -277,6 +308,7 @@ flowchart TD
 - 错误：`Unreachable`（目标格障碍）/ `OutOfBounds` / `NotMember` / `InsufficientSlots`。
 
 ### 2.3 Circle 命令（环形均匀铺开，Task 18）
+> **Task 36 起本命令已删除**：`Mission::Circle` 与 `assignment::group_circle_mission` 均已移除。以下为历史记录。
 
 `Mission::Circle { x, y, members }`（`x/y` = 圆心）：
 
@@ -395,7 +427,7 @@ Godot 进程（单进程）
 ```
 地面站 Godot：EventBus.cmd_send(targets, cmd)
   │ KernelBridge._on_cmd_send：
-  │   TASK_SET 缺 members 时用 targets 自动填充（hex → 字节）
+  │   逐车构造 TASK_SET（每帧 missions[0] = 该车目标点；Task 36 起协议无成员名单段）
   │   frame = OrionMessages.Build_Cmd(cmd)     ← Godot 拼好完整 ORION 帧
   ▼
 Rust PleiadesKernel（terminal）：send_command(peer_id_hex, frame) → Send_Data_Try 单播（DataType::Robot）
@@ -412,7 +444,7 @@ main_loop（base 骨架）收 Command，按 op_mode 分发到 device：
 ```
 
 - 命令走 **request-response unicast**，车端收到后回 `OK` ACK 闭环。
-- `parse_orion_frame` 对 `MSGID_TASK_SET` 按 `member_count` 三分支：`0` 取消 / `1` 单车 / `>1` 群发（取第一个 Goto 或 Circle + members 透传）。
+- `parse_orion_frame` 对 `MSGID_TASK_SET` 单分支（Task 36）：`mission_count == 0` → 取消；`> 0` → 逐条 `Mission::Goto` 入队；未知 `type` 该条丢弃，全丢则整帧不生效（队列不动）。
 - `ManualCmd` 超集共享 + **设备选择性响应**（车响应 Beep/StartLidarScan 不响应 Takeoff；机响应 Takeoff/Land 不响应 Beep），能力差异靠「响应」而非「声明」表达。
 
 ```mermaid
@@ -484,7 +516,10 @@ pub trait DeviceHandler: Send + Sync {
     async fn start(&self) -> Result<(), String>;   // 设备自管理启动
     async fn handle_manual_cmd(&self, cmd: &ManualCmd);
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>);
-    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>);
+    // 任务开始：为该任务建树（幂等：同 TaskId 已有实例 → 只激活、不重建）
+    async fn build_task(&self, task: &QueuedTask) -> Result<(), String>;
+    // 返回 Terminated 时 main_loop 才出队（唯一出队口）
+    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) -> TickOutcome;
     fn stop(&self);
     async fn shutdown(&self);
 }
@@ -492,9 +527,9 @@ pub trait DeviceHandler: Send + Sync {
 
 | 实现 | crate | start() 装配 | on_tick 决策 |
 |---|---|---|---|
-| `CarDeviceHandler` | pleiades-ugv | 读 `UgvConfig` → spawn stm32 + lidar + lg290p + goal_service + 决策器 | 急停 → 寻路 → 决策 → 发动作 |
-| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink + goal_service + 决策器（camera 由 `uav_bootstrap` 注入 `device_caps`） | 寻路 → 决策 → 发动作（复用车 2D，无急停；task_27 起忽略地面障碍） |
-| `SimDeviceHandler` | pleiades-sim | 无硬件 | 完整决策链（寻路 + 三状态机），动作只打印 |
+| `CarDeviceHandler` | pleiades-ugv | 读 `UgvConfig` → spawn stm32 + lidar + lg290p + `Navigator` + 决策器 | 五步：门闩 → 急停 → 树 → 决策 → 终值 |
+| `UavDeviceHandler` | pleiades-uav | 读 `UavConfig` → spawn mavlink + `goal.rs` 目标服务 + 决策器（camera 由 `uav_bootstrap` 注入 `device_caps`） | 寻路 → 决策 → 发动作（复用车 2D，无急停；task_27 起忽略地面障碍）。Step 4 起 `build_task`/`on_tick` 只是编译级 stub（恒 `Running`，旧链路自己出队），Step 5 接树 |
+| `SimDeviceHandler` | pleiades-sim | 无硬件 | 持有 `TaskStack{Ugv,Uav}`，`on_tick` 按底盘类型转发（Step 6 已接双栈） |
 
 ### 5.2 节点类型（NodeType）
 
@@ -629,7 +664,6 @@ survey_seconds = 180
 | `CELL_RESOLUTION` | 0.5 m/格 | 栅格分辨率（格 50cm×50cm） |
 | `CHUNK_SIZE` | 256 | 单 Chunk 格数（256×256，覆盖 128m×128m） |
 | `obstacle_inflation_radius` | 0.2 m（ugv config） | 他车动态障碍膨胀半径（Task 17） |
-| `CIRCLE_RING_RADIUS_CELLS` | 2 | Circle 环半径（= 与圆心隔 1 格） |
 | `auto_tick` | 50 ms | 决策主 tick |
 | `state_notifier` | 100 ms | 位姿广播周期 |
 | `slam_task` | 200 ms（节流 1s） | 建图 + 增量广播周期 |

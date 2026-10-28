@@ -1,6 +1,6 @@
 //Presented by KeJi
-//Created Date ： 2026-08-13
-//Modified Date ： 2026-08-16
+//Created Date ： 2026-10-27
+//Modified Date ： 2026-10-27
 
 //! 他车 → 动态障碍格转换（Task 15 → Task 17 圆形几何膨胀）
 //!

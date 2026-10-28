@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-26
+//Modified Date ： 2026-10-27
 
 //! Robot 核心（base 共享底座）
 //!
@@ -8,7 +8,8 @@
 //! - command_consumer.rs：命令入站消费（ORION 帧 → Command）
 //! - state.rs：位姿 schema（RobotState / ExecuteState / DecisionState）
 //! - mode.rs：运行模式（Manual / Auto）
-//! - mission.rs：任务队列
+//! - mission_queue/：任务队列（element：Mission/TaskId/QueuedTask；queue：MissionQueue）
+//! - behavior_tree/：行为树引擎（status/frame/node/composite/decorator/leaf；非泛型 + async + 失败码）
 //! - robot.rs：Robot::new() + DeviceHandler trait + 主 select! 循环骨架
 //! - protocol/：ORION 帧编解码 + 消息
 //! - cluster/：集群数据面（入站 POSE 消费 + 远端车信息表）
@@ -22,7 +23,8 @@ pub mod map_delta;
 pub mod command_consumer;
 pub mod protocol;
 pub mod state;
-pub mod mission;
+pub mod mission_queue;
+pub mod behavior_tree;
 pub mod mode;
 pub mod robot;
 pub mod cluster;

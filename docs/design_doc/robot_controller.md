@@ -361,7 +361,7 @@ pleiades-base/src/Robot/              ← 共享底座（Task 23 后）
 │   ├── state.rs         ← RobotState 等全局状态类型
 │   ├── command.rs       ← Command 枚举定义
 │   ├── mode.rs          ← OpMode
-│   ├── mission.rs       ← MissionQueue
+│   ├── mission_queue/   ← 任务队列（element.rs: Mission/TaskId/QueuedTask；queue.rs: MissionQueue）
 │   ├── robot.rs         ← Robot::launch() + select! 主循环
 │   └── protocol/        ← 命令帧编解码（ORION 帧）
 └── util/

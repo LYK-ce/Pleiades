@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-07
-//Modified Date ： 2026-08-12
+//Modified Date ： 2026-10-27
 
 //! Orion 统一通信协议（MAVLink 风格帧 + 自定义消息）
 //!
@@ -20,7 +20,7 @@ pub use messages::{
     encode_manual_control, encode_map_delta, encode_map_full, encode_pose, encode_task_set,
     ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT,
     ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,
-    ACTION_SWITCH_TO_MANUAL, MISSION_CIRCLE, MISSION_GOTO, ManualControl, MapDeltaEntry,
+    ACTION_SWITCH_TO_MANUAL, MISSION_GOTO, ManualControl, MapDeltaEntry,
     MissionItem, PoseData, TaskSetPayload,
 };
 

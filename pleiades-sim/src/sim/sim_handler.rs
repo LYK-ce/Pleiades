@@ -1,12 +1,12 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-27
 
 #![allow(non_snake_case)]
 
 //! 模拟设备处理器（无硬件，用于测试决策链）
 //!
-//! 不 spawn stm32/lidar 串口；`on_tick` 仍跑完整决策链（`GoalService` 寻路 + `DecisionExecutor`
+//! 不 spawn stm32/lidar 串口；`on_tick` 仍跑完整决策链（`TaskStack` 推进树 + `DecisionExecutor`
 //! 三状态机），「执行动作」交给底盘（[`Chassis::Apply_Action`]），由底盘翻译成世界的 `motion_cmd`。
 //!
 //! 世界链路（task_31 Step 2）：
@@ -38,10 +38,15 @@
 //!
 //! 急停（task_31 Step 6，§八）：
 //! - `on_tick` 的分支顺序与真车 `CarDeviceHandler::on_tick`（`pleiades-ugv/src/ugv/robot_handler.rs:217-244`）
-//!   逐项一致：**装配门闩 → 无底盘返回 → 急停 → 寻路 → 决策 → 写 ExecuteState → 执行**
+//!   逐项一致：**装配门闩 → 无底盘返回 → 急停 → 树 → 决策 → 写 ExecuteState → 执行 → 终值**
 //! - `start()` 从 `SensorSet` 里选出急停用 lidar（[`Select_Lidar`]）存进 `SimInner.lidar`；
 //!   无雷达 / 未连世界 → `None` → `on_tick` 跳过急停（真机 `lidar: None` 同语义）
 //! - 急停**每 tick 复核**、不锁存；触发时 `Stop()` + `ExecuteState = Idle` + **保留 goal**（供绕行）
+//!
+//! 任务栈（Task 36 Step 6，§12.6）：
+//! - `start()` 按底盘名选栈（[`Kind_Of_World`]）：差速车 → `ugv_sim::Stack`，UAV → `uav_sim::Stack`
+//! - `build_task` / `on_tick` / `reset` 三个方法**只做转发**（栈内部才是 nav + 树实例表）
+//! - 急停只挂车栈（`TaskStack::ugv_nav`），机栈不接 2D 急停（§12.6.4）
 
 // 设备能力注册（task_34 Step 4）：`CameraSimCap` 实现 base 的 `DeviceCapability`。
 //
@@ -62,20 +67,24 @@ use tracing::{debug, info, warn};
 
 use pleiades_base::network::NodeHandle;
 use pleiades_base::orchestrator::{Capabilities, DeviceCapability};
+use pleiades_base::robot::core::behavior_tree::{Frame, MotionOut, Status};
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
+use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
+use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::SimConfig;
 use crate::sim::chassis::{self, Chassis};
 use crate::sim::chassis::pose_ingest::PoseHistory;
+use crate::sim::control::TaskMonitor;
 use crate::sim::emergency_stop::{self, Check_Emergency_Stop};
 use crate::sim::executor::DecisionExecutor;
-use crate::sim::goal::{GoalService, ARRIVAL_THRESHOLD_M};
 use crate::sim::sensors::camera::CameraSensor;
 use crate::sim::sensors::lidar::mapping_task::MappingCtx;
 use crate::sim::sensors::lidar::LidarSensor;
 use crate::sim::sensors::{Sensor, SensorSet};
+use crate::sim::uav_sim;
+use crate::sim::ugv_sim;
 
 use self::device_cap::CameraSimCap;
 use crate::world_link::{
@@ -85,9 +94,109 @@ use crate::world_link::{
 /// `[sim_world].chassis` 缺省值（世界目录里的差速车）
 const DEFAULT_CHASSIS: &str = "diff_drive_ugv";
 
+/// 底盘类型 → 活动栈（§12.6.5 选项 2：按世界零件名判，**不改 `Chassis` trait**）
+///
+/// 为什么不用 `Chassis::Kind()`：`12.6.2` 明确「不动 `chassis/`」，而 `Chassis::Name()`
+/// 已经是校验过的世界零件名（`chassis::Build` 里 `Validate_Chassis` 之后才构造），足够判型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackKind {
+    Ugv,
+    Uav,
+}
+
+/// 世界零件名 → 栈。`[sim_world]` 缺省时 `world_name` 恒为 [`DEFAULT_CHASSIS`]（差速车）
+fn Kind_Of_World(world_name: &str) -> StackKind {
+    match world_name.trim() {
+        "quadrotor_uav" => StackKind::Uav,
+        // `diff_drive_ugv` 以及「无 [sim_world] 段」的缺省值都走车栈
+        _ => StackKind::Ugv,
+    }
+}
+
+/// 当前活动栈：`start()` 里按底盘类型定死，三个方法逐个转发（§12.6.1-2）
+enum TaskStack {
+    Ugv(ugv_sim::Stack),
+    Uav(uav_sim::Stack),
+}
+
+impl TaskStack {
+    async fn build(&self, task: &QueuedTask) -> Result<(), String> {
+        match self {
+            Self::Ugv(s) => s.build(task).await,
+            Self::Uav(s) => s.build(task).await,
+        }
+    }
+
+    async fn tick(&self, frame: &mut Frame<'_>) -> Option<(TaskId, Status)> {
+        match self {
+            Self::Ugv(s) => s.tick(frame).await,
+            Self::Uav(s) => s.tick(frame).await,
+        }
+    }
+
+    async fn finish(&self, id: TaskId) {
+        match self {
+            Self::Ugv(s) => s.finish(id).await,
+            Self::Uav(s) => s.finish(id).await,
+        }
+    }
+
+    async fn reset(&self) {
+        match self {
+            Self::Ugv(s) => s.reset().await,
+            Self::Uav(s) => s.reset().await,
+        }
+    }
+
+    /// `suspend`（§十一 #38）：只清 nav 目标，**不动实例表**（停车由调用方做）
+    ///
+    /// 两栈的 `nav` 字段同名同类型形状（`Arc<Mutex<Navigator>>`），但 `Navigator` 是两份
+    /// 逐字拷贝的类型 → 必须分别 match，不能抽公共函数。
+    async fn suspend(&self) {
+        match self {
+            Self::Ugv(s) => s.nav.lock().await.clear_goal(),
+            Self::Uav(s) => s.nav.lock().await.clear_goal(),
+        }
+    }
+
+    /// 当前导航状态（只读观测；`status.nav_status` 用，**不参与决策**）
+    async fn nav_status(&self) -> &'static str {
+        match self {
+            Self::Ugv(s) => match s.nav.lock().await.status() {
+                ugv_sim::nav::NavStatus::Idle => "idle",
+                ugv_sim::nav::NavStatus::Navigating => "navigating",
+                ugv_sim::nav::NavStatus::Arrived => "arrived",
+                ugv_sim::nav::NavStatus::Blocked(_) => "blocked",
+            },
+            Self::Uav(s) => match s.nav.lock().await.status() {
+                uav_sim::nav::NavStatus::Idle => "idle",
+                uav_sim::nav::NavStatus::Navigating => "navigating",
+                uav_sim::nav::NavStatus::Arrived => "arrived",
+                uav_sim::nav::NavStatus::Blocked(_) => "blocked",
+            },
+        }
+    }
+
+    fn next_tick_no(&self) -> u64 {
+        match self {
+            Self::Ugv(s) => s.next_tick_no(),
+            Self::Uav(s) => s.next_tick_no(),
+        }
+    }
+
+    /// 急停只挂车栈（§12.6.4「急停：有 / 无」）
+    fn ugv_nav(&self) -> Option<&Arc<Mutex<ugv_sim::nav::Navigator>>> {
+        match self {
+            Self::Ugv(s) => Some(&s.nav),
+            Self::Uav(_) => None,
+        }
+    }
+}
+
 /// start() 后初始化的「设备组」（无硬件，只有决策组件 + 传感器 + 底盘）
 struct SimInner {
-    goal_service: Arc<Mutex<GoalService>>,
+    /// 任务栈（§12.6：按底盘类型二选一；持有 nav + 树实例表）
+    stack: TaskStack,
     executor: DecisionExecutor,
     /// 按配置构造的传感器（`shutdown()` 逐个停；建图 task 归它们所有）
     sensors: Vec<Arc<dyn Sensor>>,
@@ -100,6 +209,8 @@ struct SimInner {
     chassis: Option<Arc<dyn Chassis>>,
     /// 本地控制口的取消令牌（§七.6 要点 7：cancel 时全部断开；不依赖 Drop）
     control_cancel: CancellationToken,
+    /// 任务观测器（§12.8.2 第 4 条）：`on_tick` 单写者，控制口 `status` 只读
+    monitor: Arc<TaskMonitor>,
 }
 
 pub struct SimDeviceHandler {
@@ -221,20 +332,6 @@ impl DeviceHandler for SimDeviceHandler {
         }
         let obstacle_inflation_radius = self.config.obstacle_inflation_radius.unwrap_or(0.2);
 
-        // 无硬件：只建决策链组件（寻路 + 决策器）
-        let mut gs = GoalService::new(
-            self.robot.robot_state.clone(),
-            self.robot.mission_queue.clone(),
-            self.node_handle.Get_Local_Peer_Id().to_bytes(),
-            self.robot.grid.clone(),
-            self.robot.cluster_table.clone(),
-            obstacle_inflation_radius,
-            ARRIVAL_THRESHOLD_M,
-        );
-        // 建图增量 → D* 修补（Step 7：没有这条通路，画出来的墙对规划不可见）
-        gs.Subscribe_Map(&self.robot.map_tx);
-        let goal_service = Arc::new(Mutex::new(gs));
-
         // ---- 1) 世界链路配置：**必须最先**解出（底盘名来自 `[sim_world].chassis`）
         //   - 配置非法 → start() 直接 Err（base 会打印「设备启动失败」并停掉主循环）
         //   - chassis 名不在本地目录 → 同样 Err（不让世界踩 1002）
@@ -287,6 +384,27 @@ impl DeviceHandler for SimDeviceHandler {
 
         // ---- 3) 底盘：动作翻译 / 速度绑定 / 位置更新（Step 4）
         let (chassis, pose_age, pose_history) = self.Build_Chassis(&world_name, motion.clone())?;
+
+        // ---- 3.5) 任务栈（§12.6.5）：底盘名 → 车栈 / 机栈，二选一后全程转发
+        //      车栈订建图增量（`map_tx`），机栈不订（D6：真机两边都不订，sim 只有车栈订）
+        let kind = Kind_Of_World(&world_name);
+        let stack = match kind {
+            StackKind::Ugv => TaskStack::Ugv(ugv_sim::Stack::new(
+                self.robot.grid.clone(),
+                self.robot.cluster_table.clone(),
+                self.robot.robot_state.clone(),
+                obstacle_inflation_radius,
+                Some(&self.robot.map_tx),
+            )),
+            StackKind::Uav => TaskStack::Uav(uav_sim::Stack::new(
+                self.robot.grid.clone(),
+                self.robot.cluster_table.clone(),
+                self.robot.robot_state.clone(),
+                obstacle_inflation_radius,
+                None,
+            )),
+        };
+        info!("[Sim] 任务栈 = {:?}（底盘 {}）", kind, world_name);
 
         // ---- 4) 传感器（在 `WorldLink::Spawn` 之前建好：Spawn 要 `Arc<SensorSet>`）
         //      `pose_age` 与底盘是**同一个** `Arc`（建图 task 判新鲜度用）
@@ -371,14 +489,17 @@ impl DeviceHandler for SimDeviceHandler {
 
         // ---- 6) 本地控制口（Step 5）：取消令牌进 `SimInner`，`shutdown()` 先 cancel 它
         let control_cancel = CancellationToken::new();
+        // ---- 6.1) 任务观测器（§12.8.2 第 4 条）：控制口与 on_tick 共用同一个 `Arc`
+        let monitor = Arc::new(TaskMonitor::default());
         self.inner
             .set(SimInner {
-                goal_service,
+                stack,
                 executor: DecisionExecutor::new(),
                 sensors,
                 lidar,
                 chassis,
                 control_cancel: control_cancel.clone(),
+                monitor: monitor.clone(),
             })
             .map_err(|_| "设备已启动".to_string())?;
         // ---- 6.5) 相机 cap 推进 `device_caps`（task_34 Step 4）
@@ -398,9 +519,10 @@ impl DeviceHandler for SimDeviceHandler {
         //         无 `[control]` 段 → `unwrap_or_default()` → 默认开启（§七.3）
         crate::sim::control::Spawn(
             self.config.control.clone().unwrap_or_default(),
-            self.robot.clone(),      // robot_cmd_tx / op_mode / robot_state
+            self.robot.clone(),      // robot_cmd_tx / op_mode / robot_state / mission_queue
             world_for_control,       // `status` 的 assembled / avatar_id
             peer_id,
+            monitor,                 // §12.8.2 #4：task_ticks / nav_status
             control_cancel,
         );
         Ok(())
@@ -427,22 +549,41 @@ impl DeviceHandler for SimDeviceHandler {
 
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
-        // 停车优先（安全关键），再清意图
+        // 停车优先（安全关键），再 halt 树 + 清实例表 + 清 nav（§十一 #38）
         if let Some(c) = d.chassis.as_ref() {
             c.Stop();
         }
-        d.goal_service.lock().await.reset();
+        d.stack.reset().await;
+        d.monitor.Clear(); // §十一 #38：replace / 切模式会**丢弃实例** → 计数表一并对齐
         *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
-        info!("[Sim] reset（停车 + 清 goal + 清意图）");
+        info!("[Sim] reset（停车 + halt 树 + 清实例表 + 清 nav + 清意图）");
     }
 
-    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) {
+    async fn suspend(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
+        let d = self.inner.get().expect("device not started");
+        // §十一 #38：停车优先（安全关键）→ 清 nav 目标 → 清意图；
+        // **不动 `d.stack` 的实例表**（`TaskStack::suspend` 只清 nav），
+        // **不清 monitor**（被挂起任务的 `task_ticks` 必须留着，用例 5/6 靠它判定）。
+        if let Some(c) = d.chassis.as_ref() {
+            c.Stop();
+        }
+        d.stack.suspend().await;
+        *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
+        info!("[Sim] suspend（停车 + 清 nav；树实例与 tick 计数保留，等恢复）");
+    }
+
+    async fn build_task(&self, task: &QueuedTask) -> Result<(), String> {
+        let d = self.inner.get().expect("device not started");
+        d.stack.build(task).await
+    }
+
+    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) -> TickOutcome {
         // 装配门闩①（必须最先）：未 Assembled → 写 Idle 直接 return，不寻路、不决策、不消费任务
         if let Some(w) = self.world.get() {
             if !w.Is_Assembled().await {
                 *execute_state.write().await =
                     ExecuteState { state: DecisionState::Idle, sub_target: None };
-                return;
+                return TickOutcome::Running;
             }
         }
 
@@ -451,35 +592,43 @@ impl DeviceHandler for SimDeviceHandler {
         let Some(ch) = d.chassis.as_ref() else {
             *execute_state.write().await =
                 ExecuteState { state: DecisionState::Idle, sub_target: None };
-            return;
+            return TickOutcome::Running;
         };
-        // 急停（Step 6，真机 `on_tick` 的第一步）：无 lidar → 不急停（真机 `match &d.lidar { None => false }`）
-        // 第 5 参是传感器外参（Step 7 第 3 轮，偏差 D8）：只用于把回波换成障碍格，
-        // 与建图同一个 `Sensor_Pose` + 同一个 `HIT_EPS_M`，保证两处标的格相同。
-        let emergency = match d.lidar.as_ref() {
-            Some(l) => {
-                Check_Emergency_Stop(l.Get_Scan().await, rs, ch.as_ref(), &d.goal_service, l.Mount())
-                    .await
+
+        // ③ 急停（真机 `on_tick` 的第一步；只车栈有，§12.6.4）：命中 → 停车 + Idle，
+        //    **保留 goal**，树这一拍不 tick（时间冻结）
+        let emergency = match (d.stack.ugv_nav(), d.lidar.as_ref()) {
+            (Some(nav), Some(l)) => {
+                Check_Emergency_Stop(l.Get_Scan().await, rs, ch.as_ref(), nav, l.Mount()).await
             }
-            None => false,
+            _ => false,
         };
         if emergency {
-            // 急停：停车 + 清意图，**保留 goal** 供绕行（等价真机 `if emergency { … } else { … }` 的 if 分支）
             ch.Stop();
             *execute_state.write().await =
                 ExecuteState { state: DecisionState::Idle, sub_target: None };
-            return;
+            return TickOutcome::Running;
         }
 
-        // 完整决策链：寻路 → 决策（与真车一致）
-        let next_cell = d.goal_service.lock().await.get_path().await;
+        // ④ 树：推进当前任务的树（叶子写 `Frame.out.next_cell`）
+        let mut out = MotionOut::default();
+        let tick_no = d.stack.next_tick_no();
+        let mut frame = Frame { dt_ms: AUTO_TICK_MS as u32, tick_no, out: &mut out };
+        let status = d.stack.tick(&mut frame).await;
+
+        // ④.5 观测（§12.8.2 #4）：只记「这一拍哪棵树被 tick 了」+ nav 状态，**不影响决策**
+        if let Some((id, _)) = status {
+            d.monitor.Note_Tick(id);
+        }
+        d.monitor.Set_Nav(d.stack.nav_status().await);
+
+        // ⑤ 决策（`ExecuteState` **唯一写点**）+ 执行动作（交底盘翻译成世界 `motion_cmd`）
         let current = execute_state.read().await.clone();
-        let result = d.executor.decide(next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+        let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
         *execute_state.write().await = ExecuteState {
             state: result.state,
             sub_target: result.sub_target,
         };
-        // 执行动作：交给底盘翻译成世界 `motion_cmd`（`None` = 保持，不发明令，G4）
         if let Some(action) = result.action {
             info!(
                 "[Sim] 位置=({:.2},{:.2}) yaw={:.2}° 状态={:?} 动作={:?} sub_target={:?} 位姿龄={}ms",
@@ -493,6 +642,20 @@ impl DeviceHandler for SimDeviceHandler {
             );
             ch.Apply_Action(action);
         }
+
+        // ⑥ 终值：halt + 丢实例 + 清 nav → 交给 base 出队（唯一出队口，§十一 #16）
+        let Some((id, st)) = status else { return TickOutcome::Running; };
+        let code = match st {
+            Status::Running => return TickOutcome::Running,
+            Status::Success => None,
+            Status::Failure(c) => {
+                warn!("[Sim] 任务 {:?} 失败，原因码 {}", id, c.code());
+                Some(c)
+            }
+        };
+        d.stack.finish(id).await;
+        d.monitor.Forget(id); // 终值 → 该任务的 tick 计数作废（下一次是新实例）
+        TickOutcome::Terminated(code)
     }
 
     fn stop(&self) {
@@ -521,5 +684,19 @@ impl DeviceHandler for SimDeviceHandler {
             d.sensors.iter().for_each(|s| s.Shutdown());
         }
         info!("[Sim] shutdown");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §12.6.7 #3：差速底盘 → 车栈；UAV 零件 → 机栈；`[sim_world]` 缺省 → 车栈
+    #[test]
+    fn test_stack_kind_by_world_name() {
+        assert_eq!(Kind_Of_World("diff_drive_ugv"), StackKind::Ugv);
+        assert_eq!(Kind_Of_World("quadrotor_uav"), StackKind::Uav);
+        assert_eq!(Kind_Of_World(" diff_drive_ugv "), StackKind::Ugv, "名字要 trim");
+        assert_eq!(Kind_Of_World(DEFAULT_CHASSIS), StackKind::Ugv, "[sim_world] 缺省 = 差速车");
     }
 }

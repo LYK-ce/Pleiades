@@ -1,12 +1,20 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-27
 
-//! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler）
+//! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.4.7 改成树驱动）
 //!
 //! 统一契约：`start()` 里读配置 + spawn 车自己的设备（stm32 + lidar）。
 //! `enabled=false` → 跳过该设备（统一跳过语义，节点照常跑；无运动设备时 on_tick 保持 Idle）。
+//!
+//! Task 36 起本文件只做**驱动**（§12.4.7 五步）：
+//! ① 门闩 → ② 急停（保留 goal，这一拍树不 tick）→ ③ 树 tick（叶子写 `Frame.out.next_cell`）
+//! → ④ 决策（`ExecuteState` **唯一写点**）→ ⑤ 终值（halt + 丢实例 + 返回 `Terminated`）。
+//!
+//! **出队只在 base `main_loop`**：本文件不碰 `MissionQueue`，也**不做出队**（§十一 #16）。
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -15,19 +23,30 @@ use tracing::{info, warn};
 
 use pleiades_base::event_bus::EventBus;
 use pleiades_base::network::NodeHandle;
+use pleiades_base::robot::core::behavior_tree::{Frame, MotionOut, Node, Status};
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::robot::{DeviceHandler, Robot};
+use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
+use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::UgvConfig;
 use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
 use crate::ugv::executor::DecisionExecutor;
-use crate::ugv::goal::{GoalService, ARRIVAL_THRESHOLD_M};
 use crate::ugv::lidar::LidarDevice;
+use crate::ugv::mission::{self, TaskDeps};
+use crate::ugv::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
 use crate::ugv::slam::SlamContext;
 use crate::ugv::stm32::STM32Device;
 use crate::ugv::types::CarType;
+
+/// 树实例表（§十一 #34）：懒创建、按 `TaskId` 存；`active` = 本拍要 tick 的那棵
+#[derive(Default)]
+struct TreeSet {
+    trees: HashMap<TaskId, Box<dyn Node>>,
+    /// 当前任务（`build_task` 写；`main_loop` 只认 `Terminated` 才出队）
+    active: Option<TaskId>,
+}
 
 /// start() 后初始化的设备组
 struct CarInner {
@@ -36,8 +55,12 @@ struct CarInner {
     lidar: Option<LidarDevice>,
     /// RTK 流动站（enabled=false 时为 None）
     lg290p: Option<Lg290pDevice>,
-    goal_service: Arc<Mutex<GoalService>>,
+    /// 导航器（原目标服务；**不再持队列、不再出队**）
+    nav: Arc<Mutex<Navigator>>,
     executor: DecisionExecutor,
+    trees: Mutex<TreeSet>,
+    /// 拍号（`Frame.tick_no`）
+    tick_no: AtomicU64,
 }
 
 pub struct CarDeviceHandler {
@@ -106,13 +129,13 @@ impl DeviceHandler for CarDeviceHandler {
             None
         };
 
-        // 目标服务（无底盘时也创建，on_tick 无运动设备时保持 Idle，任务不消费）
-        let goal_service = Arc::new(Mutex::new(GoalService::new(
+        // 导航器（无底盘时也创建；不持队列，出队在 main_loop）
+        let nav = Arc::new(Mutex::new(Navigator::new(
             self.robot.robot_state.clone(),
-            self.robot.mission_queue.clone(),
-            self.node_handle.Get_Local_Peer_Id().to_bytes(),
             self.robot.grid.clone(),
             self.robot.cluster_table.clone(),
+            ObstacleMode::Respect,
+            None, // 建图增量：真机不订阅（sim 才订，Step 6）
             obstacle_inflation_radius,
             ARRIVAL_THRESHOLD_M,
         )));
@@ -181,7 +204,15 @@ impl DeviceHandler for CarDeviceHandler {
             None
         };
 
-        self.inner.set(CarInner { stm32, lidar, lg290p, goal_service, executor: DecisionExecutor::new() })
+        self.inner.set(CarInner {
+            stm32,
+            lidar,
+            lg290p,
+            nav,
+            executor: DecisionExecutor::new(),
+            trees: Mutex::new(TreeSet::default()),
+            tick_no: AtomicU64::new(0),
+        })
             .map_err(|_| "设备已启动".to_string())?;
         Ok(())
     }
@@ -210,37 +241,103 @@ impl DeviceHandler for CarDeviceHandler {
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
         if let Some(s) = &d.stm32 { let _ = s.stop(); }
-        d.goal_service.lock().await.reset();
+        // 丢实例（§十一 #38：replace / 切模式 → 清实例表；抢占走 suspend，Step 8 引入）
+        {
+            let mut ts = d.trees.lock().await;
+            for tree in ts.trees.values_mut() { tree.halt(); }
+            ts.trees.clear();
+            ts.active = None;
+        }
+        d.nav.lock().await.clear_goal();
         *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
     }
 
-    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) {
+    async fn suspend(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
+        // §十一 #38：停车优先（安全关键）→ 清 nav 目标 → 清意图；
+        // **不 halt 树、不清实例表** —— 被抢占任务的节点进度必须原样留着（用例 5/6 卡这条）。
+        if let Some(s) = &d.stm32 { let _ = s.stop(); }
+        d.nav.lock().await.clear_goal();
+        *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
+        info!("[Car] suspend（停车 + 清 nav；树实例保留，等恢复）");
+    }
+
+    async fn build_task(&self, task: &QueuedTask) -> Result<(), String> {
+        let d = self.inner.get().expect("device not started");
+        let mut ts = d.trees.lock().await;
+        // 幂等（§12.4.10 #6）：已有实例 → 只激活、不重建（抢占恢复靠这条，§十一 #36）
+        if ts.trees.contains_key(&task.id) {
+            ts.active = Some(task.id);
+            info!("[Car] 任务 {:?} 已有树实例，只激活", task.id);
+            return Ok(());
+        }
+        let deps = TaskDeps { nav: d.nav.clone(), robot_state: self.robot.robot_state.clone() };
+        let tree = mission::build(&task.mission, &deps)?;
+        ts.trees.insert(task.id, tree);
+        ts.active = Some(task.id);
+        info!("[Car] 任务 {:?} 建树完成（实例数 {}）", task.id, ts.trees.len());
+        Ok(())
+    }
+
+    async fn on_tick(&self, rs: &RobotState, execute_state: &Arc<RwLock<ExecuteState>>) -> TickOutcome {
+        let d = self.inner.get().expect("device not started");
+
+        // ① 门闩：无底盘 → 无运动设备，保持 Idle
         let Some(stm32) = &d.stm32 else {
-            // 无底盘：无运动设备，保持 Idle（节点照常广播位姿/地图）
             *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
-            return;
+            return TickOutcome::Running;
         };
+
+        // ② 急停：命中 → 停车 + 写 Idle，**保留 goal**；树这一拍不 tick（时间冻结，§12.4.7 ②）
         let emergency = match &d.lidar {
-            Some(l) => check_emergency_stop(l, rs, stm32, &d.goal_service).await,
+            Some(l) => check_emergency_stop(l, rs, stm32, &d.nav).await,
             None => false,
         };
         if emergency {
-            // 急停：停车 + 清意图，保留 goal 供绕行
             let _ = stm32.stop();
             *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
-        } else {
-            let next_cell = d.goal_service.lock().await.get_path().await;
-            let current = execute_state.read().await.clone();
-            let result = d.executor.decide(next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
-            *execute_state.write().await = ExecuteState {
-                state: result.state,
-                sub_target: result.sub_target,
-            };
-            if let Some(action) = result.action {
-                stm32.apply_action(action);
-            }
         }
+
+        // ③ 树：推进当前任务的树（急停这一拍由 tick_active_tree 挡住）
+        let mut out = MotionOut::default();
+        let tick_no = d.tick_no.fetch_add(1, Ordering::Relaxed);
+        let mut frame = Frame { dt_ms: AUTO_TICK_MS as u32, tick_no, out: &mut out };
+        let status = {
+            let mut ts = d.trees.lock().await;
+            tick_active_tree(&mut ts, &mut frame, emergency).await
+        };
+        if emergency {
+            return TickOutcome::Running; // ④⑤ 跳过：本拍不决策、不判终值
+        }
+
+        // ④ 决策：叶子给的「下一格」→ ExecuteState（**唯一写点**）+ 动作
+        let current = execute_state.read().await.clone();
+        let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+        *execute_state.write().await = ExecuteState {
+            state: result.state,
+            sub_target: result.sub_target,
+        };
+        if let Some(action) = result.action {
+            stm32.apply_action(action);
+        }
+
+        // ⑤ 终值：halt + 丢实例 → 交给 base 出队（唯一出队口，§十一 #16）
+        let Some((id, st)) = status else { return TickOutcome::Running; };
+        let code = match st {
+            Status::Running => return TickOutcome::Running,
+            Status::Success => None,
+            Status::Failure(c) => {
+                warn!("[Car] 任务 {:?} 失败，原因码 {}", id, c.code());
+                Some(c)
+            }
+        };
+        {
+            let mut ts = d.trees.lock().await;
+            if let Some(mut tree) = ts.trees.remove(&id) { tree.halt(); }
+            if ts.active == Some(id) { ts.active = None; }
+        }
+        d.nav.lock().await.clear_goal();
+        TickOutcome::Terminated(code)
     }
 
     fn stop(&self) {
@@ -258,5 +355,67 @@ impl DeviceHandler for CarDeviceHandler {
         }
         if let Some(s) = &d.stm32 { s.shutdown(); }
         if let Some(g) = &d.lg290p { g.shutdown(); }
+    }
+}
+
+/// ③ 段的树推进：`emergency == true` 时**不 tick**（§12.4.7 ② / §12.4.10 #5）
+///
+/// 抽成函数是为了让「急停不进树」可单测（传 `emergency` 即刻返回），而不是只靠读 if。
+async fn tick_active_tree(
+    ts: &mut TreeSet,
+    frame: &mut Frame<'_>,
+    emergency: bool,
+) -> Option<(TaskId, Status)> {
+    if emergency {
+        return None;
+    }
+    let id = ts.active?;
+    let tree = ts.trees.get_mut(&id)?;
+    Some((id, tree.tick(frame).await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    use async_trait::async_trait;
+
+    /// 只记 tick 次数、恒返回 `Running` 的节点
+    struct CountingNode(Arc<AtomicU32>);
+
+    #[async_trait]
+    impl Node for CountingNode {
+        async fn tick(&mut self, _f: &mut Frame<'_>) -> Status {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Status::Running
+        }
+        fn halt(&mut self) {}
+    }
+
+    /// §12.4.10 #5：急停那一拍树 **0 次** tick；非急停拍 1 次且返回 active 的 id
+    #[tokio::test]
+    async fn test_emergency_does_not_tick_tree() {
+        let ticks = Arc::new(AtomicU32::new(0));
+        let mut ts = TreeSet::default();
+        ts.trees.insert(TaskId(7), Box::new(CountingNode(ticks.clone())));
+        ts.active = Some(TaskId(7));
+
+        let mut out = MotionOut::default();
+        let mut frame = Frame { dt_ms: AUTO_TICK_MS as u32, tick_no: 0, out: &mut out };
+
+        // 急停拍：不 tick
+        assert!(tick_active_tree(&mut ts, &mut frame, true).await.is_none());
+        assert_eq!(ticks.load(Ordering::SeqCst), 0, "急停拍不得 tick 树");
+
+        // 非急停拍：tick 1 次，返回 active 的 id
+        let got = tick_active_tree(&mut ts, &mut frame, false).await;
+        assert_eq!(got, Some((TaskId(7), Status::Running)));
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+
+        // 无 active：不 tick、返回 None
+        ts.active = None;
+        assert!(tick_active_tree(&mut ts, &mut frame, false).await.is_none());
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
     }
 }

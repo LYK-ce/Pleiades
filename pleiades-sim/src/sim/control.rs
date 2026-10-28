@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-27
 
 #![allow(non_snake_case)]
 
@@ -25,7 +25,9 @@
 //!   [`Status_Data`] / [`Help_Data`] / `Ok_Reply*` / [`Err_Reply`] / [`Bind_Listener`]），
 //!   异步壳只做 IO —— `Arc<Robot>` 太重，不拖进单测
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -37,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use pleiades_base::robot::core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
+use pleiades_base::robot::core::mission_queue::TaskId;
 use pleiades_base::robot::core::mode::OpMode;
 use pleiades_base::robot::core::robot::Robot;
 
@@ -56,6 +59,9 @@ pub const CONTROL_MODE_SETTLE: Duration = Duration::from_millis(500);
 const CONTROL_WORLD_MIN: f32 = 0.0;
 const CONTROL_WORLD_MAX: f32 = 128.0;
 
+/// 一条控制口命令最多带多少条任务（防手抖灌爆队列；`TASK_SET` 的上限是 u8，这里取小值）
+const MAX_MISSIONS_PER_CMD: usize = 16;
+
 // ================================================================ 请求模型
 
 /// 控制口的请求（[`Parse_Control`] 的产物）
@@ -63,6 +69,12 @@ const CONTROL_WORLD_MAX: f32 = 128.0;
 pub enum ControlCmd {
     Goto { x: f32, y: f32 },
     Circle { x: f32, y: f32 },
+    /// 整体替换队列（= `AutoCmd::Set`）：空数组 = 取消（与 `stop` 等价）
+    Queue { missions: Vec<Mission> },
+    /// 追加队尾（= `AutoCmd::Append`，§十一 #15）
+    Append { missions: Vec<Mission> },
+    /// 插队头（= `AutoCmd::Preempt`，§十一 #15/#17）
+    Preempt { missions: Vec<Mission> },
     Stop,
     Mode { auto: bool },
     Manual { action: String },
@@ -82,6 +94,7 @@ pub fn Spawn(
     robot: Arc<Robot>,
     world: Option<WorldLinkHandle>,
     peer_id: String,
+    monitor: Arc<TaskMonitor>,
     cancel: CancellationToken,
 ) {
     if !cfg.Enabled() {
@@ -98,7 +111,7 @@ pub fn Spawn(
             );
         }
     }
-    tokio::spawn(async move { Run(r, robot, world, Arc::new(peer_id), cancel).await });
+    tokio::spawn(async move { Run(r, robot, world, Arc::new(peer_id), monitor, cancel).await });
 }
 
 /// 绑定监听（单测缝：端口被占必须 `Err` 而不是 panic）
@@ -112,6 +125,7 @@ async fn Run(
     robot: Arc<Robot>,
     world: Option<WorldLinkHandle>,
     peer_id: Arc<String>,
+    monitor: Arc<TaskMonitor>,
     cancel: CancellationToken,
 ) {
     let listener = match Bind_Listener(&cfg.bind, cfg.port).await {
@@ -149,6 +163,7 @@ async fn Run(
                     robot.clone(),
                     world.clone(),
                     peer_id.clone(),
+                    monitor.clone(),
                     cancel.clone(),
                 ));
             }
@@ -162,6 +177,7 @@ async fn Serve_Conn(
     robot: Arc<Robot>,
     world: Option<WorldLinkHandle>,
     peer_id: Arc<String>,
+    monitor: Arc<TaskMonitor>,
     cancel: CancellationToken,
 ) {
     let mut ws = match tokio::time::timeout(CONTROL_HANDSHAKE_TIMEOUT, accept_async(stream)).await {
@@ -187,7 +203,7 @@ async fn Serve_Conn(
                 break;
             }
             Some(Ok(Message::Text(t))) => {
-                let reply = Handle_Text(&t, &robot, world.as_ref(), &peer_id).await;
+                let reply = Handle_Text(&t, &robot, world.as_ref(), &peer_id, &monitor).await;
                 let s = reply.to_string();
                 if let Err(e) = ws.send(Message::Text(s)).await {
                     debug!("[control] 回包失败：{e}");
@@ -216,14 +232,20 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
         .trim()
         .to_string();
     match cmd.as_str() {
-        "goto" | "circle" => {
-            // 现状不支持群发 members（§七.4 / §七.8-6）：非空数组 → 明确拒绝，不假装成功
-            if let Some(m) = obj.get("members") {
-                let non_empty = m.as_array().map(|a| !a.is_empty()).unwrap_or(true);
-                if non_empty {
-                    return Err("members 不支持，请用地面站".to_string());
-                }
+        "queue" | "append" | "preempt" => {
+            let missions = Param_Missions(obj)?;
+            if missions.is_empty() && cmd != "queue" {
+                return Err(format!(
+                    "{cmd} 的 missions 不得为空（取消请用 {{\"cmd\":\"queue\",\"missions\":[]}} 或 stop）"
+                ));
             }
+            Ok(match cmd.as_str() {
+                "append" => ControlCmd::Append { missions },
+                "preempt" => ControlCmd::Preempt { missions },
+                _ => ControlCmd::Queue { missions }, // 空数组合法 = 取消
+            })
+        }
+        "goto" | "circle" => {
             let x = Param_F32(obj, "x")?;
             let y = Param_F32(obj, "y")?;
             Ok(if cmd == "goto" { ControlCmd::Goto { x, y } } else { ControlCmd::Circle { x, y } })
@@ -255,24 +277,58 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
         "status" => Ok(ControlCmd::Status),
         "help" => Ok(ControlCmd::Help),
         other => Err(format!(
-            "未知 cmd '{other}'（支持 goto/circle/stop/mode/manual/status/help）"
+            "未知 cmd '{other}'（支持 goto/circle/queue/append/preempt/stop/mode/manual/status/help）"
         )),
     }
 }
 
 /// `x`/`y` 取数：缺失 / 非数字 / 非有限 / 越界 各自不同错误文本
 fn Param_F32(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<f32, String> {
-    let v = obj.get(key).ok_or_else(|| format!("缺少 {key} 字段"))?;
-    let f = v.as_f64().ok_or_else(|| format!("{key} 必须是数字"))? as f32;
+    Param_F32_As(obj, key, key)
+}
+
+/// 同 [`Param_F32`]，但**错误文本用 `label`**（`missions[0].x` 这类带下标的写法：
+/// 查的键是 `x`，报给人看的是 `missions[0].x`）
+fn Param_F32_As(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    label: &str,
+) -> Result<f32, String> {
+    let v = obj.get(key).ok_or_else(|| format!("缺少 {label} 字段"))?;
+    let f = v.as_f64().ok_or_else(|| format!("{label} 必须是数字"))? as f32;
     if !f.is_finite() {
         // `1e39` 反序列化成 f64 合法，但 as f32 变 inf → 必须当非法（R11）
-        return Err(format!("{key} 必须是有限数"));
+        return Err(format!("{label} 必须是有限数"));
     }
     if !(CONTROL_WORLD_MIN..CONTROL_WORLD_MAX).contains(&f) {
         // 右开区间：`128.0` 必须拒绝
-        return Err(format!("{key} 超范围 [{CONTROL_WORLD_MIN},{CONTROL_WORLD_MAX})"));
+        return Err(format!("{label} 超范围 [{CONTROL_WORLD_MIN},{CONTROL_WORLD_MAX})"));
     }
     Ok(f)
+}
+
+/// `missions` 解析：必须是数组，逐条 `{x,y}`（同一套范围/有限性校验，错误文本带下标）
+fn Param_Missions(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<Mission>, String> {
+    let arr = match obj.get("missions") {
+        Some(v) => v.as_array().ok_or_else(|| "missions 必须是数组".to_string())?,
+        None => return Err("缺少 missions 字段（应为 [{x,y}, ...]）".to_string()),
+    };
+    if arr.len() > MAX_MISSIONS_PER_CMD {
+        return Err(format!(
+            "missions 最多 {MAX_MISSIONS_PER_CMD} 条，实际 {}",
+            arr.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, m) in arr.iter().enumerate() {
+        let o = m
+            .as_object()
+            .ok_or_else(|| format!("missions[{i}] 必须是对象 {{x,y}}"))?;
+        let x = Param_F32_As(o, "x", &format!("missions[{i}].x"))?;
+        let y = Param_F32_As(o, "y", &format!("missions[{i}].y"))?;
+        out.push(Mission::Goto { x, y });
+    }
+    Ok(out)
 }
 
 // ================================================================ 命令 → 注入（纯函数缝）
@@ -302,7 +358,17 @@ fn Manual_Command(mode: OpMode, action: &str) -> Result<Command, String> {
     }))
 }
 
-/// 纯函数（可单测）：与 §七.4 的示例**字段完全一致**（9 个键，不多不少）
+/// 三种队列命令 → `AutoCmd`（纯函数：控制口只负责投递，语义映射必须可用单测卡住）
+fn Queue_Auto_Cmd(kind: &str, missions: Vec<Mission>) -> Command {
+    Command::Auto(match kind {
+        "append" => AutoCmd::Append(missions),
+        "preempt" => AutoCmd::Preempt(missions),
+        _ => AutoCmd::Set(missions), // "queue"
+    })
+}
+
+/// 纯函数（可单测）：§七.4 的 9 个键 + §12.8.2 第 4 条的 4 个观测键（共 13 个）
+#[allow(clippy::too_many_arguments)]
 fn Status_Data(
     peer_id: &str,
     assembled: bool,
@@ -313,6 +379,10 @@ fn Status_Data(
     z: f32,
     yaw: f32,
     rtk_fixed: bool,
+    queue_len: usize,
+    task_id: Option<u64>,
+    task_ticks: u64,
+    nav_status: &str,
 ) -> Value {
     json!({
         "peer_id": peer_id,                 // 本机 libp2p PeerId 的 base58
@@ -321,18 +391,26 @@ fn Status_Data(
         "mode": Mode_Name(mode),
         "x": x, "y": y, "z": z, "yaw": yaw,
         "rtk_fixed": rtk_fixed,             // 世界无 RTK → 恒 false（§七；§六.2.5）
+        // ---- Task 36 §12.8.2 第 4 条（队列语义判定用）----
+        "queue_len": queue_len,             // 含正在执行的队首（§十一 #16）
+        "task_id": task_id,                 // 队首 TaskId；空队列 null
+        "task_ticks": task_ticks,           // 队首任务累计 tick（挂起期间冻结）
+        "nav_status": nav_status,           // idle | navigating | arrived | blocked
     })
 }
 
 fn Help_Data() -> Value {
     json!({ "commands": [
-        {"cmd":"goto",   "args":["x","y"],  "note":"单车前往目标点（米，[0,128)）"},
-        {"cmd":"circle", "args":["x","y"],  "note":"单车围圈（x/y 为圆心，米）"},
-        {"cmd":"stop",   "args":[],         "note":"按当前模式停车（Auto→清空任务，Manual→Manual(Stop)）"},
-        {"cmd":"mode",   "args":["value"],  "note":"value = auto | manual"},
-        {"cmd":"manual", "args":["action"], "note":"forward|backward|spin_left|spin_right|stop（仅 Manual 模式）"},
-        {"cmd":"status", "args":[],         "note":"回状态 JSON（只读）"},
-        {"cmd":"help",   "args":[],         "note":"本列表"},
+        {"cmd":"goto",    "args":["x","y"],    "note":"单车前往目标点（米，[0,128)）"},
+        {"cmd":"circle",  "args":["x","y"],    "note":"单车围圈（x/y 为圆心，米）"},
+        {"cmd":"queue",   "args":["missions"], "note":"整体替换队列（missions=[] = 取消）"},
+        {"cmd":"append",  "args":["missions"], "note":"追加队尾（当前任务不受影响）"},
+        {"cmd":"preempt", "args":["missions"], "note":"插队头（当前任务挂起、可恢复）"},
+        {"cmd":"stop",    "args":[],           "note":"按当前模式停车（Auto→清空任务，Manual→Manual(Stop)）"},
+        {"cmd":"mode",    "args":["value"],    "note":"value = auto | manual"},
+        {"cmd":"manual",  "args":["action"],   "note":"forward|backward|spin_left|spin_right|stop（仅 Manual 模式）"},
+        {"cmd":"status",  "args":[],           "note":"回状态 JSON（含 queue_len/task_id/task_ticks/nav_status）"},
+        {"cmd":"help",    "args":[],           "note":"本列表"},
     ]})
 }
 
@@ -356,6 +434,88 @@ fn Mode_Name(mode: OpMode) -> &'static str {
     }
 }
 
+// ================================================================ 任务观测器（§12.8.2 第 4 条）
+
+/// `status` 需要、但 `MissionQueue` 里给不出的两个观测值，由设备端每拍写、控制口只读。
+///
+/// - **`task_ticks`**：按 `TaskId` 累计"该任务的树被 tick 了几拍"。挂起期间不 tick → 值**冻结**；
+///   恢复后从冻结值继续。用例 5/6 就靠这一条区分"同一实例恢复"与"重建后从 0 开始"
+///   （§12.8.4：判定只认 `task_ticks`）。
+/// - **`nav_status`**：最近一拍的导航器状态（`idle|navigating|arrived|blocked`），只作观测/取证。
+///
+/// 写者唯一（`SimDeviceHandler::on_tick`），读者唯一（控制口 `status`）。
+/// 用 `std::sync::Mutex` 而不是 tokio 锁：临界区里没有 `await`，也不该把控制口的读
+/// 塞进 async 排队；锁中毒不 panic（取回内层继续用，与本 crate 其它锁同纪律）。
+#[derive(Debug)]
+pub struct TaskMonitor {
+    inner: StdMutex<MonitorInner>,
+}
+
+#[derive(Debug)]
+struct MonitorInner {
+    /// `TaskId.0` → 累计 tick 数
+    ticks: HashMap<u64, u64>,
+    /// 导航状态编码：0 idle / 1 navigating / 2 arrived / 3 blocked
+    nav: u8,
+}
+
+impl Default for TaskMonitor {
+    fn default() -> Self {
+        Self { inner: StdMutex::new(MonitorInner { ticks: HashMap::new(), nav: 0 }) }
+    }
+}
+
+impl TaskMonitor {
+    /// 锁中毒不 panic（与本 crate 其它锁同纪律）
+    fn Lock(&self) -> std::sync::MutexGuard<'_, MonitorInner> {
+        match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    /// 该任务的树被 tick 了**一拍**（`on_tick` 里树真的推进过才调；无活动树不调）
+    pub fn Note_Tick(&self, id: TaskId) {
+        *self.Lock().ticks.entry(id.0).or_insert(0) += 1;
+    }
+
+    /// 该任务拿到终值（出队后清一条，避免计数表随任务数无限长）
+    pub fn Forget(&self, id: TaskId) {
+        self.Lock().ticks.remove(&id.0);
+    }
+
+    /// `reset`（replace / 切模式）→ 整表清空
+    pub fn Clear(&self) {
+        self.Lock().ticks.clear();
+    }
+
+    /// 该 `TaskId` 的累计 tick 数（不存在 / 还没开始 → 0）
+    pub fn Ticks_Of(&self, id: u64) -> u64 {
+        *self.Lock().ticks.get(&id).unwrap_or(&0)
+    }
+
+    /// 记录本拍导航状态（只认这 4 个字面量，省掉跨 crate 的枚举依赖）
+    pub fn Set_Nav(&self, nav: &'static str) {
+        let code = match nav {
+            "navigating" => 1,
+            "arrived" => 2,
+            "blocked" => 3,
+            _ => 0, // "idle"
+        };
+        self.Lock().nav = code;
+    }
+
+    /// 最近一次记录的导航状态
+    pub fn Nav(&self) -> &'static str {
+        match self.Lock().nav {
+            1 => "navigating",
+            2 => "arrived",
+            3 => "blocked",
+            _ => "idle",
+        }
+    }
+}
+
 // ================================================================ 分派与投递
 
 /// 文本帧 → 回包（**永远有回包**，绝不静默）
@@ -364,6 +524,7 @@ async fn Handle_Text(
     robot: &Arc<Robot>,
     world: Option<&WorldLinkHandle>,
     peer_id: &str,
+    monitor: &TaskMonitor,
 ) -> Value {
     // 尽力从原始 JSON 取 "cmd"（错误回包也要带）；取不到 → "?"
     let name = Reply_Cmd_Name(text);
@@ -372,7 +533,7 @@ async fn Handle_Text(
             warn!("[control] 拒绝请求：{e}");
             Err_Reply(&name, e)
         }
-        Ok(cmd) => Handle_Cmd(cmd, robot, world, peer_id).await,
+        Ok(cmd) => Handle_Cmd(cmd, robot, world, peer_id, monitor).await,
     }
 }
 
@@ -389,10 +550,35 @@ async fn Handle_Cmd(
     robot: &Arc<Robot>,
     world: Option<&WorldLinkHandle>,
     peer_id: &str,
+    monitor: &TaskMonitor,
 ) -> Value {
     // Copy 出来，读锁立即释放（绝不持锁跨 await —— 挤压设备端 RX）
     let mode = *robot.op_mode.read().await;
     match cmd {
+        ControlCmd::Queue { missions } => {
+            if mode != OpMode::Auto {
+                warn!("[control] 当前为 Manual 模式，queue 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）");
+            }
+            info!("[control] queue（整体替换）{} 条 → cmd_tx", missions.len());
+            let c = Queue_Auto_Cmd("queue", missions);
+            Dispatch(robot, c, "queue").await
+        }
+        ControlCmd::Append { missions } => {
+            if mode != OpMode::Auto {
+                warn!("[control] 当前为 Manual 模式，append 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）");
+            }
+            info!("[control] append {} 条 → cmd_tx", missions.len());
+            let c = Queue_Auto_Cmd("append", missions);
+            Dispatch(robot, c, "append").await
+        }
+        ControlCmd::Preempt { missions } => {
+            if mode != OpMode::Auto {
+                warn!("[control] 当前为 Manual 模式，preempt 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）");
+            }
+            info!("[control] preempt {} 条 → cmd_tx", missions.len());
+            let c = Queue_Auto_Cmd("preempt", missions);
+            Dispatch(robot, c, "preempt").await
+        }
         ControlCmd::Goto { x, y } => {
             if mode != OpMode::Auto {
                 warn!(
@@ -400,7 +586,7 @@ async fn Handle_Cmd(
                 );
             }
             info!("[control] goto ({x:.1}, {y:.1}) → cmd_tx");
-            let c = Command::Auto(AutoCmd::Set(vec![Mission::Goto { x, y, members: Vec::new() }]));
+            let c = Command::Auto(AutoCmd::Set(vec![Mission::Goto { x, y }]));
             Dispatch(robot, c, "goto").await
         }
         ControlCmd::Circle { x, y } => {
@@ -409,9 +595,8 @@ async fn Handle_Cmd(
                     "[control] 当前为 Manual 模式，circle 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）"
                 );
             }
-            info!("[control] circle ({x:.1}, {y:.1}) → cmd_tx");
-            let c =
-                Command::Auto(AutoCmd::Set(vec![Mission::Circle { x, y, members: Vec::new() }]));
+            info!("[control] circle ({x:.1}, {y:.1}) → cmd_tx（Task 36：Circle 已并入 Goto，去圆心）");
+            let c = Command::Auto(AutoCmd::Set(vec![Mission::Goto { x, y }]));
             Dispatch(robot, c, "circle").await
         }
         ControlCmd::Stop => {
@@ -462,14 +647,24 @@ async fn Handle_Cmd(
                 let s = robot.robot_state.read().await;
                 (s.x, s.y, s.z, s.attitude.yaw, s.rtk_fixed)
             };
+            // 队列快照：队首 = 正在执行的任务位（§十一 #16），`len` 含队首
+            let (queue_len, task_id) = {
+                let q = robot.mission_queue.read().await;
+                (q.len(), q.head().map(|t| t.id.0))
+            };
+            let task_ticks = task_id.map(|id| monitor.Ticks_Of(id)).unwrap_or(0);
+            let nav_status = monitor.Nav();
             let (assembled, avatar_id) = match world {
                 Some(w) => (w.State().await == WorldState::Assembled, w.Avatar_Id().await),
                 None => (false, None), // 不连世界：assembled=false、avatar=null
             };
-            debug!("[control] status assembled={assembled} avatar={avatar_id:?}");
+            debug!("[control] status queue={queue_len} task={task_id:?} ticks={task_ticks} nav={nav_status}");
             Ok_Reply_Data(
                 "status",
-                Status_Data(peer_id, assembled, avatar_id, mode, x, y, z, yaw, rtk_fixed),
+                Status_Data(
+                    peer_id, assembled, avatar_id, mode, x, y, z, yaw, rtk_fixed,
+                    queue_len, task_id, task_ticks, nav_status,
+                ),
             )
         }
         ControlCmd::Help => Ok_Reply_Data("help", Help_Data()),
@@ -587,7 +782,7 @@ mod tests {
     fn test_parse_unknown_cmd() {
         let e = Parse_Control(r#"{"cmd":"fly"}"#).expect_err("未知 cmd 必须报错");
         assert!(e.contains("未知 cmd 'fly'"), "错误文本：{e}");
-        assert!(e.contains("goto/circle/stop/mode/manual/status/help"), "应列出支持的命令：{e}");
+        assert!(e.contains("goto/circle/queue/append/preempt/stop/mode/manual/status/help"), "应列出支持的命令：{e}");
     }
 
     #[test]
@@ -660,23 +855,160 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_members_rejected() {
-        // §七.8-6：群发不支持，明确拒绝（不假装成功）
-        let e = Parse_Control(r#"{"cmd":"goto","x":36,"y":92,"members":["abc"]}"#)
-            .expect_err("非空 members 必须拒绝");
-        assert_eq!(e, "members 不支持，请用地面站");
-        let e = Parse_Control(r#"{"cmd":"circle","x":36,"y":92,"members":[1,2]}"#)
-            .expect_err("非空 members 必须拒绝");
-        assert_eq!(e, "members 不支持，请用地面站");
-        // 空数组 / 缺失 = 单车语义，合法
+    fn test_parse_goto_tolerates_unknown_fields() {
+        // Task 36 §十二 Step 3：协议已无群发段，控制口不再校验该字段（未知键一律忽略）
         assert_eq!(
-            Parse_Control(r#"{"cmd":"goto","x":36,"y":92,"members":[]}"#),
+            Parse_Control(r#"{"cmd":"goto","x":36,"y":92,"legacy":["abc"]}"#),
             Ok(ControlCmd::Goto { x: 36.0, y: 92.0 })
         );
         assert_eq!(
             Parse_Control(r#"{"cmd":"goto","x":36,"y":92}"#),
             Ok(ControlCmd::Goto { x: 36.0, y: 92.0 })
         );
+    }
+
+    // ---------------------------------------------------------- 队列命令（Task 36 §12.8.2 第 3 条）
+
+    #[test]
+    fn test_parse_queue_single() {
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"queue","missions":[{"x":36,"y":92}]}"#),
+            Ok(ControlCmd::Queue { missions: vec![Mission::Goto { x: 36.0, y: 92.0 }] })
+        );
+    }
+
+    #[test]
+    fn test_parse_queue_multi_keeps_order() {
+        let got = Parse_Control(r#"{"cmd":"queue","missions":[{"x":1,"y":2},{"x":3.5,"y":4.5}]}"#)
+            .expect("两条合法");
+        match got {
+            ControlCmd::Queue { missions } => assert_eq!(
+                missions,
+                vec![
+                    Mission::Goto { x: 1.0, y: 2.0 },
+                    Mission::Goto { x: 3.5, y: 4.5 },
+                ]
+            ),
+            other => panic!("应是 Queue，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_empty_is_cancel() {
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"queue","missions":[]}"#),
+            Ok(ControlCmd::Queue { missions: vec![] })
+        );
+    }
+
+    #[test]
+    fn test_parse_append_preempt_reject_empty() {
+        for cmd in ["append", "preempt"] {
+            let text = format!(r#"{{"cmd":"{cmd}","missions":[]}}"#);
+            let e = Parse_Control(&text).expect_err("空 missions 必须报错");
+            assert!(e.contains("不得为空"), "{cmd} 错误文本：{e}");
+        }
+    }
+
+    #[test]
+    fn test_parse_missions_missing() {
+        for cmd in ["queue", "append", "preempt"] {
+            let text = format!(r#"{{"cmd":"{cmd}"}}"#);
+            let e = Parse_Control(&text).expect_err("缺 missions 必须报错");
+            assert!(e.contains("缺少 missions 字段"), "错误文本：{e}");
+        }
+    }
+
+    #[test]
+    fn test_parse_missions_not_array() {
+        let e = Parse_Control(r#"{"cmd":"queue","missions":{"x":1,"y":2}}"#)
+            .expect_err("missions 非数组必须报错");
+        assert_eq!(e, "missions 必须是数组");
+    }
+
+    #[test]
+    fn test_parse_missions_bad_elem() {
+        let e = Parse_Control(r#"{"cmd":"queue","missions":[1]}"#).expect_err("元素非对象必须报错");
+        assert!(e.contains("missions[0] 必须是对象"), "错误文本：{e}");
+        let e = Parse_Control(r#"{"cmd":"queue","missions":[{"x":1}]}"#)
+            .expect_err("元素缺 y 必须报错");
+        assert!(e.contains("missions[0].y"), "错误文本要带下标：{e}");
+    }
+
+    #[test]
+    fn test_parse_missions_out_of_range() {
+        let e = Parse_Control(r#"{"cmd":"append","missions":[{"x":128,"y":0}]}"#)
+            .expect_err("x 越界必须报错");
+        assert!(e.contains("missions[0].x 超范围 [0,128)"), "错误文本：{e}");
+    }
+
+    #[test]
+    fn test_parse_missions_too_many() {
+        let items: Vec<String> = (0..MAX_MISSIONS_PER_CMD + 1)
+            .map(|i| format!(r#"{{"x":{},"y":0}}"#, i))
+            .collect();
+        let text = format!(r#"{{"cmd":"queue","missions":[{}]}}"#, items.join(","));
+        let e = Parse_Control(&text).expect_err("超条数必须报错");
+        assert!(e.contains(&format!("最多 {MAX_MISSIONS_PER_CMD} 条")), "错误文本：{e}");
+    }
+
+    /// 关键缝：控制口**不许**把 append / preempt 写成 Set（否则整个 step 白做）
+    #[test]
+    fn test_queue_auto_cmd_mapping() {
+        let one = vec![Mission::Goto { x: 1.0, y: 2.0 }];
+        match Queue_Auto_Cmd("queue", one.clone()) {
+            Command::Auto(AutoCmd::Set(v)) => assert_eq!(v, one),
+            other => panic!("queue 应映射 Set，实际 {other:?}"),
+        }
+        match Queue_Auto_Cmd("append", one.clone()) {
+            Command::Auto(AutoCmd::Append(v)) => assert_eq!(v, one),
+            other => panic!("append 应映射 Append，实际 {other:?}"),
+        }
+        match Queue_Auto_Cmd("preempt", one.clone()) {
+            Command::Auto(AutoCmd::Preempt(v)) => assert_eq!(v, one),
+            other => panic!("preempt 应映射 Preempt，实际 {other:?}"),
+        }
+    }
+
+    /// `task_ticks` 按 `TaskId` 独立累计：A 冻在不 tick，B 继续涨
+    #[test]
+    fn test_task_monitor_ticks_are_per_task() {
+        let m = TaskMonitor::default();
+        for _ in 0..20 { m.Note_Tick(TaskId(1)); }
+        for _ in 0..5 { m.Note_Tick(TaskId(2)); }
+        assert_eq!(m.Ticks_Of(1), 20);
+        assert_eq!(m.Ticks_Of(2), 5);
+        // A 挂起（不再 Note_Tick）→ 值冻结；B 继续涨
+        for _ in 0..3 { m.Note_Tick(TaskId(2)); }
+        assert_eq!(m.Ticks_Of(1), 20, "挂起期间不 tick → 冻结（用例 5/6 的判据基础）");
+        assert_eq!(m.Ticks_Of(2), 8);
+        assert_eq!(m.Ticks_Of(99), 0, "不存在的任务 → 0");
+    }
+
+    #[test]
+    fn test_task_monitor_forget_and_clear() {
+        let m = TaskMonitor::default();
+        m.Note_Tick(TaskId(1));
+        m.Note_Tick(TaskId(1));
+        m.Forget(TaskId(1));
+        assert_eq!(m.Ticks_Of(1), 0, "终值后清一条");
+        m.Note_Tick(TaskId(1));
+        m.Note_Tick(TaskId(2));
+        m.Clear();
+        assert_eq!(m.Ticks_Of(1), 0, "reset 后整表清空");
+        assert_eq!(m.Ticks_Of(2), 0);
+    }
+
+    #[test]
+    fn test_task_monitor_nav_default_and_roundtrip() {
+        let m = TaskMonitor::default();
+        assert_eq!(m.Nav(), "idle", "默认 idle");
+        for name in ["navigating", "arrived", "blocked", "idle"] {
+            m.Set_Nav(name);
+            assert_eq!(m.Nav(), name);
+        }
+        m.Set_Nav("什么鬼"); // 非法值一律降级为 idle，不 panic
+        assert_eq!(m.Nav(), "idle");
     }
 
     // ---------------------------------------------------------- 命令 → 注入
@@ -734,11 +1066,18 @@ mod tests {
 
     #[test]
     fn test_status_data_schema() {
-        let v = Status_Data("12D3KooW", true, Some(1), OpMode::Auto, 64.02, 63.98, 0.0, 0.12, false);
+        let v = Status_Data(
+            "12D3KooW", true, Some(1), OpMode::Auto, 64.02, 63.98, 0.0, 0.12, false,
+            2, Some(7), 123, "navigating",
+        );
         let obj = v.as_object().expect("status.data 必须是 JSON 对象");
-        // 恰好 9 个键，不多不少（§七.4 的示例）
-        assert_eq!(obj.len(), 9, "status.data 键数必须是 9，实际 {obj:?}");
-        for k in ["peer_id", "assembled", "avatar_id", "mode", "x", "y", "z", "yaw", "rtk_fixed"] {
+        // 恰好 13 个键，不多不少（§七.4 的 9 个 + §12.8.2 第 4 条的 4 个）
+        assert_eq!(obj.len(), 13, "status.data 键数必须是 13，实际 {obj:?}");
+        for k in [
+            "peer_id", "assembled", "avatar_id", "mode", "x", "y", "z", "yaw", "rtk_fixed",
+            // Task 36 §12.8.2 第 4 条
+            "queue_len", "task_id", "task_ticks", "nav_status",
+        ] {
             assert!(obj.contains_key(k), "status.data 缺键 {k}：{obj:?}");
         }
         assert_eq!(v["peer_id"], json!("12D3KooW"));
@@ -746,23 +1085,32 @@ mod tests {
         assert_eq!(v["avatar_id"], json!(1));
         assert_eq!(v["mode"], json!("auto"));
         assert_eq!(v["rtk_fixed"], json!(false));
+        assert_eq!(v["queue_len"], json!(2));
+        assert_eq!(v["task_id"], json!(7));
+        assert_eq!(v["task_ticks"], json!(123));
+        assert_eq!(v["nav_status"], json!("navigating"));
 
-        // 未装配 / 未连世界：avatar_id = None → JSON null
-        let v = Status_Data("p", false, None, OpMode::Manual, 1.0, 2.0, 3.0, 4.0, false);
+        // 未装配 / 未连世界：avatar_id = None → JSON null；空队列：task_id = null、task_ticks = 0
+        let v = Status_Data(
+            "p", false, None, OpMode::Manual, 1.0, 2.0, 3.0, 4.0, false, 0, None, 0, "idle",
+        );
         assert_eq!(v["avatar_id"], Value::Null, "None 必须序列化成 null");
         assert_eq!(v["assembled"], json!(false));
         assert_eq!(v["mode"], json!("manual"));
+        assert_eq!(v["task_id"], Value::Null, "空队列 task_id 必须序列化成 null");
+        assert_eq!(v["task_ticks"], json!(0));
+        assert_eq!(v["nav_status"], json!("idle"));
     }
 
     #[test]
     fn test_help_data_has_all_commands() {
         let v = Help_Data();
         let arr = v["commands"].as_array().expect("help.data.commands 必须是数组");
-        assert_eq!(arr.len(), 7, "help 必须列 7 条命令");
+        assert_eq!(arr.len(), 10, "help 必须列 10 条命令");
         let names: Vec<&str> = arr.iter().filter_map(|c| c["cmd"].as_str()).collect();
         assert_eq!(
             names,
-            vec!["goto", "circle", "stop", "mode", "manual", "status", "help"]
+            vec!["goto", "circle", "queue", "append", "preempt", "stop", "mode", "manual", "status", "help"]
         );
         // 每条都有 args 数组
         for c in arr {

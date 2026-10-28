@@ -1,6 +1,7 @@
 # UAV 架构说明（uav_arch）
 
 > 创建日期：2026-08-21
+> 更新日期：2026-10-27（Task 36 Step 5：`uav/goal.rs` + `uav/planning/` → `uav/nav/`，新增 `uav/mission/` Goto 树；`robot_handler.rs` 改为行为树驱动，出队上移 base `main_loop`）
 > 范围：DRF450（F450-4B）无人机平台的树莓派环境配置与飞控接入
 > 平台技术规格详见 `docs/design_doc/UAV.md`
 > 本文记录实际部署中确认的硬件连接、网络配置与踩坑记录
@@ -133,6 +134,38 @@ python3 -c "import serial; s=serial.Serial('/dev/ttyAMA0', 921600, timeout=1); p
 mavproxy.py --master=/dev/ttyAMA0 --baudrate=921600
 # 成功标志：出现 MAV> 提示符 + 日志滚动 heartbeat
 ```
+
+## 6. 机端任务层与导航层（Task 36 Step 5）
+
+> `uav/goal.rs` + `uav/planning/` → `uav/nav/`，新增 `uav/mission/`；结构与 `pleiades-ugv` **同构**，
+> 同名文件**逐字相同**（只差 `use` 路径）。
+
+```text
+pleiades-uav/src/uav/
+├── mavlink/                     MAVLink 飞控驱动（不变）
+├── nav/                         ★ 导航层（四个文件与 ugv 逐字节相同）
+│   ├── mod.rs                   NavStatus / BlockedCause / ObstacleMode / NavPort
+│   ├── navigator.rs             目标 → 下一格（到达 / 被堵 / 无路状态；不碰队列）
+│   ├── pathfinder.rs            D* Lite（原 planning/pathfinder.rs 原样搬入）
+│   └── cluster_obstacles.rs     他车 → 动态障碍格（原 planning/cluster_obstacles.rs 原样搬入）
+├── mission/                     ★ 任务层
+│   ├── mod.rs                   Mission → 树的分派 + TaskDeps
+│   └── goto.rs                  Goto 树 + GoTo 叶子（与 ugv 逐字相同）
+├── executor.rs                  2D 决策三状态机（不变，三份逐字节相同）
+└── robot_handler.rs             驱动：① 门闩 → ② 树 → ③ 决策 → ④ 终值（无 2D 急停）
+```
+
+**机端差异（全部用参数表达，不 fork 代码）**：
+
+| 差异 | 表达方式 |
+|---|---|
+| 忽略地面障碍（Task 27「天上没人」） | `Navigator::new(..., ObstacleMode::Ignore, ...)`：喂空栅格、不注入他车动态障碍。⚠️ **过渡参数**，机端导航后续改版时整体替换 |
+| 无建图增量（机无 `slam/`） | `Navigator::new` 的 `map_rx` 传 `None` |
+| 无 2D 急停（机无 LiDAR） | `on_tick` 少第 ② 步：门闩 → 树 → 决策 → 终值 |
+| 无飞控时 | `on_tick` 第 ① 步写 `ExecuteState{Idle, None}` 并返回 `Running`（不消费任务） |
+
+**出队口径**：机端**不再** `pop_next`（旧 `goal.rs` 的隐式出队已删）；出队只在 base `main_loop`，
+`on_tick` 返回 `Terminated` 才出队一次（§十一 #16）。
 
 ## 附：本次环境排查排除清单
 

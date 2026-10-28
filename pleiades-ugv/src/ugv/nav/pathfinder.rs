@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-31
-//Modified Date ： 2026-08-13
+//Modified Date ： 2026-10-27
 
 //! D* Lite 增量路径规划器
 //!
@@ -65,7 +65,7 @@ pub struct DStarLite {
     start: (i32, i32),
     /// 目标位置（网格坐标）
     goal: (i32, i32),
-    /// 他车动态障碍格（Task 15：每次寻路前由 GoalService 注入；footprint = 1 格）
+    /// 他车动态障碍格（Task 15：每次寻路前由 `Navigator` 注入；footprint = 1 格）
     dynamic_obstacles: HashSet<(i32, i32)>,
     /// 上次返回的下一步格（sub_target 变化时打日志，避免每 50ms 刷屏）
     last_step: Option<(i32, i32)>,

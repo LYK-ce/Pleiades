@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-30
+//Modified Date ： 2026-10-27
 
 //! Robot 模块（base：共享底座）
 //!
@@ -12,7 +12,8 @@
 pub mod core;
 pub mod util;
 
-pub use core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
+pub use core::command::{AutoCmd, Command, ManualCmd, ModeCmd};
+pub use core::mission_queue::Mission;
 pub use core::mode::OpMode;
 pub use core::robot::Robot;
 pub use core::state::RobotState;
