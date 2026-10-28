@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 
@@ -18,6 +18,13 @@
 //! `[control]` 段（task_31 §七.3，Step 5）是**测试夹具**：本地控制口，**默认开启**
 //! （配置里完全没有该段也按 `enabled = true` / `127.0.0.1` / `9098` 起监听）；
 //! `enabled = false` 才是关闭。只绑本机回环（非回环地址一律强制改回 `127.0.0.1`）。
+//!
+//! `[detector]` 段（task_37 §三.4，Step 2）与 `pleiades-uav` 的 `[detector]`
+//! **键名、默认值、访问器逐字一致**；无该段 = `None` = 不 spawn detector（零线程）。
+//!
+//! `[detector.camera]` 子表（task_37 §四.4，Step 3）：内参 `fov_deg` + `fov_axis`、外参
+//! `mount_x/y/z` / `mount_yaw_deg` / `mount_pitch_deg`、`ground_z` / `max_range_m` 共 9 个键，
+//! 键名/默认值与 `pleiades-uav` **逐字一致**；sim 侧**只读**（无补全函数）。
 
 use serde::Deserialize;
 
@@ -33,6 +40,167 @@ pub const DEFAULT_CONTROL_ENABLED: bool = true;
 pub const DEFAULT_CONTROL_BIND: &str = "127.0.0.1";
 /// 默认端口（Step 7 的验收脚本按它连）
 pub const DEFAULT_CONTROL_PORT: u16 = 9098;
+
+// ================================================================ [detector]（task_37 Step 2）
+
+/// `[detector].enabled` 的默认值：**默认关**（权重不一定在场，且 detector 会吃满一个 CPU 核）
+pub const DEFAULT_DETECTOR_ENABLED: bool = false;
+/// `[detector].model` 的默认值：只写**文件名**，权重放 `<workspace_dir>/` 下
+pub const DEFAULT_DETECTOR_MODEL: &str = "yolov8n.safetensors";
+/// `[detector].device` 的默认值（`"cpu"` / `"cuda"` / `"cuda:N"`）
+pub const DEFAULT_DETECTOR_DEVICE: &str = "cpu";
+/// `[detector].conf_thres` 的默认值（置信度阈值）
+pub const DEFAULT_DETECTOR_CONF_THRES: f32 = 0.35;
+/// `[detector].nms_thres` 的默认值（NMS IoU 阈值）
+pub const DEFAULT_DETECTOR_NMS_THRES: f32 = 0.45;
+
+// ============================================================ [detector.camera]（task_37 Step 3）
+
+/// `[detector.camera].fov_deg` 的默认值（度，全视角；与 world 侧 `CameraSensor.DEFAULT_FOV_DEG` 同值）
+pub const DEFAULT_DETECTOR_FOV_DEG: f32 = 70.0;
+/// `[detector.camera].fov_axis` 的默认值：`fov_deg` 指的是**纵向**全视角
+pub const DEFAULT_DETECTOR_FOV_AXIS: &str = "vertical";
+/// `[detector.camera].mount_x` 的默认值（米，机体系 `x` 前）
+pub const DEFAULT_DETECTOR_MOUNT_X: f32 = 0.20;
+/// `[detector.camera].mount_y` 的默认值（米，机体系 `y` 右）
+pub const DEFAULT_DETECTOR_MOUNT_Y: f32 = 0.0;
+/// `[detector.camera].mount_z` 的默认值（米，机体系 `z` 高）
+pub const DEFAULT_DETECTOR_MOUNT_Z: f32 = 0.045;
+/// `[detector.camera].mount_yaw_deg` 的默认值（度；光轴 = 局部 −Z，**前视 = +90°**）
+pub const DEFAULT_DETECTOR_MOUNT_YAW_DEG: f32 = 90.0;
+/// `[detector.camera].mount_pitch_deg` 的默认值（度；**负 = 低头**）
+pub const DEFAULT_DETECTOR_MOUNT_PITCH_DEG: f32 = -15.0;
+/// `[detector.camera].ground_z` 的默认值（米，地面高度）
+pub const DEFAULT_DETECTOR_GROUND_Z: f32 = 0.0;
+/// `[detector.camera].max_range_m` 的默认值（米，超过就拒答）
+pub const DEFAULT_DETECTOR_MAX_RANGE_M: f32 = 12.0;
+
+/// detector 设备配置（`[detector]` 段，task_37 §三.4）；**uav 与 sim 键名一致**
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectorConfig {
+    pub enabled: Option<bool>,
+    pub model: Option<String>,
+    pub device: Option<String>,
+    pub conf_thres: Option<f32>,
+    pub nms_thres: Option<f32>,
+    /// `[detector.camera]` 子表（task_37 Step 3，§四.4）；缺段 = None = 全用默认值
+    pub camera: Option<DetectorCameraConfig>,
+}
+
+impl DetectorConfig {
+    /// `enabled` 缺省 **false**（段存在但没写也按关处理）
+    pub fn Enabled(&self) -> bool {
+        self.enabled.unwrap_or(DEFAULT_DETECTOR_ENABLED)
+    }
+
+    /// 权重**文件名**（去空白；空串 → 默认 `yolov8n.safetensors`）
+    pub fn Model(&self) -> &str {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_MODEL)
+    }
+
+    /// 推理设备（`"cpu"` / `"cuda"` / `"cuda:N"`；空串 → 默认 `"cpu"`）
+    pub fn Device(&self) -> &str {
+        self.device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_DEVICE)
+    }
+
+    /// 置信度阈值（缺省 0.35；非法（<0 或 >1 或 NaN）→ 回默认，不 panic）
+    pub fn Conf_Thres(&self) -> f32 {
+        self.conf_thres
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_DETECTOR_CONF_THRES)
+    }
+
+    /// NMS IoU 阈值（缺省 0.45；非法 → 回默认，不 panic）
+    pub fn Nms_Thres(&self) -> f32 {
+        self.nms_thres
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_DETECTOR_NMS_THRES)
+    }
+}
+
+/// 相机内参 + 外参（`[detector.camera]` 子表，task_37 §四.4）；**uav 与 sim 键名一致**
+///
+/// 单位一律写进键名：角度键带 `_deg`、距离键是米。**故意**不同于 world 侧
+/// `Vehicle.AttachSensor`（那里 yaw 用弧度、pitch 用度混着写，见 `Vehicle.gd:183-184`）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectorCameraConfig {
+    pub fov_deg: Option<f32>,
+    pub fov_axis: Option<String>,
+    pub mount_x: Option<f32>,
+    pub mount_y: Option<f32>,
+    pub mount_z: Option<f32>,
+    pub mount_yaw_deg: Option<f32>,
+    pub mount_pitch_deg: Option<f32>,
+    pub ground_z: Option<f32>,
+    pub max_range_m: Option<f32>,
+}
+
+impl DetectorCameraConfig {
+    /// 视场角（度；缺省 70；非有限 / <=1 / >=179 → 回默认，不 panic）
+    ///
+    /// `1 < v < 179` 与 world 侧 `CameraSensor.gd:66-67` 的 `MIN_FOV_DEG/MAX_FOV_DEG` 同界。
+    pub fn Fov_Deg(&self) -> f32 {
+        self.fov_deg
+            .filter(|v| v.is_finite() && *v > 1.0 && *v < 179.0)
+            .unwrap_or(DEFAULT_DETECTOR_FOV_DEG)
+    }
+
+    /// 视场角口径（`"vertical"` / `"horizontal"`；去空白，空 → 默认）
+    pub fn Fov_Axis(&self) -> &str {
+        self.fov_axis
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_FOV_AXIS)
+    }
+
+    /// 光心在机体系的 `x`（米；非有限 → 回默认）
+    pub fn Mount_X(&self) -> f32 {
+        self.mount_x.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_X)
+    }
+
+    /// 光心在机体系的 `y`（米；非有限 → 回默认）
+    pub fn Mount_Y(&self) -> f32 {
+        self.mount_y.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_Y)
+    }
+
+    /// 光心在机体系的 `z`（米；非有限 → 回默认）
+    pub fn Mount_Z(&self) -> f32 {
+        self.mount_z.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_Z)
+    }
+
+    /// 光轴偏航（度；前视 = +90；非有限 → 回默认）
+    pub fn Mount_Yaw_Deg(&self) -> f32 {
+        self.mount_yaw_deg.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_YAW_DEG)
+    }
+
+    /// 光轴俯仰（度；负 = 低头；非有限 → 回默认）
+    pub fn Mount_Pitch_Deg(&self) -> f32 {
+        self.mount_pitch_deg
+            .filter(|v| v.is_finite())
+            .unwrap_or(DEFAULT_DETECTOR_MOUNT_PITCH_DEG)
+    }
+
+    /// 地面高度（米，世界 `z`；非有限 → 回默认）
+    pub fn Ground_Z(&self) -> f32 {
+        self.ground_z.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_GROUND_Z)
+    }
+
+    /// 最大距离（米；缺省 12；非有限 / <= 0 → 回默认）
+    pub fn Max_Range_M(&self) -> f32 {
+        self.max_range_m
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_DETECTOR_MAX_RANGE_M)
+    }
+}
 
 /// 底盘速度绑定（task_31 §六.5.1）：与 pleiades-ugv 的 `[chassis]` 同名同字段、同默认值
 /// （真机 `robot_handler.rs:99-100` 的 `forward_speed` / `turn_speed`）。
@@ -120,6 +288,8 @@ pub struct SimConfig {
     pub sim_world: Option<WorldLinkConfig>,
     /// 本地控制口（`[control]` 段）；无该段 = `None` = **仍按默认开启起**（§七.3）
     pub control: Option<ControlConfig>,
+    /// detector 设备（task_37 Step 2，`[detector]` 段）；无该段 = `None` = 不 spawn
+    pub detector: Option<DetectorConfig>,
 }
 
 /// 读取 SIM 配置（.config/config.toml；文件由 base 的 Ensure_Config 在 core_bootstrap 时创建）
@@ -379,5 +549,112 @@ port = 9191
         for bad in ["0.0.0.0", "192.168.1.2", "", "   ", "::", "example.com", "10.0.0.1"] {
             assert!(!Is_Loopback(bad), "'{bad}' 不是本机回环");
         }
+    }
+
+    // ============================================================ [detector]（task_37 Step 2）
+
+    #[test]
+    fn test_detector_section_parses() {
+        // 整段显式配置 → 五个访问器逐项生效（键名与 uav 的 [detector] 完全一致）
+        let toml_s = r#"
+[detector]
+enabled = true
+model = "yolov8s.safetensors"
+device = "cuda:1"
+conf_thres = 0.5
+"#;
+        let cfg: SimConfig = toml::from_str(toml_s).expect("[detector] 段必须能解析");
+        let d = cfg.detector.as_ref().expect("[detector] 段应被解析出来");
+        assert!(d.Enabled(), "enabled = true");
+        assert_eq!(d.Model(), "yolov8s.safetensors");
+        assert_eq!(d.Device(), "cuda:1");
+        assert_eq!(d.Conf_Thres(), 0.5);
+        assert_eq!(d.Nms_Thres(), DEFAULT_DETECTOR_NMS_THRES, "缺失的 nms_thres 回默认");
+
+        // 常量与 §三.4 的示例值一致
+        assert_eq!(DEFAULT_DETECTOR_MODEL, "yolov8n.safetensors");
+        assert_eq!(DEFAULT_DETECTOR_DEVICE, "cpu");
+        assert_eq!(DEFAULT_DETECTOR_CONF_THRES, 0.35);
+        assert_eq!(DEFAULT_DETECTOR_NMS_THRES, 0.45);
+        assert!(!DEFAULT_DETECTOR_ENABLED, "detector 默认关");
+
+        // 无 [detector] 段 → None（= 不 spawn，零线程）
+        let cfg: SimConfig = toml::from_str("").expect("空配置必须能解析");
+        assert!(cfg.detector.is_none(), "无 [detector] 段 → None");
+
+        // 段存在但缺 enabled → None（访问器按 false 处理，不 panic）
+        let cfg: SimConfig = toml::from_str("[detector]\n").expect("空 [detector] 段必须能解析");
+        let d = cfg.detector.as_ref().expect("空段也是 Some");
+        assert_eq!(d.enabled, None);
+        assert!(!d.Enabled(), "段存在但没写 enabled → 默认 false");
+        assert_eq!(d.Model(), DEFAULT_DETECTOR_MODEL);
+        assert_eq!(d.Device(), DEFAULT_DETECTOR_DEVICE);
+
+        // 非法值（空白 model / 空 device / 越界阈值 / NaN）→ 回默认，不 panic
+        let bad = DetectorConfig {
+            enabled: Some(true),
+            model: Some("   ".to_string()),
+            device: Some(String::new()),
+            conf_thres: Some(2.0),
+            nms_thres: Some(f32::NAN),
+            camera: None, // task_37 Step 3：新增字段（穷举字面量必须补）
+        };
+        assert_eq!(bad.Model(), DEFAULT_DETECTOR_MODEL, "空白 model 回默认");
+        assert_eq!(bad.Device(), DEFAULT_DETECTOR_DEVICE, "空 device 回默认");
+        assert_eq!(bad.Conf_Thres(), DEFAULT_DETECTOR_CONF_THRES, "越界 conf 回默认");
+        assert_eq!(bad.Nms_Thres(), DEFAULT_DETECTOR_NMS_THRES, "NaN nms 回默认");
+    }
+
+    // ==================================================== [detector.camera]（task_37 Step 3）
+
+    #[test]
+    fn test_detector_camera_section_parses() {
+        // 整段显式配置 → 9 个访问器逐项生效（键名与 uav 的 [detector.camera] 完全一致）
+        let toml_s = r#"
+[detector]
+enabled = true
+
+[detector.camera]
+fov_deg = 90.0
+fov_axis = "horizontal"
+mount_x = 0.5
+mount_y = -0.1
+mount_z = 0.3
+mount_yaw_deg = 45.0
+mount_pitch_deg = -30.0
+ground_z = 1.5
+max_range_m = 20.0
+"#;
+        let cfg: SimConfig = toml::from_str(toml_s).expect("[detector.camera] 必须能解析");
+        let cam = cfg.detector.expect("Some").camera.expect("[detector.camera] 应解析出来");
+        assert_eq!(cam.Fov_Deg(), 90.0);
+        assert_eq!(cam.Fov_Axis(), "horizontal");
+        assert_eq!(cam.Mount_X(), 0.5);
+        assert_eq!(cam.Mount_Y(), -0.1);
+        assert_eq!(cam.Mount_Z(), 0.3);
+        assert_eq!(cam.Mount_Yaw_Deg(), 45.0);
+        assert_eq!(cam.Mount_Pitch_Deg(), -30.0);
+        assert_eq!(cam.Ground_Z(), 1.5);
+        assert_eq!(cam.Max_Range_M(), 20.0);
+
+        // 子表缺失 → None（= 全默认值）；空子表 → None 且访问器回默认
+        let cfg: SimConfig = toml::from_str("[detector]\nenabled = true\n").expect("缺子表必须能解析");
+        assert!(cfg.detector.expect("Some").camera.is_none(), "缺 [detector.camera] → None");
+        let cfg: SimConfig = toml::from_str("[detector.camera]\n").expect("空子表必须能解析");
+        let cam = cfg.detector.expect("Some").camera.expect("空子表也是 Some");
+        assert_eq!(cam.Fov_Deg(), DEFAULT_DETECTOR_FOV_DEG);
+        assert_eq!(cam.Mount_Z(), DEFAULT_DETECTOR_MOUNT_Z);
+        assert_eq!(cam.Max_Range_M(), DEFAULT_DETECTOR_MAX_RANGE_M);
+
+        // 常量与 §四.4 的示例值一致
+        assert_eq!(DEFAULT_DETECTOR_FOV_DEG, 70.0);
+        assert_eq!(DEFAULT_DETECTOR_FOV_AXIS, "vertical");
+        assert_eq!(DEFAULT_DETECTOR_MOUNT_X, 0.20);
+        assert_eq!(DEFAULT_DETECTOR_MOUNT_Y, 0.0);
+        assert_eq!(DEFAULT_DETECTOR_MOUNT_Z, 0.045);
+        assert_eq!(DEFAULT_DETECTOR_MOUNT_YAW_DEG, 90.0);
+        assert_eq!(DEFAULT_DETECTOR_MOUNT_PITCH_DEG, -15.0);
+        assert_eq!(DEFAULT_DETECTOR_GROUND_Z, 0.0);
+        assert_eq!(DEFAULT_DETECTOR_MAX_RANGE_M, 12.0);
     }
 }

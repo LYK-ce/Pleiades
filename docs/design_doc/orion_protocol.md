@@ -1,7 +1,7 @@
 # Orion 统一通信协议（Orion Communication Protocol）
 
 > 创建日期：2026-08-07
-> 修改日期：2026-10-27
+> 修改日期：2026-10-28
 > 状态：设计中（消息字段以本文件为准，后续讨论补充其余章节）
 
 ---
@@ -284,9 +284,13 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `type` | uint8 | 任务类型：0 = `Goto`（其余值预留，收到即 warn 丢弃） |
-| `x` | float | 目标点 X（全局世界坐标，米） |
-| `y` | float | 目标点 Y（全局世界坐标，米） |
+| `type` | uint8 | 任务类型：0 = `Goto`，2 = `Follow`（其余值预留，收到即 warn 丢弃） |
+| `x` | float | 目标点 X（全局世界坐标，米）；`Follow` 下**预留**，填 0 |
+| `y` | float | 目标点 Y（全局世界坐标，米）；`Follow` 下**预留**，填 0 |
+
+> `Follow`（Task 37 §五.2）：`type = 2`。`x/y` 预留（现在恒 0），后续可用于「跟随偏移」等语义。
+> ⚠️ **`1` 号是 Task 36 已删的旧 `Circle`，不复用**——地面站/旧工具链里可能仍有该值，
+> 复用会让旧 Circle 帧被误认成 `Follow`；旧 type 一律按未知丢弃。
 
 **总大小 = 1 + 9×mission_count 字节**
 
@@ -296,7 +300,8 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 |---|---|---|
 | `mission_count == 0` | **取消全部任务**（唯一取消入口） | 空队列替换，车停车待命 |
 | `mission_count > 0`，`type == 0` | **逐条入队** | 每条 `Mission::Goto { x, y }` 依序替换本地队列 |
-| `mission_count > 0`，`type != 0` | 该条 `warn` + 丢弃 | 若**全部**被丢 → **整帧不生效（队列不动）** |
+| `mission_count > 0`，`type == 2` | **逐条入队**（`Follow`） | 每条 `Mission::Follow { x, y }`（仅 sim 机栈真跟，其余建平凡树） |
+| `mission_count > 0`，`type != 0/2` | 该条 `warn` + 丢弃 | 若**全部**被丢 → **整帧不生效（队列不动）** |
 | 长度 ≠ `1 + 9×mission_count` | 非法帧 | `decode_task_set` 返回 `None`（旧帧在此被拒） |
 
 行为约束：

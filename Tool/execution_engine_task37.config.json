@@ -1,0 +1,192 @@
+{
+  "task": "Task/task_37_detector.md",
+  "workbook": "Workbook/wb_37_detector.md",
+  "tmp": "tmp/task37",
+  "steps": [
+    {
+      "n": 1,
+      "title": "相机统一：常驻抓取 + 共享帧槽位",
+      "doc": "§二",
+      "side": "pleiades-uav device/camera_{pc,uav} + config；pleiades-sim 相机 sensor",
+      "note": "上一轮因上游中转站请求失败中断（不是代码问题）。工作树已有大半实现：uav/sim 两个 crate 均可 cargo check 通过、相机相关单测全绿；不要推倒重写。本轮先复核现状（cargo check -p pleiades-uav/-p pleiades-sim --all-targets + cargo test -p ... camera），再补齐遗漏项（已知：sim 侧没有名为 latest_frame() 的方法，只有 Latest() + CameraFrame::captured_at_ms()，需要按任务文档 §二 对齐命名或说明等价），并按 §二 逐条核对 stream/stream_fps/capture() 槽位优先/时间戳来源注释。",
+      "brief": [
+        "按 §二 实施：三处相机统一为“生产者写槽位、消费者同步读最新帧”，统一的是槽位结构与读接口，不是谁来写。",
+        "帧结构：Frame { jpeg: Arc<[u8]>, width: u32, height: u32, seq: u64, captured_at_ms: u64 }；槽位只留最新（覆盖式）；读接口 latest_frame() -> Option<Frame>，同步非阻塞。",
+        "camera_pc / camera_uav：worker 改为常转（按新增 stream_fps 抓取），抓到就写槽位；新增开关 stream（false 时不抓、不占 CPU）；capture() 改为“读槽位，槽位空则按需抓一次”，info() 四字段契约不变。",
+        "stream_fps 是新增键，**不复用**现有 fps（fps 保持“格式协商请求帧率”原义）；两个相机各自配置段里加。",
+        "captured_at_ms：与位姿同源的单调毫秒（真机以进程启动为基准）；camera_sim 用帧头的 world_time（世界时间），字段注释里必须写清来源差异。",
+        "camera_sim：不新增 worker（帧由 world_link 的 recv task 推入并已只留最新），只把 CameraFrame 的 world_time 暴露为 captured_at_ms，并新增 latest_frame()。",
+        "不改 Lua 契约（programs/user/camera_photo.lua 一行不动）；不改 on_tick、不改决策链、不改协议。",
+        "单测：槽位覆盖、时间戳单调、无帧返回 None、stream=false 不启动抓取。"
+      ],
+      "allowed": [
+        "pleiades-uav/src/device/camera_pc/",
+        "pleiades-uav/src/device/camera_uav/",
+        "pleiades-uav/src/config.rs",
+        "pleiades-uav/src/bootstrap.rs",
+        "pleiades-sim/src/sim/sensors/camera/",
+        "pleiades-sim/src/sim/sensors/mod.rs",
+        "pleiades-sim/src/sim/device_cap.rs",
+        "Architecture/robot_arch.md"
+      ]
+    },
+    {
+      "n": 2,
+      "title": "detector 设备（uav + sim）",
+      "doc": "§三",
+      "side": "pleiades-uav + pleiades-sim（设备 + 配置 + 日志）",
+      "note": "（重要）上一轮 Step 2 的规划派发因旧中转站故障连续失败，Step 2 尚未产生任何代码改动；本轮从零开始，不要假设已有 detector 代码。Step 1 已 PASS：三处相机已统一为「生产者写槽位 + 消费者同步读最新帧」。现状：camera_pc / camera_uav 有 `pub fn latest_frame() -> Option<slot::Frame>`（slot.rs 在各自 device 目录下）；camera_sim 没有同名方法，用 `CameraSensor::Latest() -> Option<CameraFrame>` + `CameraFrame::captured_at_ms()`。detector 的帧源接口要同时适配这两种（建议自定义 `FrameSource` trait，uav 与 sim 各自实现薄适配，不要为了统一去改相机）。uav 侧接线：bootstrap 里在 push device_caps 之前保留 `Arc<Uav_Camera>`，作为 `UavDeviceHandler::new` 的新参数传入，再交给 detector。本 step 只要求「帧到 + person 框出」，不做定位/跟踪/树。",
+      "brief": [
+        "按 §三 实施：uav 新增 pleiades-uav/src/device/detector/（mod.rs 起步），sim 新增同构设备（pleiades-sim/src/sim/detector/）。",
+        "设备形态：DetectorDevice::spawn(cfg, source, robot_state)；内部 tokio task 读 FrameSource::latest_frame() → spawn_blocking 跑推理 → 覆盖 LatestDetections { frame_ts_ms, dets }；对外 latest_dets() 只读、stats()、shutdown()；enabled=false 时不 spawn。",
+        "算法归属（本 step 已定，评审不得因此判 FAIL）：**不迁移** base 的 ML_Engine/Yolo，直接调用现有 Yolo_Detector::new(model_file, device) / detect(bytes, conf, nms)；算法迁移单列后续任务。",
+        "模型解析沿用现有规则：<workspace_dir>/<model_file>，文件名必须是 yolov8<size>.safetensors；加载一次常驻；模型缺失/加载失败只 warn、设备不启动。",
+        "uav 接线：bootstrap 里在 push device_caps 之前保留一份 Arc<Uav_Camera>，作为 UavDeviceHandler::new 的新参数传入；start() 里 spawn detector；UavInner 持 Option<Arc<DetectorDevice>>；shutdown() 停。",
+        "sim 接线：SimInner 持 detector，帧源用 camera_sim 的最新帧；同样随 start()/shutdown() 走；不改 existing on_tick 决策链。",
+        "配置 [detector]：enabled=false / model=\"yolov8n.safetensors\" / device=\"cpu\" / conf_thres=0.35 / nms_thres=0.45（uav 与 sim 各自的 config.rs 段，键名一致）。",
+        "观测（本 step 判据）：日志打 frame_ts + 每条检测的 class_name/conf/bbox（person 不过滤也行）；不定位、不跟踪、不接树。",
+        "单测：无帧不 panic、dets 覆盖、enabled=false 不 spawn、模型缺失只 warn。"
+      ],
+      "allowed": [
+        "pleiades-uav/src/device/detector/",
+        "pleiades-uav/src/config.rs",
+        "pleiades-uav/src/bootstrap.rs",
+        "pleiades-uav/src/uav/robot_handler.rs",
+        "pleiades-sim/src/sim/detector/",
+        "pleiades-sim/src/config.rs",
+        "pleiades-sim/src/sim/sim_handler.rs",
+        "pleiades-sim/src/sim/mod.rs",
+        "Architecture/robot_arch.md"
+      ]
+    },
+    {
+      "n": 3,
+      "title": "位置估计：像素 → 世界 (x,y)",
+      "doc": "§四",
+      "side": "uav + sim 的 detector（投影纯函数 + 配置）",
+      "note": "Step 2 已 PASS：两侧各有 detector 设备（pleiades-uav/src/device/detector/mod.rs、pleiades-sim/src/sim/detector/mod.rs），对外 `latest() -> Option<Detections>` / `latest_dets()` / `stats()` / `shutdown()`；`Detections { frame_ts_ms, frame_seq, infer_ms, dets }`；`FrameSource` trait 与 `[detector]` 段已就位。本步只加「像素 → 世界」的纯函数与 `[detector.camera]` 配置，不改采集/推理循环、不改相机。位姿：sim 的帧时间戳是世界时间、`RobotState` 不带时间戳；先按「用最新 `RobotState` 位姿」实现，并在注释写清这是近似（位姿 100ms 一拍），不要为此改 chassis/pose_ingest。参数一律放 `[detector.camera]`，键名带单位（`mount_yaw_deg` / `mount_pitch_deg`，米用 `mount_*`）。",
+      "brief": [
+        "按 §四 实施：框底边中点（≈脚）→ 针孔反投影 → 机体系（mount yaw/pitch）→ 世界（pose yaw）→ 与 z=ground_z 求交 → 世界 (x,y)。",
+        "机体系单应（或“行号→前方距离”一维表）在启动时由参数解析生成，**不手工标表**；无 roll 时可用简化式 forward = h / tan(θ(v))。",
+        "输入三条：内参 fov_deg + fov_axis + 帧自带 width/height（**分辨率不单独配**）；外参 [detector.camera] 的 mount_x/y/z、mount_yaw_deg、mount_pitch_deg；位姿取帧时刻 pose（拿不到就取最新，并在注释说明）。",
+        "高度不要配常量：用 pose.z；ground_z 可配（默认 0）；max_range_m 默认 12。",
+        "保护（不满足就拒答，不输出坏点）：框底边不在画面下半部；射线接近地平线；t<0；距离 > max_range_m。",
+        "输出：日志打“估计 (x,y) + 距离/方位 + 是否拒答”；不改 on_tick、不接树、不做跟踪。",
+        "纯函数单测：给定像素+位姿+参数 → 固定结果；改 pitch 或高度结果随之变；四条保护各有拒答用例。"
+      ],
+      "allowed": [
+        "pleiades-uav/src/device/detector/",
+        "pleiades-sim/src/sim/detector/",
+        "pleiades-uav/src/config.rs",
+        "pleiades-sim/src/config.rs",
+        "Architecture/robot_arch.md"
+      ]
+    },
+    {
+      "n": 4,
+      "title": "sim 无人机跟随（Mission::Follow）",
+      "doc": "§五",
+      "side": "base 协议 + 真机平凡树 + sim 跟随树",
+      "note": "Step 2/3 已 PASS：uav 与 sim 各有 detector（`DetectorDevice::latest() -> Option<Detections { frame_ts_ms, frame_seq, infer_ms, dets }>`、`latest_dets()`），各有 `projection.rs`（`Projector::New(ProjectionParams::From_Config(Option<&DetectorCameraConfig>))`、`Project(&Intrinsics, &Pose, u, v) -> Result<Ground, Reject>`），`[detector.camera]` 9 键已就位。本步只做跟随：`Mission::Follow`（type=2）、真机平凡树、sim uav_sim 的 follow 树、控制口 follow 命令。跟随所需的“目标世界坐标”从 detector 最新结果 + projection 得到：建议在 sim 侧加一个薄 `TargetSource`（持 `Arc<DetectorDevice>` + `Projector` + 位姿读句柄），**不要改 detector 的采集/推理循环**。sim_handler 里 detector 在 `SimInner`，`uav_sim::Stack` 需要拿到它：可在 `start()` 里把 Arc 传进 `Stack::new`（允许改 `sim_handler.rs` / `uav_sim/mod.rs`）。注意 `Mission` 加变体后 uav / ugv / ugv_sim 的 `mission::build` 与协议测试都要同步。本步不启动 Godot/长驻进程，端到端由人类验证。",
+      "brief": [
+        "按 §五 实施：新增 Mission::Follow { x: f32, y: f32 }（x/y 预留，填 0）；TASK_SET 布局不变，mission type=2 = Follow（**不用 1**，那是旧 Circle）；旧 type 仍按未知丢弃。",
+        "command_decode：type=2 → Mission::Follow；type=0 → Goto；其余 warn 丢弃；全丢整帧不生效的语义不变。",
+        "真机 uav/ugv：mission::build 对 Follow 返回平凡树（Action 恒 Success，一拍终值）；**禁止**返回 Err（Task 36 约定 Err = 清队列 + 停车）；并打一条 warn「Follow 未实现，跳过」。",
+        "sim uav_sim：新增 mission/follow.rs —— Fallback[ ReactiveSequence[Condition 有目标, Condition 未太近, FollowLeaf], Action Hold ]；FollowLeaf 读 detector 最新目标 → goal = P - dir*follow_dist → 目标移动 > 0.5 m 才 nav.set_goal → nav.step → Frame.out.next_cell。",
+        "目标丢失（无目标或 age > stale）→ Hold（next_cell=None），不追旧点；目标同时作为动态障碍注入。",
+        "参数初值：follow_dist=2.5、d_min=1.5、d_max=3.0、stale=0.8 s（写在 follow.rs 顶部常量）。",
+        "sim 控制口加 {\"cmd\":\"follow\"}（测试夹具）：构造 Command::Auto(Set(vec![Mission::Follow{0,0}])) 走 robot_cmd_tx 同一路；非 Auto 模式按现有门闩处理。",
+        "本 step 不启动 Godot / 长驻进程；端到端由人类验证。只跑单测 + cargo check/test。",
+        "单测：type=2 编解码 roundtrip；真机 build(Follow) 一拍 Success；follow 的 go/hold 判定（太近、丢失、带内）纯函数可测。"
+      ],
+      "allowed": [
+        "pleiades-base/src/Robot/core/mission_queue/element.rs",
+        "pleiades-base/src/Robot/core/protocol/messages.rs",
+        "pleiades-base/src/Robot/core/protocol/command_decode.rs",
+        "pleiades-base/src/Robot/core/protocol/mod.rs",
+        "pleiades-ugv/src/ugv/mission/mod.rs",
+        "pleiades-uav/src/uav/mission/mod.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/",
+        "pleiades-sim/src/sim/uav_sim/mod.rs",
+        "pleiades-sim/src/sim/ugv_sim/mission/mod.rs",
+        "pleiades-sim/src/sim/control.rs",
+        "pleiades-sim/src/sim/sim_handler.rs",
+        "docs/design_doc/orion_protocol.md",
+        "Architecture/robot_arch.md"
+      ]
+    }
+  ],
+  "prompts": {
+    "plan": [
+      "你是「规划」子 agent，只读代码 + 写计划，禁止修改任何源码。",
+      "",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "任务文档：Task/task_37_detector.md（本任务全部设计结论与 4 个 step 都在里面）",
+      "工作记录：Workbook/wb_37_detector.md（看前面 step 的进展）",
+      "",
+      "必读：",
+      "1. tmp/task37/step.md —— 本 step 要求、轮次、允许改动范围（越界即 FAIL）",
+      "2. tmp/task37/prev_issues.md —— 上一轮评审问题（若为 (无) 则首轮）",
+      "3. 任务文档里 step.md 指定的那一节（§二/§三/§四/§五），以及 §一 总体目标",
+      "4. Workbook/wb_37_detector.md",
+      "5. 按需读相关源码（相机 / detector / 协议 / uav_sim / ugv_sim / sim 控制口）",
+      "",
+      "产出：用 writeTextFile 写 tmp/task37/plan.md，必须包含：",
+      "- 改动清单（文件 → 改什么 → 为什么）",
+      "- 关键接口签名（逐字，可直接抄进代码）",
+      "- 与既有代码的衔接点（文件:行号）",
+      "- 可执行的一步步实施顺序",
+      "- 风险与规避",
+      "- 验收命令与逐条判据",
+      "- 若上一轮有 issues：逐条给出处理方式（改哪里、怎么改）",
+      "",
+      "硬约束：",
+      "- 只在 step.md 列出的路径内改动",
+      "- 不改 Task/ 文档本身、不改 .github/",
+      "- 不 git add / git commit",
+      "- 计划必须具体到能直接照做，禁止写“视情况而定”“按需调整”",
+      "",
+      "最终回复：200 字以内的计划摘要（会被写进 workbook）。"
+    ],
+    "impl": [
+      "你是「实现」子 agent。按计划实施代码，不要重新设计。",
+      "",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task37/step.md、tmp/task37/plan.md、Task/task_37_detector.md 对应章节。",
+      "",
+      "规则：",
+      "- 只改 step.md 允许的路径",
+      "- 文件头注释：Presented by KeJi / Created Date ： 2026-10-28 / Modified Date ： 2026-10-28",
+      "- 命名按仓库规范：变量 lower_snake、函数 Pascal_Snake、常数 UPPER_SNAKE；若所在模块既有风格是 snake_case 函数，与该模块保持一致",
+      "- 不做计划之外的顺手重构；发现的旧问题记进 tmp/task37/impl.md，不要动",
+      "- 不 git add / git commit",
+      "- 必须自测：cargo check --workspace（或 -p 对应 crate）+ 本 step 相关单测；失败要修到通过，不能留给评审",
+      "- 计划与代码现实冲突时以代码为准，并在 impl.md 记录偏差与理由",
+      "",
+      "产出：用 writeTextFile 写 tmp/task37/impl.md：改了哪些文件、每个文件做了什么、跑了什么命令、结果、与计划的偏差。",
+      "",
+      "最终回复：150 字以内摘要。"
+    ],
+    "review": [
+      "你是「评审」子 agent，独立评审本轮实现。不要修改源码（只允许写 tmp/task37/review.json）。",
+      "",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task37/step.md、plan.md、impl.md、Task/task_37_detector.md 对应章节、tmp/task37/git_baseline.txt",
+      "",
+      "逐项检查：",
+      "1. 改动是否越界：cd 到仓库根跑 git status --porcelain --untracked-files=all，与 git_baseline.txt 比对，只看本轮新增的改动",
+      "2. 验收判据是否真的满足：自己跑 cargo check 与相关 cargo test，不要只信 impl.md 的说法",
+      "3. 是否违反任务文档的已定结论（Step 1 的槽位/stream_fps/时间戳；Step 2 的“不迁移算法”例外；Step 3 的拒答；Step 4 的 type=2 与平凡树）",
+      "4. 代码规范：文件头注释、命名、模块注释",
+      "5. 回归红线：不改 on_tick 决策链、不改 Lua 契约（camera_photo.lua）、不新增依赖（除 step 允许）",
+      "6. 死代码、未使用 import、编译告警",
+      "",
+      "产出：用 writeTextFile 写 tmp/task37/review.json，格式：",
+      "{\"verdict\":\"PASS\" 或 \"FAIL\", \"issues\":[\"具体问题\"]}",
+      "- FAIL 时 issues 必须具体到「文件:行号 + 期望 vs 实际」，能让下一轮规划直接照做",
+      "- 不要为了通过而放水；超出本 step 范围的改进建议不要写进 issues",
+      "",
+      "最终回复：第一行写 VERDICT: PASS 或 VERDICT: FAIL，第二行一句理由。"
+    ]
+  }
+}

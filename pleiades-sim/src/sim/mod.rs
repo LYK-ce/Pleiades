@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 //! SIM 设备端模块（无硬件）
 //!
@@ -14,9 +14,12 @@
 //!   代码独立）+ `Obstacle_Cell`（障碍点 → 网格坐标）。**每 tick 复核、不锁存**
 //! - control.rs：本地控制口（Step 5）——测试夹具，把请求翻成 `Command` 注入
 //!   `robot.robot_cmd_tx`（与地面站同一条下游），**不进决策链、不走 ORION 帧**
+//! - detector/：detector 设备（task_37 Step 2）——只读相机帧槽位 → 推理 → 覆盖自己的
+//!   结果槽位；**不进 `on_tick`、不写 `RobotState`、不接树**
 
 pub mod chassis;
 pub mod control;
+pub mod detector;
 pub mod emergency_stop;
 pub mod executor;
 pub mod planning;

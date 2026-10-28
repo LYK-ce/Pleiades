@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -15,7 +15,7 @@
 //!   用 `image` 重编码 JPEG，`jpeg` 与 `rgb` 同时可用。
 //!
 //! 失败语义：一律 `Err(String)` + 排查提示，**不 panic / 不 unwrap / 不 expect**；
-//! `Frame::Jpeg()` 不会用空 `Vec` 冒充成功。
+//! `Frame::Into_Jpeg()` 不会用空 `Vec` 冒充成功。
 
 use std::io::Cursor;
 
@@ -42,20 +42,27 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// 取 JPEG 字节。
+    /// 取走 JPEG 字节（**唯一**的取字节出口；槽位要 `Arc<[u8]>` + 尺寸，不能只借 `&[u8]`）。
     ///
     /// 失败语义：`jpeg` 缺失或为空 → `Err`，**绝不返回空 `Vec` 充成功**
     /// （空 JPEG 落盘后在 TUI 侧表现为「文件存在但 `file` 认不出」，极难排查）。
-    pub fn Jpeg(&self) -> Result<&[u8], String> {
-        match self.jpeg.as_deref() {
+    ///
+    /// 只提供「移动」版：槽位存 `Arc<[u8]>`，抓帧线程抓完就交出去，没必要再拷一份。
+    pub fn Into_Jpeg(self) -> Result<Vec<u8>, String> {
+        let (width, height, format) = (self.width, self.height, self.format);
+        match self.jpeg {
             Some(bytes) if !bytes.is_empty() => Ok(bytes),
-            _ => Err(format!(
-                "{}x{} {} 帧没有 JPEG 字节（MJPG 直通与原始格式重编码都没有产出）\n  \
-                 排查建议：抓帧日志里找解码/编码失败原因；确认 [camera_uav].prefer 与设备实际格式匹配",
-                self.width, self.height, self.format
-            )),
+            _ => Err(No_Jpeg(width, height, format)),
         }
     }
+}
+
+/// 「这一帧没有 JPEG 字节」的统一文案（唯一的取字节出口 `Into_Jpeg` 用它，免得文案漂移）。
+fn No_Jpeg(width: u32, height: u32, format: FrameFormat) -> String {
+    format!(
+        "{width}x{height} {format} 帧没有 JPEG 字节（MJPG 直通与原始格式重编码都没有产出）\n  \
+         排查建议：抓帧日志里找解码/编码失败原因；确认 [camera_uav].prefer 与设备实际格式匹配"
+    )
 }
 
 /// `Buffer` → [`Frame`]（在 worker 线程内调用）。
@@ -146,7 +153,7 @@ mod tests {
         assert_eq!(frame.width, 64);
         assert_eq!(frame.height, 48);
         assert!(frame.rgb.is_none(), "MJPG 不该解码出 RGB");
-        assert_eq!(frame.Jpeg().expect("应有 JPEG 字节"), raw.as_slice());
+        assert_eq!(frame.Into_Jpeg().expect("应有 JPEG 字节"), raw);
     }
 
     #[test]
@@ -160,7 +167,7 @@ mod tests {
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);
         assert!(frame.rgb.is_some(), "原始格式应解出 RGB");
-        let jpeg = frame.Jpeg().expect("应重编码出 JPEG 字节");
+        let jpeg = frame.Into_Jpeg().expect("应重编码出 JPEG 字节");
         assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "重编码结果应是 JPEG");
     }
 
@@ -173,7 +180,7 @@ mod tests {
             jpeg: None,
             rgb: None,
         };
-        let error = frame.Jpeg().expect_err("没有 JPEG 字节时必须 Err");
+        let error = frame.Into_Jpeg().expect_err("没有 JPEG 字节时必须 Err");
         assert!(error.contains("640x480"), "文案应带尺寸：{error}");
         assert!(
             error.contains("没有 JPEG 字节"),
@@ -188,6 +195,42 @@ mod tests {
             jpeg: Some(Vec::new()),
             rgb: None,
         };
-        assert!(empty.Jpeg().is_err(), "空 JPEG 字节必须当成失败");
+        assert!(empty.Into_Jpeg().is_err(), "空 JPEG 字节必须当成失败");
+    }
+
+    #[test]
+    fn into_jpeg_moves_bytes() {
+        // 有字节：**原样移动**出来（槽位直接拿这份 owned 字节，不再拷一遍）
+        let raw = fake_jpeg();
+        let frame = Frame {
+            format: FrameFormat::MJPEG,
+            width: 64,
+            height: 48,
+            jpeg: Some(raw.clone()),
+            rgb: None,
+        };
+        assert_eq!(frame.Into_Jpeg().expect("有字节时必须 Ok"), raw);
+
+        // 没字节：与有字节路径共用 `No_Jpeg` 文案（尺寸 + 「没有 JPEG 字节」）
+        let missing = Frame {
+            format: FrameFormat::MJPEG,
+            width: 640,
+            height: 480,
+            jpeg: None,
+            rgb: None,
+        };
+        let error = missing.Into_Jpeg().expect_err("没有 JPEG 字节时必须 Err");
+        assert!(error.contains("640x480"), "文案应带尺寸：{error}");
+        assert!(error.contains("没有 JPEG 字节"), "文案应说明缺 JPEG：{error}");
+
+        // 空 Vec 同样不能冒充成功
+        let empty = Frame {
+            format: FrameFormat::MJPEG,
+            width: 2,
+            height: 2,
+            jpeg: Some(Vec::new()),
+            rgb: None,
+        };
+        assert!(empty.Into_Jpeg().is_err(), "空 JPEG 字节必须当成失败");
     }
 }

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 
@@ -211,6 +211,9 @@ struct SimInner {
     control_cancel: CancellationToken,
     /// 任务观测器（§12.8.2 第 4 条）：`on_tick` 单写者，控制口 `status` 只读
     monitor: Arc<TaskMonitor>,
+    /// detector 设备（task_37 Step 2）：`enabled=false` / 无相机 / 权重缺失 → `None`
+    /// **只被 `shutdown()` 用**，`on_tick` 一行不碰
+    detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
 }
 
 pub struct SimDeviceHandler {
@@ -385,27 +388,6 @@ impl DeviceHandler for SimDeviceHandler {
         // ---- 3) 底盘：动作翻译 / 速度绑定 / 位置更新（Step 4）
         let (chassis, pose_age, pose_history) = self.Build_Chassis(&world_name, motion.clone())?;
 
-        // ---- 3.5) 任务栈（§12.6.5）：底盘名 → 车栈 / 机栈，二选一后全程转发
-        //      车栈订建图增量（`map_tx`），机栈不订（D6：真机两边都不订，sim 只有车栈订）
-        let kind = Kind_Of_World(&world_name);
-        let stack = match kind {
-            StackKind::Ugv => TaskStack::Ugv(ugv_sim::Stack::new(
-                self.robot.grid.clone(),
-                self.robot.cluster_table.clone(),
-                self.robot.robot_state.clone(),
-                obstacle_inflation_radius,
-                Some(&self.robot.map_tx),
-            )),
-            StackKind::Uav => TaskStack::Uav(uav_sim::Stack::new(
-                self.robot.grid.clone(),
-                self.robot.cluster_table.clone(),
-                self.robot.robot_state.clone(),
-                obstacle_inflation_radius,
-                None,
-            )),
-        };
-        info!("[Sim] 任务栈 = {:?}（底盘 {}）", kind, world_name);
-
         // ---- 4) 传感器（在 `WorldLink::Spawn` 之前建好：Spawn 要 `Arc<SensorSet>`）
         //      `pose_age` 与底盘是**同一个** `Arc`（建图 task 判新鲜度用）
         let mut sensors: Vec<Arc<dyn Sensor>> = Vec::new();
@@ -487,6 +469,71 @@ impl DeviceHandler for SimDeviceHandler {
             let _ = self.world.set(h);
         }
 
+        // ---- 5.5) detector 设备（task_37 Step 2）：帧源 = 本车相机的时间槽位
+        //          只读相机槽位、只写自己的 `Mutex<Option<Detections>>`；
+        //          **不进 on_tick、不写 RobotState / ExecuteState、不碰树**（§三.6 判据 5）。
+        let detector = match (self.config.detector.as_ref(), camera.as_ref()) {
+            (None, _) => {
+                info!("[detector] 未配置 [detector] 段：不 spawn");
+                None
+            }
+            (Some(cfg), _) if !cfg.Enabled() => {
+                info!("[detector] enabled=false：不 spawn（零线程、不占 CPU）");
+                None
+            }
+            (Some(_), None) => {
+                warn!("[detector] 已启用但没有 camera 传感器（未配 sensor=\"camera\"）：detector 不启动");
+                None
+            }
+            (Some(cfg), Some(cam)) => {
+                let source: Arc<dyn crate::sim::detector::FrameSource> = cam.clone();
+                match crate::sim::detector::DetectorDevice::spawn(
+                    cfg.clone(),
+                    source,
+                    self.robot.robot_state.clone(),
+                )
+                .await
+                {
+                    Ok(d) => {
+                        info!(
+                            "[detector] detector 设备已 spawn（model={} device={}）",
+                            cfg.Model(),
+                            cfg.Device()
+                        );
+                        Some(d)
+                    }
+                    Err(e) => {
+                        warn!("[detector] 未启动（只 warn，不影响仿真）：{e}");
+                        None
+                    }
+                }
+            }
+        };
+
+        // ---- 5.6) 任务栈（§12.6.5）：底盘名 → 车栈 / 机栈，二选一后全程转发
+        //      **必须放在 5.5 之后**：机栈的 `TaskDeps` 要 detector（task_37 Step 4 跟随）。
+        //      本块原先在 3.5，与 4)/5.5) 无任何相互依赖 → 纯代码下移，语义不变。
+        //      车栈订建图增量（`map_tx`），机栈不订（D6：真机两边都不订，sim 只有车栈订）
+        let kind = Kind_Of_World(&world_name);
+        let stack = match kind {
+            StackKind::Ugv => TaskStack::Ugv(ugv_sim::Stack::new(
+                self.robot.grid.clone(),
+                self.robot.cluster_table.clone(),
+                self.robot.robot_state.clone(),
+                obstacle_inflation_radius,
+                Some(&self.robot.map_tx),
+            )),
+            StackKind::Uav => TaskStack::Uav(uav_sim::Stack::new(
+                self.robot.grid.clone(),
+                self.robot.cluster_table.clone(),
+                self.robot.robot_state.clone(),
+                obstacle_inflation_radius,
+                None,
+                detector.clone(), // 车栈不传：ugv_sim 收到 Follow 走平凡树
+            )),
+        };
+        info!("[Sim] 任务栈 = {:?}（底盘 {}）", kind, world_name);
+
         // ---- 6) 本地控制口（Step 5）：取消令牌进 `SimInner`，`shutdown()` 先 cancel 它
         let control_cancel = CancellationToken::new();
         // ---- 6.1) 任务观测器（§12.8.2 第 4 条）：控制口与 on_tick 共用同一个 `Arc`
@@ -500,6 +547,7 @@ impl DeviceHandler for SimDeviceHandler {
                 chassis,
                 control_cancel: control_cancel.clone(),
                 monitor: monitor.clone(),
+                detector,
             })
             .map_err(|_| "设备已启动".to_string())?;
         // ---- 6.5) 相机 cap 推进 `device_caps`（task_34 Step 4）
@@ -680,7 +728,11 @@ impl DeviceHandler for SimDeviceHandler {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await; // 给 recv task 收尾窗口
         }
         // 传感器：cancel 各自的建图 task（与 WorldLink 的取消互相独立）
+        // detector：先停推理 task（它只读相机槽位，停它不影响相机与决策链）
         if let Some(d) = self.inner.get() {
+            if let Some(det) = &d.detector {
+                det.shutdown();
+            }
             d.sensors.iter().for_each(|s| s.Shutdown());
         }
         info!("[Sim] shutdown");

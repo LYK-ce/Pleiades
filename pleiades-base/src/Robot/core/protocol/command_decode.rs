@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 //! ORION 命令帧 → 内部 Command 解码
 //!
@@ -14,7 +14,7 @@ use super::messages::{
     decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD,
     ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR,
     ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, ACTION_TAKEOFF, ACTION_LAND,
-    MISSION_GOTO,
+    MISSION_FOLLOW, MISSION_GOTO,
 };
 
 /// 解析 ORION 帧 → 内部命令（入站：终端/地面站 → 车）
@@ -36,6 +36,8 @@ pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
                 .into_iter()
                 .filter_map(|m| match m.mission_type {
                     MISSION_GOTO => Some(Mission::Goto { x: m.x, y: m.y }),
+                    // Task 37 §五.2：type=2 = Follow（`x/y` 预留，原样透传）
+                    MISSION_FOLLOW => Some(Mission::Follow { x: m.x, y: m.y }),
                     other => {
                         tracing::warn!("[Cmd] 未知 mission type: {other}");
                         None
@@ -84,7 +86,7 @@ mod tests {
     use crate::robot::core::protocol::frame::Frame;
     use crate::robot::core::protocol::MSGID_TASK_SET;
     use crate::robot::core::protocol::messages::{
-        encode_task_set, MissionItem, MISSION_GOTO, TaskSetPayload,
+        encode_task_set, MissionItem, MISSION_FOLLOW, MISSION_GOTO, TaskSetPayload,
     };
 
     fn task_set_frame(payload: &TaskSetPayload) -> Frame {
@@ -152,6 +154,40 @@ mod tests {
         let mut long = vec![1u8];
         long.extend_from_slice(&[0u8; 10]);
         assert!(parse_orion_frame(&raw_task_set_frame(long)).is_none(), "多 1 字节 → None");
+    }
+
+    #[test]
+    fn test_task_set_follow_decoded() {
+        // Task 37 §五.2：type=2 → Mission::Follow（x/y 预留，原样透传）
+        let f = task_set_frame(&TaskSetPayload {
+            missions: vec![MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0 }],
+        });
+        assert_set(parse_orion_frame(&f), vec![Mission::Follow { x: 0.0, y: 0.0 }]);
+    }
+
+    #[test]
+    fn test_task_set_old_circle_type_dropped() {
+        // type=1 是 Task 36 已删除的旧 Circle：**必须当未知丢弃**（不能被当成 Follow）
+        let f = task_set_frame(&TaskSetPayload {
+            missions: vec![MissionItem { mission_type: 1, x: 1.0, y: 2.0 }],
+        });
+        assert!(parse_orion_frame(&f).is_none(), "旧 type=1 单独成帧 → 整帧不生效（队列不动）");
+    }
+
+    #[test]
+    fn test_task_set_mixed_old_circle_and_goto() {
+        // 混合帧：旧 type=1 被丢弃，只留 Goto（滤掉而不是整帧作废）
+        let f = task_set_frame(&TaskSetPayload {
+            missions: vec![
+                MissionItem { mission_type: 1, x: 1.0, y: 2.0 },
+                MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 8.0, y: 9.0 },
+            ],
+        });
+        assert_set(
+            parse_orion_frame(&f),
+            vec![Mission::Follow { x: 0.0, y: 0.0 }, Mission::Goto { x: 8.0, y: 9.0 }],
+        );
     }
 
     #[test]

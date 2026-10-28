@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 //! 队列元素定义（Task 36 §12.1）
 //!
@@ -18,6 +18,11 @@ pub enum Mission {
     /// Task 36 起只有单车语义：`(x, y)` 就是本车目标；不再携带成员名单，
     /// 也不再在车端做分配（分配上移指挥层，地面站逐车发帧）。
     Goto { x: f32, y: f32 },
+    /// 跟随目标（Task 37 §五）：**只在 sim 的 uav 栈实现**；`x/y` 预留（现在恒 0）
+    ///
+    /// 真机（`pleiades-uav` / `pleiades-ugv`）收到即建平凡树（一拍 `Success`）：
+    /// 不进跟随逻辑，只让队列前进一条（**不得**返回 `Err`，那是「清队列 + 停车」）。
+    Follow { x: f32, y: f32 },
     // 未来: Patrol, Explore, ...
 }
 

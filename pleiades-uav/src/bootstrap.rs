@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-28
 
 //! UAV（机）设备装配（Task 23 C0：从 base 的 robot_bootstrap 拆出）
 //!
@@ -81,6 +81,10 @@ pub async fn uav_bootstrap(
     // 为什么要自己判同 index：nokhwa 的 Linux 绑定对「同一 index 再打开」会返回**同一个**
     // `Arc<Mutex<Device>>`（不报 busy），两个 sensor 会共享设备、互踩 open_stream/stop_stream，
     // 症状是偶发 "Stream Not Started"/花帧。这里改成确定性的「后开者跳过 + 一行 warn」。
+    //
+    // task_37 Step 2：**push 进 device_caps 之前**留一份 `Arc`，交给 detector 当帧源
+    // （`push` 那句会把 `Arc<Uav_Camera>` 转成 `Arc<dyn DeviceCapability>`，之后拿不回来）。
+    let mut camera_for_detector: Option<Arc<Uav_Camera>> = None;
     if let Some(cfg) = config.camera_uav.as_ref().filter(|c| c.enabled.unwrap_or(true)) {
         let camera = Arc::new(Uav_Camera::new(cfg.clone()));
         let same_device = matches!((pc_index, camera.Device_Index()), (Some(a), Ok(b)) if a == b);
@@ -101,17 +105,21 @@ pub async fn uav_bootstrap(
                                 device_info.format_lines.join("\n")
                             );
                             info!(
-                                "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms）：设备「{}」（index {}）选定 {}，理由：{}；camera_uav.capture 已注册到 Lua",
+                                "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms）：设备「{}」（index {}）选定 {}，理由：{}；{}；camera_uav.capture 已注册到 Lua",
                                 device_info.name,
                                 device_info.index,
                                 Format_Line(device_info.format),
-                                device_info.reason
+                                device_info.reason,
+                                camera.Describe_Stream()
                             );
                         }
                         None => info!(
-                            "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms，未取到设备信息）；camera_uav.capture 已注册到 Lua"
+                            "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms，未取到设备信息）；{}；camera_uav.capture 已注册到 Lua",
+                            camera.Describe_Stream()
                         ),
                     }
+                    // ① 先 clone（下面那句 `camera as Arc<dyn DeviceCapability>` 会 move 掉原件）
+                    camera_for_detector = Some(camera.clone());
                     capabilities
                         .device_caps
                         .write()
@@ -126,12 +134,13 @@ pub async fn uav_bootstrap(
         }
     }
 
-    // 2. 构造机设备处理器
+    // 2. 构造机设备处理器（task_37 Step 2：多传一份相机 `Arc` 给 detector 当帧源）
     let device: Arc<dyn DeviceHandler> = Arc::new(UavDeviceHandler::new(
         robot.clone(),
         config.clone(),
         node_handle.clone(),
         origin,
+        camera_for_detector,
     ));
 
     // 3. spawn 主循环（后台跑；boot.run() 阻塞 core 主循环）

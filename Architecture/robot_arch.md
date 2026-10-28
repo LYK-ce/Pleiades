@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-10-27（Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更新日期：2026-10-28（Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -137,7 +137,7 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
         ├── uav_sim/              # ★ 机栈：复刻 pleiades-uav 的 nav/ + mission/
         │   ├── mod.rs            # 同形（ObstacleMode::Ignore、不订建图增量）
         │   ├── nav/
-        │   └── mission/
+        │   └── mission/          # mod.rs + goto.rs + follow.rs（★ 唯一真跟：task_37 Step 4）
         └── planning/             # 只剩 cluster_obstacles（他车 → 动态障碍格；建图 task 在用）
 ```
 
@@ -150,6 +150,7 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
 | D-S3 | `cluster_obstacles.rs` 在 sim 有 3 份（`planning/` + 两栈） | `sim/planning/`、`sim/*_sim/nav/` | `sensors/` 不动（`mapping_task.rs` 依赖 `planning::`），而 `nav/` 要复刻真机结构 → 只能多一份 |
 | D-S4 | 建图增量：车栈 `subscribe_map(Some)`，真机 `None` | `sim/ugv_sim/mod.rs` | Step 4 已登记（D6）；sim 的 mapper 会广播 `map_tx`，不订就会「画出来的墙对规划不可见」 |
 | D-S5 | `Chassis` 判型走世界零件名（`Kind_Of_World("diff_drive_ugv"｜"quadrotor_uav")`），不加 `Chassis::Kind()` | `pleiades-sim/src/sim/sim_handler.rs` | §12.6.5 的两个选项中选了第 2 个（「按 `world_name` 判断，省一次 trait 改动」），因为 §12.6.2 要求「不动 `chassis/`」 |
+| D-S6 | **跟随只在机栈**：`Follow` → `ReactiveFallback` 持续树（`follow.rs`）；车栈/真机 → 平凡 `Success` 树。人作为动态障碍**无法真注入 D-star**（机栈 Ignore 读空图，`mark_obstacle` 当拍即失效），只否决落在人格的 `next_cell`；外层用 `ReactiveFallback`（记忆式 `Fallback` + `Running` 型 Hold = 死锁在兜底分支） | `sim/uav_sim/mission/follow.rs`、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_37 Step 4。机栈 `Navigator` 是 `ObstacleMode::Ignore`（喂空栅格 + `dynamic_obstacles` 恒空），`mark_obstacle()` 的标记会被同拍重算抹掉 → 真注入需给 `Navigator` 加 `set_extra_obstacles()` 并让机栈用 `Respect`（`nav/` 不在允许清单，另开 task）；车栈没有相机/detector，Hold 会永远占队首 → 用平凡 `Success` |
 
 **分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
@@ -194,7 +195,7 @@ flowchart TB
 | `Robot` | `base/robot/core/robot.rs` | 中枢：共享状态/广播通道/模式/队列/集群表句柄；`new()` 建共享态，`run(device)` 跑主循环骨架 |
 | `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`build_task`（建树，幂等）/`on_tick`（返回 `TickOutcome`）/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
 | `TickOutcome` | `base/robot/core/robot.rs` | 设备 tick 的结果：`Running` / `Terminated(Option<FailCode>)`；`Terminated` 才由 `main_loop` 出队 |
-| `Mission` | `base/robot/core/mission_queue/element.rs` | 单变体 `Goto { x, y }`（Task 36 删 `Circle` 与 `members`）；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
+| `Mission` | `base/robot/core/mission_queue/element.rs` | 两变体：`Goto { x, y }` + `Follow { x, y }`（Task 37 §五，`x/y` 预留；**只在 sim 机栈真跟**，真机/车栈建平凡树）。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
 | `OpMode` | `base/robot/core/mode.rs` | `Manual` / `Auto`，**默认 Auto** |
 | `ClusterInfoTable` | `base/robot/core/cluster/cluster_info.rs` | `HashMap<peer_id, ClusterInfo>`，他车位姿（x/y/yaw/vx/vy/sub_target） |
 | `OccupancyGrid` | `base/robot/core/grid.rs` | 地图表示（own/merged 双表 + log-odds），CRDT 合并前提 |
@@ -654,6 +655,62 @@ survey_seconds = 180
 - Lua cap：`ml.yolo_new(model_file, device)` + `det:detect(image_bytes, conf, nms)`（走 `exec program` 体系，与 `session inference` 同构）；权重放 `Pleiades_Workspace/`，型号从文件名推断。
 - 图传输：`ML_Engine/lua_tensor.rs` 加 U8 dtype + `ml.tensor_from_u8_bytes` / `ml.tensor_to_u8_bytes`，走 tensor stream（UAV 抓图 → 车 detect）。
 - 展示：`pleiades-base/src/API/webui.rs`（WebSocket 广播，端口自动分配）+ `Tool/yolo_viewer.html`（画框 + 浏览器算 FPS）。
+
+### 8.6 相机统一：常驻抓取 + 共享帧槽位（task_37 Step 1）
+
+- 三处相机（`camera_pc` / `camera_uav` / `camera_sim`）统一为「生产者写槽位、消费者同步读最新帧」：槽位**只留最新**（覆盖式，读者可能漏帧），读接口 `latest_frame() -> Option<Frame>`，**同步、非阻塞**。
+- `Frame { jpeg: Arc<[u8]>, width, height, seq, captured_at_ms }`：`jpeg` 用 `Arc<[u8]>` 让每次读只动引用计数；`seq` 真机 = 槽位写入计数（每次 +1），sim = 帧头序号。
+- 时间戳：真机 `captured_at_ms` = **本机单调毫秒**（`now_boot_ms()`，与位姿 `time_boot_ms` 同源、进程启动为 0）；sim = **世界时间毫秒**（帧头 `world_time × 1000`）。**两者不可跨端比较绝对时刻**，只能各自端内算帧龄。
+- 抓帧节奏：新增 `[camera_pc] / [camera_uav].stream`（默认 `true`）与 `stream_fps`（默认 10 Hz，夹到 60 上限）；`fps` 仍是「格式协商请求帧率」，**两者不复用**。`stream = false` 时 worker 阻塞等指令（零轮询、不抓帧）。
+- `capture()` 契约不变：常转时先读槽位；槽位空或 `stream = false` 时按需抓一次；`info()` 四字段（`width` / `height` / `format` / `age_ms`）与 `programs/user/camera_photo.lua` 一行不动。
+
+### 8.7 detector 设备（task_37 Step 2）
+
+- 位置：`pleiades-uav/src/device/detector/`、`pleiades-sim/src/sim/detector/`（两份**只差 4 处**：帧来源、`Frame` 别名、`FrameSource` 实现、`frame_ts` 语义）。uav 侧因允许清单不含 `device/mod.rs`，用 `#[path]` 从 `uav/robot_handler.rs` 声明（规范路径 `crate::uav::robot_handler::detector`）；sim 侧走 `sim/mod.rs` 的正规 `pub mod detector;`。
+- 形态：`DetectorDevice::spawn(cfg, source, rs)` 起一个 tokio task → 每 100 ms 读一次相机帧槽位 → 新帧（`seq` 变了）才 `spawn_blocking` 跑推理 → **覆盖** `Mutex<Option<Detections>>`；对外只读 `latest_dets()` / `latest()` / `stats()`，`shutdown()` 只 `cancel()`（同步、可重复、不 `join`）。
+- 帧源：自定义 `FrameSource`（同步、非阻塞 `Latest_Frame()`），uav/sim 各实现**薄适配**到已有 `latest_frame()`（**不改相机**）。
+- 算法：**不迁移** base 的 `ML_Engine/Yolo`，直接 `Yolo_Detector::new(model_file, device)` / `detect(jpeg, conf, nms)`；权重 `<workspace_dir>/<model_file>`（文件名须为 `yolov8<size>.safetensors`），加载一次常驻；缺失只 `warn`，设备不启动。
+- `[detector]`：`enabled`（默认 false）/ `model` / `device` / `conf_thres` / `nms_thres`，uav 与 sim 键名一致；`enabled=false` → **零线程**（不 spawn、不读帧）。uav 侧首次启动会补全该段（`fill_detector`，缺才补）。
+- 边界：不进 `on_tick`、不写 `RobotState` / `ExecuteState`、不接树、不做定位与跟踪（Step 3/4）；观测只有每帧一行 `info`（`frame_ts` + 每条检测 `class_name conf bbox`）。
+
+
+### 8.8 位置估计：像素 → 世界 (x,y)（task_37 Step 3）
+
+- 位置：`pleiades-uav/src/device/detector/projection.rs`、`pleiades-sim/src/sim/detector/projection.rs`（两份**逐字节相同**：纯函数，无 I/O / 无锁 / 无线程）。
+- 链路：框底边中点（≈脚）→ 针孔反投影（内参由 `fov_deg + fov_axis` 与**帧自带** `width/height` 解析，分辨率不单独配）→ 机体系（`mount_yaw_deg / mount_pitch_deg` 的基向量，`Projector::New` 时一次算好）→ 世界（`pose.yaw`）→ 与 `z = ground_z` 求交 → `(x, y)` + 水平距离 + 世界方位 + 相对机头方位。
+- `[detector.camera]`：`fov_deg` / `fov_axis` / `mount_x|y|z` / `mount_yaw_deg` / `mount_pitch_deg` / `ground_z` / `max_range_m`，**单位写进键名、一律用度**（与 world 侧 `Vehicle.AttachSensor` 的 yaw 弧度 / pitch 度混用**故意不同**）；高度取 `pose.z`，**不配常量**。uav 侧 `fill_detector` 会把该子表补全（缺才补、幂等）。
+- 位姿近似：取「推理结束那一刻的最新 `RobotState`」而非帧时刻（帧只有 `captured_at_ms`、`RobotState` 无时间戳；sim 位姿 10 Hz、推理 ~100 ms → 最多差一拍）。**不改 chassis / pose_ingest**；帧时刻对齐留给 Step 4（sim 侧已有 `PoseHistory`）。
+- 拒答（不输出坏点，`Reject::Reason()` 进日志）：框底边不在画面下半部 / 射线接近地平线（俯角 < 1°）/ `t <= 0`（相机在 `ground_z` 以下）/ 相机离地 < 0.10 m（位姿未就位，防 `RobotState` 默认全 0 造出「人离我 0.09 m」）/ 距离 > `max_range_m`（默认 12 m）。
+- 输出：`Run_Loop` 在 Step 2 那行 `info!` 的每个框后面追加 `→ 世界=(x,y) 距离=… 方位=… 相对机头=… 判定=采纳|拒答（原因） 世界=-`；通过保护的 `Target` 与 `Detections` **同一次覆盖**进结果槽位，`latest_targets()` 供 Step 4。
+- 边界：不进 `on_tick`、不写 `RobotState` / `ExecuteState`、不接树、不做跟踪、不补偿 roll、不校畸变。
+- 已知外部依赖：sim 的 `fov_axis` 口径待首次联调对拍确认（world `CameraSensor.gd` 注释写「水平视场角」，但 `CameraSensor.tscn` 未写 `keep_aspect` → Godot 默认 `KEEP_HEIGHT` 时 `fov` 实为纵向；本 step 默认 `vertical`）。对拍时用一条**已知距离**的人：算出来偏小/偏大就填 `horizontal`。另：sim 侧 `[detector.camera].mount_*` 与 `[[sim_world.sensor]]` 的 `mount` 是**两份手抄数值**（键名与单位都不同），Step 4 配测试环境时必须两边一致。
+
+### 8.9 sim 无人机跟随（task_37 Step 4）
+
+- 协议：`Mission` 加第二变体 `Follow { x, y }`（`x/y` 预留，填 0）；`TASK_SET` 布局**不变**，`type = 2` = `Follow`
+  （`MISSION_FOLLOW`）。**`1` 不复用**——那是 Task 36 已删的旧 `Circle`，旧 type 一律按未知 `warn` 丢弃；
+  「全部被丢 → 整帧不生效（队列不动）」的语义不变。
+- 真机 / 车栈：`mission::build` 对 `Follow` 返回**平凡树**（`Action` 恒 `Success`，一拍终值）+ 一条 `warn`，
+  **绝不返回 `Err`**（Task 36 约定：建树失败 = 清队列 + 停车）。终值取 `Success` 而非任务文档 §五.2 建议的
+  `Failure(Unsupported)`：以 `tmp/task37/step.md:12/18` 为准（两处逐字要求「一拍 `Success`」）。
+- sim 机栈（唯一真跟）：`sim/uav_sim/mission/follow.rs`
+  `ReactiveFallback[ ReactiveSequence[ TargetGate(有目标且未过期), Condition(未太近), FollowLeaf ], HoldLeaf ]`。
+  `FollowLeaf` 读 detector 的 `latest_targets()` → `goal = P - dir * follow_dist` → 目标点挪 > 0.5 m 才
+  `nav.set_goal` → `nav.step` → `Frame.out.next_cell`；`HoldLeaf` 清 nav 目标 + `next_cell = None`，返回 **`Running`**。
+- 参数（文件顶部常量）：`follow_dist = 2.5 m`、距离带 `d_min = 1.5` / `d_max = 3.0 m`、`stale = 800 ms`、
+  `goal_update = 0.5 m`、人格膨胀 `0.5 m`。带内（`d_min < d <= d_max`）**不重设目标**（迟滞，人停不抖）。
+- 目标丢失（无目标 / `age > stale`）→ Hold，**不追最后一个点**。`age` 用**本地单调 `Instant`** 记
+  「首次见到该 `frame_seq`」的时刻：sim 的 `frame_ts_ms` 是世界时间，没有「当前世界时间」可比，绝不可相减。
+- 人作为动态障碍（**已实施的替代**）：机栈 `Navigator` 是 `ObstacleMode::Ignore`，`mark_obstacle` 的标记会被
+  同拍重算抹掉 → 复用 `nav/cluster_obstacles.rs` 的圆盘膨胀算人格，**否决**落在人格的 `next_cell`
+  （`follow::guard_cell`）。`nav/` 一行不改；真要注入需单开 task 给 `Navigator` 加 `set_extra_obstacles()`。
+- 控制口测试夹具：`{"cmd":"follow"}` → `Follow_Command()` → `Command::Auto(AutoCmd::Set(vec![Mission::Follow{0,0}]))`
+  → `robot_cmd_tx`（与 `goto` 同一条注入路径；Manual 模式只 `warn`、门闩仍由 `main_loop` 判）。
+- 接线：`uav_sim::Stack::new` 末尾新增 `detector` 实参；detector 在 `start()` 的 5.5 才诞生，故「任务栈」整块
+  从 3.5 **平移到 5.6**（纯代码移动，与 4/5.5 无相互依赖，语义不变）。
+- 边界：不进 `on_tick`（`follow` 只经 `Frame.out.next_cell` 影响决策链）、不改 Lua 契约、`nav/` 与 `detector/`
+  零改动、不新增依赖；端到端（跟人 10 s / 人停不抖 / 丢失停住）由人类在仿真里验。
+
 
 ---
 

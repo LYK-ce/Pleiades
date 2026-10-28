@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 //! 机设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.5 改成树驱动）
 //!
@@ -30,10 +30,19 @@ use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::UavConfig;
+use crate::device::camera_uav::Uav_Camera;
 use crate::uav::executor::DecisionExecutor;
 use crate::uav::mavlink::{MavlinkDevice, Telemetry};
 use crate::uav::mission::{self, TaskDeps};
 use crate::uav::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
+
+// 设备目录新增 `device/detector/`（task_37 Step 2），但本 step 的允许清单里没有
+// `pleiades-uav/src/device/mod.rs`（`tmp/task37/step.md:20-30`），故从本文件声明
+// （与 `sim_handler.rs:51-58` 声明 `device_cap` 同款解法）。`#[path]` 相对**本文件所在目录**
+// （`src/uav/`）解析 → `src/device/detector/mod.rs`。
+// 规范路径因此是 `crate::uav::robot_handler::detector`。
+#[path = "../device/detector/mod.rs"]
+pub mod detector;
 
 /// 树实例表（§十一 #34）：懒创建、按 `TaskId` 存；`active` = 本拍要 tick 的那棵
 #[derive(Default)]
@@ -53,6 +62,9 @@ struct UavInner {
     trees: Mutex<TreeSet>,
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
+    /// detector 设备（task_37 Step 2）：`enabled=false` / 无相机 / 权重缺失 → `None`
+    /// **只被 `shutdown()` 用**，决策链一行不碰它
+    detector: Option<Arc<detector::DetectorDevice>>,
 }
 
 pub struct UavDeviceHandler {
@@ -62,6 +74,9 @@ pub struct UavDeviceHandler {
     #[allow(dead_code)]
     node_handle: Arc<NodeHandle>,
     origin: (f32, f32, f32),
+    /// 机载相机（task_37 Step 2）：`bootstrap` 在 push `device_caps` 之前留的那一份；
+    /// `None` = 相机没开 / 打开失败 / 同 index 被 camera_pc 占了
+    camera: Option<Arc<Uav_Camera>>,
     inner: OnceLock<UavInner>,
 }
 
@@ -71,8 +86,9 @@ impl UavDeviceHandler {
         config: UavConfig,
         node_handle: Arc<NodeHandle>,
         origin: (f32, f32, f32),
+        camera: Option<Arc<Uav_Camera>>,
     ) -> Self {
-        Self { robot, config, node_handle, origin, inner: OnceLock::new() }
+        Self { robot, config, node_handle, origin, camera, inner: OnceLock::new() }
     }
 }
 
@@ -131,12 +147,53 @@ impl DeviceHandler for UavDeviceHandler {
             ARRIVAL_THRESHOLD_M,
         )));
 
+        // ③ detector（task_37 Step 2）：只读相机帧槽位 → 推理 → 覆盖自己的结果槽位。
+        //    **失败一律 warn + None，绝不把 Err 透给 start()**（否则会打断整个机器人启动）。
+        let detector = match (self.config.detector.as_ref(), self.camera.as_ref()) {
+            (None, _) => {
+                info!("[detector] 未配置 [detector] 段：不 spawn");
+                None
+            }
+            (Some(cfg), _) if !cfg.Enabled() => {
+                info!("[detector] enabled=false：不 spawn（零线程、不占 CPU）");
+                None
+            }
+            (Some(_), None) => {
+                warn!("[detector] 已启用但没有可用的 camera_uav（未开 / 打开失败）：detector 不启动");
+                None
+            }
+            (Some(cfg), Some(cam)) => {
+                let source: Arc<dyn detector::FrameSource> = cam.clone();
+                match detector::DetectorDevice::spawn(
+                    cfg.clone(),
+                    source,
+                    self.robot.robot_state.clone(),
+                )
+                .await
+                {
+                    Ok(d) => {
+                        info!(
+                            "[detector] detector 设备已 spawn（model={} device={}）",
+                            cfg.Model(),
+                            cfg.Device()
+                        );
+                        Some(d)
+                    }
+                    Err(e) => {
+                        warn!("[detector] 未启动（只 warn，不影响其它设备）：{e}");
+                        None
+                    }
+                }
+            }
+        };
+
         self.inner.set(UavInner {
             mavlink,
             nav,
             executor: DecisionExecutor::new(),
             trees: Mutex::new(TreeSet::default()),
             tick_no: AtomicU64::new(0),
+            detector,
         })
             .map_err(|_| "设备已启动".to_string())?;
         Ok(())
@@ -245,6 +302,9 @@ impl DeviceHandler for UavDeviceHandler {
 
     async fn shutdown(&self) {
         if let Some(d) = self.inner.get() {
+            if let Some(det) = &d.detector {
+                det.shutdown(); // 先停推理 task（它与飞控无关，同步 cancel）
+            }
             if let Some(m) = &d.mavlink { m.shutdown(); }
         }
     }

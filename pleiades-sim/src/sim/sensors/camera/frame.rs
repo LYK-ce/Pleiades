@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 
@@ -26,6 +26,8 @@
 //! 找不到 SOF / SOF 宽高为 0 —— 一律 `Err(String)`，调用方（[`super::CameraSensor::On_Binary`]）
 //! 限流告警后丢弃，不 panic、不 unwrap。
 
+use std::sync::Arc;
+
 use crate::sim::sensors::lidar::frame::{Parse_Header, FRAME_HEADER_SIZE};
 
 /// 帧类型：2 = camera（与 `WireProtocol.FRAME_TYPE_CAMERA` 一致）
@@ -46,6 +48,64 @@ pub struct CameraFrame {
     pub height: u32,
     /// payload 原样（世界侧已编码，sim 不重新编码）
     pub jpeg: Vec<u8>,
+}
+
+impl CameraFrame {
+    /// 抓帧时刻：**世界时间毫秒**（`world_time` 秒 × 1000）。
+    ///
+    /// ⚠️ 来源与真机两个相机（`camera_pc` / `camera_uav`）**不同**：真机取的是本机单调毫秒
+    /// （`Instant`，基准 ≈ 进程启动），这里取的是帧头里的**世界侧时钟**。两者不可跨端直接比较
+    /// 绝对时刻；跨端只比帧龄差（各自端内 `now - captured_at_ms`）。
+    ///
+    /// 非有限（NaN / ±Inf）与负数一律返回 `0`（不让脏 `world_time` 变成一个大数）；
+    /// `f64 → u64` 在 Rust 里是饱和转换，极大值给 `u64::MAX`，不回绕。
+    pub fn captured_at_ms(&self) -> u64 {
+        if !self.world_time.is_finite() || self.world_time < 0.0 {
+            return 0;
+        }
+        (self.world_time * 1000.0) as u64
+    }
+}
+
+/// 槽位里的一帧（与真机 `camera_pc` / `camera_uav` 的 `slot::Frame` **同形**）。
+///
+/// 三处相机统一的是「槽位结构 + 读接口」，不是「谁来写」：
+/// - 真机：worker 线程按 `stream_fps` 抓硬件 → 写 `slot::FrameSlot`
+/// - sim：world_link 收包 task → [`CameraSensor::On_Binary`](super::CameraSensor::On_Binary)
+///   → 覆盖 `Mutex<Option<Latest>>`
+///
+/// ⚠️ `captured_at_ms` 来源**不同**：sim 是**世界时间毫秒**（帧头 `world_time × 1000`）；
+/// 真机是**本机单调毫秒**（`now_boot_ms()`，与位姿 `time_boot_ms` 同源、进程启动为 0）。
+/// 两者不可跨端比较绝对时刻，跨端只比帧龄差（各自端内 `now - captured_at_ms`）。
+///
+/// `seq`：sim 取**帧头序号**（世界侧序号，连接重建后可能回退）；真机是槽位写入计数。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    /// JPEG 字节：`Arc<[u8]>`，读者 clone 只加一次引用计数，不拷整帧
+    pub jpeg: Arc<[u8]>,
+    /// 帧宽：世界侧 JPEG **SOF 段的真实宽**（不是 `[sim_world.sensor.params]` 里的配置值）
+    pub width: u32,
+    /// 帧高：同上，SOF 段的真实高
+    pub height: u32,
+    /// 帧号：**取帧头序号**（世界侧序号，连接重建后可能回退；真机是槽位写入计数，严格递增）
+    pub seq: u64,
+    /// 抓帧时刻：**世界时间毫秒**（帧头 `world_time × 1000`，世界侧时钟），
+    /// 与真机 `camera_pc` / `camera_uav` 的 `now_boot_ms()` **本机单调毫秒**不同源，
+    /// **不可跨端比较绝对时刻**（只能各自端内算帧龄 `now - captured_at_ms`）
+    pub captured_at_ms: u64,
+}
+
+impl From<&CameraFrame> for Frame {
+    /// 只拷贝一次（`Vec<u8>` → `Arc<[u8]>`）：之后读者 clone 只动引用计数
+    fn from(f: &CameraFrame) -> Self {
+        Self {
+            jpeg: Arc::from(f.jpeg.as_slice()),
+            width: f.width,
+            height: f.height,
+            seq: u64::from(f.seq),
+            captured_at_ms: f.captured_at_ms(),
+        }
+    }
 }
 
 /// 小端解析整帧。**所有**失败都是 `Err(String)`（调用方限流，不 panic、不 unwrap）
@@ -255,6 +315,30 @@ mod tests {
         // payload 原样：长度 = 帧长 − 15，且以 SOI 开头
         assert_eq!(f.jpeg.len(), bytes.len() - FRAME_HEADER_SIZE);
         assert_eq!(&f.jpeg[..JPEG_SOI.len()], &JPEG_SOI[..]);
+    }
+
+    #[test]
+    fn test_captured_at_ms_from_world_time() {
+        let base = CameraFrame {
+            sensor_id: 3,
+            seq: 1,
+            world_time: 12.5,
+            width: 640,
+            height: 480,
+            jpeg: Test_Jpeg(640, 480),
+        };
+        assert_eq!(base.captured_at_ms(), 12_500, "世界时间 12.5 s → 12500 ms");
+
+        // 界外输入不得 panic、不得回绕
+        let mut bad = base.clone();
+        bad.world_time = -1.0;
+        assert_eq!(bad.captured_at_ms(), 0, "负时间戳归 0");
+        bad.world_time = f64::NAN;
+        assert_eq!(bad.captured_at_ms(), 0, "NaN 归 0");
+        bad.world_time = f64::INFINITY;
+        assert_eq!(bad.captured_at_ms(), 0, "Inf 归 0");
+        bad.world_time = 1.0e30;
+        assert_eq!(bad.captured_at_ms(), u64::MAX, "极大值饱和，不回绕");
     }
 
     #[test]

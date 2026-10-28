@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 
@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use tracing::info;
 
-use crate::sim::sensors::camera::frame::CameraFrame;
+use crate::sim::sensors::camera::frame::{CameraFrame, Frame};
 use crate::sim::sensors::{Sensor, Warn_Throttled};
 
 /// `[sim_world.sensor.params].rate_hz` 缺键时的默认值（与世界 `SensorCatalog` 的 camera 默认 1 Hz 对齐）
@@ -169,6 +169,21 @@ impl CameraSensor {
         self.Lock().as_ref().map(|l| l.frame.clone())
     }
 
+    /// 最新一帧（**同步、非阻塞**；无帧 → `None`）——与真机两个相机同名的统一读接口
+    ///
+    /// 一次持锁取全字段：`width/height/seq/captured_at_ms` 必须来自**同一帧**，
+    /// 分两次 `Lock()` 读（如先 `Latest_Size()` 再 `Age_Ms()`）会跨帧。
+    /// 只有 JPEG 字节拷一次（`Vec<u8>` → `Arc<[u8]>`，1 Hz、~几十 KB，不必再优化）。
+    ///
+    /// 与 [`CameraSensor::Latest`] 等价（同一帧、同一字节），差别只在形状：
+    /// 这里给出与真机 `camera_pc` / `camera_uav` 同形的 [`Frame`]，Step 2 的 detector
+    /// 拿到的帧结构三端一致；`Latest()` 保留给既有调用点（`device_cap.rs` / 既有单测）。
+    /// `captured_at_ms` 是**世界时间毫秒**（帧头 `world_time × 1000`），不是本机单调毫秒。
+    #[allow(dead_code)] // Step 2 的 detector 从这里取帧；本 step 只有单测与等价旧接口
+    pub fn latest_frame(&self) -> Option<Frame> {
+        self.Lock().as_ref().map(|l| Frame::from(&l.frame))
+    }
+
     /// 只取宽高（`info()` 用，避免为拿尺寸复制整段 JPEG）
     pub fn Latest_Size(&self) -> Option<(u32, u32)> {
         self.Lock().as_ref().map(|l| (l.frame.width, l.frame.height))
@@ -217,6 +232,61 @@ mod tests {
         let got = sensor.Latest();
         assert!(got.is_some(), "{why}");
         got
+    }
+
+    /// 取槽位帧（同 `latest`，不用 unwrap/expect）
+    fn latest_frame(sensor: &CameraSensor, why: &str) -> Option<Frame> {
+        let got = sensor.latest_frame();
+        assert!(got.is_some(), "{why}");
+        got
+    }
+
+    #[test]
+    fn test_camera_sensor_latest_frame_none_when_empty() {
+        let s = CameraSensor::New("camera_nose", CameraParams::default());
+        assert!(s.latest_frame().is_none(), "从未收帧时必须返回 None");
+    }
+
+    #[test]
+    fn test_camera_sensor_latest_frame_matches_camera_frame() {
+        let s = CameraSensor::New("camera_nose", CameraParams::default());
+        let jpeg = Test_Jpeg(640, 480);
+        feed(&s, 7, &jpeg); // feed ⇒ world_time = seq × 0.5 = 3.5 s
+        let f = match latest_frame(&s, "喂过帧后必须有槽位帧") {
+            Some(f) => f,
+            None => return,
+        };
+        assert_eq!((f.width, f.height), (640, 480), "宽高取帧头 SOF 真值");
+        assert_eq!(f.seq, 7, "sim 的 seq 取帧头序号");
+        assert_eq!(f.captured_at_ms, 3_500, "captured_at_ms = world_time × 1000");
+        assert_eq!(&f.jpeg[..], &jpeg[..], "字节与喂进去的完全一致");
+        let old = match latest(&s, "旧接口必须仍在") {
+            Some(f) => f,
+            None => return,
+        };
+        assert_eq!(u64::from(old.seq), f.seq, "两个读接口必须看到同一帧");
+    }
+
+    #[test]
+    fn test_camera_sensor_latest_frame_overwrites_and_ts_monotonic() {
+        let s = CameraSensor::New("camera_nose", CameraParams::default());
+        let mut previous: Option<u64> = None;
+        for seq in 1..=4u32 {
+            feed(&s, seq, &Test_Jpeg(320, 240));
+            let f = match latest_frame(&s, "刚喂过就必须有帧") {
+                Some(f) => f,
+                None => return,
+            };
+            if let Some(previous) = previous {
+                assert!(
+                    f.captured_at_ms >= previous,
+                    "时间戳必须单调不减：{previous} → {}",
+                    f.captured_at_ms
+                );
+            }
+            previous = Some(f.captured_at_ms);
+        }
+        assert_eq!(s.latest_frame().map(|f| f.seq), Some(4), "槽位只留最新（覆盖式）");
     }
 
     #[test]

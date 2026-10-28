@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -12,9 +12,12 @@
 //! → 抓帧（MJPG 直通 / 其它格式解码重编码 JPEG）→ `stop_stream()` 关闭。
 //!
 //! 线程模型：`nokhwa::Camera` 内部是 `Box<dyn CaptureBackendTrait>`（无 `Send` 约束），
-//! **不能跨线程搬运**，因此设备只在 worker 线程内创建与使用，主线程持有 `mpsc` 句柄；
-//! 跨线程只传 [`Frame`] / [`Uav_Info`] 这类纯数据。顺带把「打开设备可能长时间阻塞」
-//! 隔离在 worker 里，主线程用 `recv_timeout` 超时返回 `Err` 而不是卡死。
+//! **不能跨线程搬运**，因此设备只在 worker 线程内创建与使用。task_37 Step 1 起 worker 持
+//! `Arc<Uav_Inner>`（`open()` 里的 `worker_inner`，见 `Worker_Main` 的第一个数据入参），
+//! 在 `Capture_And_Publish` 里**自己写** `last_frame` 与槽位 —— 跨线程共享的是带 `Mutex`
+//! 的内部状态，不再是「只传纯数据」；主线程只通过 `Arc` 读（`latest_frame()` / `Info()`）。
+//! 顺带把「打开设备可能长时间阻塞」隔离在 worker 里，主线程用 `recv_timeout` 超时返回
+//! `Err` 而不是卡死。
 //!
 //! 与另一个相机 sensor（开发机摄像头）的关系：**没有关系**（不 `use` 对方、不共享基类、
 //! 重复代码是刻意接受的代价，Task 34 硬要点 1）。因此本文件里不出现对方的模块名
@@ -30,9 +33,15 @@
 //! `{width, height, format, age_ms}`；数据来源三级回退
 //! 「最近一次成功抓帧 → 打开时协商到的格式 → `[camera_uav].resolutions` 首项
 //! （显式空列表则回落 640x480）」。
+//!
+//! task_37 Step 1 增补：与另两处相机统一为「写者只留最新一帧、读者同步读」——
+//! 常驻线程按 `[camera_uav].stream_fps` 常转抓帧写入 [`slot::FrameSlot`]（覆盖式），
+//! `latest_frame()` 同步非阻塞读；`capture()` 改为「先读槽位，槽位空才按需抓一次」。
+//! `[camera_uav].stream = false` 时线程退回阻塞等指令（零轮询、不抓帧）。
 
 pub mod format;
 pub mod frame;
+pub mod slot;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
@@ -42,17 +51,19 @@ use nokhwa::utils::{
     self, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
 };
 use nokhwa::Camera as Nokhwa_Camera;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use pleiades_base::orchestrator::DeviceCapability;
 
 use crate::config::{
-    CameraUavConfig, DEFAULT_UAV_CAPTURE_TIMEOUT_MS, DEFAULT_UAV_OPEN_TIMEOUT_MS,
-    DEFAULT_UAV_RESOLUTIONS,
+    CameraUavConfig, DEFAULT_STREAM_FPS, DEFAULT_UAV_CAPTURE_TIMEOUT_MS, DEFAULT_UAV_OPEN_TIMEOUT_MS,
+    DEFAULT_UAV_RESOLUTIONS, MAX_STREAM_FPS,
 };
 
 use format::{Choose_Format, Format_Line, Format_Table, Parse_Prefer, Prefer_Format};
-use frame::{Capture_From_Buffer, Frame};
+use frame::Capture_From_Buffer;
+// 槽位帧：本文件里裸 `Frame` 一律指 `slot::Frame`（`frame::Frame` 一律写全路径）
+use slot::{Frame, FrameSlot};
 
 /// 关闭时等待 worker 退出的上限；超时则放弃 `join`（detach），保证进程一定能退出。
 pub const SHUTDOWN_TIMEOUT_MS: u64 = 2_000;
@@ -71,19 +82,50 @@ const FALLBACK_WIDTH: u32 = 640;
 const FALLBACK_HEIGHT: u32 = 480;
 
 /// 发给 worker 的指令。
+///
+/// 回传值改为**槽位帧**（`jpeg` 已是 `Arc<[u8]>`）：worker 抓到就写槽位，
+/// 主线程拿到的是同一份字节的引用计数副本，不再多拷一次。
 enum Uav_Cmd {
     Capture {
-        reply: tokio::sync::oneshot::Sender<Result<Captured_Frame, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<Frame, String>>,
     },
     Shutdown,
 }
 
-/// 一次抓帧的完整结果（worker → 主线程）：[`Frame`] 给 JPEG，`at` 给 `info().age_ms`。
+/// 一次抓帧的完整结果（worker 内部用，不跨线程）。
 struct Captured_Frame {
-    /// worker 内抓到的整帧（宽高/格式/JPEG 都在里面）
-    frame: Frame,
+    /// worker 内抓到的整帧（nokhwa 侧帧类型：宽高/格式/JPEG 都在里面）
+    frame: frame::Frame,
     /// 帧被取到的时刻（`device.frame()` 返回后**立刻**打戳，不含解码/编码耗时）
     at: Instant,
+    /// 同一个打戳点的**本机单调毫秒**（槽位 `captured_at_ms` 的来源，与 `at` 同源）
+    at_ms: u64,
+}
+
+/// 常转模式：由 `[camera_uav].stream` / `stream_fps` 决定（纯函数，可单测）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tick_Mode {
+    /// 常转：`recv_timeout(period)`，到点自己抓一帧写槽位
+    Stream { fps: u32, period: Duration },
+    /// 关流：无超时 `recv()`，只服务按需 `Capture`，**永远不会自己抓帧**
+    Idle,
+}
+
+/// `stream = false` → `Idle`；`stream_fps` 缺/0 → [`DEFAULT_STREAM_FPS`]；超过 [`MAX_STREAM_FPS`] 按上限算。
+fn Tick_Mode_Of(config: &CameraUavConfig) -> Tick_Mode {
+    if !config.stream.unwrap_or(true) {
+        return Tick_Mode::Idle;
+    }
+    let requested = config.stream_fps.unwrap_or(DEFAULT_STREAM_FPS);
+    let fps = if requested == 0 {
+        DEFAULT_STREAM_FPS
+    } else {
+        requested.min(MAX_STREAM_FPS)
+    };
+    Tick_Mode::Stream {
+        fps,
+        period: Duration::from_millis(1000 / u64::from(fps)),
+    }
 }
 
 /// 最近一次成功抓帧的元数据（`info()` 的首选数据源）。
@@ -135,14 +177,34 @@ struct Uav_Inner {
     /// 最近一次**成功**抓帧的元数据（抓帧失败不写，`age_ms` 因此不会"变新鲜"）。
     /// `Close()` **不清空**：关掉后仍能回答「最后一帧是什么尺寸/格式、多久之前」。
     last_frame: Mutex<Option<Last_Frame>>,
+    /// 最新帧槽位（常转 worker 写、`latest_frame()` / `capture()` 同步读）
+    slot: FrameSlot,
 }
 
 impl Uav_Inner {
-    /// 发 Capture 命令 + 等待 JPEG 字节（核心业务逻辑，独立于 Lua 胶水）。
+    /// 取一帧 JPEG 字节（核心业务逻辑，独立于 Lua 胶水）。
+    ///
+    /// **常转时槽位优先**：`stream = true` 且槽位里有帧就同步返回最新一帧（不再等 worker、
+    /// 也不再多抓一张）；槽位空（从未抓到 / 刚 `Close` 过）或 `stream = false` 时退回
+    /// 「发 Capture 指令按需抓一次」。
     ///
     /// 关键：取 `cmd_tx` 克隆后**先释放锁再 `await`**（保持 future `Send`）；
     /// 抓帧超时**只返回 `Err`**，绝不 `join` worker。
     async fn Capture_Impl(&self) -> Result<Vec<u8>, String> {
+        // 1) **常转在跑** ⇒ 槽位就是"最新帧"：同步返回
+        //    （`Arc<[u8]>` → `Vec<u8>` 只在 Lua 需要 owned 字节时拷一次）
+        //
+        // ⚠️ 只在本 sensor 有常转生产者时走槽位：`stream = false` 时 worker 不常转，
+        // 槽位里那一帧是「上一次按需抓的」，复用会让 `camera_uav.Capture()` 每次都拿到
+        // 同一张图（`programs/user/camera_photo.lua` 连拍两张会一模一样）。空闲模式一律
+        // 按需抓帧 —— 与 task_34 的语义逐字一致。
+        if matches!(Tick_Mode_Of(&self.config), Tick_Mode::Stream { .. }) {
+            if let Some(frame) = self.slot.Latest() {
+                return Ok(frame.jpeg.to_vec());
+            }
+        }
+
+        // 2) 无常转生产者，或槽位还空：按需抓一次（原逻辑不变；worker 抓到后会写槽位）
         let tx = {
             let guard = Lock(&self.cmd_tx);
             guard
@@ -185,12 +247,7 @@ impl Uav_Inner {
                     .to_string()
             })?;
 
-        reply.and_then(|captured| {
-            // `Jpeg()` 先转成 owned：`captured.frame` 之后还要借给 `Store_Last`。
-            let jpeg = captured.frame.Jpeg()?.to_vec();
-            self.Store_Last(&captured);
-            Ok(jpeg)
-        })
+        reply.and_then(|frame| Ok(frame.jpeg.to_vec()))
     }
 
     /// 记录最近一次成功抓帧（毒化安全：走 [`Lock`]）
@@ -267,7 +324,29 @@ impl Uav_Camera {
                 opened: AtomicBool::new(false),
                 info: Mutex::new(None),
                 last_frame: Mutex::new(None),
+                slot: FrameSlot::New(),
             }),
+        }
+    }
+
+    /// 最新一帧（**同步、非阻塞**；无帧 → `None`）。
+    ///
+    /// 只做「锁槽位 → `Arc` 克隆」两件事，不碰设备、不 `await`，因此可以在任何上下文调用。
+    #[allow(dead_code)] // Step 2 的 detector 从这里取帧；本 step 只有单测与 capture() 调用
+    pub fn latest_frame(&self) -> Option<Frame> {
+        self.inner.slot.Latest()
+    }
+
+    /// 一句话描述常转设定（bootstrap 成功日志用：现场看日志就知道「常转 fps / 不常转」）
+    pub fn Describe_Stream(&self) -> String {
+        match Tick_Mode_Of(&self.inner.config) {
+            Tick_Mode::Stream { fps, period } => format!(
+                "常转已开启：stream_fps={fps}（周期 {}ms），每帧覆盖写入槽位",
+                period.as_millis()
+            ),
+            Tick_Mode::Idle => {
+                "stream=false：不常转（worker 阻塞等指令），只在 capture() 时按需抓一帧".to_string()
+            }
         }
     }
 
@@ -304,9 +383,11 @@ impl Uav_Camera {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Uav_Cmd>();
         let (done_tx, done_rx) = mpsc::channel::<()>();
 
+        // worker 需要 `Arc<Uav_Inner>` 才能自己写 `last_frame` 与槽位（常转时主线程没有指令可收）
+        let worker_inner = self.inner.clone();
         let handle = match std::thread::Builder::new()
             .name(format!("camera-uav-worker-{index}"))
-            .spawn(move || Worker_Main(index, config, ready_tx, cmd_rx, done_tx))
+            .spawn(move || Worker_Main(index, worker_inner, ready_tx, cmd_rx, done_tx))
         {
             Ok(handle) => handle,
             Err(error) => {
@@ -390,6 +471,8 @@ impl Uav_Camera {
 
         self.inner.opened.store(false, Ordering::SeqCst);
         *Lock(&self.inner.info) = None;
+        // 关掉之后不该再答出旧帧（`last_frame` 的元数据保留，`info()` 契约不变）
+        self.inner.slot.Clear();
     }
 }
 
@@ -437,10 +520,12 @@ impl DeviceCapability for Uav_Camera {
 }
 
 /// worker 线程主体：建设备 → 枚举 → 选格式 → 设格式（失败 `drop` 后 `Closest` 重开）
-/// → 开流 → 回传信息 → 服务抓帧指令 → `stop_stream()`。
+/// → 开流 → 回传信息 → **常转抓帧 / 服务抓帧指令** → `stop_stream()`。
+///
+/// 收 `Arc<Uav_Inner>`（而不是 config 的副本）是为了让常转路径能自己写 `last_frame` 与槽位。
 fn Worker_Main(
     index: u32,
-    config: CameraUavConfig,
+    inner: Arc<Uav_Inner>,
     ready_tx: mpsc::SyncSender<Result<Uav_Info, String>>,
     cmd_rx: mpsc::Receiver<Uav_Cmd>,
     done_tx: mpsc::Sender<()>,
@@ -459,15 +544,15 @@ fn Worker_Main(
     let format_lines = Format_Table(&all_formats, enum_warning.as_deref());
 
     // 3. 选格式（prefer 非法时 warn + 回退默认）
-    let prefer = match Parse_Prefer(config.prefer.as_deref().unwrap_or(DEFAULT_PREFER)) {
+    let prefer = match Parse_Prefer(inner.config.prefer.as_deref().unwrap_or(DEFAULT_PREFER)) {
         Ok(prefer) => prefer,
         Err(error) => {
             warn!("[UAV] sensor=camera_uav {error}");
             Prefer_Format::Mjpg
         }
     };
-    let resolutions = Resolutions(&config);
-    let fps = config.fps.unwrap_or(DEFAULT_FPS);
+    let resolutions = Resolutions(&inner.config);
+    let fps = inner.config.fps.unwrap_or(DEFAULT_FPS);
     let (chosen, reason) = Choose_Format(&all_formats, prefer, &resolutions, fps);
 
     // 4. 设格式：Exact 走 fulfill()，wanted_decoder 给全 6 种格式因此必然命中 chosen 本身
@@ -526,14 +611,45 @@ fn Worker_Main(
         return;
     }
 
-    // 7. 服务抓帧指令
+    // 7. 常转抓帧 / 服务抓帧指令
+    //
+    // `stream = true`（默认）：`recv_timeout(period)`，每到点自己抓一帧写槽位（覆盖式）；
+    // `stream = false`：无超时 `recv()`，**零轮询、不抓帧、不占 CPU**，只服务按需 `Capture`。
+    let mode = Tick_Mode_Of(&inner.config);
+    match mode {
+        Tick_Mode::Stream { fps, period } => info!(
+            "[UAV] sensor=camera_uav 常转已开启：stream_fps={fps}（周期 {}ms），每帧覆盖写入槽位",
+            period.as_millis()
+        ),
+        Tick_Mode::Idle => info!(
+            "[UAV] sensor=camera_uav stream=false：不常转（worker 阻塞等指令），只在 capture() 时按需抓一帧"
+        ),
+    }
+
     loop {
-        match cmd_rx.recv() {
-            Ok(Uav_Cmd::Capture { reply }) => {
-                let result = Capture_One(&mut device);
-                let _ = reply.send(result);
+        let cmd = match mode {
+            Tick_Mode::Stream { period, .. } => match cmd_rx.recv_timeout(period) {
+                Ok(cmd) => Some(cmd),
+                // 到点没指令 → 自己抓一帧（没有读者要回复）
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            Tick_Mode::Idle => match cmd_rx.recv() {
+                Ok(cmd) => Some(cmd),
+                Err(_) => break,
+            },
+        };
+
+        match cmd {
+            None => {
+                if let Err(error) = Capture_And_Publish(&mut device, &inner) {
+                    warn!("[UAV] sensor=camera_uav 常转抓帧失败（继续下一次）：{error}");
+                }
             }
-            Ok(Uav_Cmd::Shutdown) | Err(_) => {
+            Some(Uav_Cmd::Capture { reply }) => {
+                let _ = reply.send(Capture_And_Publish(&mut device, &inner));
+            }
+            Some(Uav_Cmd::Shutdown) => {
                 let _ = device.stop_stream();
                 break;
             }
@@ -542,6 +658,26 @@ fn Worker_Main(
 
     drop(device);
     let _ = done_tx.send(());
+}
+
+/// 抓一帧 → 写 `last_frame`（`info()` 的元数据）与槽位；返回写入槽位的那一份。
+///
+/// 两条纪律（plan R2）：
+/// 1. **不同时持两把锁**：`Store_Last` 先进锁赋值再出锁，之后才 `Publish`；
+/// 2. 打戳只在 `Capture_One` 里做一次，`at`（`age_ms`）与 `at_ms`（`captured_at_ms`）**同源**。
+fn Capture_And_Publish(device: &mut Nokhwa_Camera, inner: &Uav_Inner) -> Result<Frame, String> {
+    let captured = Capture_One(device)?;
+    let (width, height) = (captured.frame.width, captured.frame.height);
+    let at_ms = captured.at_ms;
+    inner.Store_Last(&captured);
+    // `Into_Jpeg` 移动出 owned 字节（槽位要 `Arc<[u8]>`，不借 `&[u8]`）
+    let jpeg: Arc<[u8]> = Arc::from(captured.frame.Into_Jpeg()?);
+    let frame = inner.slot.Publish(jpeg, width, height, at_ms);
+    debug!(
+        "[UAV] sensor=camera_uav 槽位已更新：seq={} {}x{} captured_at_ms={}（本机单调毫秒，进程内基准）",
+        frame.seq, frame.width, frame.height, frame.captured_at_ms
+    );
+    Ok(frame)
 }
 
 /// 建 nokhwa 设备，格式先给 `None`（打开后再枚举、再设具体格式）。
@@ -580,8 +716,8 @@ fn Enumerate_Formats(device: &mut Nokhwa_Camera) -> (Vec<CameraFormat>, Option<S
 
 /// 抓一帧并转换成 [`Captured_Frame`]（在 worker 线程内调用）。
 ///
-/// `at` 在 `device.frame()` 返回后**立刻**打戳（不是转码完才打），否则 `age_ms`
-/// 会把解码/重编码耗时也算进去。
+/// `at` / `at_ms` 在 `device.frame()` 返回后**立刻**打戳（不是转码完才打），否则 `age_ms`
+/// 与 `captured_at_ms` 会把解码/重编码耗时也算进去；两者在同一个点取，保证同源。
 fn Capture_One(device: &mut Nokhwa_Camera) -> Result<Captured_Frame, String> {
     let buffer = device.frame().map_err(|error| {
         format!(
@@ -590,10 +726,12 @@ fn Capture_One(device: &mut Nokhwa_Camera) -> Result<Captured_Frame, String> {
         )
     })?;
     let at = Instant::now();
+    let at_ms = slot::Monotonic_Ms();
 
     Ok(Captured_Frame {
         frame: Capture_From_Buffer(buffer)?,
         at,
+        at_ms,
     })
 }
 
@@ -866,7 +1004,7 @@ mod tests {
             [640, 480],
         ])));
         camera.inner.Store_Last(&Captured_Frame {
-            frame: Frame {
+            frame: frame::Frame {
                 format: FrameFormat::MJPEG,
                 width: 1920,
                 height: 1080,
@@ -874,6 +1012,7 @@ mod tests {
                 rgb: None,
             },
             at: Instant::now() - Duration::from_millis(25),
+            at_ms: 25,
         });
         let info = camera.inner.Info_Impl();
         assert_eq!((info.width, info.height), (1920, 1080), "应取最近帧的宽高");
@@ -925,6 +1064,15 @@ mod tests {
 
     /// 构造一个只有 `path` 有意义的配置（其余字段全走缺省）
     fn UavCameraConfig_For_Test(path: &str) -> CameraUavConfig {
+        UavCameraConfig_For_Test_With_Stream(path, None, None)
+    }
+
+    /// 构造一个指定常转开关 / 帧率的配置（`path` 固定 "0"）
+    fn UavCameraConfig_For_Test_With_Stream(
+        path: &str,
+        stream: Option<bool>,
+        stream_fps: Option<u32>,
+    ) -> CameraUavConfig {
         CameraUavConfig {
             enabled: Some(true),
             path: Some(path.to_string()),
@@ -933,6 +1081,8 @@ mod tests {
             fps: None,
             open_timeout_ms: None,
             capture_timeout_ms: None,
+            stream,
+            stream_fps,
         }
     }
 
@@ -948,6 +1098,127 @@ mod tests {
             fps: None,
             open_timeout_ms: None,
             capture_timeout_ms: None,
+            stream: None,
+            stream_fps: None,
         }
+    }
+
+    #[test]
+    fn tick_mode_stream_by_default() {
+        // `stream` 缺省 = 常转开；`stream_fps` 缺省 = 10 Hz → 周期 100 ms
+        let mode = Tick_Mode_Of(&UavCameraConfig_For_Test("0"));
+        assert_eq!(
+            mode,
+            Tick_Mode::Stream {
+                fps: DEFAULT_STREAM_FPS,
+                period: Duration::from_millis(100),
+            },
+            "缺省必须常转 10 Hz"
+        );
+        assert_eq!(DEFAULT_STREAM_FPS, 10);
+
+        // 显式 true / 显式 fps 也照办
+        let explicit =
+            Tick_Mode_Of(&UavCameraConfig_For_Test_With_Stream("0", Some(true), Some(25)));
+        assert_eq!(
+            explicit,
+            Tick_Mode::Stream {
+                fps: 25,
+                period: Duration::from_millis(40),
+            }
+        );
+
+        // `0` 视为缺省（不能除以 0、也不能算出 0 周期）
+        let zero = Tick_Mode_Of(&UavCameraConfig_For_Test_With_Stream("0", Some(true), Some(0)));
+        assert_eq!(
+            zero,
+            Tick_Mode::Stream {
+                fps: DEFAULT_STREAM_FPS,
+                period: Duration::from_millis(100),
+            },
+            "stream_fps=0 必须回默认 10 Hz"
+        );
+    }
+
+    #[test]
+    fn tick_mode_idle_when_stream_false() {
+        // 关闭常转 → Idle（worker 走无超时 recv()，零轮询）
+        let mode = Tick_Mode_Of(&UavCameraConfig_For_Test_With_Stream("0", Some(false), Some(30)));
+        assert_eq!(mode, Tick_Mode::Idle, "stream=false 必须不常转");
+        assert!(
+            Uav_Camera::new(UavCameraConfig_For_Test_With_Stream("0", Some(false), None))
+                .Describe_Stream()
+                .contains("不常转"),
+            "日志描述必须点明「不常转」"
+        );
+        assert!(
+            Uav_Camera::new(UavCameraConfig_For_Test("0"))
+                .Describe_Stream()
+                .contains("stream_fps=10"),
+            "常转时日志描述必须带 stream_fps"
+        );
+    }
+
+    #[test]
+    fn tick_mode_clamps_stream_fps() {
+        // 超过上限按上限算：避免把设备打到异常状态
+        let clamped = Tick_Mode_Of(&UavCameraConfig_For_Test_With_Stream(
+            "0",
+            Some(true),
+            Some(1_000),
+        ));
+        assert_eq!(
+            clamped,
+            Tick_Mode::Stream {
+                fps: MAX_STREAM_FPS,
+                period: Duration::from_millis(1000 / u64::from(MAX_STREAM_FPS)),
+            },
+            "stream_fps 必须夹到上限 {MAX_STREAM_FPS}"
+        );
+        assert_eq!(MAX_STREAM_FPS, 60);
+    }
+
+    #[test]
+    fn capture_reads_slot_without_device() {
+        // 槽位有帧 → `capture()` 同步返回槽位里的字节：不碰设备、不报「未打开」
+        let camera = Uav_Camera::new(UavCameraConfig_For_Test("/dev/video5"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("测试用 runtime 应能创建");
+        let jpeg: Arc<[u8]> = Arc::from(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        camera.inner.slot.Publish(jpeg.clone(), 320, 240, 12);
+
+        let got = runtime
+            .block_on(camera.Capture())
+            .expect("槽位有帧时 capture 不该失败");
+        assert_eq!(got, jpeg.to_vec(), "必须返回槽位里的那一帧");
+        assert!(camera.latest_frame().is_some(), "latest_frame 必须能看到同一帧");
+        assert_eq!(camera.latest_frame().map(|f| f.seq), Some(1));
+    }
+
+    #[test]
+    fn capture_idle_mode_does_not_reuse_slot() {
+        // stream=false：槽位里那一帧是「上一次按需抓的」，复用会让每次拍照拿到同一张
+        // ⇒ 必须退回按需抓帧；设备没打开过 ⇒ 必须报「未打开」（证明没吃槽位）
+        let camera = Uav_Camera::new(UavCameraConfig_For_Test_With_Stream("5", Some(false), None));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("测试用 runtime 应能创建");
+        camera
+            .inner
+            .slot
+            .Publish(Arc::from(vec![0xFF_u8, 0xD8, 0xFF, 0xD9]), 320, 240, 12);
+
+        let error = runtime
+            .block_on(camera.Capture())
+            .expect_err("stream=false 不得复用槽位里的旧帧");
+        assert!(error.contains("未打开"), "应退回按需抓帧并报未打开：{error}");
+        assert_eq!(
+            camera.latest_frame().map(|f| f.seq),
+            Some(1),
+            "读路径不得清槽位：latest_frame 仍看得到那一帧"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-07
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-28
 
 //! 5 条消息的 payload 编解码（协议文档 §3）
 //!
@@ -252,6 +252,11 @@ pub fn decode_manual_control(payload: &[u8]) -> Option<ManualControl> {
 
 /// mission type（协议文档 §3.5）
 pub const MISSION_GOTO: u8 = 0;
+/// Follow（Task 37 §五.2）：`type=2 | x(f32) | y(f32)`，`x/y` 预留（填 0）
+///
+/// ⚠️ **必须用 2，不能用 1**：`1` 是 Task 36 已删除的旧 `Circle`，
+/// 地面站/旧工具链里可能仍有该值，复用会让旧 Circle 帧被误认成 Follow。
+pub const MISSION_FOLLOW: u8 = 2;
 
 /// 编码任务队列：mission_count(1) + missions[](9 × mission_count)
 ///
@@ -373,6 +378,22 @@ mod tests {
             assert_eq!(encoded[0] as usize, missions.len(), "count 在首字节");
             assert_eq!(decode_task_set(&encoded).unwrap(), payload);
         }
+    }
+
+    #[test]
+    fn test_task_set_follow_type_roundtrip() {
+        // Task 37 §五.2：type=2 = Follow，`x/y` 预留（填 0）；布局仍是 9B/项
+        assert_eq!(MISSION_FOLLOW, 2);
+        assert_ne!(MISSION_FOLLOW, 1, "1 是已删除的旧 Circle，不得复用");
+        let missions = vec![
+            MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0 },
+            MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 },
+        ];
+        let payload = TaskSetPayload { missions: missions.clone() };
+        let encoded = encode_task_set(&payload);
+        assert_eq!(encoded.len(), 1 + 9 * missions.len(), "帧长必须是 1 + 9×count");
+        assert_eq!(encoded[1], MISSION_FOLLOW, "首条 type 必须是 2");
+        assert_eq!(decode_task_set(&encoded).unwrap(), payload);
     }
 
     #[test]
