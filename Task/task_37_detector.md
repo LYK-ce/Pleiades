@@ -18,10 +18,10 @@
 3. 在 `orion-simulation-world` 中，让 **UAV 能识别到 human**。
 
 本任务做到“识别到人 → 算出世界位置 → sim 里跟着走”：
-检测框（Step 2）→ 世界坐标 `(x, y)` 与误差（Step 3）→ sim 无人机跟随（Step 4）。
+检测框（Step 2）→ 世界坐标 `(x, y)` 与误差（Step 3）→ sim 无人机跟随（Step 4）→ sim 直线跟随（Step 5，先绕开转向问题）。
 **跟踪器（ID / 卡尔曼）、真机跟随、行为树泛化、协议上报都不在本任务。**
 
-**顺序**：Step 1 相机统一 → Step 2 detector → Step 3 位置估计（uav + sim）→ Step 4 sim 跟随。
+**顺序**：Step 1 相机统一 → Step 2 detector → Step 3 位置估计（uav + sim）→ Step 4 sim 跟随 → Step 5 sim 直线跟随。
 
 ---
 
@@ -220,6 +220,10 @@ sim 里 UAV 跟着一个行人走：保持距离、人走它走、人停它停�
 **只在 sim（`uav_sim`）实现**；真机 `pleiades-uav` / `pleiades-ugv` 收到 Follow 只做“平凡终值”，不进跟随逻辑。
 
 > 依赖：Task 36 的 sim 双栈（`uav_sim/` + `mission/`）先落地，本步才接得进去。
+>
+> ⚠️ **已知限制（2026-10-28 e2e 实测）**：本步的 D* 跟随在近距离（目标 1~2 格）会被 4 连通「下一格」带偏——
+> executor 追的是下一格格心，第一格常是侧向；又因 `Turning` 过冲后不反向修正，车原地打转、人出画、跟随进入 `Hold`。
+> executor / nav 属“能动就行”的既有实现，按人类要求**本任务不改**；Step 5 用「沿机头直线」绕开。
 
 ### 2 协议：`Mission::Follow`
 
@@ -285,17 +289,63 @@ Fallback
 
 ---
 
-## 六、范围之外
+## 六、Step 5 — sim 直线跟随（人往前走，飞机往前飞）
+
+### 1 目标
+
+sim 里行人与 UAV 在同一条直线上：**人向前走，UAV 保持距离向前飞**。
+先绕开转向/寻路问题——行动逻辑（executor / 4 连通 D*）按人类要求暂不改，后续任务处理。
+
+### 2 背景（为什么绕开）
+
+Step 4 的 D* 跟随在近距离会被 4 连通「下一格」带偏：executor 追的是下一格格心，第一格常是侧向，
+车原地转 90°；`Turning` 过冲后又不反向修正，最终人从画面边缘出画、跟随进入 `Hold`。
+详见 §五.1 的“已知限制”。
+
+### 3 方案
+
+- 控制口新增 `{"cmd":"follow_straight"}`（测试夹具，不走 ORION 帧）；
+- 新增 `Mission::FollowStraight`；`TASK_SET` 的 **type=3 仅预留**，协议解码不认（收到按未知丢弃，不影响 Pictor）；
+- 真机 uav / ugv：平凡树一拍终值（与 Follow 同）；
+- sim `uav_sim/mission/follow_straight.rs`：
+  - 读 detector 最新目标；无目标 / `age > stale` → `Hold`；
+  - `d = |target - me|`，`d > d_far` → `next_cell = 机头正前方一格`（沿当前 `pose.yaw` 前进 0.5 m，不调 `nav.set_goal`）；
+  - `d <= d_near` → `Hold`（`next_cell = None`）；
+  - 下一格就在机头正前方 ⇒ executor 的 `delta ≈ 0` ⇒ 只发 `MoveForward`，不会转向。
+
+### 4 参数（初值）
+
+| 参数 | 初值 |
+|---|---|
+| `d_far`（大于它才前进） | 4.0 m |
+| `d_near`（小于它停下） | 2.5 m |
+| `stale` | 0.8 s |
+
+### 5 完成判据
+
+1. 控制口 `follow_straight` 被接受，建树成功、`task_ticks` 递增；
+2. 单测：目标远 → `next_cell` = 机头前方一格；目标近 → `None`；无目标 / 过期 → `None`；格心计算正确；
+3. `cargo check --workspace` + mission 相关单测通过；
+4. **不改** executor / nav / 协议解码；真机收到 `FollowStraight` 平凡终值。
+
+### 6 不做
+
+转向与寻路修正（8 连通 / 路径平滑 / 追最终目标方位）、D* 跟随的修复——另开任务。
+
+---
+
+## 七、范围之外
 
 - 多目标跟踪（ID / 卡尔曼）、`TargetTable` 的长期维护；
-- 真机（uav / ugv）跟随实现——收到 Follow 只做平凡终值；
+- 真机（uav / ugv）跟随实现——收到 Follow / FollowStraight 只做平凡终值；
 - 地面站上报（新 `msgid`）、多车融合；
 - ugv 跟随；
+- **转向 / 4 连通路径 / executor 行为修正**（行动逻辑“能动就行”，后续任务）；
 - 模型训练/微调。
 
 ---
 
-## 七、开工前待确认
+## 八、开工前待确认
 
 1. **算法归属**（Step 2）：detector 的模型加载 + candle 推理，是放到独立 crate，还是 Step 2 先直接调用 base 现有 `ML_Engine/Yolo`（后续再搬）。
 2. **观察方式**（已定）：Step 2 先用日志（`frame_ts` + `class/conf/bbox`）；落盘带框图、推 `webui` 留到后续。
@@ -304,7 +354,7 @@ Fallback
 
 ---
 
-## 八、记录
+## 九、记录
 
 - 2026-10-27：目标确定——detector 设备化，uav 一份、sim 一份，仿真世界 UAV 能识别 human。
 - 2026-10-27：拆步——Step 1 先统一相机（常驻抓取 + 共享帧槽位），Step 2 再做 detector。
@@ -313,3 +363,5 @@ Fallback
 - 2026-10-27：Step 2 验收收窄为“帧到 + person 框出”，观察方式先用日志。
 - 2026-10-27：Step 3 定稿——只做地面平面投影（IPM）求世界 `(x,y)` 与误差，不做跟随；参数放 `[detector.camera]`；分辨率用帧自带、外参键名带单位、高度取 `pose.z`。
 - 2026-10-27：Step 4 定稿——`Mission::Follow`（type=2，避开旧 `Circle=1`）；sim 用 `ReactiveSequence` 跟人，真机建平凡树立即终值；目标位置读 detector、不进 `ExecuteState`；初值 `follow_dist=2.5`、距离带 1.5~3.0、`stale=0.8 s`、相机 `pitch≈-15°`。
+- 2026-10-28：Step 1~4 全 PASS（commit `c639610`）。
+- 2026-10-28：e2e 实测发现两处链路问题——① sim 的 `world_link` 未透传 `mount.pitch`（相机永远 0°，投影 10 m 算成 4.66 m），已修；② 近距离 D* 跟随被 4 连通「下一格」带偏、executor 过冲不反向修正，按人类要求**不改行动逻辑**，新增 Step 5 用直线跟随绕开。

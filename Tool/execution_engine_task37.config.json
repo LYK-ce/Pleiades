@@ -114,6 +114,35 @@
         "docs/design_doc/orion_protocol.md",
         "Architecture/robot_arch.md"
       ]
+    },
+    {
+      "n": 5,
+      "title": "sim 直线跟随（人往前走，飞机往前飞）",
+      "doc": "§六",
+      "side": "sim：Mission::FollowStraight + 控制口 + uav_sim 直线跟随树；真机平凡树",
+      "note": "Step 1~4 已 PASS（commit c639610）。Step 4 的 D* 跟随在近距离被 4 连通「下一格」带偏（executor 追格心、Turning 过冲不反向修正），人类决定**不改行动逻辑**（executor / nav / 4 连通暂时保持“能动就行”），本 step 用直线跟随绕开。红线：**禁止改 executor.rs / nav/ / 协议解码**；只在 sim 侧加一个不经过 D* 的直线跟随叶子。",
+      "brief": [
+        "新增 `Mission::FollowStraight`（x/y 预留填 0）；`TASK_SET` 的 type=3 **仅预留**，协议解码不认（仍按未知 type 丢弃，避免影响 Pictor）；真机 uav/ugv 的 `mission::build` 对它返回平凡树（Action 恒 Success，一拍终值）+ 一条 warn。",
+        "sim `uav_sim/mission/follow_straight.rs`：读 detector 最新目标（复用 Step 4 的 `TargetSource`/`latest_targets`）；无目标或 age > stale → Hold（next_cell=None）；`d = |target - me|`：`d > 4.0` → `next_cell = 沿当前 pose.yaw 的机头前方一格`（格心 = 当前格 + 沿 yaw 方向 1 格，0.5 m）；`d <= 2.5` → Hold。",
+        "**不调用 `nav.set_goal` / `nav.step`**：目标是让 next_cell 恒在机头正前方，executor 的 delta ≈ 0，只发 MoveForward，不触发转向。",
+        "**禁止修改** executor.rs（三份）、nav/、protocol/command_decode.rs、messages.rs；行动逻辑的修正另开任务。",
+        "真机与 sim 的 ugv 栈按“平凡树”处理；sim 的 uav_sim::Stack 需要把 FollowStraight 分派到 follow_straight 树（`mission/mod.rs` 的 match 要穷尽）。",
+        "sim 控制口新增 `{\"cmd\":\"follow_straight\"}`（测试夹具）：构造 `Command::Auto(AutoCmd::Set(vec![Mission::FollowStraight { x: 0.0, y: 0.0 }]))` 走 `robot_cmd_tx` 同一路。",
+        "参数常量写在 follow_straight.rs 顶部：D_FAR_M=4.0、D_NEAR_M=2.5、STALE_MS=800。",
+        "单测：目标远 → next_cell 为机头前方一格（可算格心断言）；目标近 → None；无目标/过期 → None；yaw=90° 时前方格的方向正确。",
+        "本 step 不启动 Godot / 长驻进程；只跑单测 + cargo check。"
+      ],
+      "allowed": [
+        "pleiades-base/src/Robot/core/mission_queue/element.rs",
+        "pleiades-ugv/src/ugv/mission/mod.rs",
+        "pleiades-uav/src/uav/mission/mod.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/",
+        "pleiades-sim/src/sim/uav_sim/mod.rs",
+        "pleiades-sim/src/sim/ugv_sim/mission/mod.rs",
+        "pleiades-sim/src/sim/control.rs",
+        "pleiades-sim/src/sim/sim_handler.rs",
+        "Architecture/robot_arch.md"
+      ]
     }
   ],
   "prompts": {

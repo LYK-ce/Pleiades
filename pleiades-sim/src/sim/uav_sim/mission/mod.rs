@@ -19,6 +19,7 @@ use pleiades_base::robot::core::state::RobotState;
 use crate::sim::uav_sim::nav::Navigator;
 
 pub mod follow;
+pub mod follow_straight;
 pub mod goto;
 
 /// 树叶子的依赖（导航端口 + 位姿快照）；加新任务类型时在此按需加字段
@@ -52,6 +53,24 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 })))
             }
         },
+        // Task 37 §六：直线跟随（sim 机栈独有）。**不给导航器下达目标**：目标恒在机头正前方一格。
+        // 无 detector 时 `TargetSource::sample` 恒 `None` → 天然 Hold（不终值），故不另建退化树。
+        Mission::FollowStraight { .. } => {
+            if deps.detector.is_none() {
+                tracing::warn!(
+                    "[Sim/uav] FollowStraight：未启用 detector（[detector].enabled=false 或无相机）→ 原地 Hold"
+                );
+            }
+            let feed: Option<Arc<dyn follow::TargetFeed>> = match deps.detector.as_ref() {
+                Some(dev) => Some(dev.clone()),
+                None => None,
+            };
+            Ok(follow_straight::build(
+                deps.robot_state.clone(),
+                Arc::new(follow::TargetSource::new(feed)),
+                follow_straight::StraightParams::default(),
+            ))
+        }
     }
 }
 
@@ -95,4 +114,18 @@ mod tests {
 
     // 有 detector 的建树路径由 `follow::tests` 用 `FakeFeed` 覆盖
     // （真 `DetectorDevice` 需要权重文件，单测不加载模型 → 此处只验无 detector 的退化路径）。
+
+    /// task_37 §六 / C3：`detector = None` 时建 `FollowStraight` 树成功，且一拍 `Running`、不动
+    #[tokio::test]
+    async fn test_follow_straight_without_detector_is_hold_tree() {
+        let d = deps();
+        let mut tree =
+            build(&Mission::FollowStraight { x: 0.0, y: 0.0 }, &d).expect("FollowStraight 不得返回 Err");
+        let mut out = MotionOut::default();
+        let mut f = Frame { dt_ms: 50, tick_no: 0, out: &mut out };
+        for i in 0..3 {
+            assert_eq!(tree.tick(&mut f).await, Status::Running, "第 {i} 拍必须 Running（不终值）");
+            assert_eq!(f.out.next_cell, None, "无 detector → 原地 Hold");
+        }
+    }
 }

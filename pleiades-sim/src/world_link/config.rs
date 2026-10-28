@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-28
 
 //! `[sim_world]` 段配置：TOML 声明 → 填默认值 + 校验 → [`ResolvedWorld`]（task_31 §四.5.2）
 //!
@@ -33,6 +33,9 @@ pub struct Mount {
     pub y: Option<f32>,
     pub z: Option<f32>,
     pub yaw: Option<f32>,
+    /// 俯仰（**度**，负 = 低头；task_33 D10）。世界侧 `Vehicle.AttachSensor` 读同一个键，缺省 0。
+    /// 此前这里漏了该字段 → 相机永远 0°，与 `[detector.camera].mount_pitch_deg` 不一致。
+    pub pitch: Option<f32>,
 }
 
 /// 一条传感器声明 = 一条 WS 连接 = manifest 的一条
@@ -86,6 +89,7 @@ fn mount_out(m: Option<&Mount>) -> MountOut {
         y: m.and_then(|m| m.y).unwrap_or(0.0),
         z: m.and_then(|m| m.z).unwrap_or(0.0),
         yaw: m.and_then(|m| m.yaw).unwrap_or(0.0),
+        pitch: m.and_then(|m| m.pitch).unwrap_or(0.0),
     }
 }
 
@@ -225,7 +229,7 @@ mod tests {
             sensor: Some(vec![SensorDecl {
                 slot: "lidar_front".into(),
                 sensor: "lidar_2d".into(),
-                mount: Some(Mount { x: Some(0.1), y: None, z: Some(0.2), yaw: None }),
+                mount: Some(Mount { x: Some(0.1), y: None, z: Some(0.2), yaw: None, pitch: None }),
                 params: None,
             }]),
             ..minimal()
@@ -236,7 +240,7 @@ mod tests {
         assert_eq!(s.slot, "lidar_front");
         assert_eq!(s.sensor, "lidar_2d");
         // 缺省 0.0：不复制世界的数值默认
-        assert_eq!(s.mount, MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 });
+        assert_eq!(s.mount, MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 });
         assert_eq!(s.params, serde_json::json!({}));
     }
 

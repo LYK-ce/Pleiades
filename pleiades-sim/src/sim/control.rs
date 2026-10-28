@@ -71,6 +71,8 @@ pub enum ControlCmd {
     Circle { x: f32, y: f32 },
     /// 跟随（task_37 Step 4 测试夹具）：`Mission::Follow { x: 0, y: 0 }` 进 `robot_cmd_tx`
     Follow,
+    /// 直线跟随（task_37 Step 5 测试夹具）：`Mission::FollowStraight { x: 0, y: 0 }` 进 `robot_cmd_tx`
+    FollowStraight,
     /// 整体替换队列（= `AutoCmd::Set`）：空数组 = 取消（与 `stop` 等价）
     Queue { missions: Vec<Mission> },
     /// 追加队尾（= `AutoCmd::Append`，§十一 #15）
@@ -254,6 +256,8 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
         }
         // task_37 Step 4：跟随是**测试夹具**，无参数（`x/y` 预留，恒 0）
         "follow" => Ok(ControlCmd::Follow),
+        // task_37 Step 5：直线跟随也是**测试夹具**，无参数（`x/y` 预留，恒 0）
+        "follow_straight" => Ok(ControlCmd::FollowStraight),
         "stop" => Ok(ControlCmd::Stop),
         "mode" => match obj.get("value").and_then(|v| v.as_str()) {
             Some("auto") => Ok(ControlCmd::Mode { auto: true }),
@@ -281,7 +285,7 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
         "status" => Ok(ControlCmd::Status),
         "help" => Ok(ControlCmd::Help),
         other => Err(format!(
-            "未知 cmd '{other}'（支持 goto/circle/follow/queue/append/preempt/stop/mode/manual/status/help）"
+            "未知 cmd '{other}'（支持 goto/circle/follow/follow_straight/queue/append/preempt/stop/mode/manual/status/help）"
         )),
     }
 }
@@ -379,6 +383,13 @@ fn Follow_Command() -> Command {
     Command::Auto(AutoCmd::Set(vec![Mission::Follow { x: 0.0, y: 0.0 }]))
 }
 
+/// `follow_straight` → `Command::Auto(AutoCmd::Set(vec![Mission::FollowStraight { x: 0, y: 0 }]))`
+///
+/// 与 `follow` **同一条注入路径**（`robot_cmd_tx`）：直线跟随（task_37 Step 5，不转向）也是测试夹具。
+fn Follow_Straight_Command() -> Command {
+    Command::Auto(AutoCmd::Set(vec![Mission::FollowStraight { x: 0.0, y: 0.0 }]))
+}
+
 /// 纯函数（可单测）：§七.4 的 9 个键 + §12.8.2 第 4 条的 4 个观测键（共 13 个）
 #[allow(clippy::too_many_arguments)]
 fn Status_Data(
@@ -416,6 +427,7 @@ fn Help_Data() -> Value {
         {"cmd":"goto",    "args":["x","y"],    "note":"单车前往目标点（米，[0,128)）"},
         {"cmd":"circle",  "args":["x","y"],    "note":"单车围圈（x/y 为圆心，米）"},
         {"cmd":"follow",  "args":[],           "note":"跟随（sim 无人机；x/y 预留）"},
+        {"cmd":"follow_straight", "args":[],     "note":"直线跟随（sim 无人机；机头正前方一格，不转向）"},
         {"cmd":"queue",   "args":["missions"], "note":"整体替换队列（missions=[] = 取消）"},
         {"cmd":"append",  "args":["missions"], "note":"追加队尾（当前任务不受影响）"},
         {"cmd":"preempt", "args":["missions"], "note":"插队头（当前任务挂起、可恢复）"},
@@ -621,6 +633,15 @@ async fn Handle_Cmd(
             info!("[control] follow → cmd_tx（Mission::Follow，x/y 预留填 0）");
             Dispatch(robot, Follow_Command(), "follow").await
         }
+        ControlCmd::FollowStraight => {
+            if mode != OpMode::Auto {
+                warn!(
+                    "[control] 当前为 Manual 模式，follow_straight 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）"
+                );
+            }
+            info!("[control] follow_straight → cmd_tx（Mission::FollowStraight，x/y 预留填 0）");
+            Dispatch(robot, Follow_Straight_Command(), "follow_straight").await
+        }
         ControlCmd::Stop => {
             let kind = match mode {
                 OpMode::Auto => "Auto(Set(vec![]))",
@@ -756,6 +777,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_valid_follow_straight() {
+        // task_37 Step 5：无参数夹具（x/y 预留，恒 0）
+        assert_eq!(Parse_Control(r#"{"cmd":"follow_straight"}"#), Ok(ControlCmd::FollowStraight));
+        // 多余字段忽略；cmd 需 trim
+        assert_eq!(
+            Parse_Control(r#"{"cmd":" follow_straight ","x":1}"#),
+            Ok(ControlCmd::FollowStraight)
+        );
+    }
+
+    #[test]
     fn test_follow_command_maps_to_mission_follow() {
         // 必须真断言到 `Mission::Follow`（只判 `is_ok` 会漏掉「映射成 Goto」这类错）
         match Follow_Command() {
@@ -763,6 +795,21 @@ mod tests {
                 assert_eq!(list, vec![Mission::Follow { x: 0.0, y: 0.0 }], "必须是 Follow 且 x/y = 0");
             }
             other => panic!("follow 必须注入 AutoCmd::Set，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_follow_straight_command_maps_to_mission() {
+        // 必须真断言到 `Mission::FollowStraight`（只判 `is_ok` 会漏掉「映射成 Goto/Follow」这类错）
+        match Follow_Straight_Command() {
+            Command::Auto(AutoCmd::Set(list)) => {
+                assert_eq!(
+                    list,
+                    vec![Mission::FollowStraight { x: 0.0, y: 0.0 }],
+                    "必须是 FollowStraight 且 x/y = 0"
+                );
+            }
+            other => panic!("follow_straight 必须注入 AutoCmd::Set，实际 {other:?}"),
         }
     }
 
@@ -775,6 +822,17 @@ mod tests {
             .find(|c| c["cmd"] == json!("follow"))
             .expect("help 必须列 follow");
         assert_eq!(follow["args"], json!([]), "follow 无参数：{follow:?}");
+    }
+
+    #[test]
+    fn test_help_lists_follow_straight() {
+        let v = Help_Data();
+        let arr = v["commands"].as_array().expect("commands 数组");
+        let c = arr
+            .iter()
+            .find(|c| c["cmd"] == json!("follow_straight"))
+            .expect("help 必须列 follow_straight");
+        assert_eq!(c["args"], json!([]), "follow_straight 无参数：{c:?}");
     }
 
     #[test]
@@ -838,7 +896,10 @@ mod tests {
     fn test_parse_unknown_cmd() {
         let e = Parse_Control(r#"{"cmd":"fly"}"#).expect_err("未知 cmd 必须报错");
         assert!(e.contains("未知 cmd 'fly'"), "错误文本：{e}");
-        assert!(e.contains("goto/circle/follow/queue/append/preempt/stop/mode/manual/status/help"), "应列出支持的命令：{e}");
+        assert!(
+            e.contains("goto/circle/follow/follow_straight/queue/append/preempt/stop/mode/manual/status/help"),
+            "应列出支持的命令：{e}"
+        );
     }
 
     #[test]
@@ -1162,13 +1223,13 @@ mod tests {
     fn test_help_data_has_all_commands() {
         let v = Help_Data();
         let arr = v["commands"].as_array().expect("help.data.commands 必须是数组");
-        assert_eq!(arr.len(), 11, "help 必须列 11 条命令");
+        assert_eq!(arr.len(), 12, "help 必须列 12 条命令");
         let names: Vec<&str> = arr.iter().filter_map(|c| c["cmd"].as_str()).collect();
         assert_eq!(
             names,
             vec![
-                "goto", "circle", "follow", "queue", "append", "preempt", "stop", "mode",
-                "manual", "status", "help"
+                "goto", "circle", "follow", "follow_straight", "queue", "append", "preempt",
+                "stop", "mode", "manual", "status", "help"
             ]
         );
         // 每条都有 args 数组

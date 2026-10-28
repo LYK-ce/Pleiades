@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-28
 
 #![allow(non_snake_case)]
 
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn test_sensor_pose_applies_mount_offset() {
         use std::f32::consts::FRAC_PI_2;
-        let mount = MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 };
+        let mount = MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 };
         // 朝东（yaw=0）：挂载点 0.1 m 在车头方向 → x +0.1
         let p = Sensor_Pose(1.0, 2.0, 0.0, &mount);
         assert!((p.x - 1.1).abs() < 1e-6, "{p:?}");
@@ -300,10 +300,10 @@ mod tests {
         assert!((p.x - 1.0).abs() < 1e-6, "{p:?}");
         assert!((p.y - 2.1).abs() < 1e-6, "{p:?}");
         // mount.yaw 直接叠加
-        let yawed = MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.25 };
+        let yawed = MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.25, pitch: 0.0 };
         assert!((Sensor_Pose(0.0, 0.0, 0.5, &yawed).yaw - 0.75).abs() < 1e-6);
         // 无外参 = 车体位姿原样
-        let zero = MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.0 };
+        let zero = MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0 };
         let p = Sensor_Pose(3.0, 4.0, 0.7, &zero);
         assert_eq!((p.x, p.y, p.yaw), (3.0, 4.0, 0.7));
     }
@@ -330,7 +330,7 @@ mod tests {
             obstacle_inflation_radius: 0.2,
             pose_age,
             pose_history: crate::sim::chassis::pose_ingest::PoseHistory::New(),
-            mount: MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.0 },
+            mount: MountOut { x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, pitch: 0.0 },
         }
     }
 

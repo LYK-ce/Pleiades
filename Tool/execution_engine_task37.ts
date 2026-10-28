@@ -30,10 +30,10 @@ const IMPL_PROMPT = (CFG.prompts.impl || []).join("\n");
 const REVIEW_PROMPT = (CFG.prompts.review || []).join("\n");
 
 // 只跑指定 step 起（全量跑改成 0）；RUN_TAG 用于在 workbook 里区分第几次运行
-const FROM_STEP = 4;
+const FROM_STEP = 5;
 // 只跑到 TO_STEP（分段重跑：中转站不稳时一次只推一步，过了再往后）
-const TO_STEP = 4;
-const RUN_TAG = "分段重跑 Step 4（sim 跟随）";
+const TO_STEP = 5;
+const RUN_TAG = "Step 5（sim 直线跟随）";
 const RUN_STEPS = STEPS.filter((s) => Number(s.n || 0) >= FROM_STEP && Number(s.n || 0) <= TO_STEP);
 
 async function readOr(path, fallback) {

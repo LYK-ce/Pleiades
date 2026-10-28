@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-28
 
 //! 零件声明 → `*_hello` 负载（底盘 / 传感器共用入口，task_31 §四.5.4 与 §四.2 差异 4）
 //!
@@ -85,7 +85,7 @@ mod tests {
         ResolvedSensor {
             slot: slot.into(),
             sensor: sensor.into(),
-            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 },
+            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 },
             params: json!({"range": 12.0}),
         }
     }
@@ -118,7 +118,7 @@ mod tests {
             peer_id: "12D3KooW",
             slot: "lidar_front",
             sensor: "lidar_2d",
-            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 },
+            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 },
             params: &params,
         });
         assert_eq!(hello["msg"], json!("sensor_hello"));

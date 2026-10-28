@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-10-28（Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更新日期：2026-10-28（Task 37 Step 5：sim 直线跟随 —— `Mission::FollowStraight`（`TASK_SET` `type=3` 仅预留、解码不认）+ `uav_sim/mission/follow_straight.rs`（不碰导航器，`next_cell` 恒取机头正前方一格），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -137,7 +137,7 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
         ├── uav_sim/              # ★ 机栈：复刻 pleiades-uav 的 nav/ + mission/
         │   ├── mod.rs            # 同形（ObstacleMode::Ignore、不订建图增量）
         │   ├── nav/
-        │   └── mission/          # mod.rs + goto.rs + follow.rs（★ 唯一真跟：task_37 Step 4）
+        │   └── mission/          # mod.rs + goto.rs + follow.rs（★ 唯一真跟：task_37 Step 4）+ follow_straight.rs（★ 直线跟随：Step 5）
         └── planning/             # 只剩 cluster_obstacles（他车 → 动态障碍格；建图 task 在用）
 ```
 
@@ -151,6 +151,8 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
 | D-S4 | 建图增量：车栈 `subscribe_map(Some)`，真机 `None` | `sim/ugv_sim/mod.rs` | Step 4 已登记（D6）；sim 的 mapper 会广播 `map_tx`，不订就会「画出来的墙对规划不可见」 |
 | D-S5 | `Chassis` 判型走世界零件名（`Kind_Of_World("diff_drive_ugv"｜"quadrotor_uav")`），不加 `Chassis::Kind()` | `pleiades-sim/src/sim/sim_handler.rs` | §12.6.5 的两个选项中选了第 2 个（「按 `world_name` 判断，省一次 trait 改动」），因为 §12.6.2 要求「不动 `chassis/`」 |
 | D-S6 | **跟随只在机栈**：`Follow` → `ReactiveFallback` 持续树（`follow.rs`）；车栈/真机 → 平凡 `Success` 树。人作为动态障碍**无法真注入 D-star**（机栈 Ignore 读空图，`mark_obstacle` 当拍即失效），只否决落在人格的 `next_cell`；外层用 `ReactiveFallback`（记忆式 `Fallback` + `Running` 型 Hold = 死锁在兜底分支） | `sim/uav_sim/mission/follow.rs`、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_37 Step 4。机栈 `Navigator` 是 `ObstacleMode::Ignore`（喂空栅格 + `dynamic_obstacles` 恒空），`mark_obstacle()` 的标记会被同拍重算抹掉 → 真注入需给 `Navigator` 加 `set_extra_obstacles()` 并让机栈用 `Respect`（`nav/` 不在允许清单，另开 task）；车栈没有相机/detector，Hold 会永远占队首 → 用平凡 `Success` |
+
+| D-S7 | **直线跟随只在 sim 机栈**：`FollowStraight` → 单叶持续树（`follow_straight.rs`），**完全不给导航器下达目标**（不设目标、不取下一步），`next_cell` 恒为「沿 `pose.yaw` 前进 0.5 m 所落的格」；车栈/真机 → 平凡 `Success` 树 | `sim/uav_sim/mission/follow_straight.rs`、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_37 Step 5。Step 4 的 D* 跟随被 4 连通「下一格」带偏（executor 追格心 + `Turning` 不反向修正），人类指定**不改行动逻辑**（`executor.rs` / `nav/` 只读）→ 用「目标恒在机头正前方 ⇒ `delta ≈ 0`」绕开；代价是不转向、不绕障、不修正横向偏差（§六.6 另开任务） |
 
 **分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
@@ -195,7 +197,7 @@ flowchart TB
 | `Robot` | `base/robot/core/robot.rs` | 中枢：共享状态/广播通道/模式/队列/集群表句柄；`new()` 建共享态，`run(device)` 跑主循环骨架 |
 | `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`build_task`（建树，幂等）/`on_tick`（返回 `TickOutcome`）/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
 | `TickOutcome` | `base/robot/core/robot.rs` | 设备 tick 的结果：`Running` / `Terminated(Option<FailCode>)`；`Terminated` 才由 `main_loop` 出队 |
-| `Mission` | `base/robot/core/mission_queue/element.rs` | 两变体：`Goto { x, y }` + `Follow { x, y }`（Task 37 §五，`x/y` 预留；**只在 sim 机栈真跟**，真机/车栈建平凡树）。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
+| `Mission` | `base/robot/core/mission_queue/element.rs` | 三变体：`Goto { x, y }` + `Follow { x, y }` + `FollowStraight { x, y }`（Task 37 §六，`x/y` 预留）；`Follow` / `FollowStraight` **只在 sim 机栈真跟**，真机/车栈建平凡树；`FollowStraight` 的 `TASK_SET` `type=3` 仅预留、解码不认。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
 | `OpMode` | `base/robot/core/mode.rs` | `Manual` / `Auto`，**默认 Auto** |
 | `ClusterInfoTable` | `base/robot/core/cluster/cluster_info.rs` | `HashMap<peer_id, ClusterInfo>`，他车位姿（x/y/yaw/vx/vy/sub_target） |
 | `OccupancyGrid` | `base/robot/core/grid.rs` | 地图表示（own/merged 双表 + log-odds），CRDT 合并前提 |
@@ -710,6 +712,26 @@ survey_seconds = 180
   从 3.5 **平移到 5.6**（纯代码移动，与 4/5.5 无相互依赖，语义不变）。
 - 边界：不进 `on_tick`（`follow` 只经 `Frame.out.next_cell` 影响决策链）、不改 Lua 契约、`nav/` 与 `detector/`
   零改动、不新增依赖；端到端（跟人 10 s / 人停不抖 / 丢失停住）由人类在仿真里验。
+
+### 8.10 sim 直线跟随（task_37 Step 5）
+
+- 协议：`Mission` 第三变体 `FollowStraight { x, y }`；**`TASK_SET` `type = 3` 仅预留**，本步不改
+  `messages.rs` / `command_decode.rs` → 收到 type=3 仍走「未知 `type` `warn` 丢弃」分支（全丢则整帧不生效），
+  Pictor 无感。入队路径只有 sim 控制口 `{"cmd":"follow_straight"}`。
+- 真机 / sim 车栈：平凡树 `Action` 恒 `Success`（一拍终值）+ `warn`，**绝不 `Err`**（Task 36 约定：
+  建树失败 = 清队列 + 停车）。与 sim 机栈的持续树不对称是刻意的（车没有相机/detector，Hold 会永远占队首）。
+- sim 机栈：`sim/uav_sim/mission/follow_straight.rs` 单叶 `StraightLeaf` ——
+  `TargetSource::sample()` → `decide()` → `next_cell = front_cell(me, yaw)`（`Hold` → `None`），返回 `Running`。
+- **不给导航器下达任何目标**（不设目标、不取下一步、不清目标）：`nav_status` 恒 `idle`（观测如此，不是 bug）；
+  `next_cell` 目标恒在机头正前方 ⇒ executor 的 `delta ≈ 0` ⇒ 只发 `MoveForward`，不触发转向。
+- 参数（文件顶部常量）：`D_FAR_M = 4.0`、`D_NEAR_M = 2.5`、`STALE_MS = 800`；带内（`2.5 < d <= 4.0`）
+  **沿用上拍结论**（迟滞，人停在 4.0 m 边界不抖）。`age` 与 §8.9 同口径（本地单调 `Instant`，绝不相减 `frame_ts_ms`）。
+- `front_cell` 口径：`world_to_grid(x + 0.5·cos yaw, y + 0.5·sin yaw)`，与 `executor::cell_center` 同为
+  `(g+0.5)×0.5`；轴向 yaw 下恒为「当前格 +1 格」（`floor(x/0.5 + 1) = floor(x/0.5) + 1`）。
+- 控制口夹具：`{"cmd":"follow_straight"}` → `Follow_Straight_Command()` → `robot_cmd_tx`
+  （与 `goto` / `follow` 同一条路径；Manual 模式只 `warn`，门闩仍由 `main_loop` 判）。
+- 边界：不进 `on_tick`、不改 Lua 契约、`executor` / `nav/` / 协议解码零改动、不新增依赖；
+  e2e（人往前走、机往前飞、不转圈）由人类在仿真里验。
 
 
 ---

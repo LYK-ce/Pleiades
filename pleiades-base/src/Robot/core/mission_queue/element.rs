@@ -23,6 +23,17 @@ pub enum Mission {
     /// 真机（`pleiades-uav` / `pleiades-ugv`）收到即建平凡树（一拍 `Success`）：
     /// 不进跟随逻辑，只让队列前进一条（**不得**返回 `Err`，那是「清队列 + 停车」）。
     Follow { x: f32, y: f32 },
+    /// 直线跟随（Task 37 §六）：**只在 sim 的 uav 栈实现**；`x/y` 预留（现在恒 0）
+    ///
+    /// 与 `Follow` 的差别：不设导航目标、不寻路，`next_cell` 恒取「沿 `pose.yaw` 前进
+    /// 一格」（0.5 m）——executor 的 `delta ≈ 0`，只发 `MoveForward`，不触发转向（§六.3）。
+    ///
+    /// **`TASK_SET` 的 `type = 3` 仅预留**：本步协议**不解码**它（`messages.rs` /
+    /// `command_decode.rs` 一行不动），设备端收到 type=3 仍按未知 `type` `warn` 丢弃
+    /// （整帧语义不变，不影响 Pictor）。入队路径只有 sim 控制口 `{"cmd":"follow_straight"}`。
+    ///
+    /// 真机（`pleiades-uav` / `pleiades-ugv`）与两个 sim **车**栈收到即建平凡树（一拍 `Success`）。
+    FollowStraight { x: f32, y: f32 },
     // 未来: Patrol, Explore, ...
 }
 

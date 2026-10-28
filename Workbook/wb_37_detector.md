@@ -335,3 +335,55 @@
 /etc/profile: line 32: /etc/ShellCrash/menu.sh: No such file or directory
 
 ```
+
+## 执行引擎启动
+- 开始时间：2026-10-28 13:35:45Z
+- 引擎：Tool/execution_engine_task37.ts + Tool/execution_engine_task37.config.json
+- 运行标记：Step 5（sim 直线跟随）（Step 5~5）
+- 计划：每个 step 最多 3 轮（规划 → 实现 → 评审）；子 agent 异常结束自动重试 4 次（间隔 5s）
+- 说明：Step 1~4 已 PASS；本次只推 Step 5（直线跟随），禁止改 executor/nav/协议解码
+
+## Step 5 — sim 直线跟随（人往前走，飞机往前飞）（Step 5（sim 直线跟随））
+- 起止：2026-10-28 13:35:45Z → 2026-10-28 13:51:22Z
+- 范围：sim：Mission::FollowStraight + 控制口 + uav_sim 直线跟随树；真机平凡树
+- 轮次：1 / 3
+- 结果：PASS
+- 规划要点：**计划摘要（供 workbook）** plan.md 已写（964 行，未改任何源码）。`FollowStraight` 加入 base，并为 4 处 `match` 补齐穷尽分支；sim 机栈新建 `follow_straight.rs` 单叶：复用 Step 4 的 `TargetSource`，`decide` 按三档判定（d>4 前进、d≤2.5 停、带内沿用上拍），`front_cell = world_to_grid(me+0.5·dir)`，全程不碰 nav，因此 `delta≈0`，只发 MoveForward；真机与两个车栈建平凡 Success 树。控制口新增 `follow_straight`，并同步 3 处已有测试（help 11→12、未知 cmd 文本）。规划期已用桩 crate 实测：9/9 测试通过，build 分支的强制类型转换能通过编译。验收 V1~V14，包含范围与只读红线 diff 判据。 [plan.md](tmp/task37/plan.md)
+
+## 引擎结束
+- 结束时间：2026-10-28 13:51:22Z
+- 状态：ALL_STEPS_DONE
+- git status（结束时）：
+```
+ M Architecture/robot_arch.md
+ M Task/task_37_detector.md
+ M Tool/execution_engine_task37.config.json
+ M Tool/execution_engine_task37.ts
+ M Workbook/wb_37_detector.md
+ M pleiades-base/src/Robot/core/mission_queue/element.rs
+ M pleiades-sim/src/sim/control.rs
+ M pleiades-sim/src/sim/emergency_stop.rs
+ M pleiades-sim/src/sim/sensors/lidar/mapping_task.rs
+ M pleiades-sim/src/sim/uav_sim/mission/mod.rs
+ M pleiades-sim/src/sim/uav_sim/mod.rs
+ M pleiades-sim/src/sim/ugv_sim/mission/mod.rs
+ M pleiades-sim/src/world_link/config.rs
+ M pleiades-sim/src/world_link/parts.rs
+ M pleiades-sim/src/world_link/protocol.rs
+ M pleiades-uav/src/uav/mission/mod.rs
+ M pleiades-ugv/src/ugv/mission/mod.rs
+?? Task/task_38_sim_world_refine.md
+?? Tool/blender/models/camera_module.blend1
+?? Tool/blender/models/lidar_tmini.blend1
+?? Tool/blender/models/ugv_chassis.blend1
+?? Tool/execution_engine_auto_survey.config.json
+?? Tool/execution_engine_auto_survey.ts
+?? Tool/execution_engine_uav_camera.config.json
+?? Tool/execution_engine_uav_camera.ts
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+?? Workbook/wb_33_uav_camera_test.md
+?? pleiades-sim/src/sim/uav_sim/mission/follow_straight.rs
+/etc/profile: line 32: /etc/ShellCrash/menu.sh: No such file or directory
+
+```

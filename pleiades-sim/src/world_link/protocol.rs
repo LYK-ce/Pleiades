@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-28
 
 //! 世界链路 wire 协议（`orion-simulation-world/scripts/net/WireProtocol.gd` 的 Rust 镜像）
 //!
@@ -47,6 +47,8 @@ pub struct MountOut {
     pub y: f32,
     pub z: f32,
     pub yaw: f32,
+    /// 俯仰（度，负 = 低头；世界 `Vehicle.AttachSensor` 的 `mount.pitch`）
+    pub pitch: f32,
 }
 
 /// manifest 的一条：`{slot, sensor}`（世界 `_ReadManifest` 只读这两个键）
@@ -329,7 +331,7 @@ mod tests {
             peer_id: "12D3Koo",
             slot: "lidar_front",
             sensor: "lidar_2d",
-            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 },
+            mount: MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 },
             params: json!({"range": 12.0}),
         };
         let v = serde_json::to_value(&hello).expect("serialize");

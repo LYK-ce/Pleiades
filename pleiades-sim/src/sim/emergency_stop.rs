@@ -244,7 +244,7 @@ mod tests {
 
     /// 用例里的传感器外参（= §九.2 的 `[sim_world.sensor.mount]`）
     fn mount_02() -> MountOut {
-        MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0 }
+        MountOut { x: 0.1, y: 0.0, z: 0.2, yaw: 0.0, pitch: 0.0 }
     }
 
     /// 零外参（判定阈值/扇区类用例只关心「触不触发」，与格换算无关）
