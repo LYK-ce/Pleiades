@@ -6,6 +6,12 @@
 >
 > 对应任务：`Task/task_30_sim_world.md`（sim 接入 Godot 模拟世界）；`Task/task_33_camera_simulation.md`（相机仿真 + 传感器 / 底盘建模，2026-10-23 起）；`Task/task_34_camera.md`（camera 传感器全链路，2026-10-24 起）
 > 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。**支线 `human_model` Step 4（静态人物道具 `Person`）亦已落地**：§3 增第 9 个 `.tscn`（`src/scenes/props/Person.tscn`），`World.gd` 在 `World/Persons` 下**运行时**静态摆 2 人（纯视觉、**零碰撞**、不进装配线，§4.9）。**支线 `walking_person` Step 2（走路人物道具 `PersonWalking`）亦已落地**：§3 增第 10 个 `.tscn`（`src/scenes/props/PersonWalking.tscn`），`World.gd` 在 `World/Walkers` 下**运行时**放 1 个沿 44 m 闭合路径走动的人（自带骨骼 + 走路动画、`speed_scale` 跟速度、**零碰撞**、不进装配线，§4.10）。**`walking_person` Step 3（走动收口）亦已落地**：走动能力**并入 `Person.gd`**（新增 `walk_speed` / `path` / `loop` 三个字段，**默认静态 = 向后兼容**，`Person.tscn` 一个字节不动）、`PersonWalking.tscn` 与静态人物**共用同一个 `Person.gd`**（`PersonWalking.gd` 已删除）、资产目录改名 `assets/humans/rp_nathan_animated_003_walk/`、自检换成 `check_person_walk.gd`（20 项 headless / 26 项含渲染，§4.10-⑤）。**`walking_person` Step 4（三帧真渲染证明"人在走"）亦已落地**：新增 `src/tests/check_person_walk_shots.gd`（**14 项**：结构 4 + 渲染 10），在环路第一段**侧前方**架固定机位、以 `--fixed-fps 60` **真推进 0/40/80 物理帧**（**帧间绝不瞬移**）拍 `walk_t{0,1,2}.jpg`，把「物理帧数 / 弧长增量 / 每帧步长 == v/60」与「框位移 / 框内外差分 / 64×64 对齐裁剪差」一起断言（§4.10-⑦）。**task_35 Step 3（世界布局：用外部驱动的行人替换自动绕圈的 walkers）亦已落地**：`World.gd` 的 `WALKERS` /
+
+> **2026-10-28：静态装饰人已全部移除。** `World.gd` 不再有 `PERSONS` / `BuildPersons()` / `World/Persons` 容器；
+> `Person.tscn` / `PersonWalking.tscn` / `Person.gd` 与四个 `check_person_*` 自检一并删除。
+> 世界不再预置任何人，行人一律由外部按需创建（`chassis_hello{kind:"pedestrian"}` → `Pedestrian.tscn`，见 §4.11）。
+> 下文 §4.9 / §4.10 及目录树中关于 `Person*` 的描述为历史记录，不再代表当前代码。
+
 `BuildWalkers()` / `GetWalkersRoot()` 整节删除，换成 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()`
 （容器 `Walkers` → `Pedestrians`，与 `WebSocketManager` 动态装配的行人**共用同一容器**）；世界**不再内置任何路径 / 巡逻 / 计时**，
 没有外部驱动时人**站着不动**（idle = 预期，§4.11.1 / §4.10-⑧）。`PERSONS`（静态两人）一字不动。**task_35 Step 5（端到端验收）亦已落地**：只**新增**两个自检
@@ -65,7 +71,7 @@ orion-simulation-world/
 │   │       ├── Lidar2D.tscn      # [Step 8] ✅ 已落地
 │   │       └── CameraSensor.tscn # [task_33 Step 2] ✅ 已落地（离屏渲染 → JPEG）
 │   │   └── props/
-│   │       └── Person.tscn       # [human_model Step 4] ✅ 静态人物道具（纯视觉、零碰撞、不进装配线）
+│   │       └── Person.tscn       # [已移除 2026-10-28] 静态人物道具（历史）
 │   ├── common/                   # WorldTransform.gd / WorldClock.gd            [Step 2]
 │   ├── world/                    # World.gd                                      [Step 2]
 │   ├── camera/                   # ObserverCamera.gd                             [Step 3] ✅
@@ -91,7 +97,7 @@ orion-simulation-world/
 │       ├── check_sensor_models.gd # 传感器 / 底盘模型资产自检（task_33 Step 1，非组件；29 项断言）
 │       ├── check_camera_sensor.gd # 相机组件自检（task_33 Step 2，非组件；A 组 12 + B 组 9 = 21 项断言）
 │       ├── check_camera_shots.gd # 模拟世界拍照自检（task_33 Step 4，非组件；S 组 18 + R 组 17 = 35 项断言）
-│       ├── check_person_assets.gd # 静态人物自检（human_model Step 4，非组件；32 项断言）
+│       ├── check_person_assets.gd # [已移除 2026-10-28] 静态人物自检（历史）
 │       └── doubles/              # 测试替身（**不是组件**、不落 .tscn）
 │           ├── TestChassis.gd    #   底盘鸭子契约：Configure / GetDefaultParams / SetCommand / Step
 │           └── TestSensor.gd     #   传感器鸭子契约：Configure / Sample / ScanOnce

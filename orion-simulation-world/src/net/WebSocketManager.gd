@@ -95,7 +95,7 @@ const PEDESTRIANS_NODE := "Pedestrians"
 ## 默认出生点偏移（世界坐标米）：spawn 缺失/非法时的回退点 = World.SPAWN_WORLD + 该偏移。
 ## 为什么是正南 8 m：车 avatar 的环是「8 方位 × 半径 2·ring」，270° 半径 8 处的点是 (64,56)
 ##   —— 那要第 31 台车才会出现；且它已在 SPAWN_CLEAR_RADIUS_M(3 m) 之外、与 15 个
-##   World.OBSTACLES 全无交、离 PERSONS(60,76)/(68,70) 与 WALKERS 环路(y≥96) 都很远。
+##   World.OBSTACLES 全无交、离静态人物与旧 WALKERS 环路都很远（静态人物已于 2026-10-28 移除）。
 const PEDESTRIAN_SPAWN_OFFSET_M := Vector3(0.0, -8.0, 0.0)
 ## spawn 校验：与已占 avatar 的最小水平中心距（米）。
 const PEDESTRIAN_SPAWN_MIN_GAP_M := 1.0

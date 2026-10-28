@@ -79,21 +79,6 @@ const AIR_WALL_BOXES := [
 	[Vector3(64.0, 32.5, 64.0), Vector3(128.0, 1.0, 128.0)],
 ]
 
-# ---------------------------------------------------------------- 静态人物（支线 human_model Step 4）
-## 人物道具场景 + 布局表。位置/朝向一律**世界坐标（Z-up，米）**，由 WorldTransform 换轴。
-## load() 而非 preload()：Person.tscn / glb 尚未 import 时只 warn，不让整个世界脚本解析失败
-## （与 ChassisCatalog / SensorCatalog 同一取舍）。
-const PERSON_SCENE := "res://src/scenes/props/Person.tscn"
-const PERSONS_NODE := "Persons"
-
-## 为什么不是 step.md 举例的 (60,84)：那里是 check_camera_shots 的停车点（SPOT_WORLD），
-## 该自检会在同一格摆一台 UGV 连拍 3 张 → 人车重叠，且污染拍照基线。故沿 x=60 南移到 (60,76)。
-## yaw 一律 0：模型原生朝 +X（世界东），Step 5 从 +X 侧取景正好拍到正脸。
-const PERSONS := [
-	{"name": "person_01", "pos": Vector3(60.0, 76.0, 0.0), "yaw_deg": 0.0},
-	{"name": "person_02", "pos": Vector3(68.0, 70.0, 0.0), "yaw_deg": 0.0},
-]
-
 # ---------------------------------------------------------------- 外部驱动的行人（task_35 Step 3）
 ## 行人底盘场景：与 `ChassisCatalog.SCENES["pedestrian"]` 同一路径。
 ## 用 load() 而非 preload()（与 PERSON_SCENE 同一取舍）：glb/场景尚未 import 时只 warn，
@@ -116,8 +101,6 @@ const PEDESTRIANS_NODE := "Pedestrians"
 ##   ② 离世界边界：min(44, 96, 128−44, 128−96) = 32 m / min(52,102,76,26) = 26 m，判据 ≥ 1.0 m。
 ##   ③ 离出生点 SPAWN_WORLD(64,64)：37.736 / 39.850 m，判据 > SPAWN_CLEAR_RADIUS_M(3.0)
 ##      （也就远于 manager 的 8 方位 × 2 m/环 avatar 排位）。
-##   ④ 离静态两人 PERSONS(60,76)/(68,70)：25.612/35.384、27.203/35.777 m，判据 ≥ 2.0 m
-##      （**不污染 person 系列取景**：既有 check_person_shots 的机位只看得见 Persons）。
 ##   ⑤ 两人互相 10.000 m ≥ 1.0 m（镜像 manager 的 PEDESTRIAN_SPAWN_MIN_GAP_M）。
 ##   ⑥ 离雷达热区：check_lidar 的真墙热区 (60,90) 17.088 / 14.422 m、空场热区 (100,60) 66.573 / 63.781 m、
 ##      check_camera_shots 的停车点 (60,84) 20.000 / 19.698 m —— 全部 > 12 m 的 radar range。
@@ -143,7 +126,6 @@ var _built_cells: int = 0
 
 @onready var _voxel_world: GridMap = $VoxelWorld
 @onready var _vehicles_root: Node3D = $Vehicles
-var _persons_root: Node3D = null
 var _pedestrians_root: Node3D = null
 
 
@@ -153,9 +135,6 @@ func _ready() -> void:
 	_log_scale()
 	BuildVoxelWorld()
 	_Build_Bounds()
-	BuildPersons()
-	# 放在 BuildPersons 之后：既有自检的幂等组数的是 Persons 前后节点总数，
-	# Pedestrians 在这个区间之外（plan.md §5）。
 	BuildPedestrians()
 
 
@@ -213,47 +192,8 @@ func _Build_Bounds() -> void:
 ## 容器由代码建、不写进 World.tscn —— 与 Bounds 同策略（代码建、幂等重建），
 ## 这样 check_bounds.gd 的 B1d（读 .tscn 文本数节点）不受影响。
 ## 缺资产/缺场景只 push_warning（绝不 push_error：否则 --quit 的 "0 ERROR" 验收假红）。
-func BuildPersons() -> void:
-	var old: Node = get_node_or_null(PERSONS_NODE)
-	if old != null:
-		remove_child(old)
-		old.queue_free()
-
-	_persons_root = Node3D.new()
-	_persons_root.name = PERSONS_NODE
-	add_child(_persons_root)
-
-	if not ResourceLoader.exists(PERSON_SCENE):
-		push_warning("[world] 人物场景缺失（未 import？）：%s" % PERSON_SCENE)
-		return
-	var packed: PackedScene = load(PERSON_SCENE) as PackedScene
-	if packed == null:
-		push_warning("[world] 人物场景不可加载：%s" % PERSON_SCENE)
-		return
-
-	for spec: Dictionary in PERSONS:
-		var person: Node3D = packed.instantiate() as Node3D
-		if person == null:
-			push_warning("[world] 人物实例化失败：%s" % spec.get("name", "?"))
-			continue
-		person.name = String(spec["name"])
-		_persons_root.add_child(person)
-		# 必须在入树之后写 global_transform：树外读 global_* 会 ERROR（与 check_models.gd 头注释 P8 同款）。
-		person.global_transform = WorldTransform.MakeTransform(
-			spec["pos"], deg_to_rad(float(spec["yaw_deg"])))
-
-	print("[world] persons built: ", _persons_root.get_child_count(), " (", PERSONS.size(), " specs)")
-
-
-## 静态人物的父节点（Step 5 取景/自检用；与 GetVehiclesRoot 同风格）。
-func GetPersonsRoot() -> Node3D:
-	if _persons_root == null or not is_instance_valid(_persons_root):
-		_persons_root = get_node_or_null(PERSONS_NODE) as Node3D
-	return _persons_root
-
-
-## 程序化摆放"外部驱动的行人"（task_35 Step 3）：与 BuildPersons 同构 ——
-## 先摘掉同名旧容器再重建（幂等，与 Bounds / Persons 同策略）。
+## 程序化摆放"外部驱动的行人"（task_35 Step 3）——
+## 先摘掉同名旧容器再重建（幂等，与 Bounds 同策略）。
 ## **不内置任何行为**：不调 SetCommand、不设速度、不建路径；人站着等外部驱动
 ## （无 Python 连接时站住不动 = 预期）。容器代码建、不写进 World.tscn。
 ## 缺场景/缺资产只 push_warning（**绝不 push_error**：--quit 的 0 ERROR 验收靠这条）。
@@ -300,7 +240,7 @@ func BuildPedestrians() -> void:
 		" (", PEDESTRIANS.size(), " specs, idle until driven)")
 
 
-## 行人容器（自检 / Step 4/5 / manager 用；与 GetPersonsRoot 同风格）。
+## 行人容器（自检 / Step 4/5 / manager 用；与 GetVehiclesRoot 同风格）。
 ## 每次调用都复检 is_instance_valid：容器可能被 BuildPedestrians() 重建。
 func GetPedestriansRoot() -> Node3D:
 	if _pedestrians_root == null or not is_instance_valid(_pedestrians_root):
