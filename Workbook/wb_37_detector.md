@@ -435,3 +435,29 @@
 /etc/profile: line 32: /etc/ShellCrash/menu.sh: No such file or directory
 
 ```
+
+## 收尾与 e2e 实测（2026-10-28）
+
+### 提交链（本地，未推远程）
+- `c639610` Step 1~4：相机槽位 / detector 设备 / 投影 / D* 跟随
+- `12f9786` Step 5 首版 + `world_link` 透传 `mount.pitch`（10 m 算成 4.66 m 的根因）
+- `b7985d7` Step 5 纠偏：撤销 `FollowStraight`，改 `Follow` 叶子（不经 D*）
+- `d46a339` 世界移除静态装饰人（`PERSONS`/`Person*` 场景与 4 个 `check_person_*`）
+
+### Step 5 最终形态
+- `Mission::Follow`（type=2）不变；`FollowStraight` 全套已删（全仓 `.rs` grep 为 0）
+- `sim/uav_sim/mission/follow.rs`：读 detector 目标 → `d>4.0` 朝目标方向给一格（`world_to_grid(me+0.5·unit)`）→ `d<=2.5` 停 → 丢失 Hold；不调 nav
+- executor / nav / D* / 协议帧未动（行动逻辑留后续任务）
+
+### e2e（Xvfb + Godot 真渲染 + sim UAV + Python 行人）
+- 检测/投影：8 m 处估计 (73.92,63.99) vs 真值 (74,64)，误差 ~8 cm
+- 世界去装饰人前：叶子按置信度选目标，会被静态 `person_02` 抢走
+- 去装饰人后：行人 70→83.55 m，UAV 66→78.05 m 跟随；`dets=1`；估计 83.38 vs 真值 83.55（~0.17 m）
+- 跟随后稳态距离约 5 m（阈值 4.0 + 检测/推理 ~300 ms 延迟），不是 2.5 m
+- 测试环境：`[chassis].forward_speed=100`（gitignored）、`[[sim_world.sensor]] camera`、`[detector]` + `[detector.camera]`、`follow` 由控制口 9098 发
+
+### 已知遗留
+1. 多目标选择未定策略（当前按置信度）；场景多人时会跟错
+2. 跟随稳态距离偏大（~5 m），要贴身需调阈值或做前馈
+3. 近距离 D* 打转（4 连通追格心 + Turning 不反向修正）——按人类要求不改，另开任务
+4. `Task/`、`Tool/` 里仍有 `FollowStraight` 历史字样（文档/引擎配置），代码已清
