@@ -38,16 +38,6 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 Status::Success
             })))
         }
-        // Task 37 §六.3：**车不跟**（sim 车栈同真机）。平凡树 = 一拍 `Success`，让队列进下一条；
-        // **不得返回 `Err`**（Task 36 约定：建树失败 = 清队列 + 停车）。与 `uav_sim` 的持续树
-        // 不对称是刻意的（车没有相机/detector，Hold 会永远占着队首）。
-        Mission::FollowStraight { .. } => {
-            tracing::warn!("[Sim/ugv] FollowStraight 未实现（车不跟），跳过（平凡树：一拍 Success）");
-            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
-                f.out.next_cell = None;
-                Status::Success
-            })))
-        }
     }
 }
 
@@ -86,19 +76,6 @@ mod tests {
         assert_eq!(tree.tick(&mut f).await, Status::Success, "Follow 必须一拍终值（Success）");
         assert_eq!(out.next_cell, None, "平凡树不得给出下一格");
         // 队列会弹走这条 → 树被 halt；幂等、不 panic
-        tree.halt();
-    }
-
-    /// task_37 §六 / C4：`FollowStraight` 也是平凡树，**一拍 `Success`**、不动、不 Err
-    #[tokio::test]
-    async fn test_follow_straight_builds_trivial_success_tree() {
-        let d = deps();
-        let mut tree =
-            build(&Mission::FollowStraight { x: 0.0, y: 0.0 }, &d).expect("FollowStraight 不得返回 Err");
-        let mut out = MotionOut::default();
-        let mut f = Frame { dt_ms: 50, tick_no: 0, out: &mut out };
-        assert_eq!(tree.tick(&mut f).await, Status::Success, "必须一拍终值（Success）");
-        assert_eq!(out.next_cell, None, "平凡树不得给出下一格");
         tree.halt();
     }
 }

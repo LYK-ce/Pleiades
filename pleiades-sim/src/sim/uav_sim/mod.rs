@@ -52,7 +52,7 @@ pub struct Stack {
 
 impl Stack {
     /// 建栈（`start()` 里一次）。`map_tx = Some` → 订阅建图增量（sim 独有）；
-    /// `detector = Some` → `Mission::Follow` / `FollowStraight` 建真跟随树（`None` → 原地 Hold）
+    /// `detector = Some` → `Mission::Follow` 建真跟随树（`None` → 原地 Hold）
     pub fn new(
         grid: Arc<RwLock<OccupancyGrid>>,
         cluster_table: Arc<ClusterInfoTable>,
@@ -236,42 +236,6 @@ mod tests {
             s.nav.lock().await.status(),
             nav::NavStatus::Idle,
             "Hold 分支必须把 nav 目标清干净（状态回 Idle）"
-        );
-    }
-
-    /// task_37 §六 / C8：`Stack` 层建 `FollowStraight` 树成功、连拍 `Running`、`next_cell = None`
-    /// （无 detector → 原地 Hold；`task_ticks` 由 `on_tick` 累加，此处只验树不终值）
-    #[tokio::test]
-    async fn test_follow_straight_tree_holds_without_detector() {
-        let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
-        let table = Arc::new(ClusterInfoTable::new());
-        let state = Arc::new(RwLock::new(RobotState::default()));
-        let s = Stack::new(grid, table, state.clone(), 0.2, None, None);
-        set_pose(&state, 10.0, 10.0).await;
-
-        s.build(&QueuedTask {
-            id: TaskId(1),
-            mission: Mission::FollowStraight { x: 0.0, y: 0.0 },
-        })
-        .await
-        .expect("FollowStraight 建树不得 Err");
-        assert_eq!(s.instance_count().await, 1, "建树后应恰一个实例");
-
-        let mut yaw = state.write().await;
-        yaw.attitude.yaw = 0.0;
-        drop(yaw);
-
-        for n in 0..3u64 {
-            let mut out = MotionOut::default();
-            let (id, st) = s.tick(&mut frame(&mut out, n)).await.expect("有活动树");
-            assert_eq!(id, TaskId(1));
-            assert_eq!(st, Status::Running, "第 {n} 拍不得终值");
-            assert_eq!(out.next_cell, None, "无 detector → 原地 Hold，不给下一格");
-        }
-        assert_eq!(
-            s.nav.lock().await.status(),
-            nav::NavStatus::Idle,
-            "直线跟随不设目标 → nav 恒 Idle"
         );
     }
 }

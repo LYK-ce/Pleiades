@@ -33,7 +33,7 @@ const REVIEW_PROMPT = (CFG.prompts.review || []).join("\n");
 const FROM_STEP = 5;
 // 只跑到 TO_STEP（分段重跑：中转站不稳时一次只推一步，过了再往后）
 const TO_STEP = 5;
-const RUN_TAG = "Step 5（sim 直线跟随）";
+const RUN_TAG = "Step 5 重跑（修正 Follow 叶子，撤销 FollowStraight）";
 const RUN_STEPS = STEPS.filter((s) => Number(s.n || 0) >= FROM_STEP && Number(s.n || 0) <= TO_STEP);
 
 async function readOr(path, fallback) {

@@ -387,3 +387,51 @@
 /etc/profile: line 32: /etc/ShellCrash/menu.sh: No such file or directory
 
 ```
+
+## 执行引擎启动
+- 开始时间：2026-10-28 13:57:43Z
+- 引擎：Tool/execution_engine_task37.ts + Tool/execution_engine_task37.config.json
+- 运行标记：Step 5 重跑（修正 Follow 叶子，撤销 FollowStraight）（Step 5~5）
+- 计划：每个 step 最多 3 轮（规划 → 实现 → 评审）；子 agent 异常结束自动重试 4 次（间隔 5s）
+- 说明：撤销上一轮误加的 FollowStraight；沿用 Mission::Follow，叶子改为不经 D*、朝目标方向给一格
+
+## Step 5 — 修正 Follow 叶子（不用 D*，人走机跟）（Step 5 重跑（修正 Follow 叶子，撤销 FollowStraight））
+- 起止：2026-10-28 13:57:43Z → 2026-10-28 14:15:28Z
+- 范围：sim：撤销误加的 FollowStraight；改 uav_sim/follow.rs 叶子；不动协议/executor/nav
+- 轮次：1 / 3
+- 结果：PASS
+- 规划要点：计划已写入 [plan.md](tmp/task37/plan.md)（共 1332 行；未改动任何源码，`git status` 与进场时一致）。 **摘要（200 字内）** plan.md 已写（零源码改动）。撤销 FollowStraight 全套：Mission 变体、四处 build 臂、控制口 8 删 3 改（help 12→11）、删 follow_straight.rs；协议不改（本只解 0/2）。follow.rs 叶子换 StepLeaf：Gate+Condition+StepLeaf/Hold，decide 三档带迟滞（4.0/2.5/800ms），next_cell=world_to_grid(me+0.5·unit)，nav 只 clear_goal；13 单测含「set_goal/step 零调用」计数器+哨兵。文档改 D-S7/§8.10。验收 V1~15；`cargo check --workspace --all-targets` 实测本就红（t01_storage_integration），须逐 crate。 补充两点（供评审注意）：①基线实测 4 crate `--all-targets` 全绿、被碰文件 0 warning，单测基线 sim/uav_sim 73、control 49、uav mission 8、ugv mission 7；②`Task/`、`Tool/` 里仍会出现 `FollowStraight`，按硬约束不可改，grep 判据只统计 `.rs` 与 `Architecture/`。
+
+## 引擎结束
+- 结束时间：2026-10-28 14:15:28Z
+- 状态：ALL_STEPS_DONE
+- git status（结束时）：
+```
+ M Architecture/robot_arch.md
+ M Task/task_37_detector.md
+ M Tool/execution_engine_task37.config.json
+ M Tool/execution_engine_task37.ts
+ M Workbook/wb_37_detector.md
+ M pleiades-base/src/Robot/core/mission_queue/element.rs
+ M pleiades-sim/src/sim/control.rs
+ M pleiades-sim/src/sim/uav_sim/mission/follow.rs
+ D pleiades-sim/src/sim/uav_sim/mission/follow_straight.rs
+ M pleiades-sim/src/sim/uav_sim/mission/mod.rs
+ M pleiades-sim/src/sim/uav_sim/mod.rs
+ M pleiades-sim/src/sim/ugv_sim/mission/mod.rs
+ M pleiades-uav/src/uav/mission/mod.rs
+ M pleiades-ugv/src/ugv/mission/mod.rs
+?? Task/task_38_sim_world_refine.md
+?? Tool/blender/models/camera_module.blend1
+?? Tool/blender/models/lidar_tmini.blend1
+?? Tool/blender/models/ugv_chassis.blend1
+?? Tool/execution_engine_auto_survey.config.json
+?? Tool/execution_engine_auto_survey.ts
+?? Tool/execution_engine_uav_camera.config.json
+?? Tool/execution_engine_uav_camera.ts
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+?? Workbook/wb_33_uav_camera_test.md
+/etc/profile: line 32: /etc/ShellCrash/menu.sh: No such file or directory
+
+```

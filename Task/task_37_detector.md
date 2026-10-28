@@ -18,10 +18,10 @@
 3. 在 `orion-simulation-world` 中，让 **UAV 能识别到 human**。
 
 本任务做到“识别到人 → 算出世界位置 → sim 里跟着走”：
-检测框（Step 2）→ 世界坐标 `(x, y)` 与误差（Step 3）→ sim 无人机跟随（Step 4）→ sim 直线跟随（Step 5，先绕开转向问题）。
+检测框（Step 2）→ 世界坐标 `(x, y)` 与误差（Step 3）→ sim 无人机跟随（Step 4）→ 修正 `Follow` 叶子（Step 5）。
 **跟踪器（ID / 卡尔曼）、真机跟随、行为树泛化、协议上报都不在本任务。**
 
-**顺序**：Step 1 相机统一 → Step 2 detector → Step 3 位置估计（uav + sim）→ Step 4 sim 跟随 → Step 5 sim 直线跟随。
+**顺序**：Step 1 相机统一 → Step 2 detector → Step 3 位置估计（uav + sim）→ Step 4 sim 跟随 → Step 5 修正 `Follow` 叶子。
 
 ---
 
@@ -289,29 +289,33 @@ Fallback
 
 ---
 
-## 六、Step 5 — sim 直线跟随（人往前走，飞机往前飞）
+## 六、Step 5 — 修正 `Follow` 叶子（不用 D*，人走机跟）
 
 ### 1 目标
 
-sim 里行人与 UAV 在同一条直线上：**人向前走，UAV 保持距离向前飞**。
-先绕开转向/寻路问题——行动逻辑（executor / 4 连通 D*）按人类要求暂不改，后续任务处理。
+sim 里人往前走，UAV 在后面跟着（保持距离）。**沿用 `Mission::Follow`**，不新增任务类型。
 
-### 2 背景（为什么绕开）
+### 2 背景
 
-Step 4 的 D* 跟随在近距离会被 4 连通「下一格」带偏：executor 追的是下一格格心，第一格常是侧向，
-车原地转 90°；`Turning` 过冲后又不反向修正，最终人从画面边缘出画、跟随进入 `Hold`。
-详见 §五.1 的“已知限制”。
+Step 4 的 `Follow` 叶子走 `nav.set_goal → D* → next_cell`；D* 是 4 连通，近距离时“下一格”常在侧面，
+executor 追格心 → 原地打转 → 人从画面边缘出画。
+修正放在**叶子**：不经过 D*，直接朝目标方向给一格。
+
+> ⚠️ 上一轮误加了 `Mission::FollowStraight`（type=3 + 控制口 `follow_straight` + 独立叶子）。
+> 那不是需求，本步**全部撤销**，回到只用 `Mission::Follow`。
 
 ### 3 方案
 
-- 控制口新增 `{"cmd":"follow_straight"}`（测试夹具，不走 ORION 帧）；
-- 新增 `Mission::FollowStraight`；`TASK_SET` 的 **type=3 仅预留**，协议解码不认（收到按未知丢弃，不影响 Pictor）；
-- 真机 uav / ugv：平凡树一拍终值（与 Follow 同）；
-- sim `uav_sim/mission/follow_straight.rs`：
+- **撤销**：`Mission::FollowStraight` 变体、uav/ugv/ugv_sim/uav_sim 四处 `mission::build` 的对应分支、
+  控制口 `follow_straight`、`follow_straight.rs`；协议 `type=3` 回到“未知丢弃”。
+- **`Mission::Follow` 不变**（type=2），协议与控制口 `follow` 命令保持原样。
+- **改 `sim uav_sim/mission/follow.rs` 的叶子**（保留 `ReactiveFallback` + `Hold` 结构）：
   - 读 detector 最新目标；无目标 / `age > stale` → `Hold`；
-  - `d = |target - me|`，`d > d_far` → `next_cell = 机头正前方一格`（沿当前 `pose.yaw` 前进 0.5 m，不调 `nav.set_goal`）；
-  - `d <= d_near` → `Hold`（`next_cell = None`）；
-  - 下一格就在机头正前方 ⇒ executor 的 `delta ≈ 0` ⇒ 只发 `MoveForward`，不会转向。
+  - `d = |target - me|`；`d > d_far` → `next_cell = 沿「me → target」方向的一格`
+    （单位向量 × 0.5 m 后取格，**不调用 `nav`**）；
+  - `d <= d_near` → `next_cell = None`；
+  - 不再调用 `nav.set_goal` / `nav.step`；目标作动态障碍的注入若已在实现里则保留。
+- 真机 uav / ugv 的 `Follow` 平凡树不变。
 
 ### 4 参数（初值）
 
@@ -323,10 +327,12 @@ Step 4 的 D* 跟随在近距离会被 4 连通「下一格」带偏：executor 
 
 ### 5 完成判据
 
-1. 控制口 `follow_straight` 被接受，建树成功、`task_ticks` 递增；
-2. 单测：目标远 → `next_cell` = 机头前方一格；目标近 → `None`；无目标 / 过期 → `None`；格心计算正确；
-3. `cargo check --workspace` + mission 相关单测通过；
-4. **不改** executor / nav / 协议解码；真机收到 `FollowStraight` 平凡终值。
+1. 全仓 `grep FollowStraight` 为 0；协议解码只剩 type 0（Goto）/ 2（Follow）；控制口 `help` 不含 `follow_straight`；
+2. `follow` 命令仍被控制口接受，建树成功、`task_ticks` 递增；
+3. 单测：目标在前方 → `next_cell` 落在「me → target」方向上的一格；目标在侧面 → 方向随方位变化；
+   目标近 → `None`；无目标 / 过期 → `None`；
+4. `cargo check --workspace` + mission 相关单测通过；
+5. **不改** executor / nav / D* / 协议帧格式。
 
 ### 6 不做
 
@@ -364,4 +370,5 @@ Step 4 的 D* 跟随在近距离会被 4 连通「下一格」带偏：executor 
 - 2026-10-27：Step 3 定稿——只做地面平面投影（IPM）求世界 `(x,y)` 与误差，不做跟随；参数放 `[detector.camera]`；分辨率用帧自带、外参键名带单位、高度取 `pose.z`。
 - 2026-10-27：Step 4 定稿——`Mission::Follow`（type=2，避开旧 `Circle=1`）；sim 用 `ReactiveSequence` 跟人，真机建平凡树立即终值；目标位置读 detector、不进 `ExecuteState`；初值 `follow_dist=2.5`、距离带 1.5~3.0、`stale=0.8 s`、相机 `pitch≈-15°`。
 - 2026-10-28：Step 1~4 全 PASS（commit `c639610`）。
-- 2026-10-28：e2e 实测发现两处链路问题——① sim 的 `world_link` 未透传 `mount.pitch`（相机永远 0°，投影 10 m 算成 4.66 m），已修；② 近距离 D* 跟随被 4 连通「下一格」带偏、executor 过冲不反向修正，按人类要求**不改行动逻辑**，新增 Step 5 用直线跟随绕开。
+- 2026-10-28：e2e 实测发现两处链路问题——① sim 的 `world_link` 未透传 `mount.pitch`（相机永远 0°，投影 10 m 算成 4.66 m），已修；② 近距离 D* 跟随被 4 连通「下一格」带偏、executor 过冲不反向修正，按人类要求**不改行动逻辑**。
+- 2026-10-28：**纠偏**——上一轮误加 `Mission::FollowStraight`（新任务类型）不是需求；Step 5 改为“沿用 `Mission::Follow`，只把叶子改成不经 D*、朝目标方向给一格”，并撤销 FollowStraight 全套。
