@@ -1,9 +1,12 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-25
+# Modified Date ： 2026-10-28
 #
 # 世界根脚本（COMPONENTS.md §4.1）：启动世界时钟、按 [sim_world] 程序化生成体素世界、
 # 提供尺度/坐标/容器访问。D4 程序化生成，布局确定性、无 RNG。
+#
+# task_38 Step 1b：世界观感（地面/体素材质 + 天空 + 太阳方向）全部**运行时**建，
+# 入口是 WorldLook.gd（COMPONENTS.md §4.1.1）；World.tscn 零改动。
 #
 # 尺度唯一来源是 project.godot 的 [sim_world]（COMPONENTS.md §0.2-5），本文件不写字面量尺度。
 # 例外（task_32 §三.2 明令"写死，不得自行发挥"）：不可见空气墙 / 顶盖的 5 个 box 用字面量几何表
@@ -15,6 +18,11 @@ extends Node3D
 
 const WorldClock := preload("res://src/common/WorldClock.gd")
 const WorldTransform := preload("res://src/common/WorldTransform.gd")
+## 观感（材质 + 天空 + 太阳）唯一入口（task_38 §二.3 / COMPONENTS.md §4.1.1）。
+const WorldLook := preload("res://src/world/WorldLook.gd")
+## 街道几何 / 建筑立面的唯一入口（task_38 §三.4 / COMPONENTS.md §4.1.2）；运行期建、不进 .tscn。
+const StreetLayout := preload("res://src/world/StreetLayout.gd")
+const Facade := preload("res://src/world/Facade.gd")
 
 const SETTING_VOXEL_SIZE := "sim_world/world/voxel_size"
 const SETTING_CELLS_X := "sim_world/world/cells_x"
@@ -23,6 +31,10 @@ const SETTING_LAYERS := "sim_world/world/layers"
 
 const VOXEL_ITEM := 0
 const VOXEL_COLOR := Color(0.55, 0.58, 0.62, 1.0)
+
+## 观感总开关（task_38 §二.3）：false = 不换地面材质 / 不换天空 / 不动太阳，世界回到 task_37 的单色观感。
+## 缺资产时**不用**改它：WorldLook 自己降级（只 warn）。check_world_look 直接断言它为 true。
+const LOOK_ENABLED := true
 
 ## 出生点（世界坐标，米），与 pleiades-sim 的 DEFAULT_ORIGIN (64, 64, 0) 一致。
 const SPAWN_WORLD := Vector3(64.0, 64.0, 0.0)
@@ -87,6 +99,9 @@ const PEDESTRIAN_SCENE := "res://src/scenes/props/Pedestrian.tscn"
 ## 容器名**必须**与 `WebSocketManager.PEDESTRIANS_NODE` 逐字一致（"Pedestrians"）：
 ## 同一个容器既装世界预置的人（本表），也装 `chassis_hello{kind:"pedestrian"}` 动态装配的人。
 const PEDESTRIANS_NODE := "Pedestrians"
+## 街道 / 立面容器名（task_38 §三.4，自检 Get_Street_Root() / Get_Facade_Root() 用）。
+const STREET_NODE := "Street"
+const FACADE_NODE := "Facade"
 
 ## 行人布局表：**只有**出生点（世界坐标 Z-up，米）+ 初始朝向 + 数量。
 ## **没有**路径 / 巡逻 / 计时 / 速度 —— 世界不再自己让人走（task_35 Step 3）：
@@ -134,8 +149,22 @@ func _ready() -> void:
 	_read_scale_settings()
 	_log_scale()
 	BuildVoxelWorld()
+	if LOOK_ENABLED:
+		Apply_World_Look()
 	_Build_Bounds()
 	BuildPedestrians()
+	# 街道几何 / 立面（task_38 §三.4 的末尾两行）：只建渲染 mesh、零碰撞、可幂等重建。
+	StreetLayout.Build_All(self)
+	Facade.Build_All(self)
+
+
+## 应用观感（地面材质 + 天空 + 太阳方向）：幂等；缺资产只 warn。
+## 返回 false = 至少一样降级（缺失清单见 WorldLook.Get_Missing_Assets()）。
+func Apply_World_Look() -> bool:
+	var ok: bool = WorldLook.Apply_All(self)
+	if not ok:
+		print("[world] look degraded（缺资产，保持原单色观感）：", str(WorldLook.Get_Missing_Assets()))
+	return ok
 
 
 ## 程序化重建体素世界：清空 -> 建 MeshLibrary -> 稀疏填格。可重复调用（幂等）。
@@ -248,6 +277,16 @@ func GetPedestriansRoot() -> Node3D:
 	return _pedestrians_root
 
 
+## 街道容器（自检 / 后续任务用；与 GetPedestriansRoot 同风格，每次重新解析）。
+func Get_Street_Root() -> Node3D:
+	return StreetLayout.Get_Root(self)
+
+
+## 立面容器（同上）。
+func Get_Facade_Root() -> Node3D:
+	return Facade.Get_Root(self)
+
+
 ## 世界坐标（Z-up，米）-> Godot 体素索引。换轴只在 WorldTransform 里发生。
 ## 等价于 COMPONENTS.md §2.3 的 (floor(wx/v), floor(wz/v), floor(wy/v))。
 func WorldToCell(world_pos: Vector3) -> Vector3i:
@@ -291,9 +330,10 @@ func _make_mesh_library() -> MeshLibrary:
 
 	var mesh := BoxMesh.new()
 	mesh.size = size
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = VOXEL_COLOR
-	mat.roughness = 0.85
+	# 材质由 WorldLook 工厂给（task_38 §二.3）：LOOK_ENABLED=false 时取原单色材质。
+	var mat: StandardMaterial3D = WorldLook.Make_Voxel_Material(VOXEL_COLOR)
+	if not LOOK_ENABLED:
+		mat = WorldLook.Make_Fallback_Voxel_Material(VOXEL_COLOR)
 	mesh.material = mat
 
 	var shape := BoxShape3D.new()

@@ -1,0 +1,140 @@
+{
+  "task": "Task/task_38_sim_world_refine.md",
+  "workbook": "Workbook/wb_38_sim_world_refine.md",
+  "tmp": "tmp/task38",
+  "steps": [
+    {
+      "n": 1,
+      "title": "Step 1a — 材质资产入库（CC0 贴图 + HDRI）",
+      "doc": "§二.2",
+      "side": "orion-simulation-world/assets/ 与 assets/README.md（只放资产，不写代码）",
+      "brief": [
+        "只做资产：把 §二.2 表里的贴图与 HDRI 下载进 orion-simulation-world/assets/，并写好 README 记账。**本 step 不写任何 .gd、不跑 Godot**。",
+        "最低集合（够 Step 1b 用即可，不要贪多）：地面铺装 1 套、混凝土 1 套、沥青 1 套、路缘/深色混凝土 1 套、晴天正午 HDRI 1 张。",
+        "尺寸：贴图 1K 或 2K（JPG 优先，单张 <= 1.5 MB）；HDRI 2K（.hdr，<= 6 MB）。assets 总增量 <= 10 MB。",
+        "通道：Poly Haven 取 diff / nor_gl / arm；ambientCG 取 Color / NormalGL / Roughness / Metalness / AmbientOcclusion，离线拼成 *_orm.png（R=AO, G=Rough, B=Metal）。**禁止 nor_dx**。",
+        "每件资产在 assets/README.md 记一行：文件名 / 来源 URL / 许可（CC0）/ 尺寸 / 通道拼法。",
+        "下载用 `curl -L -o <file> <url>`；直连失败再走 mihomo（export http_proxy=http://127.0.0.1:7897 https_proxy=$http_proxy）。",
+        "Godot 导入：`godot --headless --path orion-simulation-world --import`，跑完确认每个 .jpg/.hdr 旁都生成了 .import；**不要**用 --editor、不要起窗口。",
+        "禁止：把 >1 MB 的预览图写进 tmp；**不要**用 read_image 直接看 HDRI/大图（要看就 `python3 -c` 缩到 <=256px 再看）。"
+      ],
+      "allowed": [
+        "orion-simulation-world/assets/"
+      ]
+    },
+    {
+      "n": 2,
+      "title": "Step 1b — 材质接线与天空（WorldLook + 自检 + 出图）",
+      "doc": "§二.1 / §二.3 / §二.5",
+      "side": "orion-simulation-world：src/world/ + src/tests/check_world_look.gd",
+      "brief": [
+        "按 §二.3 实施：新增 src/world/WorldLook.gd（材质工厂 + 天空），World.gd 的 _ready 里在 BuildVoxelWorld() 之后调用；_make_mesh_library() 改为取 WorldLook.Make_Voxel_Material()。",
+        "地面 = 混凝土铺装（triplanar，世界空间，6 m 一循环）；体素 = 混凝土（triplanar，2 m 一循环）；两者都挂 albedo + normal + orm 三张图。",
+        "天空 = PanoramaSkyMaterial + Step 1a 的 HDRI；DirectionalLight 对齐 HDRI 太阳方向、能量约 0.7；ambient_light_source 必须保持 SKY(3)。",
+        "World.tscn 零改动（git diff 为空）：材质与天空全部运行时建；缺资产时降级为原单色材质并只 warn，绝不 push_error。",
+        "新增 src/tests/check_world_look.gd：贴图非 null、uv1_triplanar && uv1_world_triplanar、uv1_scale 合理、天空材质是 PanoramaSkyMaterial 且 panorama 非 null、background_mode 与 ambient_light_source 不变、Ground AABB 不变。",
+        "不改几何、不改 OBSTACLES、不改碰撞层、不写 ShaderMaterial、不做 SSAO。",
+        "验收：`godot --headless --path orion-simulation-world --import`；再逐个跑 check_*.gd（每个都带 `--quit`）必须全 failed=0；然后 Xvfb 下跑 check_camera_shots / check_pedestrian_shots 并存 3 张 1600x900 图（地面近景 / 建筑侧视 / UAV 俯视）。",
+        "所有 Godot 命令必须带 `--quit`（或 check 脚本自带的退出）；**禁止**无 --quit 的 Godot、禁止 --editor。"
+      ],
+      "allowed": [
+        "orion-simulation-world/src/world/",
+        "orion-simulation-world/src/tests/check_world_look.gd",
+        "orion-simulation-world/COMPONENTS.md"
+      ]
+    },
+    {
+      "n": 3,
+      "title": "Step 2 — 街道几何与建筑立面",
+      "doc": "§三",
+      "side": "orion-simulation-world：src/world/ + 新增 check_street",
+      "brief": [
+        "按 §三 实施：新增 src/world/StreetLayout.gd 与 src/world/Facade.gd，在 World.gd 的 _ready 末尾调用；都必须幂等（先摘同名旧容器再建）。",
+        "路网（世界坐标 Z-up，米）：主路 x∈[4,124] y∈[60,68] 顶面 z=0.01；支路 x∈[44,52] y∈[68,92]；斑马线 x∈[56,60] 跨 y∈[60,68]，4 条 0.5 m 白条；主路中线虚线 y≈64（3 m 线+3 m 空，跳过 x∈[44,52] 与 x∈[56,60]）+ 两条实线 y≈60.30/67.70；支路中线虚线 x≈48。",
+        "路缘：高 0.15、宽 0.2，沿主路南北两侧（斑马线与路口断开）与支路东西两侧；collision_layer=0 且不得有 CollisionShape3D。",
+        "立面：按 OBSTACLES 逐栋生成窗（bay 2.4、窗 1.8x1.6、首层窗台 0.9、层高 3.2）、基座（z∈[0,0.6]）、屋顶压顶（外扩 0.05）；薄片一律外扩 0.01 m；SurfaceTool 合并成 <=3 个 MeshInstance3D；全部无碰撞。",
+        "新增 src/tests/check_street.gd：AABB、路面顶 z、Street 下无任何 CollisionObject3D、标线/斑马线条数、立面 mesh 数、连调两次节点数不变、OBSTACLES 未变。",
+        "不改 OBSTACLES / PEDESTRIANS / 世界尺度 / 碰撞层；World.tscn 零改动；不写 shader；不做点缀物。",
+        "验收：既有 17 个 check_*.gd 全 failed=0（每个带 `--quit`）；Xvfb 出 3 张街景图，斑马线与路缘清晰、无 z-fighting。"
+      ],
+      "allowed": [
+        "orion-simulation-world/src/world/",
+        "orion-simulation-world/src/tests/check_street.gd",
+        "orion-simulation-world/COMPONENTS.md"
+      ]
+    },
+    {
+      "n": 4,
+      "title": "Step 3 — 新世界 Follow 复验（e2e，只验不改）",
+      "doc": "§四",
+      "side": "Tool 复验脚本 + RobotSim_TestEnv 实例配置/结果（不碰 Rust）",
+      "brief": [
+        "按 §四 实施：**只验收、不改任何逻辑**。写 Tool/sim_follow_test.py（或等价脚本），由它一口气完成：起 Xvfb -> 起 Godot 世界 -> 起 pleiades-sim(uav) -> 起 Python 行人 -> 走 S0~S6 -> 采 trace.csv -> 判 §四.6 十条 -> 写 verdict.md 与 3 张图，产物落 RobotSim_TestEnv/results/task38_follow_<UTC时间戳>/。",
+        "前置逐条自检（缺一条就记 FAIL(env) 并停）：task_37 Step1~5 已 PASS；实例 config 有 [[sim_world.sensor]] camera（rate_hz=10、mount.pitch=-15）、[detector]、[detector.camera]、[chassis].forward_speed=100；yolov8n.safetensors 在 <实例>/Pleiades_Workspace/；<实例>/programs 软链存在；控制口端口从实例 config 的 [control].port 读。",
+        "动作序列：S0 起世界与 sim，断言 pose=(64,64,约2.5)、yaw约0、相机 rate_hz=10；**S0b 先归位到格心**（`goto (64.25,64.25)` 等 nav_status=Idle，然后按实测位姿算「首格方位」Δψ=机头到格心(64.75,64.25) 的方位，断言 |Δψ|<=10°；不卡绝对位置，因为 sim 到达判据允许 ~0.26 m 误差。机位在格角时首拍目标偏 18.4°、过冲到 47° 会把人甩出 43° 半视场，这是 task_37 executor 的已知限制，归位只是验证夹具）；S1 行人 hello 带 spawn=(70,64,0,yaw 0)；S2 发 {cmd:follow} 并等 task_ticks 递增；S3 行人沿 +X 走 20 s；S4 人停 5 s；S5 关行人客户端；S6 {cmd:stop} 再补 mission_count=0。",
+        "判据（§四.6）：1 距离带 [3.5,6.0] >=80% 且 min>=2.5（记录均值）；2 全程 min d>=2.0；3 人停 5 s 位移<=0.5；4 丢失 0.8 s 后 10 s 位移<=0.5；5 取消 <=2 tick 到 Idle；6 后 10 s 内 >=90% 帧有 person(conf>=0.5)；7 非 person conf>=0.5 <=5% 帧；8 3~6 m 投影误差 <1 m；9 LiDAR 无路缘/标线且 check_lidar/check_bounds/check_camera_shots 全绿；10 证据齐全。",
+        "**红线**：不得改任何 Rust、不得改世界外观让判据变绿、不得调 follow 参数/conf_thres/判据阈值。不通过就如实记录实测值 + 根因初判，停下汇报。",
+        "唯一例外：harness 自身故障（世界没起、行人没连上、端口被占）可修脚本重跑一次，并在 verdict.md 注明。",
+        "本 step 允许长驻进程（Xvfb/Godot/sim/行人），但脚本结束必须收干净；结束后必须收干净。"
+      ],
+      "allowed": [
+        "Tool/sim_follow_test.py",
+        "orion-simulation-world/tool/pedestrian/",
+        "RobotSim_TestEnv/"
+      ]
+    }
+  ],
+  "prompts": {
+    "plan": [
+      "你是「规划」子 agent，只读代码 + 写计划，禁止修改任何源码。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "任务文档：Task/task_38_sim_world_refine.md（本任务全部设计结论）",
+      "工作记录：Workbook/wb_38_sim_world_refine.md（看前面 step 的进展）",
+      "必读：",
+      "1. tmp/task38/step.md —— 本 step 要求、轮次、允许改动范围（越界即 FAIL）",
+      "2. tmp/task38/prev_issues.md —— 上一轮评审问题（若为 (无) 则首轮）",
+      "3. 任务文档里 step.md 指定的那一节",
+      "4. tmp/task38/git_baseline.txt（本步进场基线）",
+      "5. 按需读相关源码（orion-simulation-world/、Tool/、RobotSim_TestEnv/）",
+      "产出：用 writeTextFile 写 tmp/task38/plan.md：改动清单、资产清单（若涉及）、关键接口常量、衔接点（文件:行号）、实施顺序、风险、验收命令与逐条判据、上轮 issues 处理。",
+      "硬约束：",
+      "- 只在 step.md 列出的路径内改动；不改 Task/、.github/、任何 pleiades-* crate",
+      "- 不 git add / git commit",
+      "- 计划必须具体到能直接照做，禁止“视情况而定”",
+      "- 读代码用 grep/read 定位即可，不要通读大文件",
+      "最终回复：200 字以内的计划摘要（会被写进 workbook）。"
+    ],
+    "impl": [
+      "你是「实现」子 agent。按计划实施，不要重新设计。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task38/step.md、tmp/task38/plan.md、Task/task_38_sim_world_refine.md 对应章节。",
+      "规则：",
+      "- 只改 step.md 允许的路径",
+      "- Godot 侧文件头注释：Presented by KeJi / Created Date ： 2026-10-28 / Modified Date ： 2026-10-28",
+      "- 命名：函数 Upper_Snake、变量 lower_snake、常数 UPPER_SNAKE",
+      "- 不做计划之外的顺手重构；旧问题记进 tmp/task38/impl.md",
+      "- 不 git add / git commit",
+      "- **Godot 只能 `--headless` + `--quit`（或 check 脚本自带退出）**；禁止 `--editor`、禁止无 `--quit` 的运行，禁止起窗口",
+      "- 下载用 `curl -L`；**不要**用 read_image 看 HDRI/大图，要看先缩到 <=256px",
+      "- 计划与代码现实冲突时以代码为准，并在 impl.md 记录偏差",
+      "产出：用 writeTextFile 写 tmp/task38/impl.md：改了哪些文件、每个文件做了什么、下载了什么（URL/许可/字节）、跑了什么命令、结果、与计划的偏差。",
+      "最终回复：150 字以内摘要。"
+    ],
+    "review": [
+      "你是「评审」子 agent，独立评审本轮实现。不要修改源码（只允许写 tmp/task38/review.json）。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task38/step.md、plan.md、impl.md、Task/task_38_sim_world_refine.md 对应章节、tmp/task38/git_baseline.txt",
+      "逐项检查：",
+      "1. 越界：git status --porcelain --untracked-files=all，与 git_baseline.txt 比对；不得出现 pleiades-* / Task/ / .github/ / 根 Cargo.* 改动",
+      "2. 判据是否真满足：自己跑（Godot 一律 `--headless --quit`）；Step 3 检查 trace.csv / verdict.md / 图 是否存在且数字与 §四.6 一致",
+      "3. 是否违反定稿结论（Step1：World.tscn 零改动 / CC0 / triplanar / HDRI / 无 shader；Step2：路缘零碰撞 / 薄片合并 / 不改 OBSTACLES；Step3：只验不改 / 不改 Rust / 不调阈值）",
+      "4. 代码规范：文件头注释、命名、模块注释",
+      "5. 回归：既有 17 个 check_*.gd failed=0；像素判据不许被放宽（放宽须给改前改后实测值）",
+      "6. 死代码、未使用资源、.import 是否齐全",
+      "产出：写 tmp/task38/review.json：{\"verdict\":\"PASS\" 或 \"FAIL\", \"issues\":[\"...\"]}",
+      "- FAIL 的 issues 要具体到「文件:行号 + 期望 vs 实际 + 复现命令」",
+      "- 不要放水；超出本 step 范围的建议不要写进 issues",
+      "最终回复：第一行 VERDICT: PASS 或 VERDICT: FAIL，第二行一句理由。"
+    ]
+  }
+}

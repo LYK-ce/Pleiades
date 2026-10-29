@@ -253,6 +253,26 @@ bash tmp/task33/xvfb/start_xvfb.sh
 DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 240 godot --display-driver x11 --rendering-driver opengl3 \
   --audio-driver Dummy --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_camera_shots.gd
 
+# 世界观感（task_38 Step 1b，§4.1.1）：① headless 结构档 **30 项**（R 组 13 项 `[skip]` 且不计入 total）
+#    跑前先 `--import`（E28 同款：缺 `.godot` 缓存时贴图 / HDRI 的 `load()` 会静默 null → 材质降级）
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_world_look.gd
+#    ② **真验收（出图）**：Xvfb 档 **43 项**（30 + R 组 13），拍 3 张 1600×900 JPEG 到 tmp/task38/shots/
+#    + 2 张 160×90 太阳方向探针；**绝不加 `--headless`**、**必须 `--audio-driver Dummy`**
+DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 timeout 400 godot --display-driver x11 \
+  --rendering-driver opengl3 --audio-driver Dummy --path orion-simulation-world \
+  --fixed-fps 60 --script res://src/tests/check_world_look.gd
+
+# 街道 + 立面（task_38 Step 2，§4.1.2）：① headless 结构档 **28 项**（R 组 13 项 `[skip]` 且不计入 total）
+#    跑前先 `--import`（同 E28：缺 `.godot` 缓存时沥青/路缘贴图 load() 静默 null → 材质降级成纯色）
+timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
+  --script res://src/tests/check_street.gd
+#    ② **真验收（出图）**：Xvfb 档 **41 项**（28 + R 组 13），拍 3 张 1600×900 街景到 tmp/task38/shots/
+#    （street_00_junction / street_01_building_side / street_02_uav_top）；**必须 `--audio-driver Dummy`**
+xvfb-run -a -s "-screen 0 1600x900x24" env LIBGL_ALWAYS_SOFTWARE=1 timeout 400 godot \
+  --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy \
+  --path orion-simulation-world --fixed-fps 60 --script res://src/tests/check_street.gd
+
 # 静态人物（human_model Step 4，§4.9）：新增自检 32 项；跑前**必须先** `--import`
 # （E28：`.godot/` 缺失时 glb / Person.tscn 的 load() 会静默返回 null → 世界 0 人）
 timeout 300 godot --headless --path orion-simulation-world --import
@@ -317,6 +337,12 @@ godot --path orion-simulation-world
 World (Node3D)                              script: res://src/world/World.gd            [Step 2]
 │                                           职责：启动 WorldClock、建体素/地面、持有 Vehicles 容器
 ├── WorldEnvironment (WorldEnvironment)      Environment 内联资源：ProceduralSky + ambient    [Step 2]
+│                                            ※ task_38 Step 1b：`Environment` / `Sky` 由
+│                                              `WorldLook.Apply_All()` **运行时复制一份**再替换
+│                                              （`PanoramaSkyMaterial` + `assets/hdri/sky_midday_2k.hdr`），
+│                                              `background_mode=BG_SKY` / `ambient_light_source=SKY` 原样带走；
+│                                              地面材质 = `Ground/MeshInstance3D` 的 surface override、
+│                                              太阳 = `Sun` 的 transform / energy，**`.tscn` 零改动**（§4.1.1）
 ├── Sun (DirectionalLight3D)                 shadow_enabled=true，俯角照明                    [Step 2]
 ├── Ground (StaticBody3D)                    collision_layer=1, collision_mask=0               [Step 2]
 │   ├── CollisionShape3D                     BoxShape3D size=(128,1,128)，中心 (64,-0.5,64)      [Step 2]
@@ -345,6 +371,20 @@ World (Node3D)                              script: res://src/world/World.gd    
 │                                              行人（`Pedestrians/<peer_id>`）；容器名逐字 = `PEDESTRIANS_NODE`
 │                                            ※ 由 `World.gd::BuildPedestrians()` 在 `BuildPersons()` **之后**
 │                                              运行时建，**不在 World.tscn 里**（与 `Bounds`/`Persons` 同策略，§4.11）
+├── Street (Node3D)                          **运行时**街道容器（纯渲染、**零碰撞**）        [task_38 Step 2]
+│   ├── Road (MeshInstance3D)                沥青路面：主路 (120×8) + 支路 (8×24)，顶面 z=0.01
+│   ├── Markings (MeshInstance3D)            标线 28 个四边形：主虚线 18 + 边线 2 + 支虚线 4 + 斑马线 4，z=0.03
+│   └── Curbs (MeshInstance3D)               路缘 7 段 × 5 面（高 0.15 / 宽 0.2，斑马线与路口处断开）
+│                                            ※ 3 个 mesh 全部 `cast_shadow=OFF`、`material_override=null`、
+│                                              `transform=identity`（顶点直接烘成 Godot 坐标）；
+│                                              由 `World.gd::_ready()` 末尾调 `StreetLayout.Build_All(self)` 建，
+│                                              **不在 World.tscn 里**（§4.1.2）
+├── Facade (Node3D)                          **运行时**建筑立面容器（纯渲染、**零碰撞**）    [task_38 Step 2]
+│   ├── Windows (MeshInstance3D)             窗 60 个四边形（bay 2.4 / 窗 1.8×1.6 / 首层窗台 0.9 / 层高 3.2）
+│   ├── Plinths (MeshInstance3D)             基座 44 个四边形（11 栋 × 4 面，z∈[0,0.6]，混凝土 × 0.7）
+│   └── Caps (MeshInstance3D)                屋顶压顶 15 个四边形（外扩 0.05，路缘贴图 × 0.6）
+│                                            ※ 按 `World.OBSTACLES` **只读**生成（确定性、无 RNG）；
+│                                              由 `Facade.Build_All(self)` 建，**不在 World.tscn 里**（§4.1.2）
 ├── Systems (Node3D)                                                                          [Step 6]
 │   └── WebSocketManager (instance: res://src/scenes/WebSocketManager.tscn)             [Step 6] ✅
 │                                            @export vehicle_scene → res://src/scenes/Vehicle.tscn
@@ -368,18 +408,22 @@ World (Node3D)                              script: res://src/world/World.gd    
 | 节点 | 类型 | 脚本 | 静态/运行时 | 说明 |
 |---|---|---|---|---|
 | `World` | `Node3D` | `src/world/World.gd` | 静态 | 场景根；`_ready()` 里 `WorldClock.EnsureStarted()` + `BuildVoxelWorld()` |
-| `WorldEnvironment` | `WorldEnvironment` | — | 静态 | `Environment` 内联（`ProceduralSkyMaterial` + `ambient_light_source=SKY`） |
-| `Sun` | `DirectionalLight3D` | — | 静态 | 俯角约 -55°，`shadow_enabled=true` |
+| `WorldEnvironment` | `WorldEnvironment` | — | 静态（**环境资源运行时复制替换**） | `Environment` 内联（`ProceduralSkyMaterial` + `ambient_light_source=SKY`）；task_38 Step 1b 起 `WorldLook.Apply_All()` 把 `Environment` + `Sky` **各复制一份**后换成 `PanoramaSkyMaterial`（§4.1.1），`background_mode` / `ambient_light_source` 不变 |
+| `Sun` | `DirectionalLight3D` | — | 静态（**位姿/能量运行时覆盖**） | `.tscn` 里 `rotation_degrees=(-55,-35,0)`、`shadow_enabled=true`；运行时由 `WorldLook.Apply_All()` 改成与 HDRI 太阳方向一致（`SUN_DIR`）+ `light_energy=0.7`，`shadow_enabled` 不动 |
 | `Ground` | `StaticBody3D` | — | 静态 | **一整块**地面，非体素地面（D10；避免 6.5 万碰撞体） |
 | `Ground/CollisionShape3D` | `CollisionShape3D` | — | 静态 | `BoxShape3D(128,1,128)`；`position=(64,-0.5,64)` → 顶面 `y=0` |
-| `Ground/MeshInstance3D` | `MeshInstance3D` | — | 静态 | `BoxMesh` 同尺寸；材质深灰 |
-| `VoxelWorld` | `GridMap` | — | 静态节点 / 运行时填格 | `cell_center_*=true`；`mesh_library` 运行时构建 |
+| `Ground/MeshInstance3D` | `MeshInstance3D` | — | 静态（**材质运行时换**） | `BoxMesh` 同尺寸；`.tscn` 里是深灰单色 `StandardMaterial3D`，运行时被 `set_surface_override_material(0, WorldLook.Make_Ground_Material())` 换成混凝土铺装（三贴图 PBR + 世界空间 triplanar 6 m）；缺资产时保留原单色 |
+| `VoxelWorld` | `GridMap` | — | 静态节点 / 运行时填格 | `cell_center_*=true`；`mesh_library` 运行时构建，其立方体材质由 `WorldLook.Make_Voxel_Material()` 给（混凝土 + 世界空间 triplanar 2 m；缺资产回落到 `VOXEL_COLOR` 单色，§4.1.1） |
 | `Bounds` | `StaticBody3D` | —（`World.gd` 内建） | **运行时** | 不可见硬边界；`collision_layer=1`、`collision_mask=0`；5 个 `CollisionShape3D`（4 面 32 m 空气墙 + 32 m 顶盖）；**内侧面贴世界边界平面**（`x=0/128`、`y=0/128`、`z=32`），厚度一律向外（§9.1 E24）；无任何 mesh 子节点 |
 | `Vehicles` | `Node3D` | — | 静态容器 | 所有 avatar 的父节点；子节点名 = `peer_id`（净化后） |
 | `Persons` | `Node3D` | —（`World.gd` 内建） | **运行时** | 静态人物容器（human_model Step 4）；纯视觉、**无碰撞体**、无物理；幂等重建（`BuildPersons()`）；子节点名 = `PERSONS` 常量表的 `name` |
 | `Persons/person_0x` | `Node3D` | `src/props/Person.gd` | **运行时**实例 | 1 个 `Person.tscn` 实例；子节点 `Body` = `assets/humans/rp_carla_rigged_001/model.glb` 的静态实例（glb 根 `Node3D` → 1 个 `MeshInstance3D`）；世界坐标见 §4.9 |
 | `Pedestrians` | `Node3D` | —（`World.gd` 内建） | **运行时** | 外部驱动的行人容器（task_35 Step 3）；**世界预置 2 人 + manager 动态装配的人共用一个容器**（名字逐字 = `WebSocketManager.PEDESTRIANS_NODE`）；幂等重建（`BuildPedestrians()`；运行期重建会连带移除已装配的网络行人，见 §4.11）；子节点名 = `PEDESTRIANS` 常量表的 `name`（预置）/ `<peer_id>`（动态） |
 | `Pedestrians/pedestrian_0x` | `CharacterBody3D` | `src/chassis/Pedestrian.gd` | **运行时**实例 | 1 个 `Pedestrian.tscn` 实例：**有胶囊碰撞**（r0.25 / h1.75 / 中心 y0.875）、`layer 2` / `mask 1\|4`、`motion_mode=GROUNDED`；子节点 `CollisionShape3D` + `Body` = `assets/humans/rp_nathan_animated_003_walk/model.glb`（glb 根 `Node3D` → `Armature` → `Skeleton3D`(88 骨) + `MeshInstance3D` + `AnimationPlayer`）；出生点 / 朝向 / idle 语义 / 与协议行人的分工见 §4.11 |
+| `Street` | `Node3D` | —（`src/world/StreetLayout.gd` 内建） | **运行时** | 街道容器（task_38 Step 2）；纯渲染、**无任何 `CollisionObject3D` / `CollisionShape3D`**；幂等重建（`StreetLayout.Build_All()` 先摘同名旧容器）；3 个子节点见下三行 |
+| `Street/{Road,Markings,Curbs}` | `MeshInstance3D` | — | **运行时** | 各 1 个 `ArrayMesh`（SurfaceTool 合并，每四边形独立 4 顶点 + 6 索引）：`Road` 2 面 / `Markings` 28 面 / `Curbs` 35 面；`cast_shadow=OFF`、`material_override=null`（材质挂在 surface 上）、`transform=identity`；材质 = `asphalt` 4 m / 纯参数白 / `curb` 1.5 m 世界空间 triplanar（§4.1.2） |
+| `Facade` | `Node3D` | —（`src/world/Facade.gd` 内建） | **运行时** | 建筑立面容器（task_38 Step 2）；纯渲染、**零碰撞**；按 `OBSTACLES` 只读生成，幂等重建；3 个子节点见下 |
+| `Facade/{Windows,Plinths,Caps}` | `MeshInstance3D` | — | **运行时** | 60 / 44 / 15 个四边形合并成 3 个 mesh；`Windows` = 深色玻璃（`cull_mode=CULL_DISABLED`）、`Plinths` = `concrete` 2 m × 0.7、`Caps` = `curb` 1.5 m × 0.6（§4.1.2） |
 | `Systems` | `Node3D` | — | 静态容器 | 非物理系统（网络等）的父节点 |
 | `Systems/WebSocketManager` | `Node` | `src/net/WebSocketManager.gd` | 静态实例 | **全进程唯一** manager，管全部连接；子节点 `Heartbeat(Timer, 1 s)`；`autolisten=true`、`listen_port=0`（→ `[sim_world]` 的 9999） |
 | `ObserverCamera` | `Camera3D` | `src/camera/ObserverCamera.gd` | 静态实例 | 观察者相机；不参与任何物理/传感计算 |
@@ -402,6 +446,8 @@ World (Node3D)                              script: res://src/world/World.gd    
 | walking_person-4 | `src/tests/check_person_walk_shots.gd`（**新增**，14 项：A 组结构 4 + R 组渲染 10）+ 同名 `.gd.uid`（`--import` 生成）、`COMPONENTS.md`（L8 状态 / §3 脚本表 / §4.10-⑤ 与 **⑦** / §11 / 附） | 三帧**真推进**证明「人在走」（支线，**不进装配线**）：在环路第一段侧前方（世界 `(48,101)`+1.5 m 瞄 `(44.8,96,0.92)`）架**固定**机位，用 `await physics_frame` **逐帧**推进 0/40/80 帧拍 `tmp/walking_person/shots/walk_t{0,1,2}.jpg`（`27 862 / 28 368 / 28 541 B`，**帧间不瞬移**）。`DISPLAY=:99` **`total=14 failed=0`** + `SELF-CHECK OK` + `EXIT=0` + 0 ERROR；`s = 0.000/0.840/1.680 m`、`frames = 0/40/80`、`Δs/Δframes = 0.021000 = v/60`（偏差 0.00%）；投影框 `Δx = 57.0 / 68.1 / 125.1 px`（判据 30）；框内/框外差分 `1020× / 422× / 566×`（判据 3×）；64×64 对齐裁剪差 `0.06871 / 0.06780 / 0.08183`（判据 0.010）；机位三次变换逐位相同（偏差 0.000000）；headless 冒烟 `[skip]` ×10 + **`total=4 failed=0`**；**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 59` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `person_assets 32` / `person_walk 20`（headless）/ `person_shots 7`（headless），全部 `failed=0`、0 ERROR；渲染档 `person_shots 22` / `person_walk 26` 同样逐字不变）；`--import` EXIT=0 且 0 ERROR（生成 `.gd.uid`）；三张旧图 `walker_t{0,1,2}.jpg` 的 `md5` 未被改变。**只做「走动」**：不加碰撞、不改雷达 / 建图 / 决策链、**不做 YOLO**；**不改** `Person.gd` / `World.gd` / `Person*.tscn` / `project.godot` / `assets/**` / 既有自检；**不碰** `pleiades-*` / `Task/` / `Workbook/` / `programs/` / 根 Cargo；**不执行** `git add` / `git commit` |
 | task_33-3 | **不改 `World.tscn`**：三件 `.glb` 各自在**组件场景**里 `instance` —— `Vehicle.tscn` 的 `ModelUGV` 换 `chassis/ugv_chassis.glb`，`sensors/Lidar2D.tscn` / `sensors/CameraSensor.tscn` 各加一个 `Body`（§4.3 / §4.7 / §4.8） |
 | task_35-3 | **不改 `World.tscn`**：`World.gd` 的 `WALKERS` / `BuildWalkers()` / `GetWalkersRoot()` **整节删除**，换成 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()` —— 容器改名 `Walkers` → `Pedestrians`（`pedestrian_01` / `pedestrian_02`），**世界不再实例化 `PersonWalking.tscn`、不再内置任何路径 / 巡逻 / 计时**；人在无外部驱动时**站着不动**（idle = 预期，§4.11） |
+
+| task_38-2 | **不改 `World.tscn`**：`World.gd::_ready()` 在 `BuildPedestrians()` 之后追加 `StreetLayout.Build_All(self)` / `Facade.Build_All(self)`，把 `Street`（3 个 `MeshInstance3D`）与 `Facade`（3 个）挂到 `World` 下；新增 `Get_Street_Root()` / `Get_Facade_Root()` 与常量 `STREET_NODE` / `FACADE_NODE`；`OBSTACLES` / `PEDESTRIANS` / 世界尺度 / 四个 layer **一字不动**（§4.1.2） |
 
 ### 2.3 世界坐标 ↔ Godot 坐标（写死，勿改）
 
@@ -451,6 +497,8 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | 文件 | 类型 | 职责 |
 |---|---|---|
 | `src/world/World.gd` | 挂 `World` | 世界时钟启动、体素/地面程序化生成、尺度日志、静态人物摆位（`BuildPersons()`，§4.9） |
+| `src/world/WorldLook.gd` | 静态工具（`RefCounted`，全 `static`） | **观感唯一入口**（task_38 Step 1b，§4.1.1）：三贴图 PBR 材质工厂（`Make_Ground_Material` / `Make_Voxel_Material` / `Make_Fallback_Voxel_Material`）+ `PanoramaSkyMaterial`（`Make_Sky_Material`）+ 太阳对齐与能量（`Apply_All` / `Get_Missing_Assets` / `Reset_Cache`）；世界空间 triplanar 参数集中在此；**缺资产只 `push_warning` 并降级，绝不 `push_error`** |
+| `src/world/StreetLayout.gd` / `Facade.gd` | 静态工厂（`RefCounted`，全 `static`） | 街道 / 立面唯一入口（task_38 Step 2，§4.1.2）：`Build_All(world)` / `Get_Root(world)`；`SurfaceTool` 合并成 3 + 3 个 `MeshInstance3D`，**零碰撞、不写 shader**；`Facade` 只经 `get_script_constant_map()` 读 `World.OBSTACLES`（不 preload `World.gd`，避免循环依赖） |
 | `src/common/WorldTransform.gd` | 静态工具 | **坐标转换唯一入口**（§7.3） |
 | `src/common/WorldClock.gd` | 静态工具 | 统一 `world_time`（单调墙钟） |
 | `src/vehicle/Vehicle.gd` | 挂 `Vehicle` | 装配、物理步进、位姿查询（§4.3） |
@@ -550,6 +598,220 @@ $VoxelWorld.set_cell_item(cell, 0)                        # 只填墙/障碍，�
 可见的 2 m 体素矮墙（`OBSTACLES` 前 4 项，layer 2）**保留不动**；空气墙与地面同层 layer 1
 （`Lidar2D` 的 `scan_mask = 1|2|4` 因此也能读到它）。碰撞面一律**贴世界边界平面、厚度向外**——
 车中心永远 `≥` 边界平面，`WorldToCell` 不会出负格坐标（§9.1 E24）。
+
+#### 4.1.1 运行时观感（task_38 Step 1b ✅）
+
+世界观感（地面材质 / 体素材质 / 天空 / 太阳）**全部运行时建**，唯一入口是 `src/world/WorldLook.gd`；
+`src/scenes/World.tscn` **零改动**（`git diff` 为空）。改的只是 3 个 `Material` + 1 个 `Sky` + `Sun` 的
+`transform` / `light_energy`：**不建节点、不动几何、不动 `OBSTACLES`、不动碰撞层**。
+
+`World.gd::_ready()` 的新顺序（`Apply_World_Look()` 必须在 `BuildVoxelWorld()` **之后**、
+`_Build_Bounds()` **之前**）：
+
+```gdscript
+func _ready() -> void:
+	WorldClock.EnsureStarted()
+	_read_scale_settings()
+	_log_scale()
+	BuildVoxelWorld()          # 内部 _make_mesh_library() 已通过 WorldLook 拿到体素材质
+	if LOOK_ENABLED:           # const LOOK_ENABLED := true（观感总开关）
+		Apply_World_Look()     # 地面材质 + 天空 + 太阳；返回 false = 至少一样降级
+	_Build_Bounds()
+	BuildPedestrians()
+	StreetLayout.Build_All(self)   # task_38 Step 2：路面 + 标线 + 路缘（3 个 MeshInstance3D，零碰撞）
+	Facade.Build_All(self)         # task_38 Step 2：窗 + 基座 + 压顶（3 个 MeshInstance3D，零碰撞）
+```
+
+> 上面两行在 **`BuildPedestrians()` 之后**：街道 / 立面只读 `OBSTACLES`、不依赖任何容器，
+> 顺序排在最后的好处是"任何更早的步骤失败也不会留下脏几何"（§4.1.2）。
+
+**贴图 → 槽位（全部 1a 已入库，本步一个字节都没动）**
+
+| 用途 | 文件（`res://assets/…`） | 尺寸 | 槽位 |
+|---|---|---|---|
+| 地面 albedo / normal / ORM | `textures/ground_paving_{color.jpg,nor.jpg,orm.png}` | 2048² / 2048² / 512² | `albedo_texture` / `normal_texture` / `orm_texture`（+ 三通道显式） |
+| 体素 albedo / normal / ORM | `textures/concrete_{color.jpg,nor.jpg,orm.png}` | 1024² / 1024² / 512² | 同上 |
+| 天空 | `hdri/sky_midday_2k.hdr` | 2048×1024 | `PanoramaSkyMaterial.panorama` |
+
+`textures/asphalt_*` / `curb_*` **Step 2 起已引用**：沥青路面 4 m 一循环（`ASPHALT_TILE_M`）、
+路缘石 1.5 m 一循环（`CURB_TILE_M`），另作压顶/基座的 `tint` 变体；接线细节与材质表见 §4.1.2。
+
+**唯一来源常量（`WorldLook`，别在别处再写一遍）**
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `GROUND_TILE_M` | `6.0` | 地面 6 m 一循环 ⇒ `uv1_scale = (1/6, 1/6, 1/6)`（实测 `0.166667`） |
+| `VOXEL_TILE_M` | `2.0` | 体素 2 m 一循环 ⇒ `uv1_scale = (0.5, 0.5, 0.5)` |
+| `SUN_ENERGY` | `0.7` | `Sun.light_energy`；`shadow_enabled` 不动 |
+| `SKY_ENERGY` | `0.5` | `PanoramaSkyMaterial.energy_multiplier`（亮度标定见下） |
+| `SUN_DIR` | `Vector3(-0.4313, 0.6817, 0.5910)` | **Godot 空间**、从场景指向太阳（`\|v\| = 1.000008`） |
+
+**`SUN_DIR` 是怎么来的（实测，不是估的）**：`sky_midday_2k.hdr` 最亮像素 `(1229, 267)`、峰值亮度
+`110947`；按等距柱面反解得 `elev = 42.98°`、`|azim| = 36.12°`。水平方位**取镜像那一侧**：
+按 `+azim` 落成 `(0.4313, 0.6817, 0.5910)` 时，10° 探针对准它的 `mean = 0.3083`、对准反方向
+`mean = 0.8642`（太阳在反方向）⇒ 翻 `x`。翻后实测：对准 `SUN_DIR` 的探针 `mean = 0.9499`、
+对准「同仰角反方位」的对照探针 `mean = 0.0471`（差 `0.9029`）——「天上只有一个太阳、且就是我们
+对齐的那个方向」由此可判。
+
+`Sun` 的对齐写法：`basis.z == +SUN_DIR`（`DirectionalLight3D` 沿局部 `-Z` 发光），
+即 `Transform3D(Basis.looking_at(-SUN_DIR, up), sun.global_position)`；实测
+`basis.z = (-0.431297, 0.681695, 0.590995)`、与 `SUN_DIR` 的 `dot = 1.000000`。
+
+**亮度标定（为什么有 `SKY_ENERGY`）**：HDRI 直出（`energy_multiplier = 1.0`）会过曝 —— 实测
+`check_camera_shots` 的 `R3-shot-01/02-not-blank` 近白像素占比 **0.523 / 0.531 > `WHITE_MAX(0.50)`**
+（该脚本阈值**不许改**，task_38 §二.5-6）。压到 `SKY_ENERGY = 0.5` 后：`0.000 / 0.197 / 0.139`，
+且地面纹理细节重新可见（`R4-shot-*-grid` 的 `contrast` 由基线 `42~56` 升到 `115~138`）。
+这一个旋钮同时压「背景天空」与「来自天空的环境光」（ambient 由 sky 的 radiance 立方图产生），
+`background_mode` / `ambient_light_source` 都不动。逐次实测值见 `tmp/task38/impl.md`「亮度调参」。
+
+**降级契约（缺资产只 warn，绝不 `push_error`）**
+
+- `_Load_Tex()` 先 `ResourceLoader.exists()` 再 `load()`（未 import 时 `load()` 会打 ERROR，E28）：
+  缺任一张 ⇒ `_Make_Pbr()` 返回 `null` ⇒ 地面保留 `.tscn` 的原单色材质、体素回落到
+  `Make_Fallback_Voxel_Material(VOXEL_COLOR)`（`albedo_color = 0.55/0.58/0.62`、`roughness = 0.85`，
+  与 task_37 逐值相同）、天空保留 `ProceduralSkyMaterial`。
+- 缺失清单进 `WorldLook.Get_Missing_Assets()`；`_Warn_Missing_Once()` 只 `push_warning` **一次**。
+- `World.Apply_World_Look()` 返回 `false` 时打一行 `[world] look degraded ...`，**不中断世界构建**。
+
+**自检（`src/tests/check_world_look.gd`）**：**S 组 30 项**（headless 也全跑）+ **R 组 13 项**
+（仅真渲染器；`Can_Capture() == false` 时打印 13 条 `[skip]` 且**不计入 total**）。
+`headless → total=30 failed=0`，`Xvfb → total=43 failed=0`。R 组落盘 3 张 **1600×900** JPEG 到
+`tmp/task38/shots/`（`look_00_ground_closeup` / `look_01_building_side` / `look_02_uav_top`，
+实测 `175 615` / `187 989` / `269 011 B`）+ 2 张 160×90 探针（`probe_sun` / `probe_anti`）。
+
+**G6 人眼复核的三条实测口径（供后续改观感时对照）**
+
+1. 地面：铺装缝**每 1.5 m** 一条（`ground_paving_color.jpg` 是 `4×4` 块 / 图 ⇒ `4 × 1.5 = 6 m` 正好一个
+   triplanar 循环）；拿同一张 UAV 图里的 `building_a`（10 m 宽）当尺子复核，缝距 / 房宽 ≈ `1.5 / 10`。
+2. 体素：墙面主周期 **1.0 m**（= 2 m 图幅里的模板缝，列灰度自相关 `lag 161 px → 0.585`），
+   0.5 m 处只有 `0.208`（纹理自身的半格浅痕）⇒ **没有**「每格 0.5 m 一张图」的碎块感
+   （若 `uv1_world_triplanar` 失效，主周期会塌到 0.5 m 且强度拉满）。
+3. 单太阳：天空亮斑方向 `dot(SUN_DIR) → 探针 0.9499`，反方位 `0.0471`；物体阴影一律背向该方向。
+
+---
+
+#### 4.1.2 街道与立面（task_38 Step 2 ✅）
+
+**为什么是代码建**：`World.tscn` 必须 `git diff` 为空（§三.5），所以街道与立面全部在 `_ready()` 末尾由
+`World.gd` 调两个静态工厂建出来，与 `Bounds` / `Persons` / `Pedestrians` 同策略。**全部纯渲染、零碰撞**：
+`Street` / `Facade` 子树里 `CollisionObject3D` = `CollisionShape3D` = 0，且 `MeshInstance3D` 根本没有
+`collision_layer` 属性（`get("collision_layer") == null`，§9.1 E31-①）。
+
+```
+Street (Node3D，运行时建，identity)                                     [task_38 Step 2]
+├── Road     (MeshInstance3D)  1 surface /  2 个四边形（主路 → 支路，顺序固定）
+├── Markings (MeshInstance3D)  1 surface / 28 个四边形
+└── Curbs    (MeshInstance3D)  1 surface / 35 个四边形（7 段 × 5 面，**无底面**）
+
+Facade (Node3D，运行时建，identity)                                     [task_38 Step 2]
+├── Windows (MeshInstance3D)  1 surface / 60 个四边形
+├── Plinths (MeshInstance3D)  1 surface / 44 个四边形（11 栋非边界障碍 × 4 面）
+└── Caps    (MeshInstance3D)  1 surface / 15 个四边形（15 个障碍各 1 个）
+```
+
+三个 mesh 一律 `cast_shadow = OFF`、`material_override == null`（材质挂在 surface 上）、`transform == IDENTITY`
+（顶点直接烘成 Godot 坐标）。每四边形 **4 顶点 + 6 索引**、不焊接、不与别的四边形共享（§9.1 E31-②）——
+自检因此能用 `verts.size() == 4 × quads` 从 mesh 反推函数，不读任何自报数字。
+
+**路网常量（`StreetLayout`，世界坐标 Z-up / 米）**
+
+| 元素 | 范围 | z | 判据（§三.6） |
+|---|---|---|---|
+| 主路（东西） | `x∈[4,124]`、`y∈[60,68]` | 顶面 **0.01** | AABB `(120, 8)`、`z = 0.01 ± 0.005` ✅ |
+| 支路（南北） | `x∈[44,52]`、`y∈[68,92]` | 顶面 **0.01** | AABB `(8, 24)` ✅（北端止于 `wall_c`，T 型路口） |
+| 主路中心虚线 | `y = 64±0.075`、`x∈[4,124]`，3 m 线 + 3 m 空 | 0.03 | **18 段**（∈ 20±2）✅；跳过 `x∈[44,52]`（路口）与 `x∈[56,60]`（斑马线） |
+| 主路边线 | `y = 60.30` / `67.70`，`120 × 0.15` 实线 | 0.03 | **2 条** ✅ |
+| 支路中心虚线 | `x = 48±0.075`、`y∈[68,92]`，3 m 线 + 3 m 空 | 0.03 | **4 段**（∈ 4±1）✅ |
+| 斑马线 | `x∈[56,60]` 跨 `y∈[60,68]`，白条 0.5 + 间隔 0.5 | 0.03 | **4 条** `0.5 × 8.0`，起点 `56/57/58/59` ✅ |
+| 标线合计 | — | — | **28 个四边形**，全部落在两条路面矩形内（无一落到地面）✅ |
+
+主路虚线实测起点：`4,10,16,22,28,34,40,52,64,70,76,82,88,94,100,106,112,118`（`46/58` 两段被跳过）。
+
+**"路面 2 + 标线 1 = 3" 怎么解的**：§三.6-3 的"路面 2 + 标线 1"指**2 块路面几何**（主路 + 支路）与
+**1 块标线**。本实现把两块路面合进**同一个** `Road` mesh（2 个四边形、顺序固定：主路 → 支路），
+于是 `Street` 下 `MeshInstance3D` 总数 = **3**，同时满足"路面 2 + 标线 1 = 3"与"总数 ≤ 3"两条；
+路缘单列第 3 个节点，仍不超上限。
+
+**路缘常量（7 段 × 5 面 = 35 个四边形，高 0.15 / 宽 0.2）**
+
+| 段 | x 范围 | y 范围 | 断开依据 |
+|---|---|---|---|
+| south_west / south_east | `4~56` / `60~124` | `60~60.2` | 斑马线 `x∈[56,60]`（降坡口，**只断开、不做坡道**） |
+| north_west / north_mid / north_east | `4~44` / `52~56` / `60~124` | `67.8~68` | 支路口 `x∈[44,52]` 与斑马线 `x∈[56,60]` |
+| branch_west / branch_east | `44~44.2` / `51.8~52` | `68~92` | 与主路北缘在 `(44,68)` / `(52,68)` 成 L 角 |
+
+面 = 顶面（`z = 0.15`）+ 4 个侧面（`z∈[0,0.15]`），**不出底面**：底面与地面 `z=0` 共面会闪
+（`curb-profile` 断言"朝下的四边形 = 0"）。**没有坡道几何**——§三.5 只要求"断开"。
+
+**立面常量（`Facade`）**
+
+| 元素 | 几何 | 数量 | 判据 |
+|---|---|---|---|
+| 窗 | `bay 2.4`、窗 `1.8 × 1.6`、首层窗台 `0.9`、层高 `3.2`，墙外偏移 **0.01** | **60** | `window-total` + 逐栋 `window-per-obstacle` + 逐面 `window-four-walls` ✅ |
+| 基座 | 每栋 4 面竖片，`z∈[0,0.6]`，外扩 `0.01`、沿面两端各多伸 `0.01`（包角） | **44**（11 栋） | `plinth`（距墙面正好 0.01 且朝外）✅ |
+| 压顶 | 每栋顶面水平片，外扩 `0.05`，`z = h + 0.01 + 0.001 × 障碍下标` | **15**（含 4 面边界矮墙） | `cap`（15 个 z 两两不同 ⇒ 相邻压顶不共面）✅ |
+
+逐栋窗数（实现与自检各自独立复算，结果必须一致）：
+
+| 障碍 | size (x,y,h) | 层数 | ±x 面窗/面 | ±y 面窗/面 | 窗数 |
+|---|---|---|---|---|---|
+| wall_south / north / west / east | — / 2 | —（跳过） | — | — | **0**（只做压顶） |
+| building_a | 10 × 8 × 4 | 1 | 3 | 4 | **14** |
+| building_b | 8 × 10 × 5 | 1 | 4 | 3 | **14** |
+| wall_c | 30 × 1 × 2 | 0 | 0 | 12（不开） | **0** |
+| wall_d | 1 × 24 × 3 | 1 | 10 | 0（1 m 端面放不下） | **20** |
+| pillar_e | 2 × 2 × 8 | 2 | 1 | 1 | **8** |
+| step_f1 / step_f2 | 8×8×1 / 6×6×2 | 0 / 0 | — | — | **0 / 0** |
+| step_f3 | 4 × 4 × 3 | 1 | 1 | 1 | **4** |
+| block_1 / 2 / 3 | 1 × 1 × 1 | 0 | — | — | **0** |
+| **合计** | — | — | — | — | **60** |
+
+**层数为什么加"一档下限"**：§三.3 的字面公式 `floor((h − 0.9) / 3.2)` 会让 `h = 4` 的 `building_a` 算出
+**0 层** ⇒ 全表只剩 `building_b` / `pillar_e` 有窗，直接违反 §三.6-4「窗数量 > 0、每栋四壁都有窗」。
+`Floors_Of()` 因此在字面公式后加一条下限：`h ≥ SILL + WIN_H = 2.5 m` 却不足一整层时按 1 层算。
+实测层数 `4→1 / 5→1 / 8→2 / 3→1 / 2→0 / 1→0`；**该下限只影响 4 m 与 3 m 两档，不影响 5 m / 8 m**。
+`check_street` 的 `window-four-walls` 用同一公式**独立复算**，不做自证。
+
+**深度分层（防 z-fighting）**：地面 `z=0` / 路面 `z=0.01` / 标线 `z=0.03`。`near = 0.05` 的 D24 相机在
+64 m 处深度精度 ≈ 4.9 mm ⇒ 路面对地面有 2 倍余量，标线对路面 4 倍余量（1.7 m 眼高下 0.17° 视差不可见）。
+路面 `z` 被 §三.6-1 钉死 `0.01`，**要再狠只能抬标线**。
+
+**三处已知的"叠在一起但不闪"**：
+
+1. **边线 × 斑马线**：边线在 `x∈[56,60]` 与白条共面重叠（`markings-skip` 实测 8 处）。同材质、同色、
+   同 `z` ⇒ 像素输出完全相同，**不是 z-fighting**（z-fighting 需要"两个不同的结果在抢同一深度"）。
+2. **嵌套退台 `step_f1~f3`**：三者实心互相嵌套，`step_f3` 的 4 扇窗在 `z∈[0.9,2.0]` 段被 `step_f2` 的实体
+   包住（只有 `2.0~2.5` 露出，视觉上像小高窗），`step_f1/f2` 的压顶环在对方体积内被遮（正是要的退台阶梯感）。
+   **不为嵌套做特例**（否则要引入遮挡计算）；计数仍按全量算（60 / 15）。
+3. **窗/基座薄片 vs 墙体**：薄片只沿法线外扩 `0.01 m`，不与墙面共面；体素墙是 0.5 m 一格的 `GridMap`，
+   墙面格心在 `x = 24.25` 这类位置，薄片平面在 `x = 23.99`，**相距 1 cm 以上**。
+
+**贴图接线（0 字节增量：`assets/` 仍是 `24 306 445 B`）**
+
+| 用途 | 材质工厂 | 循环 / 变体 |
+|---|---|---|
+| 路面 | `WorldLook.Make_Pbr_Material("asphalt", ASPHALT_TILE_M)` | 4 m（1K 图 ⇒ 256 px/m） |
+| 路缘 | `WorldLook.Make_Pbr_Material("curb", CURB_TILE_M)` | 1.5 m |
+| 基座 | `WorldLook.Make_Pbr_Material("concrete", VOXEL_TILE_M, 0.7)` | 2 m（与体素墙同源，接缝连续） |
+| 压顶 | `WorldLook.Make_Pbr_Material("curb", CURB_TILE_M, 0.6)` | 1.5 m |
+| 窗 | 纯参数 `StandardMaterial3D`（albedo 0.07 / roughness 0.15 / metallic 0.3 / `CULL_DISABLED`） | — |
+| 标线 | 纯参数白（`Color(0.85,0.85,0.83)`、roughness 0.55、无 metallic） | — |
+
+> 薄片**没有 UV** ⇒ 材质只能经 `WorldLook.Make_Pbr_Material`（内部 `uv1_triplanar + uv1_world_triplanar`），
+> 否则整面只采一个 texel（看起来像纯色，自检也抓不到；§9.1 E31）。
+
+**自检：`src/tests/check_street.gd`（S 组 28 + R 组 13）**
+
+`headless → total=28 failed=0`（R 组 13 条 `[skip]` 且不计入 total），`Xvfb → total=41 failed=0`。
+R 组落盘 3 张 **1600×900** JPEG 到 `tmp/task38/shots/`：`street_00_junction`（站在支路上看 T 型路口，
+实测 `261 789 B`）/ `street_01_building_side`（`building_a` 西南两面 3/4 视角，`172 797 B`）/
+`street_02_uav_top`（20 m 俯视路口，`285 920 B`）。R 组三条实测口径：
+
+- `windows-dark`：屏内且 ≥ 12 px 的窗 **11** 个，其中平均亮度 < 0.25 的占 **0.91**、聚合均值 **0.1055**
+  （唯一偏亮的那扇 `0.277` 是镜面打到太阳方向的高光，物理正确）。
+- `window-clean`：99 个采样点里「偏离本窗均值 > 0.12」的占 **0.0000** ⇒ 窗/墙交界没有互穿斑驳。
+- `crosswalk-contrast`：白条均值 **0.9379** − 间隔均值 **0.4727** = **0.4652**（判据 ≥ 0.10，4.7 倍余量）
+  ⇒ 斑马线真的画出来且与沥青分得开。
 
 ### 4.2 `src/scenes/ObserverCamera.tscn`（Step 3 ✅）
 
@@ -2339,6 +2601,9 @@ const DEFAULTS := {
 | E28 | **glTF 内嵌贴图会被导入器抽取成 `.glb` 旁的独立贴图文件**（human_model Step 4 实测）：Godot 4.7.2 的场景导入参数默认 `gltf/embedded_image_handling=1`（Extract）→ `assets/humans/<name>/model.glb` 导入后**额外生成** `model_<glTF 内图名>.jpg/.png`（本资产是 `model_rp_*_dif.jpg` + `model_rp_*_norm.png`）以及各自的 `.import`。① 这 4 个文件**必须与 `.glb`、`.glb.import` 一起提交** —— 只提交 `.glb` + `.import` 时，任何人在干净检出上重导都会 `ERROR: Cannot open file …_dif.jpg`；② 运行 / 自检**之前必须先** `godot --headless --path orion-simulation-world --import`，`.godot/` 缓存缺失时 `load(model.glb)` 返回 `null`（.tscn 仍能加载但 `Body` 为 `null`）——实测 `Person` 节点仍被建出却是**空壳**（0 mesh，画面里看不到人），引擎打 **12 行** `ERROR: Cannot open file 'res://.godot/imported/…*.scn'`，`check_person_assets` 报 **`total=32 failed=14`**；③ 反过来把参数改 `2`（Basis Universal 内嵌）能换回“只有 `.glb`”，但那是**有损压缩**、对下游 YOLO 判据是负收益，本支线不采用 | 漏提交 sidecar → 别人重导即 ERROR 或贴图全丢；忘了先 `--import` → `Person.tscn` 的 `Body` 拿不到 glb、世界里 0 个人，而 `--quit` 仍可能 EXIT=0（“0 ERROR”假红）。执行者：`src/tests/check_person_assets.gd` 的 `asset-loads-*`（缓存缺失即红）/ `asset-material-*` 与 `scene-material`（贴图真在）/ `asset-sha256-*`（字节未被悄悄替换）+ `World.gd::BuildPersons()` 的 `ResourceLoader.exists()` 守护（缺场景只 warn） || E28 | **glTF 内嵌贴图会被导入器抽取成 `.glb` 旁的独立贴图文件**（human_model Step 4 实测）：Godot 4.7.2 的场景导入参数默认 `gltf/embedded_image_handling=1`（Extract）→ `assets/humans/<name>/model.glb` 导入后**额外生成** `model_<glTF 内图名>.jpg/.png`（本资产是 `model_rp_*_dif.jpg` + `model_rp_*_norm.png`）以及各自的 `.import`。① 这 4 个文件**必须与 `.glb`、`.glb.import` 一起提交** —— 只提交 `.glb` + `.import` 时，任何人在干净检出上重导都会 `ERROR: Cannot open file …_dif.jpg`；② 运行 / 自检**之前必须先** `godot --headless --path orion-simulation-world --import`，`.godot/` 缓存缺失时 `load(model.glb)` 返回 `null`（.tscn 仍能加载但 `Body` 为 `null`）——实测 `Person` 节点仍被建出却是**空壳**（0 mesh，画面里看不到人），引擎打 **12 行** `ERROR: Cannot open file 'res://.godot/imported/…*.scn'`，`check_person_assets` 报 **`total=32 failed=14`**；③ 反过来把参数改 `2`（Basis Universal 内嵌）能换回“只有 `.glb`”，但那是**有损压缩**、对下游 YOLO 判据是负收益，本支线不采用 | 漏提交 sidecar → 别人重导即 ERROR 或贴图全丢；忘了先 `--import` → `Person.tscn` 的 `Body` 拿不到 glb、世界里 0 个人，而 `--quit` 仍可能 EXIT=0（“0 ERROR”假红）。执行者：`src/tests/check_person_assets.gd` 的 `asset-loads-*`（缓存缺失即红）/ `asset-material-*` 与 `scene-material`（贴图真在）/ `asset-sha256-*`（字节未被悄悄替换）+ `World.gd::BuildPersons()` 的 `ResourceLoader.exists()` 守护（缺场景只 warn） |
 | E29 | **`--fixed-fps 60` 只给"自己数帧"的自检用，墙钟驱动的端到端**绝对不能**带**（task_35 Step 5 实测）：它在 headless 下会**关掉实时同步**，实测跑到 **21~37 倍速**（`--max-fps 60` 也救不了）。判据"`\|d\| ≈ v×t`"会因此必红（10 s 墙钟 = 360 s 世界时间，人撞到东侧空气墙）。**正确姿势**：① 自检脚本（`await physics_frame` 自己数帧、需要 `delta` 恒 = 1/60）→ `--headless --fixed-fps 60`；② Python / 墙钟驱动的端到端 → `--headless --max-fps 60`（实测 ratio 1.00、pose 10.2 Hz），并且**速率类断言一律用 pose 的 `world_time`** 当时间基（只有"300 ms 超时"那条必须用墙钟，因为世界侧 `_Tick_Pedestrian_Timeouts` 用的就是 `Time.get_ticks_msec()`）。反例与本轮实测见 §4.11.2 |
 
+| E30 | **世界观的四条硬约束**（task_38 Step 1b 实测）：① `uv1_scale` 是**乘子**不是"米"——世界空间 triplanar 的采样坐标是 `(MODEL_MATRIX * vec4(VERTEX,1)).xyz * uv1_scale + uv1_offset`，所以 **6 m 一循环 = `1/6`**、2 m = `1/2`（写 `6.0` 会让纹理每 1/6 m 重复一次）；② `Environment` / `Sky` 是 `.tscn` 里的**共享 SubResource**，运行时必须先 `duplicate()` 再改并回写 `WorldEnvironment.environment`——直接改原对象会让**同一进程里第二次 `instantiate()` 拿到已被改过的环境**，而 `World.tscn` 仍显示 `ProceduralSkyMaterial`，极难查；③ 天空换成 HDR panorama 后 `background_mode` 必须仍是 **`BG_SKY(2)`**、`ambient_light_source` 必须仍是 **`AMBIENT_SOURCE_SKY(3)`**（`check_world` 的 `environment-sky` 与 `check_world_look` 的 `env-modes` 双重守卫），**不要**改成 `AMBIENT_SOURCE_COLOR`；④ `--headless`（dummy 渲染器）下 `Can_Capture()==false`，出图断言必须**整体 skip 且不计入 total**，并且照旧**先闸后 await**（E26-③） | ①纹理尺度静默错 6/2 倍且画面只是"看起来密一点"；②同进程复用世界时环境被"串味"，`check_*` 之间互相污染；③环境光来源一改，`check_world` 立刻红且天空不再照亮场景；④headless 下 await `frame_post_draw` 会永久挂住（看起来像死循环），或把 `total` 冲成与基线不一致。执行者：`src/tests/check_world_look.gd` 的 `ground-scale` / `voxel-scale`（`1e-6` 容差、且必须 `≠1`）/ `env-modes` / `sky-material` / `fallback-and-idempotent`（二次 `Apply_World_Look()` 必须换回**同一个**材质实例）+ `src/tests/check_world.gd` 的 `environment-sky` |
+| E31 | **街道/立面这五条坑**（task_38 Step 2 实测）：① `MeshInstance3D`（`GeometryInstance3D`）**没有 `collision_layer` 属性**——`get("collision_layer")` 返回 `null`，零碰撞断言必须把 `null` 也算 0，不能写 `int(mi.collision_layer) == 0`；② `SurfaceTool` 合并薄片时必须 **4 顶点 + 6 索引**（`add_index(base+0/1/2, base+0/2/3)`，`base` 自己累加）：若按 6 顶点/四边形提交，`verts.size() / 4` 会算出 **1.5 倍**四边形数（实测 28 标线被数成 42、60 窗被数成 90、35 路缘面被数成 52）；③ **Godot 的正面是顺时针绕序**，`generate_normals()` 给出的法线 = `(c−a)×(b−a)`，与"右手系 `(b−a)×(c−a)`"**反号**——按右手系排绕序会让路面/路缘顶面的法线朝**地下**（实测顶面法线 `-Y`、路缘顶面数 0、朝下"底面"数 11），面被背面剔除；本工程统一在 `_Add_Quad()` 里用 `(c−a)×(b−a)`，且 `_Quad_Up` 的四角按"从上方看逆时针"给；④ `CameraSensor` **只在 `Capture_Jpeg()` 里** `_Sync_View_Transform()`：挪 holder 不会同步镜头，任何 `unproject_position` 断言必须**紧跟在同一张抓拍之后**（否则用上一张的机位投影，实测斑马线对比度假红成 `0.0014`，修好后 `0.4652`）；⑤ `World.OBSTACLES` 是 `const`，不在属性表里 ⇒ `Facade` 只能经 `world.get_script().get_script_constant_map()` 读（**不能** `preload("World.gd")`，`World.gd` 已 preload `Facade.gd`，会形成循环依赖） | ①零碰撞断言永远红或永远绿；②"四边形数"自证法失效，条数断言全体错位；③几何看不见/受光反了，而自检若只数条数则全绿；④出图类断言在"对的位置"上采到"错的机位"，红绿都不可信；⑤循环 preload 让整个 World 解析失败。执行者：`src/tests/check_street.gd` 的 `street-zero-collision` / `facade-zero-collision`（容 `null`）、`road-top-z`（附带断言法线朝上）、`curb-profile`（朝下四边形数 = 0）、`window-total` / `crosswalk-contrast`（`verts.size() == 4 × quads` 反推）、`windows-dark`（紧跟 shot-01 抓拍） |
+
 ### 9.2 命名规范
 
 | 对象 | 规范 | 例 |
@@ -2427,6 +2692,7 @@ Modified Date ： YYYY-MM-DD
 
 | task_35-3 | `src/world/World.gd`（**删**：`WALKER_SCENE` / `WALKERS_NODE` / `WALKERS` / `_walkers_root` / `BuildWalkers()` / `GetWalkersRoot()`；**加**：`PEDESTRIAN_SCENE` / `PEDESTRIANS_NODE` / `PEDESTRIANS` / `_pedestrians_root` / `BuildPedestrians()` / `GetPedestriansRoot()`；`_ready()` 里 `BuildWalkers()` → `BuildPedestrians()`，位置不变）、`src/tests/check_person_walk.gd`（**20 -> 15**：删 C 旧 3 / D 5 / R 6，加 C 新 3）、`src/tests/check_person_walk_shots.gd`（**总数 4 / 14 不变**，主语 `walker_01` -> `pedestrian_01`、驱动 `Set_Progress_M()` -> 一次 `SetCommand({"v": 1.26, "dir": 0.0})`、R7 尺子 `Δs` -> `Δx`；**step.md 名单之外但验收必需** —— 旧文件强依赖 `GetWalkersRoot()`，不改必红）、`COMPONENTS.md`（§2 / §2.1 / §2.2 / §3 / §4.1 / §4.10-⑤⑧ / **§4.11.1** / §10 / §11 / 附） | Step 3 世界布局：**世界不再自己让人走**，交给人（外部）驱动。`World.WALKERS`（1 条 44 m 闭合矩形路径）/ `BuildWalkers()` / `GetWalkersRoot()` 与 `Walkers` 容器**整节删除**，换成 `PEDESTRIANS`（**只有**出生点 + 初始朝向 + 数量，**无路径 / 无巡逻 / 无计时 / 无速度**）+ `BuildPedestrians()`（先摘同名旧容器再建，幂等）+ `GetPedestriansRoot()`；容器名 `Pedestrians` **逐字 = `WebSocketManager.PEDESTRIANS_NODE`**（与动态装配的人共用）。`PERSONS` / `BuildPersons()` **一字不动**；`Person.gd` / `Person.tscn` / `PersonWalking.tscn` / `World.tscn` / `project.godot` / `Pedestrian.*` / `WebSocketManager.gd` / 其余 13 个自检**一行未改**。**2 个世界预置 idle 行人**：`pedestrian_01` 世界 `(44,96)` yaw 0 / `pedestrian_02` `(52,102)` yaw 180`（互距 10.000 m）；选点判据逐条实测（离最近障碍 3.000 / 8.062 m；离边界 32 / 26 m；离 `SPAWN_WORLD` 37.736 / 39.850 m；离 `PERSONS` ≥ 25.6 m；离 `check_lidar` 热区 `(60,90)` **17.088 / 14.422 m** —— 全部 > 12 m range；离 `check_camera_shots` 停车点 `(60,84)` 20.000 / 19.698 m；离协议 spawn 点 `(64,56)` / K1 `(70,70)` / K16 `(72,78)` 均 > 30 m）。**无外部驱动时人站着不动 = 预期**（`speed_scale = 0.0`、仍 `is_playing`）。`check_person_walk`：**`total=15 failed=0`**，**headless 与 Xvfb 两档同值**（A 8 / B 4 逐字保留 + C 新 3：`world-pedestrians-count`（容器名 / 父 / 孩子数 2 / 名字逐字 / `Pedestrian.tscn` / `Pedestrian.gd` / `SetCommand`+`GetPose` 契约面）、`world-pedestrians-spawn-clear`（五条判据全过，`bad=[]`）、`world-pedestrians-idempotent`（`nodes 40->40`、同名容器 1 个、孩子数 2））。`check_person_walk_shots`：**headless `[skip]` ×10 + `total=4 failed=0`**、**Xvfb `total=14 failed=0`**（三张 `walk_t{0,1,2}.jpg` = `27 857 / 28 321 / 28 614 B`、SOF0 均 1280×720；`x = 44.000 / 44.840 / 45.680 m`、`frames = 0 / 40 / 80`、`Δx = 0.8400 m`、`Δx/Δframes = 0.021000 = v/60`（偏差 **0.00%**）；框 `P(523.7,276.2) S(119.2,173.0)` → `P(583.0,273.2) S(114.7,187.9)` → `P(654.8,269.5) S(107.2,206.2)`；`h_frac 0.240 / 0.261 / 0.286`；框水平位移 `57.0 / 68.1 / 125.1 px`；框内/框外 `0.0962/0.0001 (996.5×)`、`0.0666/0.0002 (406.4×)`、`0.0881/0.0002 (545.4×)`；64×64 裁剪差 `0.06694 / 0.07616 / 0.08532`；源码 lint `Set_Progress_M=0 / _ped.global_position=0 / SetCommand=1`）。**16 个既有自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `camera_sensor 18` / `camera_shots 18` / `lidar 48` / `person_assets 32` / `person_shots 7` / `pedestrian 40`，全部 `failed=0`、0 ERROR、EXIT=0）+ `ws_manager` **headless 76 / Xvfb 77** 逐字不变（K1/K2/K13/K15/K16 全绿；`[ws] pedestrians root created` **0 行** —— manager 直接复用世界已建的同名容器，`K2 parent=Pedestrians` 即证据）。`--quit` / `--quit --fixed-fps 60` 均 EXIT=0 且 **0 ERROR**，日志：`[world] persons built: 2 (2 specs)` + `[world] pedestrians built: 2 (2 specs, idle until driven)`、`walkers built` **0 行**、`[pedestrian]` 告警 **0 行**；`--import` EXIT=0 且 0 ERROR。**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不改** `World.tscn` / `project.godot` / `PERSONS` / `pleiades-*` / `Task/` / `programs/` / 根 Cargo；**不执行** `git add` / `git commit` |
 | task_35-5 | `src/tests/check_pedestrian_physics.gd`（**新建**，**22 项**：S 7 / P 8 / L 7）、`src/tests/check_pedestrian_shots.gd`（**新建**，**14 项**：A 4 / R 10；headless 档 4 + 10 `[skip]`）、两个自动生成的 `.gd.uid`、`COMPONENTS.md`（顶部状态段 / §1.4 / §3 脚本表两行 / **§4.11.2** / §9.1 **E29** / §11）；工程外 `tmp/task35/{e2e_drive.py,s5_e2e.sh,s5_checks.sh,s5_metrics.md,e2e_report.md,impl.md,pose_*.csv,shots/ped_*.jpg,logs/*}` | Step 5 **端到端验收**（**生产代码一字未改**，Step 1~4 的产出物全部当黑盒）。**① 直行**：Python → WS → 世界，10.100 世界秒位移 10.102 m（`v_eff=1.0003 m/s`，+0.03%）、`yaw_max=0.000°`、`Δy=0.0000 m`、pose 10.10 Hz。**② 转弯**：`dir` 阶跃 0→π/2，只用**严格内部点**拟合得 `180.0 °/s`（被 clamp 的端点会把 180 压成 160.7 —— 第一版实测）、`conv=0.600 s`（中间经过 15/33/51/69/87 五个 yaw ⇒ 不是瞬转）、Kasa（**零 numpy**，手写 3×3 高斯消元）`r_fit=0.3199 m` vs `v/ω=0.3183 m`（+0.5%）、弧长差 −2.5%。**③ 超时**：停发后 `stop_latency=0.384 s`（= 世界 300 ms 阈值 + 一条 pose 量化）、冻结 1.100 世界秒位移 **0.000000 m**、末条 `v=(0,0)`、世界日志 `pedestrian idle` **恰 1 行**。**④ 人撞车**：车静在世界 `(60,84)` 朝东、人自 `(62.5,84)` 以 1.2 m/s 正碰后**再推 300 物理帧** —— 逐帧 `gap_min=0.019952 m`（= 一帧步长 0.02，≥ −1 mm 不穿透）、**挡停**（最后 60 帧前进 0.000000 m、横向 0.000000 m）、**车位移 0.000000000 m**、`Δyaw=0`、`min(ped.x−car.x)=0.4200 m`（没被挤穿）；再用 0.05 m/s 贴实 60 帧量得真实车头→胶囊表面 `0.1508 m`（`\|0.150−v\|=0.0008`）。**⑤ 雷达可见**：雷达装**车头**（`x=0.15`、`z=0.6`）扫 `ScanOnce()`，±45° 扇区最近 `2.2500 m` = 2.50 − 0.25（差 **0.0000**）、`ranges[0]` 与该最小值一致、扇区 11 条命中（≈11.5° 张角 = 一个人的宽度）、后向扇区只有 11.31 m 外的 `wall_c`、把人挪到 10 m 外变 `9.7500 m`。**⑥ 三帧真渲染**（Xvfb `:99` + llvmpipe，**绝不 `--headless`**、必带 `--audio-driver Dummy`）：`tmp/task35/shots/ped_{walk,turn,stop}.jpg` = 31 123 / 31 317 / 32 122 B、SOF0 均 1280×720、`var 0.0235~0.0242`、逐字节差 0.669/0.681/0.682、框内灰度差 0.068~0.100、框水平中心 **74.2 / 141.6 / 67.5 px**、`h_frac 0.375/0.525/0.530`；`R7` 此帧 `yaw=90.00°` 且转向段 60 Hz 逐帧拟合 **180.0 °/s**；`R8` 冻结 15 帧 `Δpose=0.000000 m` + `speed_scale=0.000` + 停帧与前两帧各差 ≥ 67 px。**回归**：`bash tmp/task35/s5_checks.sh` → `FAILS=0 / ALL CHECKS GREEN`（`--quit` EXIT=0/0 ERROR + **21 项 headless** + **5 项 Xvfb**），既有 19 项 `total` 逐字不变（`check_ws_manager` 按本文 §1.4 的 **76 / 77**，非 plan.md §2.4 过期的 73）。**不做** SLAM / 建图 / 动态障碍 / 避让 / YOLO / 图传；**不碰** `pleiades-*` / `Task/` / `programs/` / 根 Cargo；**未起停 Xvfb**（用现成 `:99`）；**不执行** `git add` / `git commit` |
+| task_38-2 | `src/world/StreetLayout.gd`（**新建**）、`src/world/Facade.gd`（**新建**）、`src/tests/check_street.gd`（**新建**）+ 两个自动生成的 `.gd.uid`、`src/world/World.gd`（**只加不删**：2 个 preload / `STREET_NODE`·`FACADE_NODE` / `_ready()` 末尾两行 / `Get_Street_Root`·`Get_Facade_Root`）、`src/world/WorldLook.gd`（+`ASPHALT_TILE_M`·`CURB_TILE_M`·`FALLBACK_COLORS`·`Make_Pbr_Material()`，既有函数一字不改）、`COMPONENTS.md` | Step 2 街道几何 + 建筑立面（**纯渲染、零碰撞、`.tscn` 零改动、0 字节新资产**）：主路 `(120×8)` / 支路 `(8×24)` 顶面 `z=0.01`；标线 **28** 个四边形（主虚线 **18** ∈ 20±2 / 边线 **2** / 支虚线 **4** ∈ 4±1 / 斑马线 **4**）；路缘 **7 段 × 5 面 = 35**（高 0.15，斑马线与 `x∈[44,52]` 路口断开，**无底面**）；立面 **窗 60 / 基座 44 / 压顶 15**，`Street` 与 `Facade` 各 **3 个 `MeshInstance3D`**。`check_street.gd`：**S 组 28 项**（headless 也全跑）+ **R 组 13 项**（仅真渲染器，headless 打印 13 条 `[skip]` 且不计入 total）→ `headless total=28 failed=0` / **`Xvfb total=41 failed=0`**，两条均 `SELF-CHECK OK` + `EXIT=0` + 0 ERROR；落盘 3 张 1600×900 街景（`261 789 / 172 797 / 285 920 B`），斑马线白条均值 `0.9379` vs 间隔 `0.4727`（差 `0.4652` ≥ 0.10）、屏内窗 11 个中暗窗占 `0.91` 聚合均值 `0.1055`、窗内偏窗均值 > 0.12 的采样占 `0.0000`。**18 个既有 headless 自检断言数与基线逐字一致**（`project` 无 total / `world 26` / `camera 32` / `camera_sensor 18` / `camera_shots 18` / `vehicle 40` / `diff_drive 41` / `quadrotor 48` / `ws_manager 76` / `lidar 48` / `pose 23` / `bounds 12` / `models 24` / `sensor_models 29` / `pedestrian 40` / `pedestrian_physics 22` / `pedestrian_shots 4` / `world_look 30`，全 `failed=0`）；Xvfb 档 `camera_shots 35` / `camera_sensor 28` / `pedestrian_shots 14` / `world_look 43` 同样 `failed=0`（观感像素随沥青/立面自然漂移，阈值未放宽）。`--import` / `--quit` 均 EXIT=0 且 0 ERROR；`World.tscn` md5 不变、`assets/` 仍 `24 306 445 B`。**不碰** `OBSTACLES` / `PEDESTRIANS` / 世界尺度 / 碰撞层；**不写** shader；**不做**点缀物（红绿灯/路牌/车/树）、不做坡道、不做夜间发光窗；**不执行** `git add` / `git commit` |
 
 > **task_31 Step 1 追加**（不属于 task_30 的 Step 1~8）：`pose` 下行（10 Hz，走底盘连接）+ `src/tests/check_pose.gd`（**23 项断言** / `total=23 failed=0` / `SELF-CHECK OK`）。改动文件仅 `src/net/{WireProtocol,WebSocketManager}.gd`、新建 `src/tests/check_pose.gd`、本文；`pleiades-sim/**` 一行未动（消费在 task_31 后续 step）。
 
@@ -2483,6 +2749,11 @@ Step 1（本文 + 骨架）
 | `src/tests/check_lidar.gd` | ✅ Lidar2D 自检（Step 8；`SELF-CHECK OK` + `exit 0`，**48 项断言**：场景形态 / 目录 / 装配 / 一圈几何 / 10 Hz 时序 / 帧格式 / 边界与白盒） |
 | `src/tests/check_pose.gd` | ✅ 位姿下行自检（task_31 Step 1；`SELF-CHECK OK` + `exit 0`，**23 项断言**：`A1~A7` 协议形态与白盒 lint（E23 三条禁止）/ `B1~B2` World 接线 / `C1~C14` 端到端（10 Hz = 60 帧 10 条、8 键字段、与 `spawn` 一致、yaw 范围、`world_time` 单调、传感器连接 0 条、forward 的 `x`/`vx`、left 的 `yaw`/`vy`、断开后不再发、`vehicle==null` 守卫、每周期每连接恰好一次）） |
 | `src/tests/check_bounds.gd` | ✅ 空气墙 / 顶盖自检（task_32 Step 2；`SELF-CHECK OK` + `exit 0`，**12 项断言**：`B1` 结构 / layer / 无 mesh + `B1b` 四面墙内侧面贴边界 + `B1c` 顶盖下表面 32 m + `B1d` 由代码构建（`.tscn` 无 `Bounds`）+ `B1e` 幂等重建 + `B2~B5` 四面 20 m/s 冲撞 10 s 出不去 + `B6` 5 m/s 爬升被顶盖挡住 + `B7` 地面自由落体静止 + `B8` 可见 2 m 矮墙各 1024 格仍在） |
+| `src/world/WorldLook.gd` | ✅ task_38 Step 1b 观感唯一入口（`RefCounted` 全 `static`，§4.1.1）：三贴图 PBR 材质工厂（`Make_Ground_Material` / `Make_Voxel_Material` / `Make_Fallback_Voxel_Material`）、`PanoramaSkyMaterial`（`Make_Sky_Material`，`SKY_ENERGY = 0.5`）、太阳对齐 + 能量（`Apply_All`，`SUN_DIR = (-0.4313, 0.6817, 0.5910)`、`SUN_ENERGY = 0.7`）、幂等缓存与缺失清单（`Get_Missing_Assets` / `Reset_Cache`）；**缺资产只 warn、降级为原单色** |
+| `src/tests/check_world_look.gd` | ✅ task_38 Step 1b 世界观感自检（**S 组 30 项** headless 也跑 + **R 组 13 项**仅真渲染器）：三贴图非 null / `uv1_triplanar && uv1_world_triplanar` / `uv1_scale = 1/6` 与 `1/2` / 天空是 `PanoramaSkyMaterial` 且 `panorama` 2048×1024 / `bg=2 & ambient=3` / `Ground` 几何与 AABB 未变 / `Sun` 与 `SUN_DIR` 的 `dot > 0.9999` / 体素格数不变 / 降级材质 + `Apply_World_Look()` 幂等；R 组落盘 3 张 **1600×900** JPEG（`tmp/task38/shots/`）+ 2 张 160×90 太阳探针。`headless total=30` / `Xvfb total=43`，均 `failed=0` |
+| `src/world/StreetLayout.gd` | ✅ task_38 Step 2 街道唯一入口（`RefCounted` 全 `static`，§4.1.2）：常量表 `ROADS`(2) / `EDGE_LINES`(2) / `CROSSWALK` / `CURBS`(7) / `MAIN_SKIP_X`，递推生成主虚线 18 / 边线 2 / 支虚线 4 / 斑马线 4 = **28** 个四边形，`_Add_Box_Quads()` 出 7 段 × 5 面 = **35**；`SurfaceTool` 合并成 `Road`/`Markings`/`Curbs` **3 个 `MeshInstance3D`**，`Build_All(world)` 幂等（先摘同名旧容器）、`Get_Root(world)`；**零碰撞、无 RNG、不写 shader** |
+| `src/world/Facade.gd` | ✅ task_38 Step 2 立面唯一入口（同风格，§4.1.2）：按 `World.OBSTACLES`（经 `get_script_constant_map()` **只读**）生成窗 **60** / 基座 **44** / 压顶 **15** 个四边形，合并成 `Windows`/`Plinths`/`Caps` **3 个 `MeshInstance3D`**；纯函数 `Floors_Of(h)`（字面公式 + 2.5 m 一档下限）/ `Bays_Of(w)`（`max(1, floor(w/2.4))`，面宽 < 2 m 不开窗）供自检独立复算；`Build_All(world)` 幂等、`Get_Root(world)`；**零碰撞、不写 shader** |
+| `src/tests/check_street.gd` | ✅ task_38 Step 2 街道 + 立面自检（**S 组 28 项** headless 也跑 + **R 组 13 项**仅真渲染器）：从 mesh 顶点反推四边形（`verts.size() == 4 × quads`）→ 路网 AABB `(120,8)`/`(8,24)` 与顶面 `z=0.01` / `Street`+`Facade` 子树零 `CollisionObject3D`·`CollisionShape3D` / 标线 28（主虚线 18∈[18,22]、边线 2、支虚线 4∈[3,5]、斑马线 4）/ 路缘 7×5=35 与断口覆盖率探针（1200+1200 点）/ 窗 60 逐栋逐面 / 基座 44（距墙 0.01 且朝外）/ 压顶 15（15 个 z 两两不同）/ 连调两次节点数与 mesh 数不变 / `OBSTACLES` 15 条逐位不变 / 尺度与四个 layer 不变；R 组落盘 3 张 **1600×900** JPEG（`tmp/task38/shots/street_0{0,1,2}_*.jpg`）+ 窗暗度 / 窗无斑驳 / 斑马线对比度。`headless total=28` / `Xvfb total=41`，均 `failed=0` |
 | `src/tests/check_models.gd` | ✅ 低模外观 + 传感器模型接入自检（Step 2 / task_33 Step 3；`SELF-CHECK OK` + `exit 0`，**24 项断言**：`M1~M8` 模型显隐 / AABB / 车头朝向 / 碰撞盒 = 模型 / 幂等 / 换底盘循环 + `M3b` 模型 = 碰撞盒 + `S1~S7` 两个传感器场景的 `Body` 挂载 / AABB / 光心 / 零碰撞 / `pitch`） |
 | `assets/humans/README.md` | ✅ human_model Step 4 资产说明（来源 URL `https://renderpeople.com/sample/free/renderpeople_free_rigged_people_FBX.zip` + 许可原文 + 处理方式（单位修正 / 缩放 / 朝向 / 贴图 / 三角数）+ 导入副产物 + 换备选方法 + 使用边界 + 摆位差异） |
 | `assets/humans/LICENSE_renderpeople.txt` | ✅ Renderpeople 免费页条款原文（883 B，`sha256 aa4f1583…`，与 `tmp/human_model/normalized/` 原件逐字节相同） |
