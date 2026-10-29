@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 //! Goto 树（Task 36 §12.4.6）
 //!
@@ -25,7 +25,7 @@ use pleiades_base::robot::core::behavior_tree::{
 };
 use pleiades_base::robot::core::state::RobotState;
 
-use crate::sim::uav_sim::nav::{BlockedCause, NavPort, NavStatus};
+use crate::sim::uav_sim::nav::{BlockedCause, NavPort, NavStatus, NavStep};
 
 /// 业务超时（毫秒）：树内唯一的兜底时限，写在文件顶部便于后续调（§12.4.6）
 const TASK_TIMEOUT_MS: u32 = 60_000;
@@ -80,7 +80,7 @@ impl<P: NavPort + 'static> Node for GoToLeaf<P> {
             self.armed = true;
         }
 
-        let cell = nav.step(&rs).await;
+        let step = nav.step_result(&rs).await;
         let status = nav.status();
         drop(nav);
 
@@ -100,7 +100,12 @@ impl<P: NavPort + 'static> Node for GoToLeaf<P> {
             }
             // Navigating（或刚清空的 Idle）：本拍仍给「下一格」；`None` = 这一拍不动
             _ => {
-                f.out.next_cell = cell;
+                // Task 39 §二：算不完（`NotReady`）与确实没有路一样**都不发动作**（执行器 `Stop`），
+                // 但 `Status` 恒 `Running` —— 没算完绝不判失败、不清目标、不重置 `sub_target`。
+                f.out.next_cell = match step {
+                    NavStep::Step(cell) => Some(cell),
+                    NavStep::NoPath | NavStep::NotReady => None,
+                };
                 Status::Running
             }
         }
@@ -262,5 +267,52 @@ mod tests {
             Status::Failure(FailCode::Timeout),
             "第 1200 拍应超时（Timeout 先加 dt_ms 再判 >= 60000）"
         );
+    }
+
+    /// 假端口：永远 `NotReady`（`status` 保持 `Navigating`）
+    struct NotReadyNav {
+        set_goal_calls: u32,
+    }
+
+    #[async_trait]
+    impl NavPort for NotReadyNav {
+        fn set_goal(&mut self, _x: f32, _y: f32) {
+            self.set_goal_calls += 1;
+        }
+        async fn step(&mut self, _rs: &RobotState) -> Option<(i32, i32)> {
+            None
+        }
+        async fn step_result(&mut self, _rs: &RobotState) -> NavStep {
+            NavStep::NotReady
+        }
+        fn status(&self) -> NavStatus {
+            NavStatus::Navigating
+        }
+    }
+
+    /// #9 Task 39 §二：叶子收到 `NotReady` → `next_cell = None` 且 `Status::Running`
+    /// （不判失败、不清 goal、不重复武装）
+    #[tokio::test]
+    async fn test_leaf_not_ready_stops_without_failing() {
+        let nav = Arc::new(Mutex::new(NotReadyNav { set_goal_calls: 0 }));
+        let mut node = GoToLeaf::new(
+            1.0,
+            2.0,
+            nav.clone(),
+            Arc::new(RwLock::new(RobotState::default())),
+        );
+        let mut out = MotionOut::default();
+        let mut f = frame(&mut out, 50);
+
+        assert_eq!(node.tick(&mut f).await, Status::Running, "NotReady 必须是 Running");
+        assert_eq!(f.out.next_cell, None, "NotReady 不得给下一格（执行器 Stop）");
+        assert_eq!(nav.lock().await.set_goal_calls, 1, "已武装一次");
+        assert_eq!(
+            nav.lock().await.status(),
+            NavStatus::Navigating,
+            "不得清 goal / 不判失败"
+        );
+        assert_eq!(node.tick(&mut f).await, Status::Running, "连拍仍 Running");
+        assert_eq!(nav.lock().await.set_goal_calls, 1, "NotReady 不得重复武装");
     }
 }

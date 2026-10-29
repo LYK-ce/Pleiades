@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-29
 
 //! UAV（机）设备配置（Task 23 C0：设备段从 base 拆出，`#[serde(flatten)]` 复用共享段）
 //!
@@ -42,6 +42,9 @@ pub const DEFAULT_UAV_CAPTURE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_STREAM_FPS: u32 = 10;
 /// `[camera_pc] / [camera_uav].stream_fps` 的上限（超过按上限算，避免把设备打到异常状态）
 pub const MAX_STREAM_FPS: u32 = 60;
+
+/// 顶层键 `plan_budget_ms` 的缺省值（毫秒）：D* 单拍规划时间预算（Task 39 §二）
+pub const DEFAULT_PLAN_BUDGET_MS: u64 = 20;
 
 // ================================================================ [detector]（task_37 Step 2）
 
@@ -213,6 +216,9 @@ pub struct UavConfig {
     pub flight_ctrl: Option<FlightCtrlConfig>,
     /// 他车障碍膨胀半径（米，缺省 0.2；「天上小车」2D 寻路阶段使用）
     pub obstacle_inflation_radius: Option<f32>,
+    /// 单拍规划时间预算（毫秒，缺省 20；Task 39 §二；**顶层键**，与
+    /// `obstacle_inflation_radius` 同级 —— 机没有 `[chassis]` 段，故不进任何段）
+    pub plan_budget_ms: Option<u64>,
     /// **旧**摄像头段（Task 28/29）：保留解析，运行时**只判 `is_some()`** 打迁移提示，
     /// 任何字段都不读取（Task 34 Step 1）
     pub camera: Option<CameraConfig>,
@@ -306,7 +312,7 @@ pub fn Ensure_Uav_Config() -> Result<UavConfig, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-/// 确保 config.toml 存在机端设备段（obstacle_inflation_radius / flight_ctrl /
+/// 确保 config.toml 存在机端设备段（obstacle_inflation_radius / plan_budget_ms / flight_ctrl /
 /// camera_pc / camera_uav），缺失才补默认值。
 ///
 /// **不再**补旧 `[camera]` 段：已存在的旧段原样留在文件里（由 bootstrap 打一行「已忽略」），
@@ -318,6 +324,11 @@ fn ensure_uav_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     if doc.get("obstacle_inflation_radius").is_none() {
         doc["obstacle_inflation_radius"] = toml_edit::value(0.2_f64);
+        changed = true;
+    }
+    // Task 39 §二：规划时间预算（顶层键，缺键补 20 ms；已有值不覆盖）
+    if doc.get("plan_budget_ms").is_none() {
+        doc["plan_budget_ms"] = toml_edit::value(DEFAULT_PLAN_BUDGET_MS as i64);
         changed = true;
     }
     changed |= fill_flight_ctrl(&mut doc);
@@ -901,6 +912,65 @@ mod tests {
         assert_eq!(first, second, "第二次补全不得改动文件内容");
         assert_eq!(first.matches("[detector.camera]").count(), 1, "{first}");
         assert_eq!(first.matches("mount_yaw_deg").count(), 1, "{first}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── plan_budget_ms（Task 39 §二：顶层键，缺键补 20、幂等、已有值不覆盖）───
+
+    /// 缺键 → 补 20 ms（且是**顶层键**，不掉进任何段）
+    #[test]
+    fn ensure_uav_section_fills_plan_budget() {
+        let dir = tmp_dir("uav_cfg_plan_budget_fill");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"uav\"\n").unwrap();
+
+        ensure_uav_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UavConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(DEFAULT_PLAN_BUDGET_MS));
+        assert_eq!(parsed.plan_budget_ms, Some(20), "缺键补 20 ms");
+        assert!(content.contains("plan_budget_ms = 20"), "{content}");
+        // 顶层键：不在任何段头之后（`[flight_ctrl]` 之前那一行）
+        let top_pos = content.find("plan_budget_ms").expect("应落盘");
+        let first_table = content.find("\n[").expect("应有段头");
+        assert!(top_pos < first_table, "plan_budget_ms 必须是顶层键：\n{content}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已有值不被覆盖
+    #[test]
+    fn plan_budget_existing_value_kept() {
+        let dir = tmp_dir("uav_cfg_plan_budget_keep");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "plan_budget_ms = 50\n").unwrap();
+
+        ensure_uav_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UavConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(50), "不得覆盖用户写的值");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 幂等：连补两次文件字节不变
+    #[test]
+    fn ensure_uav_section_plan_budget_idempotent() {
+        let dir = tmp_dir("uav_cfg_plan_budget_idem");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "plan_budget_ms = 50\n").unwrap();
+
+        ensure_uav_section(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        ensure_uav_section(&path).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(first, second, "第二次补全不得改动文件内容");
+        let parsed: UavConfig = toml::from_str(&second).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(50));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

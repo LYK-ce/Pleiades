@@ -3,7 +3,7 @@
 > Presented by KeJi
 > Created Date ： 2026-10-29
 > Modified Date ： 2026-10-29
-> 状态：草案（Step 1a 方案已定：每拍重算 + 三态返回 + 停车等；Step 1b 待评审；Step 2 待讨论）
+> 状态：草案（Step 1a / 1b / 2 方案已定；Step 3 = 验证，待评审）
 
 ---
 
@@ -99,7 +99,7 @@ pub enum ComputeOutcome { Converged, BudgetExhausted }
 
 > **为什么不做"无变化就不重算"**：车几乎一直在动（每 0.5 m 起点格就变），雷达画出来的边界每帧都在抖，建图增量几乎每拍都有 —— 这个判断在真机上大概率永远为假，只会多出一份常驻的无效缓存。**每拍重算，代价交给时间预算管。**
 >
-> 代价是：`sub_target` 仍可能因为等代价解翻面而变，执行器会 `Stop + Idle`。**这一点不在 1a 用迟滞去压**，留到 Step 2 从执行器侧解决（认"路径进度"，不认"格子相等"）。
+> 代价是：`sub_target` 仍可能因为等代价解翻面而变，执行器会 `Stop + Idle`。**这一条本任务明确不解决**（人类 2026-10-29 决定），登记为已知限制：根因是"连续量被砍成格"+"执行器把格变当命令变"，与预算/8 连通无关。
 
 #### 1.3 叶子：三种结果怎么写
 
@@ -144,7 +144,8 @@ pub enum ComputeOutcome { Converged, BudgetExhausted }
 - 不改 8 连通（1b）；
 - 不改执行器（Step 2）与急停；
 - 不把 D* 改成后台任务、不改地图服务接口；
-- **不做"有没有变化"的缓存判断**（理由见 1.2）。
+- **不做"有没有变化"的缓存判断**（理由见 1.2）；
+- **不解决"下一格在相邻两格之间翻面"**（见 1.2 的已知限制）。
 
 ---
 
@@ -253,16 +254,167 @@ pub enum ComputeOutcome { Converged, BudgetExhausted }
 
 ---
 
-## 四、Step 2 — 执行器（待讨论）
+## 四、Step 2 — 机栈执行器：连续速度控制（只做 sim 无人机）
 
-目标：从"到格心 + 原地转向"的离散动作，改为支持连续运动（边走边转）的执行方式。
+> **定位：验证，不是替代。** 只额外添加一条 sim 机栈的连续执行路径：**不动 ORION 协议、不动手动遥控链、不动真机**。
+> 协议层面的"速度指令取代 `MANUAL_CONTROL`"单开任务，见 §五。
 
-已知输入（前序讨论）：
+### 1 目标
 
-- 命令需要二维（`(v, ω)`），现有 `MotionAction` 五枚举表达不了；
-- UAV 的 MAVLink 链天然支持 `(vx, vy, vz, yaw_rate)`，改我们侧的映射即可；
-- 仿真世界只认 `forward/backward/left/right/stop`，要扩指令集；
-- 真车 UGV 有一条未验证的 `FUNC_MOTION`（vx/vy/vz）；
-- 二维设定值 = 周期刷新语义，三端都需要超时兜底。
+机栈执行器从"到格心 0.2 m + 原地转向"的离散动作，改成"每拍算一次 `(v, ω)`"：
 
-方案与步骤待讨论后补。
+- **目标点 = nav / 叶子给的下一格的格心**（方案 A，不做前瞻）；
+- 偏角大 → `v=0` 只转；偏角小 → **匀速**直行（不做距离衰减）；
+- 验证目标：切向通过不丢视野、不撞人、不原地打转。
+
+### 2 范围
+
+| 状态 | 文件 | 改什么 |
+|---|---|---|
+| 新增 | `pleiades-sim/src/sim/uav_sim/executor.rs` | 连续控制内核（复制自 `sim/executor.rs`，改内容） |
+| 改 | `pleiades-sim/src/sim/sim_handler.rs` | 按栈分派：车 → 老执行器，机 → 新执行器 |
+| 改 | `pleiades-sim/src/sim/chassis/mod.rs` | `Chassis` 加 `Apply_Velocity(v, ω)`，默认"不支持" |
+| 改 | `pleiades-sim/src/sim/chassis/uav.rs` | 实现 `Apply_Velocity` → `MotionSender` |
+| 改 | `pleiades-sim/src/world_link/{mod,protocol}.rs` | 新增出站速度指令（`v` / `omega`） |
+| 改 | `orion-simulation-world/src/chassis/Quadrotor.gd` | `SetCommand` 认 `action="velocity"` |
+| 按需 | `orion-simulation-world/src/net/*.gd` | 放行该消息/字段 |
+
+**不动**：`pleiades-sim/src/sim/executor.rs`（车栈继续用）、`pleiades-base`（`ExecuteState` / `MotionAction` / 协议）、`pleiades-uav`（真机）、`pleiades-ugv`、`Pictor`、ORION 协议、手动遥控链。
+
+> 车与机的执行器**本来就应该分开**（真机已经是两份）。sim 现在是共用一份，本步先把它们拆开：车保留离散，机新增连续。
+
+### 3 控制律（2a 内核）
+
+三个数都是定值，**没有比例、没有中间值**：`v ∈ {0, vel_fwd}`，`ω ∈ {−yaw_rate, 0, +yaw_rate}`。
+
+> **2026-10-29 修订（人类决定）**：`v` / `ω` 是**物理量**（m/s、rad/s），来自 `[flight_ctrl]` 的
+> `vel_fwd` / `yaw_rate_deg`——与 `pleiades-uav` **同名同单位**，不再借用车的 `[chassis]` 百分比档位
+> （旧写法让 `forward_speed=100` 被世界 clamp 成满速、`turn_speed=30` 被当 30 rad/s 顶到 90°/s，
+> 导致"调配置无效"）。
+
+| 偏角 \|Δθ\| | v | ω | 车怎么动 |
+|---|---|---|---|
+| ≤ 5° | `vel_fwd`（m/s） | 0 | 直行 |
+| 5° ~ 20° | `vel_fwd` | `±yaw_rate`（rad/s） | **边走边转（弧线）** |
+| > 20° | 0 | `±yaw_rate` | 原地转 |
+
+```text
+每 50 ms：
+  target = 叶子给的格（None → v = 0, ω = 0）
+  Δθ = 归一化(指向格心的方位 − yaw)          // 顺时针为正
+
+  if |Δθ| <= 5°:     v = vel_fwd, ω = 0
+  elif |Δθ| <= 20°:  v = vel_fwd, ω = sign(Δθ) × yaw_rate
+  else:              v = 0,       ω = sign(Δθ) × yaw_rate
+```
+
+- `vel_fwd`（m/s）/ `yaw_rate`（rad/s）来自 `[flight_ctrl]`（缺省 0.3 m/s、15°/s，与真机 UAV 默认一致）；
+  sim 实例为验证设成 0.8 m/s、30°/s。世界侧 `clampf(v, ±max_speed)` / `clampf(omega, ±max_yaw_rate)`
+  不再截断（2.0 m/s / 90°/s 是它的上限）。
+- 两个角度写常量：`DEADBAND_DEG = 5`、`SPIN_DEG = 20`。
+- **相对今天唯一的行为变化**：多出"5°~20° 边走边转"这一档（`v` 与 `ω` 同时非零）。
+- 到达不归执行器管：nav 判到达 → 叶子写 `None` → `v=ω=0`。
+- 状态：机栈只写 `ExecuteState.sub_target`；`state` 留 `Idle`（没人读）。`POSE` 广播不受影响。
+- 已知小毛病：`ω` 是满舵，车会在 5° 死区边界小幅左右摆（周期约 0.4 s）。先接受，之后调。
+
+### 4 下发路径（2b）
+
+1. `Chassis` trait 加：
+
+   ```rust
+   fn Apply_Velocity(&self, v: f32, omega: f32) -> bool { false }  // 默认不支持
+   ```
+
+2. 机栈实现：`MotionSender::Send_Velocity(v, omega)` → 出站 JSON，例如：
+
+   ```json
+   { "msg": "motion_cmd", "seq": 12, "action": "velocity", "v": 1.2, "omega": 0.35 }
+   ```
+
+3. 车栈不实现 → 走原来的 `Apply_Action`，一行不改。
+
+### 5 世界侧（2c）
+
+`Quadrotor.SetCommand` 增加 `"velocity"` 分支：
+
+```gdscript
+"velocity":
+    _speed_target = clampf(v, -_max_speed, _max_speed)
+    _yaw_target   = clampf(omega, -_max_yaw_rate, _max_yaw_rate)
+```
+
+- 原有的 `forward / backward / left / right / stop` 分支**保留不动**（保底兼容；车栈还在用）；
+- 补一条自检断言（`check_quadrotor` 或 `check_ws_manager`）：发速度指令后 `Step()` 产出的 `velocity/yaw_rate` 符合预期。
+
+### 6 验证
+
+- 场景：sim 无人机 + 行人**切向通过**（人沿 y≈64.5 横穿，机在出生点附近），相机 `rate_hz=10`；
+- 判据（初稿，跑完再校准）：
+  1. 检测命中率不低于改前（同一段路的 `person` 帧占比）；
+  2. **不撞人**：全程最小距离 ≥ 2.0 m；
+  3. **不打转**：10 s 内水平位移 > 5 m；
+  4. 日志里不再出现"每 100~200 ms 一次 Stop/Turning 交替"；
+- 产物：trace + 结论写 `Workbook/wb_39_*.md`。
+
+### 7 不做
+
+- ORION 协议、手动遥控（W+A）、Pictor —— 单开任务（§五）；
+- 真机 UAV、真车 UGV（UGV 等 `FUNC_MOTION` 实车验证）；
+- 前瞻目标点（方案 B）、把 nav 接回跟随；
+- 车栈执行器（保持离散）。
+
+---
+
+## 五、Step 3 — 验证（常规移动 + 跟随）
+
+### 1 目标
+
+在改完的 sim 机栈上验证两件事：**常规移动没被改坏**、**跟随能跟住且不丢视野**。
+
+### 2 常规移动（回归）
+
+| 用例 | 怎么跑 | 判据 |
+|---|---|---|
+| 直线 Goto | 控制口 `goto` 到正东约 20 m | 到达；无越界/撞墙；无急停 |
+| L 形 Goto | 需要一次 90° 拐的目标 | 到达；拐角不反复停走 |
+| 长路径 | 30~50 格 | 到达；日志里不出现"每 100~200 ms 一次 Stop/Turning" |
+
+统一判据：nav 判 `Arrived`、无 `Blocked`、无急停、日志里没有连续的 `Stop + Idle` 交替。
+
+### 3 跟随（重点）
+
+| 用例 | 场景 | 判据（绝对标准，不跟改前比） |
+|---|---|---|
+| F1 直线跟随 | 人沿 y≈64.5 向东走 20 s | 10 s 内机位移 ≥ 5 m；不掉队（距离不持续拉大）；不撞人 |
+| F2 **切线通过（重点）** | 人从机前方横向穿过：(72,60) → (72,68)，**速度 0.6 m/s**（约 13 s 走完） | ① 能持续检测到人：最长连续出画 ≤ 1 s；② 机跟着人走：10 s 内位移 ≥ 5 m，且方向与人的移动方向一致；③ 不是"停着不动"：`动作=Stop` ≤ 3 次；④ 最小距离 ≥ 2.0 m |
+| F3 丢失 | 关掉行人客户端 | 800 ms 后机停住，不乱飞 |
+| F4 不撞人 | 全程 | 最小距离 ≥ 2.0 m |
+
+> 这一轮**不做"改前 vs 改后"的对比**：现状在切向场景下基本跟不了，没有可比性。只回答一个问题——**改完之后能不能跟住**。
+
+### 4 指标怎么取
+
+- **检测命中率** = 有 `person` 的帧数 / 总帧数（从 `[detector]` 日志统计）；
+- **位移** = 控制口 `status` 的 `x/y` 序列；
+- **最小距离** = detector 日志里的 `距离=`；
+- **停车次数** = 日志里 `动作=Stop` 的条数；
+- **出画时长** = 连续无 `person` 的最长间隔。
+
+### 5 产物
+
+`RobotSim_TestEnv/results/task39_<UTC时间戳>/`：`trace.csv`、截图、`world.log` / `sim.log` / `ped.log`、`verdict.md`；结论写 `Workbook/wb_39_*.md`。
+
+### 6 不做
+
+- 真机 UAV / 真车 UGV；
+- 多目标跟随、前瞻目标点；
+- 协议层（ORION 速度消息）——另开任务。
+
+---
+
+## 六、后续任务（不在本任务范围）
+
+1. **协议重置**：把"速度指令"提升为 ORION 消息（如 `ORION_VELOCITY_CMD`：`vx / vy / omega`），取代 `MANUAL_CONTROL` 的运动分支；按"并存 → 切默认 → 删旧的"三步走，Pictor 需同步。
+2. **真机 UAV 跟随**：把 `Mission::Follow` 在真机上从平凡树接成真树（需要 detector 消费者 + 安全距离约束）。
+3. **UGV 连续运动**：实车验证 `FUNC_MOTION`（`set_motion(vx, vy, vz)`），通过后再决定车端是否也走连续执行。
+4. **"下一格在相邻两格间翻面"**：连续量砍成格 + 执行器把格变当命令变；本任务登记为已知限制。

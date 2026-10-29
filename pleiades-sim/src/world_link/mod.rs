@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 //! 世界链路：装配状态机 + 事件循环（task_31 §四.5.6 / §四.6）
@@ -146,6 +146,32 @@ impl MotionSender {
         self.Send("stop", 0)
     }
 
+    /// 连续速度指令（task_39 §四.4）：`v` 单位 **m/s**、`omega` 单位 **rad/s**
+    /// （物理量，与真机 UAV 的 `vel_fwd` / `yaw_rate_deg` 同口径；§四 修订）。
+    ///
+    /// - 未装配 → `debug!` 丢弃 + `Ok(())`（与 [`Send`] 同语义，Step 2 的空跑不产生噪音）
+    /// - 通道满/关闭 → 限流 `warn!`（`world.velocity_dropped`）+ `Err`
+    /// - **不登记 `pending_stop`**：速度指令按 `AUTO_TICK_MS`（50 ms）周期重发，掉一帧下一拍自愈；
+    ///   安全停车仍走 [`Self::Send_Stop_Priority`]（reset / stop / shutdown / 急停那条路，G1 不变）
+    pub fn Send_Velocity(&self, v: f32, omega: f32) -> Result<(), String> {
+        if !self.Is_Assembled() {
+            debug!(
+                "[world] 未装配，丢弃 motion_cmd action={} v={v} omega={omega}",
+                protocol::ACTION_VELOCITY
+            );
+            return Ok(());
+        }
+        match self.Push_Velocity(v, omega) {
+            Ok(()) => Ok(()),
+            Err(msg) => {
+                Warn_Throttled("world.velocity_dropped", 1000, || {
+                    format!("[world] {msg}（世界只取最新一条，不补发历史）")
+                });
+                Err(msg)
+            }
+        }
+    }
+
     /// supervisor 每 [`STOP_RESEND_MS`] 取一次：`Some` = 需要立即补发这条 stop
     /// （**已带新 `seq`，标志已清**，绝不重复补发）
     pub fn Take_Pending_Stop(&self) -> Option<protocol::MotionCmd> {
@@ -162,6 +188,9 @@ impl MotionSender {
             seq: self.seq.fetch_add(1, Ordering::Relaxed),
             action,
             speed: speed.min(100),
+            // 离散动作帧不带速度字段（`skip_serializing_if` ⇒ 旧 JSON 逐字不变）
+            v: None,
+            omega: None,
         }
     }
 
@@ -170,6 +199,27 @@ impl MotionSender {
         self.tx
             .try_send(cmd)
             .map_err(|e| format!("motion_cmd 未投递（action={action}）：{e}"))
+    }
+
+    /// 组一条速度帧（`action = ACTION_VELOCITY`；`speed` 仍带 0 —— 世界侧该分支不读它）
+    ///
+    /// `seq` 与 [`Self::Next_Cmd`] **共用同一个计数器**（世界只做日志对账，不要求连续）
+    fn Next_Velocity_Cmd(&self, v: f32, omega: f32) -> protocol::MotionCmd {
+        protocol::MotionCmd {
+            msg: protocol::MSG_MOTION_CMD,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
+            action: protocol::ACTION_VELOCITY,
+            speed: 0,
+            v: Some(v),
+            omega: Some(omega),
+        }
+    }
+
+    fn Push_Velocity(&self, v: f32, omega: f32) -> Result<(), String> {
+        let cmd = self.Next_Velocity_Cmd(v, omega);
+        self.tx.try_send(cmd).map_err(|e| {
+            format!("motion_cmd 未投递（action={} v={v} omega={omega}）：{e}", protocol::ACTION_VELOCITY)
+        })
     }
 }
 
@@ -1028,8 +1078,8 @@ async fn Send_Out(
     match tokio::time::timeout(Duration::from_millis(1000), send).await {
         Ok(Ok(())) => {
             debug!(
-                "[world] motion_cmd 已发送 action={} speed={} seq={}",
-                cmd.action, cmd.speed, cmd.seq
+                "[world] motion_cmd 已发送 action={} speed={} v={:?} omega={:?} seq={}",
+                cmd.action, cmd.speed, cmd.v, cmd.omega, cmd.seq
             );
             Ok(())
         }
@@ -1200,5 +1250,52 @@ mod tests {
         assert!(tx.Take_Pending_Stop().is_none(), "置 false 必须清掉 pending_stop");
         // 且此后 Send 一律丢弃
         assert_eq!(tx.Send("stop", 0), Ok(()));
+    }
+
+    // ============================================================ 连续速度指令（task_39 §四.4）
+
+    #[test]
+    fn test_motion_sender_velocity_when_assembled() {
+        // 装配后：一帧 `action="velocity"`，带 v / omega，speed 恒 0，seq 与 Send 共用计数器
+        let (tx, mut rx) = assembled(MOTION_CHANNEL_CAP);
+        tx.Send("forward", 30).expect("普通动作先占掉 seq=1");
+        tx.Send_Velocity(0.5, -0.25).expect("装配后必须投递成功");
+        let c1 = rx.try_recv().expect("应收到普通动作帧");
+        assert_eq!((c1.action, c1.speed, c1.v, c1.omega), ("forward", 30, None, None));
+        let c2 = rx.try_recv().expect("应收到速度帧");
+        assert_eq!(c2.action, protocol::ACTION_VELOCITY);
+        assert_eq!(c2.speed, 0, "速度帧的 speed 恒 0（世界该分支不读它）");
+        assert_eq!((c2.v, c2.omega), (Some(0.5), Some(-0.25)));
+        assert_eq!(c2.msg, protocol::MSG_MOTION_CMD);
+        assert_eq!((c1.seq, c2.seq), (1, 2), "seq 与 Send 共用同一个计数器");
+    }
+
+    #[test]
+    fn test_motion_sender_velocity_dropped_before_assembled() {
+        // 未装配：返回 Ok(())（不吓人）但绝不进通道 —— 与 Send 同语义
+        let (tx, mut rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
+        assert!(!tx.Is_Assembled());
+        assert_eq!(tx.Send_Velocity(0.5, -0.25), Ok(()));
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        // 置 true 后才真正下发
+        tx.Set_Assembled(true);
+        assert_eq!(tx.Send_Velocity(0.5, -0.25), Ok(()));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn test_motion_velocity_does_not_register_pending_stop() {
+        // 速度帧掉帧不登记补发（50 ms 下一拍自愈）；G1 的 pending_stop 只服务 stop
+        let (tx, mut rx) = assembled(1);
+        tx.Send("forward", 30).expect("先塞满");
+        let err = tx.Send_Velocity(0.5, -0.25).expect_err("满通道必须报 Err");
+        assert!(err.contains(protocol::ACTION_VELOCITY), "错误信息应带 action：{err}");
+        assert!(
+            tx.Take_Pending_Stop().is_none(),
+            "速度帧不许登记 pending_stop（安全停车走 Send_Stop_Priority）"
+        );
+        // 通道里仍然只有那一条普通动作
+        assert_eq!(rx.try_recv().expect("第 1 条").action, "forward");
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 }

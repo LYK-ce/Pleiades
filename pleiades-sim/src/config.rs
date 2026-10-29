@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
@@ -214,6 +214,37 @@ pub struct ChassisConfig {
     pub turn_speed: Option<i32>,
 }
 
+/// 飞控速度配置（task_39 §四 修订）：与 `pleiades-uav` 的 `[flight_ctrl]` **同名同单位**
+///
+/// sim 机栈的连续执行器只读这两个键；车栈仍用 `[chassis]` 的 `forward_speed/turn_speed`。
+/// 整段缺失 / 缺键 → 取真机同款默认（`vel_fwd = 0.3 m/s`、`yaw_rate_deg = 15°/s`）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FlightCtrlConfig {
+    /// 前进速度（**米/秒**，缺省 0.3）
+    pub vel_fwd: Option<f32>,
+    /// 偏航角速度（**度/秒**，缺省 15）
+    pub yaw_rate_deg: Option<f32>,
+}
+
+impl FlightCtrlConfig {
+    /// 填默认值并夹到合法域：`vel_fwd ∈ [0, 5]` m/s、`yaw_rate ∈ [1, 180]` °/s。
+    ///
+    /// 非有限值或 ≤ 0 → 回落默认（配置写坏不该让仿真飞出去）。
+    pub fn Resolved(&self) -> (f32, f32) {
+        let v = self
+            .vel_fwd
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_VEL_FWD)
+            .clamp(0.0, 5.0);
+        let w = self
+            .yaw_rate_deg
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_YAW_RATE_DEG)
+            .clamp(1.0, 180.0);
+        (v, w)
+    }
+}
+
 /// 本地控制口配置（task_31 §七.3，Step 5）：**测试夹具**，默认开启、只绑本机、无鉴权
 ///
 /// 整段缺失 → `SimConfig.control = None` → 调用方 `unwrap_or_default()` → 默认值（仍是开启）。
@@ -275,6 +306,20 @@ impl ControlConfig {
     }
 }
 
+// ============================================================ 顶层键：规划预算（Task 39）
+
+/// 顶层键 `plan_budget_ms` 的缺省值（毫秒）：D* 单拍规划时间预算
+///
+/// sim **不补全** config（`Ensure_Sim_Config` 只读文件，没有 `fill_*`），缺键 = `None` →
+/// 调用方 `unwrap_or(DEFAULT_PLAN_BUDGET_MS)`（与 `obstacle_inflation_radius` 的先例一致）。
+pub const DEFAULT_PLAN_BUDGET_MS: u64 = 20;
+
+/// `[flight_ctrl].vel_fwd` 的缺省值（m/s）：与 `pleiades-uav` 的默认值一致（Task 22_5 D2）
+pub const DEFAULT_VEL_FWD: f32 = 0.3;
+
+/// `[flight_ctrl].yaw_rate_deg` 的缺省值（°/s）：与 `pleiades-uav` 的默认值一致
+pub const DEFAULT_YAW_RATE_DEG: f32 = 15.0;
+
 /// SIM 完整配置 = 共享段（flatten）+ 障碍膨胀半径（寻路动态障碍用）+ 底盘 + 世界链路
 #[derive(Debug, Clone, Deserialize)]
 pub struct SimConfig {
@@ -282,8 +327,13 @@ pub struct SimConfig {
     pub base: BaseConfig,
     /// 他车障碍膨胀半径（米，缺省 0.2）
     pub obstacle_inflation_radius: Option<f32>,
+    /// 单拍规划时间预算（毫秒，缺省 20；Task 39 §二；**顶层键**，与
+    /// `obstacle_inflation_radius` 同级 —— 不放 `[chassis]`，UAV 没有该段）
+    pub plan_budget_ms: Option<u64>,
     /// 底盘速度绑定（`[chassis]` 段）；无该段 = `None` = 不建底盘（车不会动）
     pub chassis: Option<ChassisConfig>,
+    /// 飞控速度（`[flight_ctrl]` 段，task_39 §四 修订）；无该段 = 机栈执行器用默认 0.3 / 15
+    pub flight_ctrl: Option<FlightCtrlConfig>,
     /// 世界链路（`[sim_world]` 段）；无该段 = `None` = 不连世界
     pub sim_world: Option<WorldLinkConfig>,
     /// 本地控制口（`[control]` 段）；无该段 = `None` = **仍按默认开启起**（§七.3）
@@ -430,6 +480,36 @@ turn_speed = 10
         let c = cfg.chassis.as_ref().expect("[chassis] 段应被解析出来");
         assert_eq!(c.forward_speed, Some(30));
         assert_eq!(c.turn_speed, Some(10));
+    }
+
+    #[test]
+    fn test_sim_config_flight_ctrl_section() {
+        // task_39 §四 修订：机栈速度与真机 UAV 同名同单位（m/s、°/s）
+        let toml_s = r#"
+[flight_ctrl]
+vel_fwd = 0.8
+yaw_rate_deg = 30.0
+"#;
+        let cfg: SimConfig = toml::from_str(toml_s).expect("[flight_ctrl] 段必须能解析");
+        let f = cfg.flight_ctrl.as_ref().expect("[flight_ctrl] 应被解析出来");
+        assert_eq!(f.Resolved(), (0.8, 30.0));
+    }
+
+    #[test]
+    fn test_sim_config_flight_ctrl_defaults_and_clamp() {
+        // 无该段 → None（机栈执行器回落到常量默认 0.3 / 15）
+        let cfg: SimConfig = toml::from_str("[chassis]\n").expect("仅 [chassis] 必须能解析");
+        assert!(cfg.flight_ctrl.is_none());
+        // 缺键 → Resolved 补默认
+        assert_eq!(
+            FlightCtrlConfig::default().Resolved(),
+            (DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG)
+        );
+        // 非法值（负 / 非有限）→ 回落默认；超大 → 夹到上界
+        let bad = FlightCtrlConfig { vel_fwd: Some(-1.0), yaw_rate_deg: Some(f32::INFINITY) };
+        assert_eq!(bad.Resolved(), (DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG));
+        let huge = FlightCtrlConfig { vel_fwd: Some(99.0), yaw_rate_deg: Some(999.0) };
+        assert_eq!(huge.Resolved(), (5.0, 180.0));
     }
 
     #[test]
@@ -656,5 +736,45 @@ max_range_m = 20.0
         assert_eq!(DEFAULT_DETECTOR_MOUNT_PITCH_DEG, -15.0);
         assert_eq!(DEFAULT_DETECTOR_GROUND_Z, 0.0);
         assert_eq!(DEFAULT_DETECTOR_MAX_RANGE_M, 12.0);
+    }
+
+    // ==================================================== plan_budget_ms（Task 39 §二）
+
+    #[test]
+    fn test_sim_config_plan_budget_absent_defaults_20() {
+        // 缺键 → None（sim 没有 fill_*，不写回文件）；调用方 unwrap_or 得 20
+        let toml_s = r#"
+[Log]
+level = "info"
+
+[Identity]
+peer_name = "simA"
+node_type = "car"
+"#;
+        let cfg: SimConfig = toml::from_str(toml_s).expect("无 plan_budget_ms 必须能解析");
+        assert_eq!(cfg.plan_budget_ms, None, "缺键 → None（sim 不补全 config）");
+        assert_eq!(DEFAULT_PLAN_BUDGET_MS, 20);
+        assert_eq!(
+            cfg.plan_budget_ms.unwrap_or(DEFAULT_PLAN_BUDGET_MS),
+            20,
+            "缺键按缺省 20 ms 用"
+        );
+    }
+
+    #[test]
+    fn test_sim_config_plan_budget_parses() {
+        // 顶层键（不在任何段里）→ Some(50)；与 [chassis] 同级
+        let cfg: SimConfig = toml::from_str("plan_budget_ms = 50\n").expect("顶层键必须能解析");
+        assert_eq!(cfg.plan_budget_ms, Some(50));
+
+        let toml_s = r#"
+plan_budget_ms = 35
+
+[chassis]
+enabled = true
+"#;
+        let cfg: SimConfig = toml::from_str(toml_s).expect("顶层键 + [chassis] 必须能解析");
+        assert_eq!(cfg.plan_budget_ms, Some(35));
+        assert!(cfg.chassis.is_some());
     }
 }

@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-10-28（Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更新日期：2026-10-29（Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -129,13 +129,14 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
     ├── bootstrap.rs              # sim_bootstrap()：Robot::new + SimDeviceHandler
     └── sim/
         ├── sim_handler.rs        # SimDeviceHandler（DeviceHandler；持 TaskStack 并转发 build/tick/reset）
-        ├── executor.rs           # 车 2D 三状态机（两栈共用一份）
+        ├── executor.rs           # 车 2D 三状态机（**车栈专用**；机栈见 uav_sim/executor.rs）
         ├── ugv_sim/              # ★ 车栈：复刻 pleiades-ugv 的 nav/ + mission/（树文件逐字相同）
         │   ├── mod.rs            # Stack：nav + 树实例表 + build/tick/finish/reset
         │   ├── nav/              # navigator（sim 到达判据）/ pathfinder / cluster_obstacles
         │   └── mission/          # mod.rs（Mission → 树穷尽分派）+ goto.rs（Goto 树）
         ├── uav_sim/              # ★ 机栈：复刻 pleiades-uav 的 nav/ + mission/
         │   ├── mod.rs            # 同形（ObstacleMode::Ignore、不订建图增量）
+        │   ├── executor.rs       # ★ 机栈连续速度（三档：直行 / 边走边转 / 原地转；task_39 §四）
         │   ├── nav/
         │   └── mission/          # mod.rs + goto.rs + follow.rs（★ 唯一真跟：task_37 Step 4/5，叶子不经 D*）
         └── planning/             # 只剩 cluster_obstacles（他车 → 动态障碍格；建图 task 在用）
@@ -153,6 +154,7 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
 | D-S6 | **跟随只在机栈**：`Follow` → `ReactiveFallback` 持续树（`follow.rs`）；车栈/真机 → 平凡 `Success` 树。人作为动态障碍**无法真注入 D-star**（机栈 Ignore 读空图，`mark_obstacle` 当拍即失效），只否决落在人格的 `next_cell`；外层用 `ReactiveFallback`（记忆式 `Fallback` + `Running` 型 Hold = 死锁在兜底分支） | `sim/uav_sim/mission/follow.rs`、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_37 Step 4。机栈 `Navigator` 是 `ObstacleMode::Ignore`（喂空栅格 + `dynamic_obstacles` 恒空），`mark_obstacle()` 的标记会被同拍重算抹掉 → 真注入需给 `Navigator` 加 `set_extra_obstacles()` 并让机栈用 `Respect`（`nav/` 不在允许清单，另开 task）；车栈没有相机/detector，Hold 会永远占队首 → 用平凡 `Success` |
 
 | D-S7 | **`Follow` 叶子不经 D\***：`Follow` → `ReactiveFallback[ ReactiveSequence[ TargetGate(有目标且未过期), Condition(未太近), StepLeaf ], HoldLeaf ]`；`StepLeaf` **不调 `nav.set_goal` / `nav.step`**，`next_cell = world_to_grid(me + 0.5·unit(target−me))`；`d > 4.0` 前进、`d ≤ 2.5` 停、带内沿用上拍（迟滞）；`nav` 只用于 Hold 时 `clear_goal()` | `sim/uav_sim/mission/follow.rs`（`-p` 无需改调用方：`build` 签名不变） | task_37 Step 5。Step 4 的 `nav.set_goal → D*` 跟随被 4 连通「下一格」带偏（executor 追格心 + `Turning` 不反向修正），人类指定**不改行动逻辑**（`executor.rs` / `nav/` 只读）→ 把修正收进叶子；代价是不转向、不绕障、不修正横向偏差（§六.6 另开任务）。上一轮误加的直线跟随任务类型已在本步全部撤销 |
+| D-S8 | **执行器分家**：`sim/executor.rs` 保留车栈离散三状态机（一行不改）；`sim/uav_sim/executor.rs` 新增机栈连续速度（`DEADBAND_DEG=5` / `SPIN_DEG=20`，输出 `VelocityCmd{v,omega}`，`omega` 取负 = 右转） | `pleiades-sim/src/sim/{executor.rs, uav_sim/executor.rs, chassis/mod.rs, chassis/uav.rs}` | task_39 §四。真机本来就是两份（车 `executor` / 机 `uav/`），sim 只是历史上共用一份；下发侧新增 `Chassis::Apply_Velocity`（默认 false）+ `motion_cmd{action:"velocity", v, omega}`（世界 `Quadrotor.SetCommand` 认 `"velocity"`，与 6 个离散 action 并存）；`omega` 取负的符号推导见 `action_map.rs:21-24` |
 
 **分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
@@ -230,6 +232,14 @@ stateDiagram-v2
 4. **④ 决策**：`DecisionExecutor::decide(frame.out.next_cell, …)` → 写 `ExecuteState`（**唯一写点**）→ 若有 `action` 则 `stm32.apply_action(action)`。
 5. **⑤ 终值**：树返回 `Success`/`Failure(code)` → `halt` 树 + 从实例表删除 + 清 goal → 返回 `TickOutcome::Terminated(code)`，出队由 base `main_loop` 独占。
 
+**叶子写 `next_cell` 的三种结果**（Task 39 §二，`GoToLeaf::tick`）：
+
+| `NavStep` | `Frame.out.next_cell` | 叶子 `Status` |
+|---|---|---|
+| `Step(cell)` | `Some(cell)` | `Running` |
+| `NotReady`（这拍没算完） | `None` → 执行器 `Stop`，车停住等 | **`Running`**（不清 goal、不判失败） |
+| `NoPath`（确实没有路） | `None` | 维持现有 `blocked_ticks` 去抖：20 拍后 `Failure(Blocked/Unreachable)` |
+
 ### 1.4 启动流程 + 主循环（Robot::new + DeviceHandler）
 
 **装配下沉**（Task 23 C0）：共享装配在 base 的 `core_bootstrap()`；设备装配在各终端 crate 的 `ugv_bootstrap`/`uav_bootstrap`。
@@ -264,7 +274,8 @@ stateDiagram-v2
 ### 2.1 D* Lite + 动态障碍
 
 - 规划器：`ugv/nav/pathfinder.rs` 的 `DStarLite`（`g/rhs/u/km/start/goal/dynamic_obstacles`）。
-- **`cost()` 判定顺序**（`pathfinder.rs`）：先查 `dynamic_obstacles`（命中 → ∞）→ 越界（∞）→ 静态 `Occupied`（∞）→ 其余 1.0。**4 连通**（无对角移动），Manhattan 启发。
+- **`cost()` 判定顺序**（`pathfinder.rs`）：对角边先查两个相邻 cardinal 中间格（任一不可通行 → ∞，**禁切角**）；再查 `to`：`dynamic_obstacles`（命中 → ∞）→ 越界（∞）→ 静态 `Occupied`（∞）；其余 cardinal 1.0 / diagonal √2。**8 连通**，octile 启发。
+- **8 连通契约（Task 39 §三，四份副本逐字一致）**：邻居顺序固定 `N→NE→E→SE→S→SW→W→NW`（顺序即 tie-break，`next_step` 取第一个严格更小的候选）；cardinal 1.0、diagonal `SQRT_2`；禁切角 `s→t` 对角边存在 ⟺ 两个相邻 cardinal 中间格与 `t` 都可通行；`passable(c)` = 在界内 && 非 `Occupied` && 不在动态障碍集合（sim 的可通行判据已与真机同口径）；修补按 **8 邻域（1 环）**：`rhs(s)` 只依赖 `s` 的 8 条边，边只涉及 `t` 与两个 cardinal 中间格，全在 `s` 的 8 邻域内。
 - **动态障碍注入**（`ugv/nav/cluster_obstacles.rs`，Task 17）：`cluster_to_obstacle_cells(others, radius)` 把每辆他车（`ClusterInfo.x/y`）按「圆心 + 半径圆盘」映射为障碍格集合。
 - **寻路下沉**（Task 23 决策 D1）：`DStarLite` 由 `Navigator`（`ugv/nav/navigator.rs`）直接持有；`world` 只保留纯地图只读接口 `get_cell`/`get_agents`，不再内嵌寻路。**出队在 base `main_loop`**，导航层不接触任务队列。
 
@@ -291,8 +302,32 @@ flowchart TD
     H --> I["DecisionExecutor::decide → 转向 / 直行"]
     I --> D
 ```
-- 每次寻路前（`Navigator::step`）注入最新障碍：`move_to(当前格)` → `set_dynamic_obstacles(动态障碍)` → `next_step()`。
+- 每次寻路前（`Navigator::step_result`）注入最新障碍：`move_to(当前格)` → `set_dynamic_obstacles(动态障碍)` → `next_step(grid, budget)`。
 - 静态地图**不兜底**他车：`lidar_mapper` 对他车格做 `-DYNAMIC_OBSTACLE_DECAY` 主动抵消，使他车格稳定在 Unknown（可通行），避让他车**完全依赖**动态障碍膨胀。
+
+#### 2.1.1 三态返回 + 时间预算（Task 39 §二）
+
+> 原则：**先补"说法"，再补"行为"** —— 算不完（`NotReady`）≠ 没有路（`NoPath`）。这类区分写在接口上，不在下游打补丁。
+
+- **返回类型**（`nav/pathfinder.rs`）：
+  - `StepResult { Step((i32,i32)), NoPath, NotReady }` —— `next_step(grid, budget)` 只返回这三种；
+  - `ComputeOutcome { Converged, BudgetExhausted }` —— `compute_shortest_path(grid, budget)` 只返回这两种。
+- **`NoPath` 只在收敛后给**：堆空 **且** `rhs[start] = ∞`；收敛但挑不出候选 → 也是 `NoPath`（**绝不给假格**）。
+- **预算按时间计（不写死）**：`next_step` 的 `budget: Duration` 由调用方传入，值来自 config **顶层键** `plan_budget_ms`
+  （ugv / uav / sim 三份 `config.rs`，缺省 `DEFAULT_PLAN_BUDGET_MS = 20`），装配期
+  `handler` 读 config → `Navigator::set_plan_budget`；`Navigator::new` 的 `DEFAULT_PLAN_BUDGET` 只是兜底。
+- **检查粒度**：`compute_shortest_path` 循环里每 **64** 次迭代（`iter > 0` 时）查一次 `Instant::now()`，超预算
+  立即 `BudgetExhausted`；`budget == 0` 在循环前直接短路。`iter > 0` 保证每拍**至少推进一批** ——
+  极小预算也能断点续算，不会永久零进展。
+- **旧的 `MAX_COMPUTE_ITERS` 只作兜底**（真机 10_000 / sim 60_000，值未改）：命中返回 `BudgetExhausted`
+  → `StepResult::NotReady`，**不再当作不可达**。
+- **`next_step` 遇到 `BudgetExhausted` 立即返回 `NotReady`，此后一行都不读 `g/rhs`**（半成品）。
+- **上层行为**（`Navigator::step_result` / `NavStep`）：`NotReady` → `not_ready_ticks += 1`，
+  **不清 goal、不判失败、`blocked_ticks` 不动**；连续 5 拍（250 ms @ 20 Hz）打**一条** `warn!`
+  （起点格 / 目标格 / 预算 / 已算拍数），随后每拍静默等待。`Step` 与 `NoPath` 各自清零该计数。
+- **叶子**：`Step` → `next_cell = Some(cell)`；`NotReady` / `NoPath` → `None`（执行器 `Stop`），
+  但 `NotReady` 时 `Status` 恒 `Running`（见 §1.3 的三态表）。
+- **四份副本**逐字相同（`ugv ≡ uav`、`sim_ugv ≡ sim_uav`，只允许文件头日期不同）。
 
 ### 2.2 Goto 命令（棋盘散布，Task 14）
 > **Task 36 起本节逻辑已从车端删除**：`planning/assignment.rs`（三份）已删，`Mission` 不再带群发名单；群发改由指挥层逐车算点、逐车发帧。以下为历史记录。
@@ -745,6 +780,8 @@ survey_seconds = 180
 | `CELL_RESOLUTION` | 0.5 m/格 | 栅格分辨率（格 50cm×50cm） |
 | `CHUNK_SIZE` | 256 | 单 Chunk 格数（256×256，覆盖 128m×128m） |
 | `obstacle_inflation_radius` | 0.2 m（ugv config） | 他车动态障碍膨胀半径（Task 17） |
+| `plan_budget_ms` | 20 ms（三端 config 顶层键） | D\* 单拍规划时间预算（Task 39；`Navigator::set_plan_budget`，`NotReady` 时停车等） |
+| 对角步长 | √2 格 ≈ 0.707 m（SQRT_2 × CELL_RESOLUTION） | 8 连通对角边代价（Task 39 §三；禁切角） |
 | `auto_tick` | 50 ms | 决策主 tick |
 | `state_notifier` | 100 ms | 位姿广播周期 |
 | `slam_task` | 200 ms（节流 1s） | 建图 + 增量广播周期 |

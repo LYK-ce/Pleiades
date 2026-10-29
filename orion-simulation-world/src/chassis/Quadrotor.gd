@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-29
 #
 # 四旋翼底盘 quadrotor_uav（Step 7 / COMPONENTS.md §4.6）：
 #   CharacterBody3D + MOTION_MODE_FLOATING（D3）+ 四旋翼运动学 + 世界侧速度环。
@@ -12,6 +12,8 @@
 #
 # 控制接口与真机一致（§6.3-1）：只吃 motion_cmd{action, speed(百分比)}，
 #   速度环在底盘内部跑 —— sim 侧的控制器组件与真机完全相同。
+#   task_39 §四.5 起另认一条连续速度指令 {action:"velocity", v, omega}（与下面 6 个离散
+#   action **并存**，不是替换；车栈与手动遥控仍走离散 action）。
 #
 # 分工（D8）：本文件只产出**控制量** {velocity(全局), yaw_rate(rotation.y 角速度)}；
 #   位置一律由 Vehicle._physics_process() 推进（唯一位置更新点）。
@@ -33,6 +35,9 @@
 #   up       -> 爬升 = +max_climb_rate·pct              （水平速度 0）
 #   down     -> 爬升 = -max_climb_rate·pct              （水平速度 0）
 #   stop / 未知 / 缺 action -> 三轴目标 0（= 悬停）
+#   velocity -> 连续速度（task_39 §四.5）：水平 v_target = clampf(v, ±max_speed)、
+#              yaw_target = clampf(omega, ±max_yaw_rate)，爬升恒 0（= 高度保持）；
+#              与上面 6 个离散 action 分支**并存**（sim 机栈的连续执行器用它，车栈不用）。
 #   单 action 的直接后果：从 forward 切到 up，水平速度会按 3 m/s² 斜坡降到 0（约 0.65 m 漂移）。
 #
 # 坐标：Godot Y-up，前进 = 局部 +X，局部 +Z = 机头右侧；速度 = global_basis * (v, 0, 0)，
@@ -117,7 +122,8 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 
 
 ## 指令 -> 三轴速度环目标（只存最新，不排队；pct 缺失/非法一律 0）。
-## 单 action：任何一个 action 都先把三轴目标全部清零，再只设其中一轴。
+## 单 action：任何一个 action 都先把三轴目标全部清零，再只设其中一轴
+## （`"velocity"` 同样先把三轴清零：只设水平 + 偏航，爬升目标 0 = 高度保持）。
 func SetCommand(cmd: Dictionary) -> void:
 	super.SetCommand(cmd)
 	var pct := SpeedPct(cmd)
@@ -134,6 +140,13 @@ func SetCommand(cmd: Dictionary) -> void:
 			_yaw_target = _max_yaw_rate * pct
 		"right":
 			_yaw_target = -_max_yaw_rate * pct
+		"velocity":
+			# task_39 §四.5：连续速度指令 {action:"velocity", v, omega}（与上面 6 个离散 action 并存）。
+			# v / omega 按**世界侧**单位解释：v = 水平速度 m/s（局部 +X）、
+			# omega = rotation.y 角速度 rad/s（正 = 左转 = 世界 yaw 减小）。
+			# sim 送的是配置档位原值（30 / 10），clampf 后即满速 + 满舵（见 task_39 的 R2）。
+			_speed_target = clampf(_velocity_field(cmd, "v"), -_max_speed, _max_speed)
+			_yaw_target = clampf(_velocity_field(cmd, "omega"), -_max_yaw_rate, _max_yaw_rate)
 		"up":
 			_climb_target = _max_climb_rate * pct
 		"down":
@@ -229,6 +242,13 @@ func _warn_clamp(world_z: float, ceiling: float) -> void:
 
 
 # ================================================================ 私有
+
+## 速度指令的数值字段（容错口径与基类 `SpeedPct` 一致）：缺失 / 非法类型 -> 0.0，不崩。
+func _velocity_field(cmd: Dictionary, key: String) -> float:
+	if not cmd.has(key):
+		return 0.0
+	return _to_float(cmd[key], 0.0)
+
 
 ## 旋翼摆位：x = ±size/2（前 +，后 −）、z = ±size/2（左 −，右 +）、
 ##   y = BODY_HEIGHT + ROTOR_LIFT（贴着机顶上方一点）。

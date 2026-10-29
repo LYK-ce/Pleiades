@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-29
 
 //! 世界链路 wire 协议（`orion-simulation-world/scripts/net/WireProtocol.gd` 的 Rust 镜像）
 //!
@@ -24,6 +24,9 @@ pub const MSG_CHASSIS_READY: &str = "chassis_ready";
 pub const MSG_SENSOR_HELLO: &str = "sensor_hello";
 pub const MSG_SENSOR_READY: &str = "sensor_ready";
 pub const MSG_MOTION_CMD: &str = "motion_cmd";
+/// 机栈连续速度指令的 `action`（task_39 §四.4）：与 `forward/backward/left/right/up/down/stop`
+/// 七个离散 action **并存**，只是多带 `v` / `omega` 两个数值字段。
+pub const ACTION_VELOCITY: &str = "velocity";
 pub const MSG_ASSEMBLY_READY: &str = "assembly_ready";
 pub const MSG_POSE: &str = "pose";
 
@@ -77,12 +80,26 @@ pub struct SensorHello<'a> {
     pub params: Value,
 }
 
+/// 一条动作帧（世界 `motion_cmd`）
+///
+/// task_39 §四.4 在**同一个结构体**上加 `v` / `omega` 两个可选字段，而不是换结构体 / 换 enum：
+/// 本类型是动作通道的元素类型（`mpsc::Receiver<protocol::MotionCmd>`），且 `sim::chassis::ugv.rs`
+/// 以 `m.action` / `m.speed` 字段访问它 —— 换类型会让差速底盘编不过。旧帧两个字段都是 `None`
+/// ⇒ 序列化**逐字不变**（`skip_serializing_if` 整键省略，由单测锁住）。
 #[derive(Debug, Clone, Serialize)]
 pub struct MotionCmd {
     pub msg: &'static str,
     pub seq: u64,
     pub action: &'static str,
     pub speed: u8,
+    /// 连续速度的水平速度（仅 `action == ACTION_VELOCITY` 时 `Some`）：**m/s**
+    /// （物理量，与真机 UAV 的 `vel_fwd` 同口径；task_39 §四 修订）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v: Option<f32>,
+    /// 连续速度的偏航角速度（同上）：**rad/s**（与真机 UAV 的 `yaw_rate_deg` 同口径；
+    /// 符号见 `sim::uav_sim::executor` 的文件头推导）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omega: Option<f32>,
 }
 
 // ================================================================ 入站
@@ -346,8 +363,51 @@ mod tests {
 
     #[test]
     fn test_serialize_motion_cmd() {
-        let cmd = MotionCmd { msg: MSG_MOTION_CMD, seq: 7, action: "forward", speed: 50 };
+        let cmd = MotionCmd {
+            msg: MSG_MOTION_CMD,
+            seq: 7,
+            action: "forward",
+            speed: 50,
+            v: None,
+            omega: None,
+        };
         let v = serde_json::to_value(&cmd).expect("serialize");
         assert_eq!(v, json!({"msg":"motion_cmd","seq":7,"action":"forward","speed":50}));
+    }
+
+    #[test]
+    fn test_serialize_motion_velocity_cmd() {
+        // task_39 §四.4：速度帧带 v / omega；`speed` 仍恒序列化（世界 `"velocity"` 分支不读它）
+        let cmd = MotionCmd {
+            msg: MSG_MOTION_CMD,
+            seq: 12,
+            action: ACTION_VELOCITY,
+            speed: 0,
+            v: Some(0.5),
+            omega: Some(-0.25),
+        };
+        let v = serde_json::to_value(&cmd).expect("serialize");
+        assert_eq!(
+            v,
+            json!({"msg":"motion_cmd","seq":12,"action":"velocity","speed":0,"v":0.5,"omega":-0.25})
+        );
+    }
+
+    #[test]
+    fn test_serialize_motion_cmd_without_velocity_keys() {
+        // 双锁「None 时两个键**整键省略**」（旧帧 JSON 逐字不变，R4）
+        let cmd = MotionCmd {
+            msg: MSG_MOTION_CMD,
+            seq: 1,
+            action: "stop",
+            speed: 0,
+            v: None,
+            omega: None,
+        };
+        let v = serde_json::to_value(&cmd).expect("serialize");
+        assert_eq!(v, json!({"msg":"motion_cmd","seq":1,"action":"stop","speed":0}));
+        let obj = v.as_object().expect("object");
+        assert!(!obj.contains_key("v"), "None 不该出现 v 键");
+        assert!(!obj.contains_key("omega"), "None 不该出现 omega 键");
     }
 }

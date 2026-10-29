@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 //! 导航层（Task 36 §12.4.4：原 `goal.rs` + 原规划层合并为 `nav/`）
 //!
@@ -20,7 +20,7 @@ pub use cluster_obstacles::cluster_to_obstacle_cells;
 #[allow(unused_imports)]
 pub use navigator::{Navigator, ARRIVAL_THRESHOLD_M, BLOCKED_AFTER_TICKS};
 #[allow(unused_imports)]
-pub use pathfinder::DStarLite;
+pub use pathfinder::{DStarLite, StepResult};
 
 use pleiades_base::robot::core::state::RobotState;
 
@@ -54,10 +54,41 @@ pub enum ObstacleMode {
     Ignore,
 }
 
-/// 叶子依赖的导航端口（`mission::goto` 只认这三个方法 → 单测可用假端口，§12.4.9 #6~#8）
+/// 导航一拍的三种结果（Task 39 §二）：**"这拍没算完" 与 "确实没有路" 必须分开**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavStep {
+    /// 有一格：叶子写 `Frame.out.next_cell = Some(cell)`
+    Step((i32, i32)),
+    /// 确实没有路：走 `blocked_ticks` 去抖，到点判 `Blocked`
+    NoPath,
+    /// 这拍没算完：叶子写 `next_cell = None`（执行器 `Stop`），但 `Status` 仍是 `Running`
+    NotReady,
+}
+
+impl From<StepResult> for NavStep {
+    fn from(r: StepResult) -> Self {
+        match r {
+            StepResult::Step(cell) => NavStep::Step(cell),
+            StepResult::NoPath => NavStep::NoPath,
+            StepResult::NotReady => NavStep::NotReady,
+        }
+    }
+}
+
+/// 叶子依赖的导航端口（`mission::goto` 只认这些方法 → 单测可用假端口，§12.4.9 #6~#8）
 #[async_trait::async_trait]
 pub trait NavPort: Send {
     fn set_goal(&mut self, x: f32, y: f32);
     async fn step(&mut self, rs: &RobotState) -> Option<(i32, i32)>;
+    /// 三态版本（Task 39 §二）：默认实现把两态 `step()` 映射为 `Step` / `NoPath`。
+    ///
+    /// 带默认实现是为了**只实现两态的端口零改动、行为不变**（例如 `uav_sim` 跟随叶子的假端口）；
+    /// `Navigator` 覆写成真实三态（多出一个 `NotReady`）。
+    async fn step_result(&mut self, rs: &RobotState) -> NavStep {
+        match self.step(rs).await {
+            Some(cell) => NavStep::Step(cell),
+            None => NavStep::NoPath,
+        }
+    }
     fn status(&self) -> NavStatus;
 }

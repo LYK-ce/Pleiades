@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 //! 导航器（Task 36 §12.4.5 + §12.6.4）：目标 → 下一格，并维护「到达 / 被堵 / 无路」状态
 //!
@@ -10,9 +10,13 @@
 //! 2. ② **格内逼近**：入目标格后必须再逼近到格心（逐轴 ≤ 0.26），否则把目标格自身当下一步；
 //! 3. 建图增量（`map_rx`）在 sim 侧是真订阅（真机 `None`）。
 //!
+//! Task 39 §二起与真机一致地走**三态 + 时间预算**：这拍没算完 → `NavStep::NotReady`，
+//! **不清 goal、不判失败、不增 `blocked_ticks`**（算不完 ≠ 没有路）。
+//!
 //! `uav_sim/nav/navigator.rs` 与本文件**逐字相同**（差异只在 `Stack::new` 的 `ObstacleMode`）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
@@ -23,15 +27,23 @@ use pleiades_base::robot::core::map_delta::MapDelta;
 use pleiades_base::robot::core::state::RobotState;
 
 use super::cluster_obstacles::cluster_to_obstacle_cells;
-use super::pathfinder::DStarLite;
+use super::pathfinder::{DStarLite, StepResult};
 // 枚举与端口定义在 `nav/mod.rs`（§12.4.4 分工），这里只取用
-use super::{BlockedCause, NavPort, NavStatus, ObstacleMode};
+use super::{BlockedCause, NavPort, NavStatus, NavStep, ObstacleMode};
 
 /// 到达判定阈值（米）：真机按**世界距离** 0.3 m（sim 侧判据不要求一致，§十一 #37）
 pub const ARRIVAL_THRESHOLD_M: f32 = 0.3;
 
 /// 连续无路的去抖拍数（1 s @ 20 Hz）：期间保持 `Navigating`，到点才判 `Blocked`
 pub const BLOCKED_AFTER_TICKS: u32 = 20;
+
+/// 规划时间预算的缺省值（Task 39 §二）= 三端 config 顶层键 `plan_budget_ms` 的缺省（20 ms）
+///
+/// 只在 `Navigator::new` 里兜底；装配期（`sim_handler.rs`）一定用 `set_plan_budget` 覆盖成 config 值。
+pub const DEFAULT_PLAN_BUDGET: Duration = Duration::from_millis(20);
+
+/// 连续 `NotReady` 多少拍打一条 `warn!`（5 拍 = 250 ms @ 20 Hz）
+pub const NOT_READY_WARN_TICKS: u32 = 5;
 
 /// **预测停点**判定的逐轴容差（米）：0.06 —— sim 独有（§十一 #37）
 ///
@@ -91,12 +103,16 @@ fn drain_map_deltas(rx: &mut Option<broadcast::Receiver<Vec<MapDelta>>>) -> Vec<
     out
 }
 
-/// 分类被堵原因（与 `step` 的「清空动态障碍再算一次」同一条路径）
-fn classify_blocked(pf: &mut Option<DStarLite>, grid: &OccupancyGrid) -> BlockedCause {
+/// 分类被堵原因（与 `step_result` 的「清空动态障碍再算一次」同一条路径）
+fn classify_blocked(pf: &mut Option<DStarLite>, grid: &OccupancyGrid, budget: Duration) -> BlockedCause {
     match pf.as_mut() {
         Some(pf) => {
             pf.set_dynamic_obstacles(&[], grid);
-            if pf.next_step(grid).is_some() { BlockedCause::Dynamic } else { BlockedCause::NoPath }
+            if matches!(pf.next_step(grid, budget), StepResult::Step(_)) {
+                BlockedCause::Dynamic
+            } else {
+                BlockedCause::NoPath
+            }
         }
         None => BlockedCause::NoPath,
     }
@@ -115,11 +131,12 @@ fn plan_next(
     dynamic: &[(i32, i32)],
     changed: &[(i32, i32)],
     will_latch: bool,
-) -> (Option<(i32, i32)>, Option<BlockedCause>) {
+    budget: Duration,
+) -> (NavStep, Option<BlockedCause>) {
     if pf.is_none() {
         *pf = Some(DStarLite::new(start_cell, goal_cell));
     }
-    let next = match pf.as_mut() {
+    let step = match pf.as_mut() {
         Some(pf) => {
             pf.move_to(current);
             pf.set_dynamic_obstacles(dynamic, grid);
@@ -127,16 +144,17 @@ fn plan_next(
             for cell in changed {
                 pf.mark_obstacle(*cell, grid);
             }
-            pf.next_step(grid)
+            pf.next_step(grid, budget)
         }
-        None => None,
+        None => StepResult::NoPath,
     };
-    let cause = if next.is_none() && will_latch {
-        Some(classify_blocked(pf, grid))
+    // 只有「确实没有路」才算被堵原因；`NotReady` 不是无路，不去多算一次
+    let cause = if matches!(step, StepResult::NoPath) && will_latch {
+        Some(classify_blocked(pf, grid, budget))
     } else {
         None
     };
-    (next, cause)
+    (NavStep::from(step), cause)
 }
 
 /// 导航器（原目标服务）
@@ -155,6 +173,10 @@ pub struct Navigator {
     status: NavStatus,
     /// 连续无路拍数（去抖）
     blocked_ticks: u32,
+    /// 单拍规划时间预算（Task 39 §二）：装配期由 `set_plan_budget` 用 config 值覆盖
+    plan_budget: Duration,
+    /// 连续 `NotReady` 拍数（算不完，不判失败；达 `NOT_READY_WARN_TICKS` 打一条 warn）
+    not_ready_ticks: u32,
 }
 
 impl Navigator {
@@ -182,7 +204,17 @@ impl Navigator {
             pathfinder: None,
             status: NavStatus::Idle,
             blocked_ticks: 0,
+            plan_budget: DEFAULT_PLAN_BUDGET,
+            not_ready_ticks: 0,
         }
+    }
+
+    /// 设规划时间预算（Task 39 §二）：由 `sim_handler.rs` 从 config 顶层键 `plan_budget_ms`
+    /// 读入后注入（`Stack::new` 里不传，故不放构造参数）
+    pub fn set_plan_budget(&mut self, budget: Duration) {
+        info!("[Nav] 规划时间预算 = {:?}", budget);
+        self.plan_budget = budget;
+        self.not_ready_ticks = 0;
     }
 
     /// 订阅建图增量（sim 用；ugv / uav 不调用 → `map_rx` 保持 `None`）
@@ -192,12 +224,13 @@ impl Navigator {
         self.map_rx = Some(map_tx.subscribe());
     }
 
-    /// 设目标：清终态 + 记目标（D* 在本拍 `step` 用实时位姿建，见 `step` 注释）
+    /// 设目标：清终态 + 记目标（D* 在本拍 `step_result` 用实时位姿建，见其注释）
     pub fn set_goal(&mut self, x: f32, y: f32) {
         info!("[Nav] 新目标 ({x:.2}, {y:.2})");
         self.goal = Some((x, y));
         self.pathfinder = None;
         self.blocked_ticks = 0;
+        self.not_ready_ticks = 0;
         self.status = NavStatus::Navigating;
     }
 
@@ -206,6 +239,7 @@ impl Navigator {
         self.goal = None;
         self.pathfinder = None;
         self.blocked_ticks = 0;
+        self.not_ready_ticks = 0;
         self.status = NavStatus::Idle;
     }
 
@@ -224,16 +258,16 @@ impl Navigator {
         }
     }
 
-    /// 每拍推进：到达判定 → 格级兜底 → 动态障碍 + 建图增量 + `next_step`，产出下一格
+    /// 每拍推进：到达判定 → 格级兜底 → 动态障碍 + 建图增量 + `next_step`，产出**三态**结果
     ///
     /// `async` 的必要性：要读 `grid` 的 `RwLock`；同步签名只能 `try_read`，
     /// 锁被建图写者占用时会「假无路」，把 20 拍去抖打乱。
-    pub async fn step(&mut self, rs: &RobotState) -> Option<(i32, i32)> {
+    pub async fn step_result(&mut self, rs: &RobotState) -> NavStep {
         // 终态锁存：Arrived / Blocked 之后不再推进（等下一次 set_goal）
         if matches!(self.status, NavStatus::Arrived | NavStatus::Blocked(_)) {
-            return None;
+            return NavStep::NoPath;
         }
-        let Some(goal) = self.goal else { return None; };
+        let Some(goal) = self.goal else { return NavStep::NoPath; };
         let (wx, wy) = (rs.x, rs.y);
 
         // ① 到达检测：**预测停点 + 逐轴容差**（sim 判据，§十一 #37）
@@ -242,7 +276,7 @@ impl Navigator {
         if (px - goal.0).abs() <= tol && (py - goal.1).abs() <= tol {
             info!("[Nav] 到达目标（预测停点）({:.2}, {:.2})", goal.0, goal.1);
             self.arrive();
-            return None;
+            return NavStep::NoPath;
         }
 
         // ② 格内逼近：入目标格后**必须**再逼近到格心，否则会停在格边界上（逐轴可能 > 0.3 m）
@@ -257,10 +291,11 @@ impl Navigator {
                     ARRIVAL_TOL_M, goal.0, goal.1
                 );
                 self.arrive();
-                return None;
+                return NavStep::NoPath;
             }
             self.blocked_ticks = 0;
-            return Some(goal_cell);
+            self.not_ready_ticks = 0;
+            return NavStep::Step(goal_cell);
         }
 
         // ③ 寻路：动态障碍 → 建图增量 → next_step
@@ -279,32 +314,34 @@ impl Navigator {
         let will_latch = self.blocked_ticks.saturating_add(1) >= BLOCKED_AFTER_TICKS;
         // 障碍策略决定喂哪张图（uav：空图；ugv/sim：真实栅格）。
         // 两条分支都只做「字段级借用」：`self.grid` 的读锁 + `self.pathfinder` 的可变借用互不重叠。
-        let (next, cause) = match self.obstacle_mode {
+        let (step, cause) = match self.obstacle_mode {
             ObstacleMode::Ignore => {
                 let empty = OccupancyGrid::new();
                 plan_next(
                     &mut self.pathfinder, &empty, current, start_cell, goal_cell,
-                    &dynamic_obstacles, &changed, will_latch,
+                    &dynamic_obstacles, &changed, will_latch, self.plan_budget,
                 )
             }
             ObstacleMode::Respect => {
                 let real = self.grid.read().await;
                 plan_next(
                     &mut self.pathfinder, &real, current, start_cell, goal_cell,
-                    &dynamic_obstacles, &changed, will_latch,
+                    &dynamic_obstacles, &changed, will_latch, self.plan_budget,
                 )
             }
         };
 
-        match next {
-            Some(cell) => {
+        match step {
+            NavStep::Step(cell) => {
                 self.blocked_ticks = 0;
+                self.not_ready_ticks = 0;
                 if matches!(self.status, NavStatus::Idle) {
                     self.status = NavStatus::Navigating;
                 }
-                Some(cell)
+                NavStep::Step(cell)
             }
-            None => {
+            NavStep::NoPath => {
+                self.not_ready_ticks = 0;
                 // 无路：**不清 goal**，继续每拍重算；连续 BLOCKED_AFTER_TICKS 拍才判 Blocked
                 self.blocked_ticks = self.blocked_ticks.saturating_add(1);
                 if self.blocked_ticks >= BLOCKED_AFTER_TICKS {
@@ -315,8 +352,33 @@ impl Navigator {
                     );
                     self.status = NavStatus::Blocked(cause);
                 }
-                None
+                NavStep::NoPath
             }
+            NavStep::NotReady => {
+                // 算不完 ≠ 没有路：不清 goal、不判失败、**blocked_ticks 不动**（这一拍没结论）
+                self.not_ready_ticks = self.not_ready_ticks.saturating_add(1);
+                if self.not_ready_ticks == NOT_READY_WARN_TICKS {
+                    warn!(
+                        "[Nav] 连续 {} 拍未算完（250 ms）：start=({},{}) goal=({},{}) plan_budget={}ms blocked_ticks={} → 停车等，目标保留",
+                        self.not_ready_ticks,
+                        start_cell.0, start_cell.1,
+                        goal_cell.0, goal_cell.1,
+                        self.plan_budget.as_millis(),
+                        self.blocked_ticks,
+                    );
+                }
+                NavStep::NotReady
+            }
+        }
+    }
+
+    /// 两态适配器（旧接口保留）：`NotReady` 与 `NoPath` 都映射成 `None`
+    ///
+    /// 只给「不区分三态」的既有调用方用；叶子走 [`Navigator::step_result`]。
+    pub async fn step(&mut self, rs: &RobotState) -> Option<(i32, i32)> {
+        match self.step_result(rs).await {
+            NavStep::Step(cell) => Some(cell),
+            NavStep::NoPath | NavStep::NotReady => None,
         }
     }
 
@@ -325,6 +387,7 @@ impl Navigator {
         self.goal = None;
         self.pathfinder = None;
         self.blocked_ticks = 0;
+        self.not_ready_ticks = 0;
         self.status = NavStatus::Arrived;
     }
 }
@@ -337,6 +400,10 @@ impl NavPort for Navigator {
 
     async fn step(&mut self, rs: &RobotState) -> Option<(i32, i32)> {
         Navigator::step(self, rs).await
+    }
+
+    async fn step_result(&mut self, rs: &RobotState) -> NavStep {
+        Navigator::step_result(self, rs).await
     }
 
     fn status(&self) -> NavStatus {
@@ -485,10 +552,15 @@ mod tests {
     }
 
     // ─── #11 去抖：无路 19 拍仍 Navigating，第 20 拍才 Blocked ───
+    //
+    // Task 39 起**围死目标格**（而不是围死起点格）：D* 证「起点不可达」必须弹空整堆
+    // （256×256 空图 ≈ 6.5 万次扩展 > `MAX_COMPUTE_ITERS`），会先连续 `NotReady`
+    // 若干拍（每拍续算一批）；围死目标则一次扩展就能收敛出 `NoPath`，去抖拍数才是纯粹的 20。
     #[tokio::test]
     async fn test_blocked_after_20_ticks_of_no_path() {
         let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
-        mark_occupied(&grid, &[(19, 20), (21, 20), (20, 19), (20, 21)]).await;
+        // 目标格 (24,24)（= 12.0 m）的四邻居全标占据 → 真·无路
+        mark_occupied(&grid, &[(23, 24), (25, 24), (24, 23), (24, 25)]).await;
         let mut nav = nav_with(grid, Arc::new(ClusterInfoTable::new()), 0.2, ObstacleMode::Respect);
         nav.set_goal(12.0, 12.0);
         for i in 1..=19 {
@@ -504,7 +576,8 @@ mod tests {
     async fn test_blocked_cause_dynamic() {
         let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
         let table = Arc::new(ClusterInfoTable::new());
-        table.upsert(car_at(10.0, 10.0)).await;
+        // 他车压在**目标**上（膨胀 1 m → 目标及其周围一圈都是动态障碍）
+        table.upsert(car_at(12.0, 12.0)).await;
         let mut nav = nav_with(grid, table, 1.0, ObstacleMode::Respect);
         nav.set_goal(12.0, 12.0);
         for _ in 0..19 {
@@ -519,7 +592,8 @@ mod tests {
     #[tokio::test]
     async fn test_blocked_cause_no_path() {
         let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
-        mark_occupied(&grid, &[(19, 20), (21, 20), (20, 19), (20, 21)]).await;
+        // 同 #11：围死目标格（收敛出 NoPath 不依赖迭代上限兜底）
+        mark_occupied(&grid, &[(23, 24), (25, 24), (24, 23), (24, 25)]).await;
         let mut nav = nav_with(grid, Arc::new(ClusterInfoTable::new()), 0.2, ObstacleMode::Respect);
         nav.set_goal(12.0, 12.0);
         for _ in 0..19 {
@@ -540,6 +614,24 @@ mod tests {
         for i in 1..=25 {
             assert!(nav.step(&pose(10.0, 10.0)).await.is_some(), "第 {i} 拍 Ignore 下应始终有路");
         }
+        assert_eq!(nav.status(), NavStatus::Navigating);
+    }
+
+    // ─── #15 Task 39 §二：NotReady 不清目标、不判失败 ───
+    #[tokio::test]
+    async fn test_step_not_ready_keeps_goal_and_status() {
+        let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
+        let mut nav = nav_with(grid, Arc::new(ClusterInfoTable::new()), 0.2, ObstacleMode::Respect);
+        nav.set_goal(40.0, 40.0);
+        nav.set_plan_budget(Duration::ZERO);
+        assert_eq!(nav.step_result(&pose(10.0, 10.0)).await, NavStep::NotReady);
+        assert_eq!(nav.status(), NavStatus::Navigating, "NotReady 不得判失败/不清目标");
+        // 预算恢复 → 同一条 D* 链路上接着算，立刻给出格（不是从无路里恢复）
+        nav.set_plan_budget(Duration::from_secs(3));
+        assert!(
+            matches!(nav.step_result(&pose(10.0, 10.0)).await, NavStep::Step(_)),
+            "预算恢复后应立刻给出下一格"
+        );
         assert_eq!(nav.status(), NavStatus::Navigating);
     }
 }

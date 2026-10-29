@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
@@ -60,6 +60,16 @@ pub trait Chassis: Send + Sync {
 
     /// 与 `STM32Device::apply_action` / `MavlinkDevice::apply_action` 同形（同步、无返回值）
     fn Apply_Action(&self, action: MotionAction);
+
+    /// 连续速度指令（task_39 §四.4）：`v` 单位 **m/s**、`omega` 单位 **rad/s**
+    /// （物理量，与真机 UAV 的 `vel_fwd` / `yaw_rate_deg` 同口径）。
+    ///
+    /// 默认**不支持** → 车栈继续走 [`Self::Apply_Action`]（差速底盘一行不改）。
+    /// 返回 `true` = 本底盘**支持**这路指令（**不代表已送达**：未装配时 `Send_Velocity`
+    /// 只 `debug!` 丢弃并返回 `Ok(())`）。
+    fn Apply_Velocity(&self, _v: f32, _omega: f32) -> bool {
+        false
+    }
 
     /// 与真机 `handle_manual_cmd` 同形（设备选择性响应：车不响应 Takeoff/Land）
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd);
@@ -269,6 +279,18 @@ mod tests {
         assert!(
             crate::sim::chassis::pose_ingest::Age_Of(&handle) < 1000,
             "建图 task 的 pose_age 必须同步变新鲜（同一个 Arc）"
+        );
+    }
+
+    #[test]
+    fn test_apply_velocity_default_unsupported() {
+        // task_39 §四.4：差速底盘不实现 Apply_Velocity（默认 false）→ 车栈既不下发也不报错
+        let (tx, mut rx) = channel();
+        let ch = Build("diff_drive_ugv", &cfg(), tx, state()).expect("能建");
+        assert!(!ch.Apply_Velocity(0.5, -0.25), "默认必须返回 false（不支持）");
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "车栈不该下发任何速度帧"
         );
     }
 }

@@ -1,17 +1,29 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
 //! D* Lite 增量路径规划器
 //!
 //! 基于 Sven Koenig & Maxim Likhachev (2002) 算法。
-//! 4 连通网格，Manhattan 距离启发式。
+//! **8 连通（禁切角）**，octile 距离启发式。
 //! 障碍通过 mark_obstacle() 增量修补，无需每次从头搜索。
+//!
+//! ## 8 连通契约（Task 39 §三）
+//!
+//! 1. **邻居顺序（固定，顺时针，从正北起）**：`N → NE → E → SE → S → SW → W → NW`
+//!    —— `neighbors()` 的数组顺序决定 tie-break（`next_step` 取**第一个严格更小**的候选），**不许重排**。
+//! 2. **边代价**：cardinal `1.0`，diagonal `SQRT_2`。
+//! 3. **禁切角**：`s → t` 对角边存在 ⟺ `passable(s.x+dx, s.y)` 且 `passable(s.x, s.y+dy)` 且 `passable(t)`。
+//! 4. **`passable(c)`**（两变体同口径）：在界内 && 本格 != `Occupied` && 不在动态障碍集合。
+//! 5. **修补范围 1 环**：`rhs(s)` 只依赖 `s` 的 8 条边，而边只涉及 `t` 与两个 cardinal 中间格，
+//!    全在 `s` 的 8 邻域内 —— 所以 `mark_obstacle` / `set_dynamic_obstacles` / `Notify_Changed`
+//!    按 **8 邻域**修补即可（sim 的 2 环随 1 格膨胀一起回退）。
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use pleiades_base::robot::core::grid::{CellState, OccupancyGrid, CHUNK_SIZE};
@@ -27,14 +39,50 @@ use pleiades_base::robot::core::grid::{CellState, OccupancyGrid, CHUNK_SIZE};
 /// 取 60_000（评审建议 3~6 万的上界）：覆盖 256×256 全图的量级（65 536 格），实测首帧
 /// 规划耗时仍远低于 50 ms tick 预算（见本文件单测 `test_far_goal_reachable_from_empty_grid`
 /// 与 Workbook「Step 7 第 2 轮」记录的实测耗时）。超过上限仍会 break（有界终止，不挂死）。
+///
+/// Task 39 起它**只是兜底**：命中时返回 `ComputeOutcome::BudgetExhausted` → `StepResult::NotReady`
+/// （=「没算完」），**不再当作不可达**。正常出口是时间预算（config `plan_budget_ms`，缺省 20 ms）。
 const MAX_COMPUTE_ITERS: u32 = 60_000;
 
-/// 等代价容差：两邻居的 `c(s,s')+g(s')` 相差 ≤ 它即视为「打平」，沿用上一步（防 4 连通并列解翻面）
+/// 规划时间预算的检查粒度：每 N 次迭代查一次表（Task 39 §二）
+///
+/// 一次迭代是一个 `pop_valid` + `update_vertex`（微秒级），64 次一查既不会让
+/// 单拍超支太多，也不会被 `Instant::now()` 自身的开销拖慢。
+const BUDGET_CHECK_EVERY: u32 = 64;
+
+/// 对角步长（= √2 格 = √2 × 0.5 m ≈ 0.707 m），Task 39 §三
+const SQRT_2: f32 = std::f32::consts::SQRT_2;
+
+// ============================================================
+// 返回类型（Task 39 §二：先补"说法"，再补"行为"）
+// ============================================================
+
+/// `next_step` 的三种结果：**"没算完" 不等于 "没有路"**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepResult {
+    /// 有一格（8 邻居里 `cost + Value` 最小的）
+    Step((i32, i32)),
+    /// 已收敛，确实没有路（堆空 且 `rhs[start] = ∞`）
+    NoPath,
+    /// 时间预算（或旧迭代上限）用完，`g/rhs` 是半成品 —— **不许读、不许当不可达**
+    NotReady,
+}
+
+/// `compute_shortest_path` 的两种结果（Task 39 §二：预算按**时间**计）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeOutcome {
+    /// 堆空或已收敛（起点值已定、堆顶 key 已过起点）
+    Converged,
+    /// 预算（或旧迭代上限）用完，搜索没做完
+    BudgetExhausted,
+}
+
+/// 等代价容差：两邻居的 `c(s,s')+g(s')` 相差 ≤ 它即视为「打平」，沿用上一步（防 8 连通并列解翻面）
 const TIE_EPS: f32 = 1e-3;
 
 /// 从候选里选下一步（task_31 Step 7 / D1：等代价迟滞）
 ///
-/// `candidates` 必须已按 4 连通**固定顺序**给出且代价均有限（无穷代价由调用方滤掉）。
+/// `candidates` 必须已按 8 连通**固定顺序**给出且代价均有限（无穷代价由调用方滤掉）。
 ///
 /// 1) 若 `last` 仍在候选里、且它的值与最优值相差 ≤ `eps` → 选 `last`（迟滞，避免 tie 每 tick 翻面）
 /// 2) 否则选**第一个**最小值（与引入迟滞前的行为逐字一致）
@@ -128,24 +176,31 @@ impl DStarLite {
 
     // ─── 公有接口 ─────────────────────────────────
 
-    /// 查询下一格方向
+    /// 查询下一格方向（Task 39 §二：三态返回）
     ///
-    /// 返回 4 连通邻居中 `cost + g` 最小的格子，或 None（不可达/已到达）。
-    pub fn next_step(&mut self, grid: &OccupancyGrid) -> Option<(i32, i32)> {
-        info!("[D*] next_step: start=({},{}) goal=({},{}) km={:.1}",
-            self.start.0, self.start.1, self.goal.0, self.goal.1, self.km);
+    /// 返回 8 邻居中 `cost + Value` 最小的格子；这一拍没算完 → [`StepResult::NotReady`]，
+    /// **绝不**降级成 `NoPath`（算不完 ≠ 没有路）。
+    ///
+    /// `budget` 由调用方传入（值来自 config 顶层键 `plan_budget_ms`，缺省 20 ms），
+    /// 本函数自身不写入任何缺省值。
+    pub fn next_step(&mut self, grid: &OccupancyGrid, budget: Duration) -> StepResult {
+        info!("[D*] next_step: start=({},{}) goal=({},{}) km={:.1} budget={:?}",
+            self.start.0, self.start.1, self.goal.0, self.goal.1, self.km, budget);
         if self.start == self.goal {
-            warn!("[D*] start==goal，返回 None");
-            return None;
+            warn!("[D*] start==goal，返回 NoPath");
+            return StepResult::NoPath;
         }
-        self.compute_shortest_path(grid);
+        // 预算用完 → 立即 NotReady：从这里往下**一行都不许读 g/rhs**（半成品）
+        if self.compute_shortest_path(grid, budget) == ComputeOutcome::BudgetExhausted {
+            return StepResult::NotReady;
+        }
         if self.rhs_val(self.start) >= f32::MAX / 2.0 {
             warn!("[D*] rhs[start]=INF，不可达");
-            return None;
+            return StepResult::NoPath;
         }
         // 找邻居中 c(s,s') + v(s') 最小的（先收集候选，再交给 Choose_Step 做等代价迟滞）
         //
-        // 为什么需要迟滞（task_31 Step 7 实测 D1）：4 连通等距时最优邻居不唯一，
+        // 为什么需要迟滞（task_31 Step 7 实测 D1）：8 连通等距时最优邻居不唯一，
         // 每 tick 重新 compute_shortest_path 后 `HashMap` 遍历/浮点累加的末位差异会让 tie
         // 在两格之间翻面，`sub_target` 一变，executor 就 `Stop + Idle` 重新转向，车在墙前永久冻结。
         //
@@ -154,7 +209,7 @@ impl DStarLite {
         // 「只是还没扩展、其实可通行」的邻居算成不可达（实测：西侧绕行格全 ∞，车只能在南北
         // 两格间来回摆动）。`rhs` 是**一步前瞻**（由邻居的 g 直接算出），对未收敛节点仍是可用
         // 估计；取 min 后已收敛的照旧用 g，未收敛的退化为一步前瞻，不会再出现"整片方向 ∞"。
-        let mut cands: Vec<((i32, i32), f32)> = Vec::with_capacity(4);
+        let mut cands: Vec<((i32, i32), f32)> = Vec::with_capacity(8);
         for n in Self::neighbors(self.start) {
             let cost = self.cost(grid, self.start, n);
             if cost >= f32::MAX / 2.0 { continue; }
@@ -171,7 +226,11 @@ impl DStarLite {
             }
             self.last_step = step;
         }
-        step
+        match step {
+            Some(cell) => StepResult::Step(cell),
+            // 收敛了却挑不出候选（数学上不会发生）：宁可说没有路，也**绝不给假格**
+            None => StepResult::NoPath,
+        }
     }
 
     /// 更新起点（机器人移动了一步）
@@ -196,16 +255,13 @@ impl DStarLite {
     /// 与 (36.28, 90.74) 之间来回 150 s）。本函数由 `GoalService::get_path` 每 tick 用
     /// 建图增量喂进来，等价于标准 D* Lite 的"边代价变化"处理。
     ///
-    /// 修补范围取**2 环**（自身 + 1 环 + 2 环）：`cost()` 的判据是"本格或贴邻格是 Occupied"
-    /// （1 格膨胀），所以某格变为 Occupied 会影响到**距离 2** 的格子的可通行性。
+    /// 修补范围取**1 环**（自身 + `neighbors()` 一圈，与真机 `mark_obstacle` 同口径）：
+    /// `rhs(s)` 只依赖 `s` 的 8 条边，而边只涉及 `t` 与两个 cardinal 中间格，全在 `s` 的
+    /// 8 邻域内 —— 所以按 **8 邻域**修补即可。sim 的 2 环修补已随可通行判据回退一起回退
+    /// （Task 39 §三：与真机同口径）。
     pub fn Notify_Changed(&mut self, cells: &[(i32, i32)], grid: &OccupancyGrid) {
         for &cell in cells {
             for n in Self::neighbors(cell) {
-                for nn in Self::neighbors(n) {
-                    if nn != cell && self.has_rhs(nn) {
-                        self.update_vertex(nn, grid);
-                    }
-                }
                 if self.has_rhs(n) {
                     self.update_vertex(n, grid);
                 }
@@ -216,7 +272,7 @@ impl DStarLite {
 
     /// 注入最新他车动态障碍格（Task 15）
     ///
-    /// 对 old/new 集合做 diff，仅对变更格触发局部修补（先邻居、后自身，
+    /// 对 old/new 集合做 diff，仅对变更格触发局部修补（先 **8 邻域**、后自身，
     /// 复用 mark_obstacle 的修补机制）。集合未变时直接返回，零开销。
     pub fn set_dynamic_obstacles(&mut self, cells: &[(i32, i32)], grid: &OccupancyGrid) {
         let new: HashSet<(i32, i32)> = cells.iter().copied().collect();
@@ -256,67 +312,56 @@ impl DStarLite {
         Key { k1: m + h + self.km, k2: m }
     }
 
-    /// Manhattan 距离
+    /// octile 距离（8 连通下的精确步数代价）：`max(dx,dy) + (√2−1)·min(dx,dy)`
     fn heuristic(a: (i32, i32), b: (i32, i32)) -> f32 {
-        ((a.0 - b.0).abs() + (a.1 - b.1).abs()) as f32
+        let dx = (a.0 - b.0).abs() as f32;
+        let dy = (a.1 - b.1).abs() as f32;
+        dx.max(dy) + (SQRT_2 - 1.0) * dx.min(dy)
     }
 
-    /// 4 连通邻居
-    fn neighbors(cell: (i32, i32)) -> [(i32, i32); 4] {
-        let (x, y) = cell;
-        [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)]
-    }
-
-    /// 移动代价：Free/Unknown=1，Occupied（含**贴邻格**）=∞，出界=∞
+    /// 8 连通邻居，顺序固定（顺时针、从正北起）：`N → NE → E → SE → S → SW → W → NW`
     ///
-    /// 贴邻格不可通行（task_31 Step 7 实测修复）：急停阈值 `OBSTACLE_THRESHOLD_M = 0.3 m`
-    /// 比格心到墙面的距离（`CELL_RESOLUTION/2 = 0.25 m`）大 —— 只要规划把车放进**与
-    /// Occupied 格 4 连通的格**，车停下时离墙必然 < 0.3 m → 急停每 tick 触发 → 车既不能
-    /// 前进也不能转向（急停在决策之前 `Stop + return`）→ **永久冻结**。
-    /// 实测：S3 停在 (40.23, 91.74) 120 s 不动、yaw 恒定，日志 94 条急停。
-    /// 因此把「贴邻 Occupied」视为不可通行（等价于对地图做 1 格膨胀），让规划与急停自洽。
-    fn cost(&self, grid: &OccupancyGrid, _from: (i32, i32), to: (i32, i32)) -> f32 {
-        if self.dynamic_obstacles.contains(&to) {
-            return f32::MAX;
-        }
-        if Self::Blocked(grid, to) {
-            return f32::MAX;
-        }
-        1.0
+    /// 顺序即 tie-break：`next_step` 取**第一个严格更小**的候选，**不许重排**（Task 39 §三）。
+    fn neighbors(cell: (i32, i32)) -> [(i32, i32); 8] {
+        let (x, y) = cell;
+        [
+            (x, y - 1),
+            (x + 1, y - 1),
+            (x + 1, y),
+            (x + 1, y + 1),
+            (x, y + 1),
+            (x - 1, y + 1),
+            (x - 1, y),
+            (x - 1, y - 1),
+        ]
     }
 
-    /// 在界内且本格非 Occupied
-    fn Passable(grid: &OccupancyGrid, cell: (i32, i32)) -> bool {
+    /// 边代价：cardinal `1.0`、diagonal `SQRT_2`；不可通行 / 切角 → ∞
+    ///
+    /// **禁切角**：`s → t` 对角边存在 ⟺ 两个相邻 cardinal 中间格可通行，且 `t` 可通行。
+    /// `from`/`to` 只有 8 邻居才有"边"语义；非邻居输入按 cardinal 处理（只有单测拿它查单格可通行性）。
+    fn cost(&self, grid: &OccupancyGrid, from: (i32, i32), to: (i32, i32)) -> f32 {
+        let dx = to.0 - from.0;
+        let dy = to.1 - from.1;
+        let diagonal = dx.abs() == 1 && dy.abs() == 1;
+        if diagonal
+            && (!self.Passable(grid, (from.0 + dx, from.1))
+                || !self.Passable(grid, (from.0, from.1 + dy)))
+        {
+            return f32::MAX;
+        }
+        if !self.Passable(grid, to) {
+            return f32::MAX;
+        }
+        if diagonal { SQRT_2 } else { 1.0 }
+    }
+
+    /// 可通行判据（只判**本格**，Task 39 §三：sim 的 1 格膨胀已回退，与真机同口径）：
+    /// 在界内 && 本格 != Occupied && 不在动态障碍集合
+    fn Passable(&self, grid: &OccupancyGrid, cell: (i32, i32)) -> bool {
         Self::In_Bounds(cell)
             && !matches!(grid.state(cell.0, cell.1), Some(val) if val == CellState::Occupied as u8)
-    }
-
-    /// 本格 Occupied/出界，或**任一 4 连通邻居是 Occupied** → 不可通行（1 格膨胀，见 [`Self::cost`]）
-    ///
-    /// 膨胀半径取 1 格的理由：4 连通的规划格心到贴邻的 Occupied 格面只有 `0.25 m`，
-    /// 而急停阈值是 `0.3 m`；再远一格（2 格）不需要，且会把 `wall_c` 与 `wall_d` 之间
-    /// 仅 1 m 的通道彻底堵死（S3 的目标就在那条通道后面）。
-    /// 注意：**出界只判自身**，不参与「邻居」膨胀（地图外沿不该再外扩一圈，
-    /// 否则贴边的格全部不可通行，单测里以 (0,0) 为起点的用例会失去全部出口）。
-    ///
-    /// ## 偏差 D1-c（**未获人类批准的设计变更**，见 `Workbook/wb_31_sim_world_link.md` 偏差登记表）
-    ///
-    /// 与 `pleiades-ugv` 的 D\* `cost()`（只判本格）**不一致**：本函数额外把贴邻格判为不可通行。
-    /// - 几何关系：急停阈值 [`crate::sim::emergency_stop::OBSTACLE_THRESHOLD_M`] = `0.3 m`
-    ///   **大于** 格心到贴邻格面的 `CELL_RESOLUTION/2 = 0.25 m`。规划只要允许「与 Occupied 4 连通的格」，
-    ///   车停在那里就必然 < 0.3 m → 急停每 tick 触发（`on_tick` 里急停在决策**之前** `Stop + return`）
-    ///   → 车既不能前进也不能转向 → 永久冻结。第 1 轮实测：S3 卡 (40.23, 91.74) 120 s、94 条急停。
-    /// - 去留：由 `RobotSim_TestEnv/tools/probe_noinflate.py` 的 A/B 决策实验按**事前定死**的规则裁决
-    ///   （能删就删 → 恢复与 ugv 一致；必须留则登记为本偏差）。结论见 `results/conclusion.md`。
-    /// - 影响的两条判据：Task §八 判据 8、§九.3 S3 的「急停出现过」——规划停在离墙 ≥ 0.5 m 处，
-    ///   静态世界里走规划绕行的车永不进入 0.3 m 扇区。**需人类裁决**（结论「需人类决策」）。
-    fn Blocked(grid: &OccupancyGrid, cell: (i32, i32)) -> bool {
-        if !Self::Passable(grid, cell) {
-            return true;
-        }
-        Self::neighbors(cell)
-            .iter()
-            .any(|n| Self::In_Bounds(*n) && !Self::Passable(grid, *n))
+            && !self.dynamic_obstacles.contains(&cell)
     }
 
     /// 地图边界内
@@ -368,19 +413,35 @@ impl DStarLite {
 
     // ─── compute_shortest_path ─────────────────
 
-    fn compute_shortest_path(&mut self, grid: &OccupancyGrid) {
+    fn compute_shortest_path(&mut self, grid: &OccupancyGrid, budget: Duration) -> ComputeOutcome {
+        // 预算 0 → 本拍一次都不算（确定性：不依赖墙钟，单测可断言）
+        if budget.is_zero() {
+            info!("[D*] compute: 预算为 0，本拍不算（NotReady）");
+            return ComputeOutcome::BudgetExhausted;
+        }
+        let t0 = Instant::now();
         let mut iter = 0u32;
         loop {
-            // P3：迭代上限——极端地图降级，避免拖垮 50ms tick（get_path 在 main_loop 同步执行）
+            // P3：迭代上限——极端地图降级，避免拖垮 50ms tick（Task 39 起命中 → NotReady）
             if iter >= MAX_COMPUTE_ITERS {
-                warn!("[D*] compute_shortest_path 超过迭代上限 {MAX_COMPUTE_ITERS}，降级（路径可能不完整）");
-                break;
+                warn!("[D*] compute_shortest_path 超过迭代上限 {MAX_COMPUTE_ITERS}，返回 NotReady（兜底，不算不可达）");
+                return ComputeOutcome::BudgetExhausted;
+            }
+            // 时间预算：每 BUDGET_CHECK_EVERY 次迭代查一次表。
+            // `iter > 0` 保证**每拍至少推进一批** —— 极小预算（如 1 ns）也能断点续算，
+            // 不会因"每次都超时且在起点就超时"造成永久零进展的死循环。
+            //
+            // 这一条用 `info!`（不是 `warn!`）：预算用完是**正常工况**，`NotReady` 连拍时
+            // 每拍都会命中，`warn!` 会刷屏。给人看的"连续 5 拍一条 warn"在 `Navigator` 里。
+            if iter > 0 && iter % BUDGET_CHECK_EVERY == 0 && t0.elapsed() >= budget {
+                info!("[D*] compute: 时间预算 {budget:?} 用完（{iter} iters），本拍返回 NotReady");
+                return ComputeOutcome::BudgetExhausted;
             }
             let (key, cell) = match self.pop_valid() {
                 Some(v) => v,
                 None => {
                     info!("[D*] compute: heap empty after {} iters", iter);
-                    break;
+                    return ComputeOutcome::Converged;
                 }
             };
             iter += 1;
@@ -398,7 +459,7 @@ impl DStarLite {
                 && self.g_val(self.start) == self.rhs_val(self.start) {
                 self.u.push((key, cell));
                 info!("[D*] compute: converged after {} iters", iter);
-                break;
+                return ComputeOutcome::Converged;
             }
 
             if g > rhs {
@@ -457,55 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cost_inflates_cells_adjacent_to_occupied() {
-        let mut grid = OccupancyGrid::new();
-        // (10,10) 连续命中 3 帧 → Occupied
-        for _ in 0..3 {
-            grid.update(10, 10, true);
-        }
-        assert_eq!(grid.state(10, 10), Some(CellState::Occupied as u8));
-        let pf = DStarLite::new((0, 0), (20, 20));
-        // 墙体本身不可通行
-        assert_eq!(pf.cost(&grid, (9, 10), (10, 10)), f32::MAX);
-        // 贴邻格（上下左右）也不可通行：否则车停下时离墙 < 急停阈值 0.3 m
-        for n in [(9, 10), (11, 10), (10, 9), (10, 11)] {
-            assert_eq!(pf.cost(&grid, (0, 0), n), f32::MAX, "贴邻格 {n:?} 应不可通行");
-        }
-        // 斜角格隔着一个空行/列（不贴邻）→ 可通行
-        assert_eq!(pf.cost(&grid, (0, 0), (9, 9)), 1.0);
-        assert_eq!(pf.cost(&grid, (0, 0), (8, 10)), 1.0);
-    }
-
-    #[test]
-    fn test_next_step_steps_around_inflated_wall() {
-        // 竖直墙 x=5（y=0..9），膨胀后 x=4/5/6 都不可通行；起点 (2,5)、目标 (8,5)
-        let mut grid = OccupancyGrid::new();
-        for y in 0..10 {
-            for _ in 0..3 {
-                grid.update(5, y, true);
-            }
-        }
-        let mut pf = DStarLite::new((2, 5), (8, 5));
-        let mut cur = (2, 5);
-        let mut reached = false;
-        for _ in 0..80 {
-            let step = pf.next_step(&grid).expect("绕行路径应存在");
-            assert_eq!(
-                pf.cost(&grid, cur, step),
-                1.0,
-                "不得走进被膨胀的格：{cur:?} -> {step:?}"
-            );
-            pf.move_to(step);
-            cur = step;
-            if cur == (8, 5) {
-                reached = true;
-                break;
-            }
-        }
-        assert!(reached, "沿膨胀后的可通行格应能到达 (8,5)，实际停在 {cur:?}");
-    }
-
-    #[test]
     fn test_set_dynamic_obstacles_remove_restores() {
         let grid = OccupancyGrid::new();
         let mut pf = DStarLite::new((0, 0), (5, 5));
@@ -531,12 +543,12 @@ mod tests {
         let grid = OccupancyGrid::new();
         let mut pf = DStarLite::new((0, 0), (0, 2));
         // 无障碍时必经格 (0,1)
-        assert_eq!(pf.next_step(&grid), Some((0, 1)));
+        assert_eq!(pf.next_step(&grid, Duration::from_secs(3)), StepResult::Step((0, 1)));
         // 注入 (0,1) 障碍后，不应再返回 (0,1)
         pf.set_dynamic_obstacles(&[(0, 1)], &grid);
-        let step = pf.next_step(&grid);
-        assert_ne!(step, Some((0, 1)), "注入障碍后不应返回障碍格");
-        assert!(step.is_some(), "绕行路径应存在");
+        let step = pf.next_step(&grid, Duration::from_secs(3));
+        assert_ne!(step, StepResult::Step((0, 1)), "注入障碍后不应返回障碍格");
+        assert!(matches!(step, StepResult::Step(_)), "绕行路径应存在");
     }
 
     #[test]
@@ -547,9 +559,9 @@ mod tests {
         pf.move_to((0, 1));
         // 注入下一必经格 (0,2) 障碍
         pf.set_dynamic_obstacles(&[(0, 2)], &grid);
-        let step = pf.next_step(&grid);
-        assert_ne!(step, Some((0, 2)), "move_to 后注入障碍应被绕开");
-        assert!(step.is_some(), "绕行路径应存在");
+        let step = pf.next_step(&grid, Duration::from_secs(3));
+        assert_ne!(step, StepResult::Step((0, 2)), "move_to 后注入障碍应被绕开");
+        assert!(matches!(step, StepResult::Step(_)), "绕行路径应存在");
     }
 
     #[test]
@@ -558,8 +570,8 @@ mod tests {
         let mut pf = DStarLite::new((0, 0), (0, 3));
         // 走一步到 (0,1)，模拟车跨格移动（km 变化）；不注入障碍（回归：pop_valid 不应清空堆）
         pf.move_to((0, 1));
-        let step = pf.next_step(&grid);
-        assert_eq!(step, Some((0, 2)), "move_to 后（无障碍变化）寻路不应退化");
+        let step = pf.next_step(&grid, Duration::from_secs(3));
+        assert_eq!(step, StepResult::Step((0, 2)), "move_to 后（无障碍变化）寻路不应退化");
     }
 
     // ─── Choose_Step（task_31 Step 7 / D1：等代价迟滞）────────────────
@@ -622,7 +634,7 @@ mod tests {
         assert_eq!(pf.Value((0, 2)), f32::MAX);
         // g 收敛后 Value 取 min(g, rhs) = g
         let mut pf = DStarLite::new((0, 0), (0, 2));
-        assert_eq!(pf.next_step(&grid), Some((0, 1)));
+        assert_eq!(pf.next_step(&grid, Duration::from_secs(3)), StepResult::Step((0, 1)));
         assert!(pf.g_val((0, 1)).is_finite(), "邻居应收敛出有限 g");
         assert_eq!(pf.Value((0, 1)), pf.g_val((0, 1)));
     }
@@ -636,16 +648,20 @@ mod tests {
 
     #[test]
     fn test_next_step_is_stable_across_ticks() {
-        // 端到端复现冻结场景：空地曼哈顿路径上等距邻居不唯一时，
+        // 端到端复现冻结场景：空地 8 连通路径上等距邻居不唯一时，
         // 连续两次 next_step（同一 start、未 move_to）必须返回**同一格**，
         // 否则 executor 会因 sub_target 变化反复 Stop + Idle（D1）。
         let grid = OccupancyGrid::new();
         // start 与 goal 同列同行的对角线关系：两个邻居代价相等，tie 明显
         let mut pf = DStarLite::new((2, 2), (0, 0));
-        let first = pf.next_step(&grid);
-        assert!(first.is_some(), "空 grid 上应能找到下一步");
+        let first = pf.next_step(&grid, Duration::from_secs(3));
+        assert!(matches!(first, StepResult::Step(_)), "空 grid 上应能找到下一步");
         for _ in 0..8 {
-            assert_eq!(pf.next_step(&grid), first, "tie 不得每 tick 翻面（D1 冻结回归）");
+            assert_eq!(
+                pf.next_step(&grid, Duration::from_secs(3)),
+                first,
+                "tie 不得每 tick 翻面（D1 冻结回归）"
+            );
         }
     }
 
@@ -659,9 +675,12 @@ mod tests {
         let grid = OccupancyGrid::new();
         let mut pf = DStarLite::new((128, 128), (72, 220));
         let t0 = std::time::Instant::now();
-        let step = pf.next_step(&grid);
+        let step = pf.next_step(&grid, Duration::from_secs(3));
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        assert!(step.is_some(), "空地图远目标必须有下一步（不得降级/丢任务）");
+        assert!(
+            matches!(step, StepResult::Step(_)),
+            "空地图远目标必须有下一步（不得降级/丢任务），实际 {step:?}"
+        );
         // 注意：本实现用 `f32::MAX` 当"无穷"哨兵（不是 f32::INFINITY），所以判据是
         // `< f32::MAX / 2.0`（与 `next_step` 内部判不可达的阈值一致），不能用 is_finite()。
         assert!(
@@ -678,8 +697,8 @@ mod tests {
     }
 
     #[test]
-    fn test_enclosed_goal_terminates_with_none() {
-        // 被围死的目标：4 邻居全 Occupied → 起点不可达。必须**有界终止**并返回 None
+    fn test_enclosed_goal_returns_no_path() {
+        // 被围死的目标：4 邻居全 Occupied → 起点不可达。必须**有界终止**并返回 NoPath
         // （不得因迭代上限之外的死循环挂死；也不得返回一个假的"下一步"）。
         let mut grid = OccupancyGrid::new();
         for cell in [(5, 4), (6, 5), (5, 6), (4, 5)] {
@@ -690,8 +709,9 @@ mod tests {
         }
         let mut pf = DStarLite::new((0, 0), (5, 5));
         let t0 = std::time::Instant::now();
-        let step = pf.next_step(&grid);
-        assert_eq!(step, None, "被围死的目标必须返回 None");
+        // 3 s 预算：足够走完「收敛」这条路，所以这一条必须给出 NoPath 而不是 NotReady
+        let step = pf.next_step(&grid, Duration::from_secs(3));
+        assert_eq!(step, StepResult::NoPath, "被围死的目标必须返回 NoPath（收敛后）");
         assert!(
             pf.rhs_val((0, 0)) >= f32::MAX / 2.0,
             "起点 rhs 应为 INF 哨兵（真不可达，而非降级）"
@@ -702,5 +722,209 @@ mod tests {
             "围死目标的搜索必须在 1 s 内终止，实际 {:?}",
             t0.elapsed()
         );
+    }
+
+    // ─── Task 39 §二：三态返回 + 时间预算 ─────────────
+
+    /// 预算 0 → 本拍不算 → `NotReady`，**不是** `NoPath`（算不完 ≠ 没有路）
+    #[test]
+    fn test_next_step_zero_budget_is_not_ready() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (5, 5));
+        assert_eq!(pf.next_step(&grid, Duration::ZERO), StepResult::NotReady);
+    }
+
+    /// 预算充足 → 空地图直达 `Step`（第一格必为沿目标方向的邻居 `(0,1)`）
+    #[test]
+    fn test_next_step_converged_with_path_returns_step() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (0, 2));
+        assert_eq!(
+            pf.next_step(&grid, Duration::from_secs(3)),
+            StepResult::Step((0, 1))
+        );
+    }
+
+    /// 断点续算：1 ns 预算每拍只推一批 64 次迭代 → 多次调用最终必须给出 `Step`
+    ///
+    /// 目标取 (100,100)：8 连通 + octile 在空地图上是**精确**启发，搜索只沿最优对角走廊
+    /// 扩展（每次迭代一格），距离必须长过一批 64 次迭代，才可能先出 `NotReady`。
+    #[test]
+    fn test_next_step_resumes_across_small_budgets() {
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (100, 100));
+        let mut not_ready = 0u32;
+        let mut out = StepResult::NotReady;
+        for _ in 0..2_000 {
+            out = pf.next_step(&grid, Duration::from_nanos(1));
+            if out == StepResult::NotReady {
+                not_ready += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(not_ready > 0, "1 ns 预算下应先出现 NotReady（每拍只推一批）");
+        assert!(
+            matches!(out, StepResult::Step(_)),
+            "多次续算后必须收敛出 Step，实际 {out:?}"
+        );
+    }
+
+    // ─── Task 39 §三：回退 1 格膨胀（反向锁）─────────────
+
+    /// 反向锁（Task 39 §三.4.1-6）：**贴邻 `Occupied` 的空格代价必须是 1.0** —— sim 不再有 1 格膨胀
+    #[test]
+    fn test_cost_does_not_inflate_cells_next_to_occupied() {
+        let mut grid = OccupancyGrid::new();
+        for _ in 0..3 {
+            grid.update(10, 10, true);
+        }
+        assert_eq!(grid.state(10, 10), Some(CellState::Occupied as u8));
+        let pf = DStarLite::new((0, 0), (20, 20));
+        // 墙体本身不可通行（含对角进墙）
+        assert_eq!(pf.cost(&grid, (9, 10), (10, 10)), f32::MAX);
+        assert_eq!(pf.cost(&grid, (9, 9), (10, 10)), f32::MAX);
+        // 贴邻 Occupied 的空格**可通行**：代价 1.0（与真机同口径，无膨胀）
+        for n in [(9, 10), (11, 10), (10, 9), (10, 11)] {
+            assert_eq!(pf.cost(&grid, (0, 0), n), 1.0, "贴邻格 {n:?} 应可通行（无 1 格膨胀）");
+        }
+        // 斜角隔一行的格子也不受影响
+        assert_eq!(pf.cost(&grid, (0, 0), (9, 9)), 1.0);
+    }
+
+    // ─── Task 39 §三：8 连通（禁切角）+ octile ─────────────
+
+    /// 邻居顺序固定 `N,NE,E,SE,S,SW,W,NW`（决定 tie-break）；空地图斜向目标首步必为对角格
+    #[test]
+    fn test_neighbor_order_and_first_step_is_diagonal() {
+        assert_eq!(
+            DStarLite::neighbors((5, 5)),
+            [(5, 4), (6, 4), (6, 5), (6, 6), (5, 6), (4, 6), (4, 5), (4, 4)],
+            "邻居顺序必须是 N,NE,E,SE,S,SW,W,NW"
+        );
+        let grid = OccupancyGrid::new();
+        let mut pf = DStarLite::new((0, 0), (2, 2));
+        assert_eq!(
+            pf.next_step(&grid, Duration::from_secs(3)),
+            StepResult::Step((1, 1)),
+            "斜向目标首步必须是对角格（4 连通时会是 (1,0) 或 (0,1)）"
+        );
+    }
+
+    /// 禁切角（左）：对角边 (0,0)→(1,1) 的**北侧**中间格 (0,1) 被占 → 该对角边不存在
+    #[test]
+    fn test_no_corner_cutting_left() {
+        let mut grid = OccupancyGrid::new();
+        for _ in 0..3 {
+            grid.update(0, 1, true);
+        }
+        assert_eq!(grid.state(0, 1), Some(CellState::Occupied as u8));
+        let mut pf = DStarLite::new((0, 0), (2, 2));
+        assert_eq!(
+            pf.cost(&grid, (0, 0), (1, 1)),
+            f32::MAX,
+            "北侧中间格被占 → 不得切角"
+        );
+        assert_eq!(
+            pf.next_step(&grid, Duration::from_secs(3)),
+            StepResult::Step((1, 0)),
+            "切角被禁后只能先走 E 绕"
+        );
+    }
+
+    /// 禁切角（右）：对角边 (0,0)→(1,1) 的**东侧**中间格 (1,0) 被占 → 该对角边不存在
+    #[test]
+    fn test_no_corner_cutting_right() {
+        let mut grid = OccupancyGrid::new();
+        for _ in 0..3 {
+            grid.update(1, 0, true);
+        }
+        assert_eq!(grid.state(1, 0), Some(CellState::Occupied as u8));
+        let mut pf = DStarLite::new((0, 0), (2, 2));
+        assert_eq!(
+            pf.cost(&grid, (0, 0), (1, 1)),
+            f32::MAX,
+            "东侧中间格被占 → 不得切角"
+        );
+        assert_eq!(
+            pf.next_step(&grid, Duration::from_secs(3)),
+            StepResult::Step((0, 1)),
+            "切角被禁后只能先走 S 绕"
+        );
+    }
+
+    /// 边代价：cardinal 1.0、diagonal √2
+    #[test]
+    fn test_edge_costs_cardinal_one_diagonal_sqrt2() {
+        let grid = OccupancyGrid::new();
+        let pf = DStarLite::new((0, 0), (3, 3));
+        assert_eq!(pf.cost(&grid, (0, 0), (1, 0)), 1.0, "E cardinal = 1.0");
+        assert_eq!(pf.cost(&grid, (0, 0), (0, 1)), 1.0, "S cardinal = 1.0");
+        assert_eq!(pf.cost(&grid, (0, 0), (1, 1)), SQRT_2, "SE diagonal = √2");
+        assert_eq!(pf.cost(&grid, (1, 1), (0, 0)), SQRT_2, "反向对角同价");
+        assert!(
+            (pf.cost(&grid, (0, 0), (1, 1)) - std::f32::consts::SQRT_2).abs() < 1e-6,
+            "对角代价必须等于 √2"
+        );
+    }
+
+    /// octile：(0,0)→(3,4) = 4 + (√2−1)×3 ≈ 5.2426（Manhattan 会是 7.0）
+    #[test]
+    fn test_heuristic_is_octile() {
+        let h = DStarLite::heuristic((0, 0), (3, 4));
+        assert!((h - 5.2426).abs() < 1e-4, "octile(3,4) 应 ≈5.2426，实际 {h}");
+        assert_eq!(h, DStarLite::heuristic((3, 4), (0, 0)), "启发必须对称");
+        assert_eq!(DStarLite::heuristic((7, 7), (7, 7)), 0.0, "同格距离为 0");
+        assert!(h < 7.0, "octile 必须小于 Manhattan(7.0)");
+    }
+
+    /// L 形墙仍能绕行：首步非 `NoPath`，且逐格移动能走到目标
+    #[test]
+    fn test_l_shaped_wall_detours() {
+        // L 形墙：竖墙 x=5（y=0..=9）+ 横墙 y=9（x=5..=12）；起点 (2,5) 在 L 内侧，目标 (10,4)
+        let mut grid = OccupancyGrid::new();
+        for y in 0..=9 {
+            for _ in 0..3 {
+                grid.update(5, y, true);
+            }
+        }
+        for x in 5..=12 {
+            for _ in 0..3 {
+                grid.update(x, 9, true);
+            }
+        }
+        assert_eq!(grid.state(5, 5), Some(CellState::Occupied as u8));
+        assert_eq!(grid.state(12, 9), Some(CellState::Occupied as u8));
+        assert_eq!(
+            grid.state(10, 4),
+            Some(CellState::Unknown as u8),
+            "目标格必须可通行"
+        );
+
+        let mut pf = DStarLite::new((2, 5), (10, 4));
+        assert_eq!(
+            pf.cost(&grid, (4, 5), (5, 5)),
+            f32::MAX,
+            "竖墙挡住直行"
+        );
+        let mut cur = (2, 5);
+        let mut reached = false;
+        for _ in 0..300 {
+            let step = match pf.next_step(&grid, Duration::from_secs(3)) {
+                StepResult::Step(c) => c,
+                other => panic!("L 形墙必须能绕行，实际 {other:?}（当前 {cur:?}）"),
+            };
+            assert!(
+                pf.cost(&grid, cur, step) < f32::MAX / 2.0,
+                "不得走进不可通行格：{cur:?} -> {step:?}"
+            );
+            pf.move_to(step);
+            cur = step;
+            if cur == (10, 4) {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "L 形墙绕行必须到达 (10,4)，实际停在 {cur:?}");
     }
 }

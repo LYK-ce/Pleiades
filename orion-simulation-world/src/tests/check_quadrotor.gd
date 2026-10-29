@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-22
+# Modified Date ： 2026-10-29
 #
 # Quadrotor 四旋翼底盘自检（Step 7）：场景形态 / 目录装配 / 无重力悬停 / 升降 / 平移 / 偏航 / 边界与白盒。
 # 用法：timeout 240 godot --headless --path orion-simulation-world --fixed-fps 60 \
@@ -402,6 +402,77 @@ func _run() -> void:
 	var drot_r: float = vehicle.rotation.y
 	_check("yaw-right-60f", drot_r < -WANT_YAW_60 * 0.92 and drot_r > -WANT_YAW_60 * 1.08,
 		"d_rot_y=%.4f (want≈-%.4f)" % [drot_r, WANT_YAW_60])
+
+	# ============================================================ C-velocity. 连续速度指令（task_39 §四.5）
+	# 与上面 6 个离散 action **并存**：{action:"velocity", v, omega} 只设水平 + 偏航，爬升 0。
+
+	# --- velocity-arc-60f：v 与 omega 同时生效（边走边转的弧线），且不掉高度
+	_prepare(vehicle, SPAWN_WORLD)
+	var ch_v: Node = _first_child(vehicle.chassis_root)
+	vehicle.SetMotionCommand({"action": "velocity", "v": 1.0, "omega": 0.5})
+	var pos_arc0: Vector3 = vehicle.global_position
+	await _wait_physics(60)
+	var planar_arc: float = Vector2(vehicle.global_position.x - pos_arc0.x,
+		vehicle.global_position.z - pos_arc0.z).length()
+	var dy_arc: float = vehicle.global_position.y - pos_arc0.y
+	_check("velocity-arc-60f", ch_v != null
+		and absf(float(ch_v.call("GetSpeed")) - 1.0) < 0.05
+		and absf(float(ch_v.call("GetYawRate")) - 0.5) < 0.05
+		and vehicle.rotation.y > 0.3 and planar_arc > 0.5 and absf(dy_arc) < TOL,
+		"v=%s omega=%s rot_y=%.4f planar=%.4f dy=%.6f" % [
+			ch_v.call("GetSpeed") if ch_v != null else "null",
+			ch_v.call("GetYawRate") if ch_v != null else "null",
+			vehicle.rotation.y, planar_arc, dy_arc])
+
+	# --- velocity-sign-right：负 omega = 右转（rotation.y 减小），与 action="right" 同向
+	_prepare(vehicle, SPAWN_WORLD)
+	ch_v = _first_child(vehicle.chassis_root)
+	vehicle.SetMotionCommand({"action": "velocity", "v": 0.0, "omega": -0.5})
+	await _wait_physics(30)
+	_check("velocity-sign-right", ch_v != null and vehicle.rotation.y < -0.1
+		and absf(float(ch_v.call("GetYawRate")) + 0.5) < 0.05,
+		"rot_y=%.4f yaw_rate=%s (want≈-0.5)" % [vehicle.rotation.y,
+			ch_v.call("GetYawRate") if ch_v != null else "null"])
+
+	# --- velocity-clamps：两轴各自 clampf 到 ±max_speed / ±max_yaw_rate，不放大
+	_prepare(vehicle, SPAWN_WORLD)
+	ch_v = _first_child(vehicle.chassis_root)
+	vehicle.SetMotionCommand({"action": "velocity", "v": 99.0, "omega": -999.0})
+	await _wait_physics(60)
+	_check("velocity-clamps", ch_v != null
+		and absf(float(ch_v.call("GetSpeed")) - 2.0) < 1e-3
+		and absf(float(ch_v.call("GetYawRate")) + PI * 0.5) < 1e-3,
+		"v=%s (want 2.0) yaw_rate=%s (want %.4f)" % [
+			ch_v.call("GetSpeed") if ch_v != null else "null",
+			ch_v.call("GetYawRate") if ch_v != null else "null", -PI * 0.5])
+
+	# --- velocity-zero-hovers：先 forward 100 跑起来，再 v=omega=0 → 停住悬停（执行器"无目标"那条）
+	_prepare(vehicle, SPAWN_WORLD)
+	vehicle.SetMotionCommand({"action": "forward", "speed": 100})
+	await _wait_physics(60)
+	vehicle.SetMotionCommand({"action": "velocity", "v": 0.0, "omega": 0.0})
+	await _wait_physics(60)
+	var pos_vz0: Vector3 = vehicle.global_position
+	await _wait_physics(30)
+	var planar_vz: float = Vector2(vehicle.global_position.x - pos_vz0.x,
+		vehicle.global_position.z - pos_vz0.z).length()
+	var dy_vz: float = vehicle.global_position.y - pos_vz0.y
+	_check("velocity-zero-hovers", planar_vz < TOL and absf(vehicle.rotation.y) < TOL
+		and absf(dy_vz) < TOL,
+		"planar=%.6f rot_y=%.6f dy=%.6f（斜坡 0.67 s 内必须已经停住）" % [planar_vz,
+			vehicle.rotation.y, dy_vz])
+
+	# --- velocity-missing-fields：只有 action、没有 v / omega → 容错取 0（不崩、不动）
+	_prepare(vehicle, SPAWN_WORLD)
+	vehicle.SetMotionCommand({"action": "velocity"})
+	var pos_mf0: Vector3 = vehicle.global_position
+	await _wait_physics(30)
+	var planar_mf: float = Vector2(vehicle.global_position.x - pos_mf0.x,
+		vehicle.global_position.z - pos_mf0.z).length()
+	_check("velocity-missing-fields", is_instance_valid(vehicle) and planar_mf < TOL
+		and absf(vehicle.rotation.y) < TOL,
+		"valid=%s planar=%.6f rot_y=%.6f" % [is_instance_valid(vehicle), planar_mf,
+			vehicle.rotation.y])
 
 	# --- climb 60 帧：竖直 0.8417 m，水平不动
 	_prepare(vehicle, SPAWN_WORLD)

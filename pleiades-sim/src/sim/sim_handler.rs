@@ -1,13 +1,21 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
 //! 模拟设备处理器（无硬件，用于测试决策链）
 //!
-//! 不 spawn stm32/lidar 串口；`on_tick` 仍跑完整决策链（`TaskStack` 推进树 + `DecisionExecutor`
-//! 三状态机），「执行动作」交给底盘（[`Chassis::Apply_Action`]），由底盘翻译成世界的 `motion_cmd`。
+//! 不 spawn stm32/lidar 串口；`on_tick` 跑完整决策链（`TaskStack` 推进树 + 执行器），
+//! 「执行动作」交给底盘（[`Chassis::Apply_Action`] / [`Chassis::Apply_Velocity`]），
+//! 由底盘翻译成世界的 `motion_cmd`。
+//!
+//! 执行器分家（task_39 §四）：
+//! - 车栈：`sim/executor.rs` 的 `DecisionExecutor`（离散三状态机）+ [`Chassis::Apply_Action`]
+//!   —— 语义**一行不改**，`sim/executor.rs` 也一个字不动；
+//! - 机栈：`sim/uav_sim/executor.rs` 的 `UavExecutor`（连续速度三档）+ [`Chassis::Apply_Velocity`]，
+//!   机栈只写 `ExecuteState.sub_target`、`state` 留 `Idle`（唯一的读点
+//!   `base/Robot/core/robot.rs:250-253` 的 POSE 广播只取 `sub_target`，故 POSE / 集群不受影响）。
 //!
 //! 世界链路（task_31 Step 2）：
 //! - `start()` 里**只 spawn**（[`WorldLink::Spawn`]），立即返回 —— 世界没起也必须能启动 tick
@@ -59,6 +67,7 @@ pub mod device_cap;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
@@ -73,7 +82,9 @@ use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
-use crate::config::SimConfig;
+use crate::config::{
+    DEFAULT_PLAN_BUDGET_MS, DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG, SimConfig,
+};
 use crate::sim::chassis::{self, Chassis};
 use crate::sim::chassis::pose_ingest::PoseHistory;
 use crate::sim::control::TaskMonitor;
@@ -82,8 +93,9 @@ use crate::sim::executor::DecisionExecutor;
 use crate::sim::sensors::camera::CameraSensor;
 use crate::sim::sensors::lidar::mapping_task::MappingCtx;
 use crate::sim::sensors::lidar::LidarSensor;
-use crate::sim::sensors::{Sensor, SensorSet};
+use crate::sim::sensors::{Sensor, SensorSet, Should_Log, Warn_Throttled};
 use crate::sim::uav_sim;
+use crate::sim::uav_sim::executor::{UavExecutor, DEADBAND_DEG, SPIN_DEG};
 use crate::sim::ugv_sim;
 
 use self::device_cap::CameraSimCap;
@@ -159,6 +171,16 @@ impl TaskStack {
         }
     }
 
+    /// 设规划时间预算（Task 39 §二）：值来自 config 顶层键 `plan_budget_ms`
+    ///
+    /// 两栈的 `Navigator` 是两份逐字拷贝的类型 → 同 `suspend` 一样分别 match。
+    async fn set_plan_budget(&self, budget: Duration) {
+        match self {
+            Self::Ugv(s) => s.nav.lock().await.set_plan_budget(budget),
+            Self::Uav(s) => s.nav.lock().await.set_plan_budget(budget),
+        }
+    }
+
     /// 当前导航状态（只读观测；`status.nav_status` 用，**不参与决策**）
     async fn nav_status(&self) -> &'static str {
         match self {
@@ -198,6 +220,9 @@ struct SimInner {
     /// 任务栈（§12.6：按底盘类型二选一；持有 nav + 树实例表）
     stack: TaskStack,
     executor: DecisionExecutor,
+    /// 机栈连续速度执行器（task_39 §四.2）：`Some` 只在机栈；`None` = 车栈（走上面的
+    /// `DecisionExecutor` + `Apply_Action`，语义一行不改）
+    uav_executor: Option<UavExecutor>,
     /// 按配置构造的传感器（`shutdown()` 逐个停；建图 task 归它们所有）
     sensors: Vec<Arc<dyn Sensor>>,
     /// 急停用 lidar（Step 6）：`None` = 没连世界 / 没有 `lidar_2d` / 无 `[sim_world]` 段
@@ -334,6 +359,8 @@ impl DeviceHandler for SimDeviceHandler {
             return Ok(()); // 幂等
         }
         let obstacle_inflation_radius = self.config.obstacle_inflation_radius.unwrap_or(0.2);
+        // 规划时间预算（Task 39 §二）：config 顶层键 `plan_budget_ms`，缺省 20 ms
+        let plan_budget_ms = self.config.plan_budget_ms.unwrap_or(DEFAULT_PLAN_BUDGET_MS);
 
         // ---- 1) 世界链路配置：**必须最先**解出（底盘名来自 `[sim_world].chassis`）
         //   - 配置非法 → start() 直接 Err（base 会打印「设备启动失败」并停掉主循环）
@@ -532,7 +559,33 @@ impl DeviceHandler for SimDeviceHandler {
                 detector.clone(), // 车栈不传：ugv_sim 收到 Follow 走平凡树
             )),
         };
+        // 规划时间预算（Task 39 §二）：`Stack::new` 不收预算（它的调用点不在本 step 允许路径内），
+        // 故建栈之后紧跟注入；值来自 config 顶层键 `plan_budget_ms`。
+        stack.set_plan_budget(Duration::from_millis(plan_budget_ms)).await;
         info!("[Sim] 任务栈 = {:?}（底盘 {}）", kind, world_name);
+
+        // ---- 5.7) 执行器分家（task_39 §四.2）：车 → `DecisionExecutor`（离散三状态机）；
+        //      机 → `UavExecutor`（连续速度三档）。**口径与真机 UAV 一致**（§四 修订）：
+        //      速度取 `[flight_ctrl]` 的 `vel_fwd`（m/s）/ `yaw_rate_deg`（°/s），
+        //      不再借用车的 `[chassis]` 百分比档位；缺段/缺键 → 真机同款默认（0.3 m/s / 15°/s）。
+        //      判据只有 `uav_executor.is_some()`，不借 `stack.ugv_nav()`（那个的语义是
+        //      「急停支不支持」，不是「执行器用哪个」）。
+        let (vel_fwd, yaw_rate_deg) = self
+            .config
+            .flight_ctrl
+            .as_ref()
+            .map(|c| c.Resolved())
+            .unwrap_or((DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG));
+        let uav_executor = match kind {
+            StackKind::Ugv => None,
+            StackKind::Uav => Some(UavExecutor::new(vel_fwd, yaw_rate_deg.to_radians())),
+        };
+        if uav_executor.is_some() {
+            info!(
+                "[Sim] 机栈执行器 = 连续速度（vel_fwd={:.2} m/s，yaw_rate={:.1}°/s={:.3} rad/s，DEADBAND={:.0}°，SPIN={:.0}°）",
+                vel_fwd, yaw_rate_deg, yaw_rate_deg.to_radians(), DEADBAND_DEG, SPIN_DEG
+            );
+        }
 
         // ---- 6) 本地控制口（Step 5）：取消令牌进 `SimInner`，`shutdown()` 先 cancel 它
         let control_cancel = CancellationToken::new();
@@ -542,6 +595,7 @@ impl DeviceHandler for SimDeviceHandler {
             .set(SimInner {
                 stack,
                 executor: DecisionExecutor::new(),
+                uav_executor,
                 sensors,
                 lidar,
                 chassis,
@@ -671,24 +725,58 @@ impl DeviceHandler for SimDeviceHandler {
         d.monitor.Set_Nav(d.stack.nav_status().await);
 
         // ⑤ 决策（`ExecuteState` **唯一写点**）+ 执行动作（交底盘翻译成世界 `motion_cmd`）
+        //    分派（task_39 §四.2）：车栈 = 老离散三状态机 + `Apply_Action`（语义一行不改）；
+        //    机栈 = 连续速度内核 + `Apply_Velocity`（**只写 `sub_target`**，`state` 留 `Idle`：
+        //    唯一的读点 `base/Robot/core/robot.rs:250-253` 只取 `sub_target`）
         let current = execute_state.read().await.clone();
-        let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
-        *execute_state.write().await = ExecuteState {
-            state: result.state,
-            sub_target: result.sub_target,
-        };
-        if let Some(action) = result.action {
-            info!(
-                "[Sim] 位置=({:.2},{:.2}) yaw={:.2}° 状态={:?} 动作={:?} sub_target={:?} 位姿龄={}ms",
-                rs.x,
-                rs.y,
-                rs.attitude.yaw.to_degrees(),
-                result.state,
-                action,
-                result.sub_target,
-                ch.Pose_Age_Ms()
-            );
-            ch.Apply_Action(action);
+        match d.uav_executor.as_ref() {
+            None => {
+                let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+                *execute_state.write().await = ExecuteState {
+                    state: result.state,
+                    sub_target: result.sub_target,
+                };
+                if let Some(action) = result.action {
+                    info!(
+                        "[Sim] 位置=({:.2},{:.2}) yaw={:.2}° 状态={:?} 动作={:?} sub_target={:?} 位姿龄={}ms",
+                        rs.x,
+                        rs.y,
+                        rs.attitude.yaw.to_degrees(),
+                        result.state,
+                        action,
+                        result.sub_target,
+                        ch.Pose_Age_Ms()
+                    );
+                    ch.Apply_Action(action);
+                }
+            }
+            Some(ex) => {
+                let cmd = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+                *execute_state.write().await =
+                    ExecuteState { state: DecisionState::Idle, sub_target: out.next_cell };
+                // 20 Hz 全程有输出，用 Should_Log 压到 5 Hz（日志仍够查"有没有 100~200 ms 抖动"）
+                if Should_Log("sim.uav.exec", 200) {
+                    info!(
+                        "[Sim] UAV 位置=({:.2},{:.2}) yaw={:.1}° next={:?} → v={} omega={} 位姿龄={}ms",
+                        rs.x,
+                        rs.y,
+                        rs.attitude.yaw.to_degrees(),
+                        out.next_cell,
+                        cmd.v,
+                        cmd.omega,
+                        ch.Pose_Age_Ms()
+                    );
+                }
+                if !ch.Apply_Velocity(cmd.v, cmd.omega) {
+                    // 判型与底盘构造同一个来源（`stack kind` ← `[sim_world].chassis`），理论上不会发生；
+                    // 真发生就按最安全的方式收场：停车 + 1 s 限流告警（不静默）
+                    Warn_Throttled("sim.uav.no_velocity", 1000, || {
+                        "[Sim] 底盘不支持 Apply_Velocity：按停车处理（检查 [sim_world].chassis 与栈是否一致）"
+                            .to_string()
+                    });
+                    ch.Stop();
+                }
+            }
         }
 
         // ⑥ 终值：halt + 丢实例 + 清 nav → 交给 base 出队（唯一出队口，§十一 #16）

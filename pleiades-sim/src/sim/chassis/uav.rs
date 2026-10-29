@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
@@ -57,6 +57,17 @@ impl Chassis for QuadrotorChassis {
 
     fn Apply_Action(&self, action: MotionAction) {
         self.base.Dispatch(action);
+    }
+
+    /// 连续速度指令（task_39 §四.4）：档位原值直接送世界（`action="velocity"` + `v` / `omega`）。
+    ///
+    /// 恒返回 `true`（= **支持**这路指令）：`Err` 只表示这一帧没进通道（未装配 / 通道满），
+    /// 速度指令每 50 ms 重发一次，下一拍自愈，不需要在这里升级成错误。
+    fn Apply_Velocity(&self, v: f32, omega: f32) -> bool {
+        if let Err(e) = self.base.motion.Send_Velocity(v, omega) {
+            debug!("[chassis] {} 速度指令未投递：{e}", self.base.name);
+        }
+        true
     }
 
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd) {
@@ -216,5 +227,31 @@ mod tests {
         ch.Handle_Manual_Cmd(&ManualCmd::Takeoff);
         let m = rx.try_recv().expect("Takeoff 应下发 up");
         assert_eq!((m.action, m.speed), ("up", 10));
+    }
+
+    #[test]
+    fn test_uav_apply_velocity_dispatch() {
+        // task_39 §四.4：四旋翼支持速度指令 → 一帧 action="velocity" + v / omega（speed 恒 0）
+        let (ch, mut rx) = quad();
+        assert!(ch.Apply_Velocity(0.5, -0.25), "四旋翼必须支持 Apply_Velocity");
+        let m = rx.try_recv().expect("速度指令应下发一帧");
+        assert_eq!(m.action, "velocity");
+        assert_eq!(m.speed, 0);
+        assert_eq!((m.v, m.omega), (Some(0.5), Some(-0.25)));
+    }
+
+    #[test]
+    fn test_uav_apply_velocity_before_assembled_still_supported() {
+        // 未装配：返回值仍 true（= 支持），但通道里什么都没有（Send_Velocity 只 debug 丢弃）
+        let (tx, mut rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
+        let base = ChassisBase::New(
+            "quadrotor_uav",
+            SpeedBinding::From_Config(Some(&ChassisConfig::default())),
+            tx,
+            Arc::new(RwLock::new(RobotState::default())),
+        );
+        let ch: Arc<dyn Chassis> = Arc::new(QuadrotorChassis::New(base));
+        assert!(ch.Apply_Velocity(0.5, -0.25), "未装配也算「支持」（bool 不表示已送达）");
+        assert_empty(&mut rx);
     }
 }

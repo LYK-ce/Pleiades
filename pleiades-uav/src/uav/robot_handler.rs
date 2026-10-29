@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-29
 
 //! 机设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.5 改成树驱动）
 //!
@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
@@ -29,7 +30,7 @@ use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
-use crate::config::UavConfig;
+use crate::config::{DEFAULT_PLAN_BUDGET_MS, UavConfig};
 use crate::device::camera_uav::Uav_Camera;
 use crate::uav::executor::DecisionExecutor;
 use crate::uav::mavlink::{MavlinkDevice, Telemetry};
@@ -102,6 +103,10 @@ impl DeviceHandler for UavDeviceHandler {
         let flight_ctrl_enabled = flight_ctrl.and_then(|f| f.enabled).unwrap_or(false);
         let obstacle_inflation_radius = self.config.obstacle_inflation_radius.unwrap_or(0.2);
 
+        // 规划时间预算（Task 39 §二）：config 顶层键 `plan_budget_ms`，缺省 20 ms
+        let plan_budget =
+            Duration::from_millis(self.config.plan_budget_ms.unwrap_or(DEFAULT_PLAN_BUDGET_MS));
+
         // 飞控：enabled=false → 跳过（统一跳过语义）
         let mavlink = if flight_ctrl_enabled {
             let port = match flight_ctrl.and_then(|f| f.connection.clone()) {
@@ -137,7 +142,7 @@ impl DeviceHandler for UavDeviceHandler {
         // - `ObstacleMode::Ignore`：喂空栅格、不注入他车动态障碍（Task 27「天上没人」）；
         // - 建图增量订阅 `None`：机无 SLAM（`slam/` 只在 ugv）。
         // ⚠️ 过渡参数：机的导航模式后续会改版，届时整体替换（不要当最终形态）。
-        let nav = Arc::new(Mutex::new(Navigator::new(
+        let mut nav = Navigator::new(
             self.robot.robot_state.clone(),
             self.robot.grid.clone(),
             self.robot.cluster_table.clone(),
@@ -145,7 +150,10 @@ impl DeviceHandler for UavDeviceHandler {
             None,
             obstacle_inflation_radius,
             ARRIVAL_THRESHOLD_M,
-        )));
+        );
+        // 预算来自 config（不是硬编码；`Navigator::new` 的缺省只是兜底）
+        nav.set_plan_budget(plan_budget);
+        let nav = Arc::new(Mutex::new(nav));
 
         // ③ detector（task_37 Step 2）：只读相机帧槽位 → 推理 → 覆盖自己的结果槽位。
         //    **失败一律 warn + None，绝不把 Err 透给 start()**（否则会打断整个机器人启动）。

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-08-31
+//Modified Date ： 2026-10-29
 
 //! UGV（车）设备配置（Task 23 C0：设备段从 base 拆出，`#[serde(flatten)]` 复用共享段）
 //!
@@ -15,6 +15,9 @@ use toml_edit::{DocumentMut, Item};
 
 use pleiades_base::config::{config_file_path, BaseConfig};
 
+/// 顶层键 `plan_budget_ms` 的缺省值（毫秒）：D* 单拍规划时间预算（Task 39 §二）
+pub const DEFAULT_PLAN_BUDGET_MS: u64 = 20;
+
 /// UGV 完整配置 = 共享段（flatten）+ 车独有设备段
 #[derive(Debug, Clone, Deserialize)]
 pub struct UgvConfig {
@@ -26,6 +29,9 @@ pub struct UgvConfig {
     pub lidar: Option<LidarConfig>,
     /// 他车障碍膨胀半径（米，缺省 0.2）
     pub obstacle_inflation_radius: Option<f32>,
+    /// 单拍规划时间预算（毫秒，缺省 20；Task 39 §二；**顶层键**，与
+    /// `obstacle_inflation_radius` 同级 —— 不放 `[chassis]`）
+    pub plan_budget_ms: Option<u64>,
     /// RTK 流动站设备配置（LG290P）
     pub lg290p: Option<Lg290pConfig>,
 }
@@ -74,7 +80,8 @@ pub fn Ensure_Ugv_Config() -> Result<UgvConfig, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-/// 确保 config.toml 存在车端设备段（obstacle_inflation_radius / chassis / lidar），缺失才补默认值。
+/// 确保 config.toml 存在车端设备段（obstacle_inflation_radius / plan_budget_ms / chassis / lidar），
+/// 缺失才补默认值。
 fn ensure_ugv_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let mut doc: DocumentMut = content.parse()?;
@@ -82,6 +89,11 @@ fn ensure_ugv_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     if doc.get("obstacle_inflation_radius").is_none() {
         doc["obstacle_inflation_radius"] = toml_edit::value(0.2_f64);
+        changed = true;
+    }
+    // Task 39 §二：规划时间预算（顶层键，缺键补 20 ms；已有值不覆盖）
+    if doc.get("plan_budget_ms").is_none() {
+        doc["plan_budget_ms"] = toml_edit::value(DEFAULT_PLAN_BUDGET_MS as i64);
         changed = true;
     }
     changed |= fill_chassis(&mut doc);
@@ -219,6 +231,60 @@ mod tests {
         let c = parsed.chassis.unwrap();
         assert_eq!(c.port.as_deref(), Some("/dev/ttyACM0"));
         assert_eq!(c.baudrate, Some(115200));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── plan_budget_ms（Task 39 §二：顶层键，缺键补 20、幂等、已有值不覆盖）───
+
+    #[test]
+    fn test_ensure_ugv_section_fills_plan_budget() {
+        let dir = tmp_dir("ugv_cfg_plan_budget_fill");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"car\"\n").unwrap();
+
+        ensure_ugv_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UgvConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(DEFAULT_PLAN_BUDGET_MS));
+        assert_eq!(parsed.plan_budget_ms, Some(20), "缺键补 20 ms");
+        // 必须是**顶层键**，不能掉进 [chassis]
+        assert!(content.contains("plan_budget_ms = 20"), "{content}");
+        assert!(!content.contains("[chassis]\nplan_budget_ms"), "{content}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_plan_budget_existing_value_kept() {
+        let dir = tmp_dir("ugv_cfg_plan_budget_keep");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "plan_budget_ms = 50\n").unwrap();
+
+        ensure_ugv_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UgvConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(50), "不得覆盖用户写的值");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_ugv_section_plan_budget_idempotent() {
+        let dir = tmp_dir("ugv_cfg_plan_budget_idem");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "plan_budget_ms = 50\n").unwrap();
+
+        ensure_ugv_section(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        ensure_ugv_section(&path).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(first, second, "第二次补全不得改动文件内容");
+        let parsed: UgvConfig = toml::from_str(&second).unwrap();
+        assert_eq!(parsed.plan_budget_ms, Some(50));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

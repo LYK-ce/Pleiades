@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 //! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.4.7 改成树驱动）
 //!
@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
@@ -29,7 +30,7 @@ use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
-use crate::config::UgvConfig;
+use crate::config::{DEFAULT_PLAN_BUDGET_MS, UgvConfig};
 use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
 use crate::ugv::executor::DecisionExecutor;
@@ -110,6 +111,9 @@ impl DeviceHandler for CarDeviceHandler {
 
         let obstacle_inflation_radius = r.obstacle_inflation_radius.unwrap_or(0.2);
 
+        // 规划时间预算（Task 39 §二）：config 顶层键 `plan_budget_ms`，缺省 20 ms
+        let plan_budget = Duration::from_millis(r.plan_budget_ms.unwrap_or(DEFAULT_PLAN_BUDGET_MS));
+
         // 底盘：enabled=false → 跳过（统一跳过语义）
         let stm32 = if chassis_enabled {
             let serial_port = chassis.and_then(|c| c.port.clone()).unwrap_or_else(|| "/dev/myserial".to_string());
@@ -130,7 +134,7 @@ impl DeviceHandler for CarDeviceHandler {
         };
 
         // 导航器（无底盘时也创建；不持队列，出队在 main_loop）
-        let nav = Arc::new(Mutex::new(Navigator::new(
+        let mut nav = Navigator::new(
             self.robot.robot_state.clone(),
             self.robot.grid.clone(),
             self.robot.cluster_table.clone(),
@@ -138,7 +142,10 @@ impl DeviceHandler for CarDeviceHandler {
             None, // 建图增量：真机不订阅（sim 才订，Step 6）
             obstacle_inflation_radius,
             ARRIVAL_THRESHOLD_M,
-        )));
+        );
+        // 预算来自 config（不是硬编码；`Navigator::new` 的缺省只是兜底）
+        nav.set_plan_budget(plan_budget);
+        let nav = Arc::new(Mutex::new(nav));
 
         // 雷达（含 SLAM）：enabled=false / 未配置 → 跳过
         let lidar = match (lidar_port, lidar_baudrate) {
