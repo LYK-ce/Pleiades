@@ -115,3 +115,11 @@
 - 复跑记录：共 2 次完整取证跑 + 2 次复算。`task39_20261029T100147Z`（第一次，§5 的 M2 逐秒 |Δyaw| 因 harness 双重弧度换算写出 1604.3°，已修；判据部分不受影响）、**`task39_20261029T100655Z`（最终证据）**；`task39_regrade_probe_20261029T101113Z`（对口径修订后的 2 用例 probe `094918Z` 复算：解析 440/440、差异只有 L4/F2-4、其余 26 行逐字节相同）、`task39_selfcheck_20261029T101111Z`（对最终证据复算：**28/28 verdict + 28/28 measured 0 diff**，`REGRADE_PIN` 已按实测填死）。**已知不稳定**：两次跑 F2-2 一次 5.205 m（PASS）一次 1.586 m（FAIL）、F2-1 一次 1.179 s 一次 3.584 s —— 取证以单目录 `verdict.md` 为准，不取最好成绩
 - 残留：`pgrep -af 'godot|pleiades-sim|Xvfb'` 空、9999/9098 空闲、`/tmp/.X99-lock` 与 `/tmp/.X11-unix/X99` 已消失（verdict §8/§10 各记一次）；`git status --porcelain -uall` == 进场基线、`git diff --numstat` sha 未变、世界副本 `diff -r` 0 行
 - 需要人类决定的两条（**本 step 无权改**）：① `F1-2`（机速上限 < 人速 ⇒ 几何上不可能过）——提高 `vel_fwd` 或降人速；② `F2-3`（切向通过时净位移方向必然不随人）——改判据口径或改场景
+
+## 任务收尾（2026-10-29）
+- 结束时间：2026-10-29 11:08Z
+- 提交：`4276bf8`（36 文件，+7817/−602），已推 `origin/robot_yolo`
+- 自动验证：`RobotSim_TestEnv/results/task39_20261029T100655Z/verdict.md`（28 条：PASS 23 / FAIL 5）
+- 人类本地复验：**通过**
+- 遗留：见任务文档 §七.3（机速上限 / F2 判据与检测链 / 转弯半径 / 幻影目标 / D-S1 反哺 / 协议）
+- 归档：任务文件移入 `Task/archived task/`
