@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-10-29
 
 //! 车栈（Task 36 §12.6）：复刻 `pleiades-ugv/src/ugv/` 的 `nav/` + `mission/`
 //!
@@ -10,7 +10,10 @@
 //!
 //! 本文件 = 真机 `CarDeviceHandler` 里「树实例表 + 建树 + 推进 + 收尾」那一段，
 //! 抽出来只服务仿真；`Mission → 树` 的分派在 `mission::build`（编译期穷尽，§十一 #13）。
+//!
+//! 子模块 `executor`：车栈连续档位执行器（task_40 §二，独立文件，与 `uav_sim/executor.rs` 同构）。
 
+pub mod executor;
 pub mod mission;
 pub mod nav;
 

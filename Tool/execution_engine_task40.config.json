@@ -1,0 +1,230 @@
+{
+  "task": "Task/task_40_ugv_motion.md",
+  "workbook": "Workbook/wb_40_ugv_motion.md",
+  "tmp": "tmp/task40",
+  "steps": [
+    {
+      "n": 1,
+      "title": "Step 1 — 车栈执行器改成与 sim uav 同一套逻辑",
+      "doc": "§二",
+      "side": "新增 sim 车栈连续执行器 + 线上 turn 字段 + 世界侧 DiffDrive velocity 分支（不动 sim/executor.rs、不动 nav/mission、不碰真机与 ORION）",
+      "brief": [
+        "按任务文档 §二 实施。**只做 sim 车栈**；`pleiades-sim/src/sim/executor.rs`（离散三状态机）与 `pleiades-ugv/` **一行不改**。",
+        "1) 新增 `pleiades-sim/src/sim/ugv_sim/executor.rs`，与 `sim/uav_sim/executor.rs` **同构**：无状态、`decide(next_cell: Option<(i32,i32)>, x: f32, y: f32, yaw: f32) -> VelocityCmd`，**只返回档位不写状态**。",
+        "2) `VelocityCmd { speed: u8, turn: i16 }`：`speed` = 前进档位（0~100，取自 `[chassis] forward_speed`），`turn` = 带符号转向档位（−100~+100，绝对值取 `[chassis] turn_speed`）。**不要**引入 m/s / rad/s，也**不要**抄世界的 `max_speed=1.5` / `max_turn_rate=90`。",
+        "3) 控制律（每拍）：`next_cell=None` → `(0,0)`；`d = ‖格心−我‖`，`Δθ = normalize(atan2(ty−y, tx−x) − yaw)`；",
+        "   - `d < PASS_THROUGH_M && |Δθ| > 90°` → `(forward_speed, 0)`（目标格心在身后且很近：直行穿过，不掉头）",
+        "   - `|Δθ| ≤ DEADBAND_DEG` → `(forward_speed, 0)`",
+        "   - `|Δθ| ≤ ARC_MAX_DEG` → `(forward_speed, ∓turn_speed)`（边走边转）",
+        "   - 否则 → `(0, ∓turn_speed)`（原地转）",
+        "4) 常量（§九 已定）：`DEADBAND_DEG = 5.0`、`ARC_MAX_DEG = 10.0`、`PASS_THROUGH_M = 0.5`。**符号**：`Δθ > 0`（目标在右）⇒ `turn < 0`；证据链 = `common/WorldTransform.gd` 的 `YawToGodot = −world_yaw` ⇒ 世界 `rotation.y` 减小。写进文件头注释，并配一条符号单测。",
+        "5) `pleiades-sim/src/world_link/protocol.rs`：`MotionCmd` 加 `turn: Option<i16>`（`#[serde(skip_serializing_if = \"Option::is_none\")]`），照 task_39 加 `v`/`omega` 的写法；单测锁「三个可选字段全 None 时序列化逐字不变」+ `turn` 正/负/0 各一条。",
+        "6) `pleiades-sim/src/world_link/mod.rs`：加 `MotionSender::Send_Velocity_Pct(speed: u8, turn: i16)`（照 `Send_Velocity` 同构，只换字段）。",
+        "7) `pleiades-sim/src/sim/chassis/ugv.rs`：`DiffDriveChassis` 实现 `Apply_Velocity(&self, speed: u8, turn: i16) -> bool` → `Send_Velocity_Pct`，返回 `true`。`chassis/mod.rs` 的 trait 默认实现若签名需同步（默认 false 即可），**不要**改机栈那一份。",
+        "8) `pleiades-sim/src/sim/sim_handler.rs`：把 `:732` 的二分分派（`uav_executor.is_some()`）改成三态 `Actuator { UgvDiscrete, UgvVelocity(..), Uav(..) }`，`start()` 里按栈装配；车栈连续分支只写 `ExecuteState.sub_target`、`state` 留 `Idle`；日志用 `Should_Log(\"sim.ugv.exec\", 200)` 节流；`Apply_Velocity` 返回 false 时 `Warn_Throttled` + `ch.Stop()`。",
+        "9) `orion-simulation-world/src/chassis/DiffDrive.gd`：`SetCommand` 加 `\"velocity\"` 分支 —— `_speed_target = _max_speed * clampf(speed/100, 0, 1)`、`_yaw_target = _max_turn_rate * clampf(turn/100, -1, 1)`（**同时生效**，这是本步唯一的新行为）；5 个离散分支与 `_` 兜底**一字不改**；文件头 action 表补 `velocity` 一行并写明 `rotation.y` 符号约定。",
+        "10) `RobotSim_TestEnv/simq_ugv/.config/config.toml`（gitignored）把 `[chassis] turn_speed` 改成 **30**（§九 #1）。",
+        "11) 单测：新执行器 ≥8 条（直行/右弧/左弧/原地右/原地左/无目标/身后格心/±π 归一化）+ 符号 1 条；协议 3 条；Godot 侧 `--headless` 自检若存在 `check_diff_drive.gd` 则加一条「velocity 帧下 velocity 与 yaw_rate 同时非零且符号符合预期」，不存在就在 impl.md 记「无此自检」。",
+        "12) 文档：`Architecture/robot_arch.md` 补「车栈连续执行」一节 + 常量速查；修正 D-S8 里 `sim/executor.rs` 被写成「已改」的表述。",
+        "**不动**：`sim/executor.rs`、`sim/*/nav/`、`sim/*/mission/`、急停、`Mission`/队列、ORION 协议、`pleiades-base`、`pleiades-ugv`、`pleiades-uav`、`pleiades-terminal`。",
+        "验收：逐 crate `cargo check --all-targets`（**用 `--bins`，本仓没有 `--lib`**：`cargo test -p pleiades-sim --bins executor`）；`diff` 证明 `sim/executor.rs` 与 `pleiades-ugv/src/ugv/executor.rs` 仍逐字相同；`git diff` 只含允许路径。"
+      ],
+      "allowed": [
+        "pleiades-sim/src/sim/ugv_sim/executor.rs",
+        "pleiades-sim/src/sim/ugv_sim/mod.rs",
+        "pleiades-sim/src/sim/sim_handler.rs",
+        "pleiades-sim/src/sim/chassis/ugv.rs",
+        "pleiades-sim/src/sim/chassis/mod.rs",
+        "pleiades-sim/src/world_link/mod.rs",
+        "pleiades-sim/src/world_link/protocol.rs",
+        "orion-simulation-world/src/chassis/DiffDrive.gd",
+        "orion-simulation-world/src/tests/check_diff_drive.gd",
+        "RobotSim_TestEnv/",
+        "Architecture/robot_arch.md"
+      ]
+    },
+    {
+      "n": 2,
+      "title": "Step 2 — 验证：最新的小车能不能正常运动",
+      "doc": "§三",
+      "side": "只验不改：新建验证脚本 + 结果目录（不动 Rust / 世界 / Pictor）",
+      "brief": [
+        "按任务文档 §三 **只验证**：不调阈值、不改被测代码。判据不通过就如实记录，**不要**为了让判据变绿而改判据或改代码。",
+        "1) 环境：Godot 世界 + `Xvfb`，世界用 **`RobotSim_TestEnv/world_fast/`**（`msaa_3d=0`；`llvmpipe` 直跑 2 fps、位姿龄 245 ms 会让判据失真）；sim 用 `RobotSim_TestEnv/simq_ugv`。",
+        "2) 用例 6 个：M0 静止（不发任务）/ M1 直线 20 m / M2 L 形 / M3 长路径 40~50 格 / M4 45° 斜线 20 m / M5 1 格宽窄通道 + 转角。",
+        "3) 判据 8 条：到达（nav `Arrived`，末位逐轴 ≤ 0.26 m）；不抖（相邻非零 `turn` 反号次数：M1 ≤ 2、M4 ≤ 3）；不打转（10 s 净位移 ≥ 2 m）；不撞墙（全程最小 `lidar` ≥ 0.3 m）；该停会停（M0 全程 `(0,0)`、任务后 1 s 内 `(0,0)`）；停走对比（`(0,0)` 拍数/总拍数，**只记录**并与 `results/queue_ugv_dev/sim_1.log` 的基线对比）；日志可解析（`[Sim] UGV` 逐行解析成功，解析数≠行数 ⇒ 该判据 `FAIL(env)`）；无回归（无 `Blocked`、无急停、无任务失败）。",
+        "4) 脚本：新建 `Tool/sim_task40_ugv_test.py`，起停/控制口/日志解析复用 `Tool/sim_queue_test.py`、`Tool/sim_follow_test.py` 的既有设施；控制口端口 9098。",
+        "5) 产物：`RobotSim_TestEnv/results/task40_<UTC>/{trace.csv, world.log, sim.log, verdict.md}`；`verdict.md` 逐条给实测值 + PASS/FAIL。",
+        "6) 收干净：世界/sim 进程退出、9999/9098 端口不残留、`pgrep` 无残留。",
+        "验收：`verdict.md` 28 行以内逐条有实测值；结论与关键数字写进 `Workbook/wb_40_ugv_motion.md`。"
+      ],
+      "allowed": [
+        "Tool/",
+        "RobotSim_TestEnv/",
+        "Workbook/wb_40_ugv_motion.md"
+      ]
+    },
+    {
+      "n": 3,
+      "title": "Step 3 — Pictor 无头驱动：WS 命令通道 + Python 控制脚本",
+      "doc": "§四",
+      "side": "Pictor 内新增 WS 服务节点 + Python 控制脚本（不动 ORION 协议、不动 executor、不管 Manual）",
+      "brief": [
+        "按任务文档 §四 实施。**只做「让外部 Python 能通过 Pictor 下发命令、读回遥测」**，用现有 msgid（`TASK_SET` type=0 / 模式），**不放开 Follow**（那是 Step 4）。",
+        "1) 新增 `Pictor/src/kernel/ws_command_server.gd`（Node）：`WebSocketPeer`/`TCPServer`，在 `_process` 里 poll，不阻塞主循环。",
+        "2) 下行：收到 JSON → `EventBus.cmd_send.emit(targets, cmd_dict)`；`cmd_dict` 就是 `Build_Cmd` 吃的 `{msgid, ...}` 形状（`TASK_SET` 用 `MessageBuilder.build_task_set`）。",
+        "3) 上行：订阅 EventBus 的 `pose_received` / `peer_*`（以及需要的 `map_delta_received`）→ JSON 推给客户端；支持 `subscribe` 切换事件集、`pose_hz` 降频（默认 2）、按 `targets` 过滤。",
+        "4) 车列表查询：`{\"cmd\":\"vehicles\"}` → 返回已注册车的 `name` + `vid` + `node_type`（数据源用既有 `src/vehicle_registry/`，**不新增状态**）。",
+        "5) 端口：命令行参数 `--ws-port=9100`，**默认关闭**（§九 #4）；只绑 `127.0.0.1`，无鉴权。挂载点改 `Pictor/src/main/main.tscn` / `main.gd`。",
+        "6) Python：`Pictor/tool/pictor_ws_ctl.py`（子命令 + 退出码 0 成功 / 1 断言失败 / 2 环境错误；`ack` 只代表「已交给 kernel」，到达判定只用上行事件，双信号：`valid==0` 或 连续 N 帧位置误差 ≤ tol）；依赖写进 `Pictor/tool/requirements.txt`。",
+        "7) 文档：`Pictor/docs/project_code_overview.md` 补一节「WS 命令通道」。",
+        "8) 验收（§4.6 七条）：`godot --headless --path Pictor -- --ws-port=9100` 起得来、Python 10 s 内查到车列表且 Godot 无脚本错误；单机闭环（发 task_set → sim 日志任务入队 → pose.sub_target 变化 → 到达）；多车各收到自己的目标；上行可降频可过滤；断连不崩、重连可继续、未注册车返回明确失败；**零协议改动**；脚本一次运行完成「等注册 → 发任务 → 判到达」并以退出码收尾。",
+        "前置：Pictor 依赖 `pleiades-terminal` 的 cdylib —— 需要时先 `cargo build -p pleiades-terminal --release` 并确认 `pictor_kernel.gdextension` 指向的库存在；世界/sim 起停与收尾同 Step 2。",
+        "**不动**：`pleiades-base`、`pleiades-sim`、`pleiades-ugv`、`pleiades-uav`、`kernel_bridge.gd`、`orion_messages.gd` 的 `Build_Cmd`、世界。"
+      ],
+      "allowed": [
+        "Pictor/src/kernel/",
+        "Pictor/src/main/",
+        "Pictor/src/vehicle_registry/",
+        "Pictor/tool/",
+        "Pictor/docs/",
+        "RobotSim_TestEnv/",
+        "Architecture/robot_arch.md"
+      ]
+    },
+    {
+      "n": 4,
+      "title": "Step 4 — Follow 进 Pictor，并用 Pictor 下发跟随",
+      "doc": "§五",
+      "side": "Pictor 协议层放开 type=2 + Python follow 子命令 + 只验直走场景（不动 base/sim/真机）",
+      "brief": [
+        "按任务文档 §五 实施。**只改 Pictor 侧协议常量与编码**，`pleiades-base` / `pleiades-sim` / 真机一行不动（`MISSION_FOLLOW=2` 与 `follow.rs` 早已存在）。",
+        "1) `Pictor/src/websocket/protocol/protocol_def.gd`：加 `MISSION_TYPE_FOLLOW := 2`；`Mission_Type_From()` 认 `\"follow\"` / `2`；更新上方「Pictor 侧只生成 0」的注释。",
+        "2) `Pictor/src/websocket/protocol/orion_messages.gd`（`Encode_Task_Set`）：降级条件从「非 0 一律降级」改成「**不在 {0,2}** 才降级 + 告警」。",
+        "3) `Pictor/src/websocket/protocol/message_builder.gd`（`_Normalize_Mission_Type` / `build_task_set`）：同步放开 type=2。",
+        "4) `Pictor/tool/pictor_ws_ctl.py`：加 `follow` 子命令（`{\"cmd\":\"task_set\",\"missions\":[{\"type\":2,\"x\":0,\"y\":0}]}`）。",
+        "5) 单测：`Pictor/src/test/test_orion_protocol.gd` 加一条「type=2 roundtrip」与一条「type=3 仍被降级/丢弃」；跑 `godot --headless --path Pictor -s src/test/test_orion_protocol.gd`。",
+        "6) **验证口径（人类 2026-10-29 决定，写进 verdict）**：判据 1/2/4/5/6 **必须 PASS**；判据 3「机栈真跟」**只验直走**（行人直线走、机跟随；task_37 F1 口径），**允许 FAIL 且不阻塞**——当前环境（llvmpipe + detector ~3.3 Hz 检测链）不适合验跟随场景；FAIL 时只记录现象与日志，**不改代码、不修、不重跑调参**，跟随由人类自验。",
+        "7) 前置：机栈 sim 实例（`[sim_world].chassis=\"quadrotor_uav\"` + `[detector] enabled=true` + 相机段，参考 `RobotSim_TestEnv/sim1`）、世界相机段、`mount` 与 `[detector.camera]` 数值一致、行人源 `orion-simulation-world/tool/pedestrian/*.py`、世界用 `world_fast`。",
+        "8) 产物：`RobotSim_TestEnv/results/task40_s4_<UTC>/{verdict.md, sim.log, ped.log}`；结论写 workbook。",
+        "**不动**：`Follow{x,y}` 语义、多目标、前瞻、UI 按钮与 LLM 词表（§九 #6：只走 WS 命令）。"
+      ],
+      "allowed": [
+        "Pictor/src/websocket/protocol/",
+        "Pictor/src/test/",
+        "Pictor/tool/",
+        "Pictor/docs/",
+        "RobotSim_TestEnv/",
+        "Workbook/wb_40_ugv_motion.md"
+      ]
+    },
+    {
+      "n": 5,
+      "title": "Step 5 — 四旋翼外观：换一个像样的免费模型",
+      "doc": "§六",
+      "side": "纯资产：找免费 UAV 模型 + 归一 + 落 assets + 接线 + 自检同步（不动动力学与碰撞尺寸）",
+      "brief": [
+        "按任务文档 §六 实施。**顺手小事**：现在 UAV 用的是 20 460 B 的占位低模（`assets/uav_quadrotor_lowpoly.glb`），底盘组件只有 4 个 `CylinderMesh` 桨盘。",
+        "1) 选型（§6.3）：**CC0 优先，CC-BY 可接受**（须 `LICENSE` + `ATTRIBUTION.md` + 台账 + 说明改动）；**排除** CC BY-SA / CC BY-NC / personal-only / 品牌机型翻制。来源顺序：Poly Pizza → Sketchfab(CC0) → Kenney → 都不行就 Blender 自制。要求真实四旋翼形态（机架/机臂/电机/起落架）、≤50k tris、贴图 ≤2K。",
+        "2) 下载：直连失败时加 `-x http://127.0.0.1:7897`（mihomo mixed-port，已实测 200）；记录 URL / 许可原文 / 字节 / sha256 / 抓取日期。",
+        "3) 归一（Blender 批处理）：朝 **+X**、底面 `y=0`、缩放到 AABB ≈ **`0.64 × 0.13 × 0.64`**（与现有碰撞体一致）、导出 glb。",
+        "4) 落库：`orion-simulation-world/assets/chassis/uav_quadrotor.glb`（新名去掉 lowpoly）+ `.import`（必须一起提交），`git rm` 旧 `assets/uav_quadrotor_lowpoly.glb`；若 CC-BY 再加 `assets/ATTRIBUTION.md`；`assets/README.md` 加台账行。",
+        "5) 接线：`src/scenes/Vehicle.tscn:16` 路径；`src/scenes/chassis/Quadrotor.tscn` **保留** 4 个桨盘（转速/转向的视觉表达），必要时微调 position。",
+        "6) 自检同步：`src/tests/check_models.gd` 的 `UAV_MODEL_SCENE`(路径)、`UAV_SIZE_XZ`/`UAV_SIZE_Y_MIN..MAX`(AABB)、`UAV_HULL`（碰撞盒，**若 AABB 与 0.64×0.13×0.64 差 >1cm 才改**，并在 assets/README 记「碰撞盒随外观变更」）、`M4` 的 `UAV_NoseRed` 断言；`src/tests/check_sensor_models.gd:31` 路径。",
+        "7) 导入：`godot --headless --path orion-simulation-world --import`（0 ERROR，生成 `.import`）。可选截图核对（`Xvfb`）。",
+        "8) 验收（§6.6）：`check_models.gd` 全绿；视觉可辨四旋翼且与写实人形同框不违和；`world_fast` 下 fps ≥ 改前基线 11；许可台账到位；**动力学零改动**（`max_speed`/`max_turn_rate`/`_size`/`BODY_HEIGHT` 一个不改，M5/M6 与动力学判据逐条不变）；`git diff` 只含允许路径。",
+        "**不动**：动力学参数、碰撞尺寸、`Vehicle.tscn` 节点结构、桨盘转速逻辑、UGV 与其他资产。"
+      ],
+      "allowed": [
+        "orion-simulation-world/assets/",
+        "orion-simulation-world/src/scenes/Vehicle.tscn",
+        "orion-simulation-world/src/scenes/chassis/Quadrotor.tscn",
+        "orion-simulation-world/src/tests/check_models.gd",
+        "orion-simulation-world/src/tests/check_sensor_models.gd",
+        "Workbook/wb_40_ugv_motion.md"
+      ]
+    },
+    {
+      "n": 6,
+      "title": "Step 6 — 死区调大（5°→8° / ARC 10°→12°）+ 复验",
+      "doc": "§七",
+      "side": "只改两个常量 + 单测同步 + 复验 M1/M4 与回归（不动 turn_speed / 世界 / 协议 / nav / Pictor）",
+      "brief": [
+        "按任务文档 §七 实施。这是 Step 2 判据 2「不抖」未达标的收口：只调死区，**不拿拐角速度换稳定**。",
+        "1) `pleiades-sim/src/sim/ugv_sim/executor.rs`：`DEADBAND_DEG 5.0 → 8.0`、`ARC_MAX_DEG 10.0 → 12.0`；文件头三档表格与两处 doc 注释同步（含「§九 #8 / §七.3」的出处）。",
+        "2) 单测：`test_constants_are_spec` 断言改 `8.0 / 12.0`；补边界用例 —— `7°` 直行（`turn=0`）、`8.5°`/`10°`/`12°` 走弧线档（`speed>0 且 turn≠0`）、`12.5°` 原地转（`speed=0`）；原有用例全部保留（右弧/左弧/原地/无目标/身后格心/±π），只改与旧阈值绑定的数值。",
+        "3) **不动**：`turn_speed = 30`、`PASS_THROUGH_M = 0.5`、`forward_speed = 30`、世界侧（`DiffDrive.gd`）、协议、`nav/`、行为树、Pictor、`sim/executor.rs`。",
+        "4) 复验（**只验不改**，判据与 Step 2 同口径）：用 `Tool/sim_task40_ugv_test.py` 跑 M1/M4 —— 主判据 `turn` 反号 **M1 ≤2、M4 ≤3**；再跑 M1/M2/M4 回归（到达且末位逐轴 ≤0.26 m、急停 0 次、该停会停、无 `Blocked`、`[Sim] UGV` 日志全解析）；M2 耗时 **≤100 s**（Step 2 实测 87.4 s）。",
+        "5) 环境同 Step 2：`RobotSim_TestEnv/world_fast`(msaa_3d=0) + `xvfb-run -a`；前置自检照旧（位姿龄门、执行器活体闸门 `[Sim] UGV` vs 旧离散 `[Sim] 位置=(`、二进制 sha 与 target 一致、config `turn_speed=30` 回读断言）。",
+        "6) 产物：`RobotSim_TestEnv/results/task40_s6_<UTC>/{verdict.md, sim.log, trace.csv}`；结论与关键数字写 `Workbook/wb_40_ugv_motion.md`。",
+        "7) **判据不过时**：不许再调阈值、不许改判据、不许改脚本口径；如实记录（哪条、实测值、日志片段）并**停下来等人类裁决**，不要自动试第二组参数。",
+        "8) 文档：`Architecture/robot_arch.md` 的 D-S9 与「关键常量速查」同步（把「§九 已定，不得再调」改成「Step 6 已上调到 8°/12°」）。",
+        "验收：逐 crate `cargo check --all-targets`；`cargo test -p pleiades-sim --bins executor` 全绿；`git diff` 只含本 step 允许路径。"
+      ],
+      "allowed": [
+        "pleiades-sim/src/sim/ugv_sim/executor.rs",
+        "Architecture/robot_arch.md",
+        "RobotSim_TestEnv/",
+        "Tool/sim_task40_ugv_test.py",
+        "Workbook/wb_40_ugv_motion.md"
+      ]
+    }
+  ],
+  "prompts": {
+    "plan": [
+      "你是「规划」子 agent，只读代码 + 写计划，禁止修改任何源码。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "任务文档：Task/task_40_ugv_motion.md（本任务全部设计结论；§八 是已定参数，不得再改）",
+      "工作记录：Workbook/wb_40_ugv_motion.md（看前面 step 的进展）",
+      "必读：",
+      "1. tmp/task40/step.md —— 本 step 要求、轮次、允许改动范围（越界即 FAIL）",
+      "2. tmp/task40/prev_issues.md —— 上一轮评审问题（若为 (无) 则首轮）",
+      "3. 任务文档里 step.md 指定的那一节（§八 已定参数一并遵守）",
+      "4. tmp/task40/git_baseline.txt（本步进场基线）",
+      "5. 按需读相关源码（pleiades-sim/、orion-simulation-world/、Pictor/、Tool/）",
+      "产出：用 writeTextFile 写 tmp/task40/plan.md：改动清单（文件:行号）、接口与常量、实施顺序、风险、验收命令与逐条判据、上轮 issues 处理。",
+      "硬约束：",
+      "- 只在 step.md 列出的路径内改动；不改 Task/、.github/、Cargo.toml/Cargo.lock",
+      "- 不 git add / git commit；不跑 cargo fmt",
+      "- cargo check 逐 crate：`cargo check -p <crate> --all-targets`；本仓三个 crate 只有 `[[bin]]`，**测试用 `--bins` 不用 `--lib`**",
+      "- Godot 只允许 `--headless`（`--import` / `--quit` / `-s <脚本>`）；需要显示时用 `xvfb-run -a`",
+      "- 计划必须具体到能直接照做，禁止“视情况而定”",
+      "最终回复：200 字以内的计划摘要（会被写进 workbook）。"
+    ],
+    "impl": [
+      "你是「实现」子 agent。按计划实施，不要重新设计。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task40/step.md、tmp/task40/plan.md、Task/task_40_ugv_motion.md 对应章节（§八 是已定参数）。",
+      "规则：",
+      "- 只改 step.md 允许的路径",
+      "- 文件头注释：Presented by KeJi / Created Date / Modified Date（Modified 用今天；GDScript 用 `#`，Rust 用 `//`）",
+      "- 命名跟随所在文件既有风格（Rust/GDScript 里已有的 Pascal_Snake 保持原样）",
+      "- 不做计划之外的顺手重构；偏差记进 tmp/task40/impl.md",
+      "- 不 git add / git commit；**禁止 cargo fmt**",
+      "- 验证：`cargo check -p <crate> --all-targets`、`cargo test -p <crate> --bins <filter>`（本仓无 `--lib`）",
+      "- Godot：`godot --headless --path orion-simulation-world --import` / `--quit` / `-s <脚本>`；需要显示用 `xvfb-run -a`",
+      "- 长驻进程：step.md 若不允许就不得起 pleiades-sim / Godot 长跑；允许时必须在结束时收干净（进程 + 端口）",
+      "- 需要联网时直连优先，失败再加 `-x http://127.0.0.1:7897`",
+      "- 计划与代码现实冲突时以代码为准，并在 impl.md 记录偏差",
+      "产出：用 writeTextFile 写 tmp/task40/impl.md：改了哪些文件、每个文件做了什么、跑了什么命令与结果、与计划的偏差。",
+      "最终回复：150 字以内摘要。"
+    ],
+    "review": [
+      "你是「评审」子 agent，独立评审本轮实现。不要修改源码（只允许写 tmp/task40/review.json）。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task40/step.md、plan.md、impl.md、Task/task_40_ugv_motion.md 对应章节（含 §八 已定参数）、tmp/task40/git_baseline.txt",
+      "逐项检查：",
+      "1. 越界：`git status --porcelain --untracked-files=all` 与基线比对；不得出现 Task/、.github/、Cargo.* 改动；本 step 未列出的路径也不许动",
+      "2. 判据是否真满足：自己跑（逐 crate `cargo check --all-targets`、`cargo test --bins <filter>`；Godot 自检 `--headless`）；Step 2/3/4 检查 verdict.md 与实测值",
+      "3. 是否违反定稿结论：Step 1 三档控制律/符号/常量（5°/10°/0.5m）、`sim/executor.rs` 与 `pleiades-ugv` 零改动、世界 `velocity` 分支不让离散分支失效；Step 3 不放开 Follow、零协议改动；Step 4 只放开 type=2 且 type=3 仍被丢；Step 5 动力学零改动",
+      "4. 代码规范：文件头注释、命名、模块注释",
+      "5. 回归：原有单测不全绿即 FAIL；新增门禁必须存在",
+      "6. 死代码、未使用导入、副本一致性（`sim/executor.rs` 与 `pleiades-ugv/src/ugv/executor.rs` 必须仍逐字相同）",
+      "7. **Step 4 特殊口径**：判据 3（机栈真跟、只验直走）允许 FAIL，**不得**因为它红就判 FAIL；判据 1/2/4/5/6 必须满足",
+      "产出：写 tmp/task40/review.json：{\"verdict\":\"PASS\" 或 \"FAIL\", \"issues\":[\"...\"]}",
+      "- FAIL 的 issues 要具体到「文件:行号 + 期望 vs 实际 + 复现命令」",
+      "- 不要放水；超出本 step 范围的建议不要写进 issues",
+      "最终回复：第一行 VERDICT: PASS 或 VERDICT: FAIL，第二行一句理由。"
+    ]
+  }
+}

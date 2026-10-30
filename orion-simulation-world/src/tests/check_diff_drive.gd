@@ -1,8 +1,9 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-23
+# Modified Date ： 2026-10-29
 #
 # DiffDrive 差速底盘自检（Step 5）：场景形态 / 目录与装配 / 运动语义 / 撞墙会停 / 边界与白盒。
+# C-velocity 小节（task_40 §二.5）：连续档位 `velocity{speed, turn}` —— 前进与转向**同时生效**。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
 #          --script res://src/tests/check_diff_drive.gd
 # 期望：failed=0 + SELF-CHECK OK + EXIT=0，且 stderr 无 ERROR（COMPONENTS.md §11 Step 5）。
@@ -337,6 +338,51 @@ func _run() -> void:
 	var drot_r: float = vehicle.rotation.y
 	_check("right-turn-60f", drot_r < -WANT_TURN_60 * 0.92 and drot_r > -WANT_TURN_60 * 1.08,
 		"d_rot_y=%.4f (want≈-%.4f)" % [drot_r, WANT_TURN_60])
+
+	# ============================================================ C-velocity. 连续档位指令（task_40 §二.5）
+	# --- 连续档位的唯一证据：`velocity` 下 **线速度与角速度同时非零**（离散 5 个 action 是互斥的）
+	# speed=30 ⇒ 0.45 m/s、turn=-50 ⇒ -45 °/s（右转）；60 帧后解析值 rotation.y ≈ -0.687 rad。
+	_prepare(vehicle, SPAWN_WORLD)
+	vehicle.SetMotionCommand({"action": "velocity", "speed": 30, "turn": -50})
+	var ch_v: Node = _first_child(vehicle.chassis_root)
+	var vp0: Vector3 = vehicle.global_position
+	await _wait_physics(60)
+	var v_speed: float = float(ch_v.call("GetSpeed")) if ch_v != null else -9.0
+	var v_yaw: float = float(ch_v.call("GetYawRate")) if ch_v != null else -9.0
+	var v_planar: float = Vector2(vehicle.global_position.x - vp0.x,
+		vehicle.global_position.z - vp0.z).length()
+	_check("velocity-both-axes-60f", ch_v != null
+		and absf(v_speed - 0.45) < 0.02
+		and absf(v_yaw + PI * 0.25) < 0.05
+		and vehicle.rotation.y < -0.60 and vehicle.rotation.y > -0.80
+		and v_planar > 0.30,
+		"speed=%.4f (want≈0.45) yaw_rate=%.4f (want≈%.4f) rot_y=%.4f planar=%.4f"
+			% [v_speed, v_yaw, -PI * 0.25, vehicle.rotation.y, v_planar])
+
+	# --- 档位越界（250/250）⇒ 夹到 100%：1.5 m/s + 90 °/s（正 turn = 左转 = rotation.y 增大）
+	_prepare(vehicle, SPAWN_WORLD)
+	vehicle.SetMotionCommand({"action": "velocity", "speed": 250, "turn": 250})
+	var ch_c: Node = _first_child(vehicle.chassis_root)
+	await _wait_physics(60)
+	var c_speed: float = float(ch_c.call("GetSpeed")) if ch_c != null else -9.0
+	var c_yaw: float = float(ch_c.call("GetYawRate")) if ch_c != null else -9.0
+	_check("velocity-turn-clamped", ch_c != null
+		and absf(c_speed - 1.5) < 1e-3
+		and absf(c_yaw - PI * 0.5) < 0.05
+		and vehicle.rotation.y > 1.0,
+		"speed=%.4f (want 1.5) yaw_rate=%.4f (want %.4f) rot_y=%.4f"
+			% [c_speed, c_yaw, PI * 0.5, vehicle.rotation.y])
+
+	# --- 缺字段（只有 action）⇒ 容错成停车：不动、不转、不崩
+	_prepare(vehicle, SPAWN_WORLD)
+	vehicle.SetMotionCommand({"action": "velocity"})
+	var mp0: Vector3 = vehicle.global_position
+	await _wait_physics(30)
+	var m_planar: float = Vector2(vehicle.global_position.x - mp0.x,
+		vehicle.global_position.z - mp0.z).length()
+	_check("velocity-missing-fields-stops", m_planar < TOL
+		and absf(vehicle.rotation.y) < TOL and is_instance_valid(vehicle),
+		"moved=%.6f rot_y=%.6f" % [m_planar, vehicle.rotation.y])
 
 	# --- A22 stop：减速到 0 后 30 帧完全不动
 	_prepare(vehicle, SPAWN_WORLD)

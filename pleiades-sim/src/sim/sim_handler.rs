@@ -7,15 +7,15 @@
 //! 模拟设备处理器（无硬件，用于测试决策链）
 //!
 //! 不 spawn stm32/lidar 串口；`on_tick` 跑完整决策链（`TaskStack` 推进树 + 执行器），
-//! 「执行动作」交给底盘（[`Chassis::Apply_Action`] / [`Chassis::Apply_Velocity`]），
-//! 由底盘翻译成世界的 `motion_cmd`。
+//! 「执行动作」交给底盘（[`Chassis::Apply_Action`] / [`Chassis::Apply_Velocity`] /
+//! [`Chassis::Apply_Velocity_Pct`]），由底盘翻译成世界的 `motion_cmd`。
 //!
-//! 执行器分家（task_39 §四）：
-//! - 车栈：`sim/executor.rs` 的 `DecisionExecutor`（离散三状态机）+ [`Chassis::Apply_Action`]
-//!   —— 语义**一行不改**，`sim/executor.rs` 也一个字不动；
-//! - 机栈：`sim/uav_sim/executor.rs` 的 `UavExecutor`（连续速度三档）+ [`Chassis::Apply_Velocity`]，
-//!   机栈只写 `ExecuteState.sub_target`、`state` 留 `Idle`（唯一的读点
-//!   `base/Robot/core/robot.rs:250-253` 的 POSE 广播只取 `sub_target`，故 POSE / 集群不受影响）。
+//! 执行器三态（task_39 §四 / task_40 §二）：
+//! - 车栈：`sim/ugv_sim/executor.rs` 的 `UgvVelocityExecutor`（三档连续**档位**）+ [`Chassis::Apply_Velocity_Pct`]；
+//! - 机栈：`sim/uav_sim/executor.rs` 的 `UavExecutor`（三档连续**物理量**）+ [`Chassis::Apply_Velocity`]；
+//! - 车栈遗留离散路径（`sim/executor.rs` + [`Chassis::Apply_Action`]）保留为 A/B 回退点，Step 1 起不再选用。
+//! 两个连续分支都**只写 `ExecuteState.sub_target`**、`state` 留 `Idle`（唯一的读点
+//! `base/Robot/core/robot.rs:250-253` 的 POSE 广播只取 `sub_target`，故 POSE / 集群不受影响）。
 //!
 //! 世界链路（task_31 Step 2）：
 //! - `start()` 里**只 spawn**（[`WorldLink::Spawn`]），立即返回 —— 世界没起也必须能启动 tick
@@ -85,7 +85,7 @@ use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState}
 use crate::config::{
     DEFAULT_PLAN_BUDGET_MS, DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG, SimConfig,
 };
-use crate::sim::chassis::{self, Chassis};
+use crate::sim::chassis::{self, Chassis, SpeedBinding};
 use crate::sim::chassis::pose_ingest::PoseHistory;
 use crate::sim::control::TaskMonitor;
 use crate::sim::emergency_stop::{self, Check_Emergency_Stop};
@@ -97,6 +97,11 @@ use crate::sim::sensors::{Sensor, SensorSet, Should_Log, Warn_Throttled};
 use crate::sim::uav_sim;
 use crate::sim::uav_sim::executor::{UavExecutor, DEADBAND_DEG, SPIN_DEG};
 use crate::sim::ugv_sim;
+// 车栈连续档位常量起别名：`DEADBAND_DEG` 已被上面机栈的同名常量占用（同名不同值，各自口径）
+use crate::sim::ugv_sim::executor::{
+    UgvVelocityExecutor, ARC_MAX_DEG as UGV_ARC_MAX_DEG, DEADBAND_DEG as UGV_DEADBAND_DEG,
+    PASS_THROUGH_M as UGV_PASS_THROUGH_M,
+};
 
 use self::device_cap::CameraSimCap;
 use crate::world_link::{
@@ -215,14 +220,48 @@ impl TaskStack {
     }
 }
 
+/// 执行器三态（task_40 §二.8）：选型只由栈决定，`on_tick` 一次 `match` 分派
+enum Actuator {
+    /// 车栈遗留的离散三状态机（`sim/executor.rs`，与 `pleiades-ugv` 逐字相同）
+    /// Step 1 起 sim 车栈改走 [`Self::UgvVelocity`]；本变体**保留为 A/B 回退点**
+    /// （§二.8「不加配置开关，回退 = 回退代码」），只有回退时才由 [`Actuator_For`] 返回。
+    #[allow(dead_code)]
+    UgvDiscrete(DecisionExecutor),
+    /// 车栈连续档位执行器（`ugv_sim/executor.rs`）
+    UgvVelocity(UgvVelocityExecutor),
+    /// 机栈连续速度执行器（`uav_sim/executor.rs`）
+    Uav(UavExecutor),
+}
+
+/// 按栈装配执行器（task_40 §二.8）：车 → 连续档位（档位来自 `[chassis]`）；机 → 连续物理量（`[flight_ctrl]`）
+///
+/// 判据是**栈**（`Kind_Of_World` ← `[sim_world].chassis`），不借 `stack.ugv_nav()`（那个的语义是
+/// 「急停支不支持」，不是「执行器用哪个」）。
+fn Actuator_For(kind: StackKind, binding: SpeedBinding, vel_fwd: f32, yaw_rate_rps: f32) -> Actuator {
+    match kind {
+        StackKind::Ugv => {
+            Actuator::UgvVelocity(UgvVelocityExecutor::new(binding.forward, binding.turn))
+        }
+        StackKind::Uav => Actuator::Uav(UavExecutor::new(vel_fwd, yaw_rate_rps)),
+    }
+}
+
+/// A/B 回退点（§二.8）：车栈回到遗留离散三状态机的**唯一**构造点。
+///
+/// Step 1 起 `Actuator_For` 不再返回它；回退 = 让 `Actuator_For` 的 `Ugv` 分支返回本函数的结果。
+/// 之所以保留成独立函数：`sim/executor.rs` 本 step **一行不改**（不能在那边加 `allow`），
+/// 而 `DecisionExecutor::new` 一旦没人调用就变成死代码（新增 warning）—— 这里保留构造点即保住它。
+#[allow(dead_code)]
+fn Discrete_Actuator() -> Actuator {
+    Actuator::UgvDiscrete(DecisionExecutor::new())
+}
+
 /// start() 后初始化的「设备组」（无硬件，只有决策组件 + 传感器 + 底盘）
 struct SimInner {
     /// 任务栈（§12.6：按底盘类型二选一；持有 nav + 树实例表）
     stack: TaskStack,
-    executor: DecisionExecutor,
-    /// 机栈连续速度执行器（task_39 §四.2）：`Some` 只在机栈；`None` = 车栈（走上面的
-    /// `DecisionExecutor` + `Apply_Action`，语义一行不改）
-    uav_executor: Option<UavExecutor>,
+    /// 执行器（三态，`start()` 按栈装配一次）：见 [`Actuator`]
+    actuator: Actuator,
     /// 按配置构造的传感器（`shutdown()` 逐个停；建图 task 归它们所有）
     sensors: Vec<Arc<dyn Sensor>>,
     /// 急停用 lidar（Step 6）：`None` = 没连世界 / 没有 `lidar_2d` / 无 `[sim_world]` 段
@@ -564,27 +603,30 @@ impl DeviceHandler for SimDeviceHandler {
         stack.set_plan_budget(Duration::from_millis(plan_budget_ms)).await;
         info!("[Sim] 任务栈 = {:?}（底盘 {}）", kind, world_name);
 
-        // ---- 5.7) 执行器分家（task_39 §四.2）：车 → `DecisionExecutor`（离散三状态机）；
-        //      机 → `UavExecutor`（连续速度三档）。**口径与真机 UAV 一致**（§四 修订）：
-        //      速度取 `[flight_ctrl]` 的 `vel_fwd`（m/s）/ `yaw_rate_deg`（°/s），
-        //      不再借用车的 `[chassis]` 百分比档位；缺段/缺键 → 真机同款默认（0.3 m/s / 15°/s）。
-        //      判据只有 `uav_executor.is_some()`，不借 `stack.ugv_nav()`（那个的语义是
-        //      「急停支不支持」，不是「执行器用哪个」）。
+        // ---- 5.7) 执行器三态（task_40 §二.8）：车 → 连续档位（取 `[chassis]` forward/turn，百分比）；
+        //      机 → 连续物理量（取 `[flight_ctrl]` 的 vel_fwd / yaw_rate_deg；缺段默认 0.3 m/s / 15°/s）。
+        //      **口径与真机一致**：车的档位是百分比（换算在世界侧 `DiffDrive.gd`），
+        //      机的速度是物理量（§四 修订），两边各自沿用真机的单位，不再互相借。
+        let binding = SpeedBinding::From_Config(self.config.chassis.as_ref());
         let (vel_fwd, yaw_rate_deg) = self
             .config
             .flight_ctrl
             .as_ref()
             .map(|c| c.Resolved())
             .unwrap_or((DEFAULT_VEL_FWD, DEFAULT_YAW_RATE_DEG));
-        let uav_executor = match kind {
-            StackKind::Ugv => None,
-            StackKind::Uav => Some(UavExecutor::new(vel_fwd, yaw_rate_deg.to_radians())),
-        };
-        if uav_executor.is_some() {
-            info!(
+        let actuator = Actuator_For(kind, binding, vel_fwd, yaw_rate_deg.to_radians());
+        match &actuator {
+            Actuator::UgvVelocity(_) => info!(
+                "[Sim] 车栈执行器 = 连续档位（forward_speed={} turn_speed={}，DEADBAND={:.0}°，ARC_MAX={:.0}°，PASS_THROUGH={:.2} m）",
+                binding.forward, binding.turn, UGV_DEADBAND_DEG, UGV_ARC_MAX_DEG, UGV_PASS_THROUGH_M
+            ),
+            Actuator::Uav(_) => info!(
                 "[Sim] 机栈执行器 = 连续速度（vel_fwd={:.2} m/s，yaw_rate={:.1}°/s={:.3} rad/s，DEADBAND={:.0}°，SPIN={:.0}°）",
                 vel_fwd, yaw_rate_deg, yaw_rate_deg.to_radians(), DEADBAND_DEG, SPIN_DEG
-            );
+            ),
+            Actuator::UgvDiscrete(_) => {
+                info!("[Sim] 车栈执行器 = 离散三状态机（A/B 回退路径）")
+            }
         }
 
         // ---- 6) 本地控制口（Step 5）：取消令牌进 `SimInner`，`shutdown()` 先 cancel 它
@@ -594,8 +636,7 @@ impl DeviceHandler for SimDeviceHandler {
         self.inner
             .set(SimInner {
                 stack,
-                executor: DecisionExecutor::new(),
-                uav_executor,
+                actuator,
                 sensors,
                 lidar,
                 chassis,
@@ -725,13 +766,15 @@ impl DeviceHandler for SimDeviceHandler {
         d.monitor.Set_Nav(d.stack.nav_status().await);
 
         // ⑤ 决策（`ExecuteState` **唯一写点**）+ 执行动作（交底盘翻译成世界 `motion_cmd`）
-        //    分派（task_39 §四.2）：车栈 = 老离散三状态机 + `Apply_Action`（语义一行不改）；
-        //    机栈 = 连续速度内核 + `Apply_Velocity`（**只写 `sub_target`**，`state` 留 `Idle`：
-        //    唯一的读点 `base/Robot/core/robot.rs:250-253` 只取 `sub_target`）
-        let current = execute_state.read().await.clone();
-        match d.uav_executor.as_ref() {
-            None => {
-                let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+        //    分派（task_40 §二.8）：三态 `Actuator` —— 车栈连续档位 / 机栈连续速度各自一臂，
+        //    车栈遗留离散三状态机保留为 A/B 回退臂（语义一行不改）。
+        //    两个连续臂**只写 `sub_target`**，`state` 留 `Idle`（唯一的读点
+        //    `base/Robot/core/robot.rs:250-253` 只取 `sub_target`）。
+        match &d.actuator {
+            Actuator::UgvDiscrete(ex) => {
+                // 离散三状态机读当前 `ExecuteState`（连续两臂不读，故 `current` 只在本臂克隆）
+                let current = execute_state.read().await.clone();
+                let result = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
                 *execute_state.write().await = ExecuteState {
                     state: result.state,
                     sub_target: result.sub_target,
@@ -750,7 +793,35 @@ impl DeviceHandler for SimDeviceHandler {
                     ch.Apply_Action(action);
                 }
             }
-            Some(ex) => {
+            Actuator::UgvVelocity(ex) => {
+                let cmd = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+                *execute_state.write().await =
+                    ExecuteState { state: DecisionState::Idle, sub_target: out.next_cell };
+                // 20 Hz 全程有输出 → Should_Log 压到 5 Hz；**字段名固定**
+                // （Step 2 的 `[Sim] UGV` 行解析依赖它）
+                if Should_Log("sim.ugv.exec", 200) {
+                    info!(
+                        "[Sim] UGV 位置=({:.2},{:.2}) yaw={:.1}° next={:?} → speed={} turn={} 位姿龄={}ms",
+                        rs.x,
+                        rs.y,
+                        rs.attitude.yaw.to_degrees(),
+                        out.next_cell,
+                        cmd.speed,
+                        cmd.turn,
+                        ch.Pose_Age_Ms()
+                    );
+                }
+                if !ch.Apply_Velocity_Pct(cmd.speed, cmd.turn) {
+                    // 判型与底盘构造同一个来源（`stack kind` ← `[sim_world].chassis`），理论上不会发生；
+                    // 真发生就按最安全的方式收场：停车 + 1 s 限流告警（不静默，也不自动回落离散）
+                    Warn_Throttled("sim.ugv.no_velocity", 1000, || {
+                        "[Sim] 底盘不支持 Apply_Velocity_Pct：按停车处理（检查 [sim_world].chassis 与栈是否一致）"
+                            .to_string()
+                    });
+                    ch.Stop();
+                }
+            }
+            Actuator::Uav(ex) => {
                 let cmd = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
                 *execute_state.write().await =
                     ExecuteState { state: DecisionState::Idle, sub_target: out.next_cell };
@@ -838,5 +909,45 @@ mod tests {
         assert_eq!(Kind_Of_World("quadrotor_uav"), StackKind::Uav);
         assert_eq!(Kind_Of_World(" diff_drive_ugv "), StackKind::Ugv, "名字要 trim");
         assert_eq!(Kind_Of_World(DEFAULT_CHASSIS), StackKind::Ugv, "[sim_world] 缺省 = 差速车");
+    }
+
+    /// §二.8：车的选型只能是连续档位（离散路径不再被 `start()` 选中），机的选型只能是连续速度
+    #[test]
+    fn test_actuator_select_by_stack_kind() {
+        let binding = SpeedBinding { forward: 30, turn: 30 };
+        let ugv = Actuator_For(StackKind::Ugv, binding, 0.3, 0.26);
+        assert!(
+            matches!(ugv, Actuator::UgvVelocity(_)),
+            "车栈必须选连续档位执行器（离散路径留给回退）"
+        );
+        if let Actuator::UgvVelocity(ex) = &ugv {
+            // 无目标 = 停；档位原值来自 `[chassis]`
+            assert_eq!(
+                ex.decide(None, 0.25, 0.25, 0.0),
+                crate::sim::ugv_sim::executor::VelocityCmd { speed: 0, turn: 0 }
+            );
+        }
+        let uav = Actuator_For(StackKind::Uav, binding, 0.3, 0.26);
+        assert!(matches!(uav, Actuator::Uav(_)), "机栈必须选连续速度执行器");
+    }
+
+    /// 回退路径（A/B）：离散变体仍可用、语义一行未被改坏（位姿在格心正南 0.35 m、朝北 ⇒ Δθ = 0）
+    #[test]
+    fn test_ugv_discrete_variant_still_works() {
+        let act = Discrete_Actuator();
+        let Actuator::UgvDiscrete(ex) = &act else { unreachable!("`Discrete_Actuator` 只产出离散变体") };
+        let result = ex.decide(
+            Some((20, 20)),
+            10.25,
+            9.90,
+            std::f32::consts::FRAC_PI_2,
+            &ExecuteState::default(),
+        );
+        assert_eq!(result.state, DecisionState::Moving);
+        assert_eq!(
+            result.action,
+            Some(pleiades_base::robot::core::state::MotionAction::MoveForward)
+        );
+        assert_eq!(result.sub_target, Some((20, 20)));
     }
 }

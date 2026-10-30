@@ -1,8 +1,8 @@
 # Presented by KeJi
 # Created Date ： 2026-10-22
-# Modified Date ： 2026-10-23
+# Modified Date ： 2026-10-29
 #
-# 低模外观自检（Step 2 + task_33 Step 3）：模型静态挂在 Vehicle.tscn / 两个传感器场景上，
+# 低模外观自检（Step 2 + task_33 Step 3 + task_40 Step 5）：模型静态挂在 Vehicle.tscn / 两个传感器场景上，
 # 显隐正确 / 尺寸朝向正确 / 模型 = 碰撞盒 / 传感器模型零碰撞。
 # 用法：timeout 180 godot --headless --path orion-simulation-world --fixed-fps 60 \
 #          --script res://src/tests/check_models.gd
@@ -13,6 +13,10 @@
 #     MeshInstance3D 的第 2 个 surface（材质名 UGV_NoseRed / UAV_NoseRed），所以 UAV 的朝向断言
 #     仍走"节点名 + 材质名"双通道。task_33 Step 3 起 ModelUGV 改用 assets/chassis/ugv_chassis.glb，
 #     它的车头是**独立节点 NosePlate**（新 glb 没有 NoseRed 材质通道）→ UGV 命中走 by-name。
+#     task_40 Step 5 起 ModelUAV 改用 assets/chassis/uav_quadrotor.glb（Poly Pizza `Drone` /
+#     NateGazzard，CC BY 3.0，见 assets/ATTRIBUTION.md）：它同样**没有**名字含 Nose 的节点，
+#     红色机头是 Body 的第 2 个 surface（材质名 UAV_NoseRed，由正面面片重涂而来）
+#     → M4 的 UAV 一侧只走 by-mat 通道（实测该 surface AABB 中心 x = +0.2105，10 倍于阈值）。
 #   - UGV 模型在 Vehicle 坐标系的整体 AABB = P(-0.15, 0.00, -0.13) S(0.30, 0.25, 0.25)（= 碰撞盒）；
 #     UAV = P(-0.32, 0.00, -0.32) S(0.64, 0.14, 0.64)。
 #   - 传感器模型（task_33 Step 3，纯视觉、无碰撞）：挂在 Lidar2D/CameraSensor 场景的 Body 上，
@@ -33,7 +37,7 @@ extends SceneTree
 
 const VEHICLE_SCENE := "res://src/scenes/Vehicle.tscn"
 const UGV_MODEL_SCENE := "res://assets/chassis/ugv_chassis.glb"
-const UAV_MODEL_SCENE := "res://assets/uav_quadrotor_lowpoly.glb"
+const UAV_MODEL_SCENE := "res://assets/chassis/uav_quadrotor.glb"
 const LIDAR_SCENE := "res://src/scenes/sensors/Lidar2D.tscn"
 const CAMERA_SCENE := "res://src/scenes/sensors/CameraSensor.tscn"
 const LIDAR_GLB := "res://assets/sensors/lidar_tmini.glb"

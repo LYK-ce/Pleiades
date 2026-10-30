@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-10-29
 
 #![allow(non_snake_case)]
 
@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::state::MotionAction;
@@ -48,6 +49,15 @@ impl Chassis for DiffDriveChassis {
 
     fn Apply_Action(&self, action: MotionAction) {
         self.base.Dispatch(action);
+    }
+
+    /// 车栈连续档位指令（task_40 §二.7）：一帧 `action="velocity"` + `speed` / `turn` 档位，
+    /// 恒返回 `true`（= 支持）；`Err` 只表示这一帧没进通道（未装配 / 通道满），50 ms 下一拍自愈。
+    fn Apply_Velocity_Pct(&self, speed: u8, turn: i16) -> bool {
+        if let Err(e) = self.base.motion.Send_Velocity_Pct(speed, turn) {
+            debug!("[chassis] {} 连续档位未投递：{e}", self.base.name);
+        }
+        true
     }
 
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd) {
@@ -202,6 +212,38 @@ mod tests {
         ch.Stop();
         let m = rx.try_recv().expect("Stop 应下发");
         assert_eq!((m.action, m.speed), ("stop", 0));
+    }
+
+    #[test]
+    fn test_diff_apply_velocity_pct_dispatch() {
+        // task_40 §二.7：档位直接透传到 wire（不做任何换算），两向都过一遍
+        let (ch, mut rx) = diff();
+        assert!(ch.Apply_Velocity_Pct(30, -30), "差速底盘必须支持连续档位");
+
+        let m = rx.try_recv().expect("档位帧应下发");
+        assert_eq!(m.action, "velocity");
+        assert_eq!(m.speed, 30);
+        assert_eq!(m.turn, Some(-30), "右转 ⇒ turn < 0（符号见 ugv_sim/executor.rs 文件头）");
+        assert_eq!((m.v, m.omega), (None, None), "车栈帧不带物理量字段");
+
+        assert!(ch.Apply_Velocity_Pct(0, 30));
+        let m = rx.try_recv().expect("原地左转应下发");
+        assert_eq!((m.speed, m.turn), (0, Some(30)));
+    }
+
+    #[test]
+    fn test_diff_apply_velocity_pct_before_assembled_still_supported() {
+        // 未装配：仍返回 true（= 底盘支持），只是这一帧被 `Send_Velocity_Pct` 静默丢弃
+        let (tx, mut rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
+        let base = ChassisBase::New(
+            "diff_drive_ugv",
+            SpeedBinding::From_Config(Some(&ChassisConfig::default())),
+            tx,
+            Arc::new(RwLock::new(RobotState::default())),
+        );
+        let ch = DiffDriveChassis::New(base);
+        assert!(ch.Apply_Velocity_Pct(30, -30));
+        assert_empty(&mut rx);
     }
 
     #[test]

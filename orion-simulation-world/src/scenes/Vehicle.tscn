@@ -1,11 +1,14 @@
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-23
+; Modified Date ： 2026-10-29
 ;
 ; Vehicle 组件（Step 4）。节点树与接口见 COMPONENTS.md §4.3。
 ; task_33 Step 3：ModelUGV 改挂 assets/chassis/ugv_chassis.glb（模型 = 碰撞盒，D11）。
 ;   占位 BoxMesh/CollisionShape3D 尺寸同步为模型 AABB 0.30 × 0.25 × 0.25，抬升 y = 0.125；
 ;   有模型时占位与 Nose 一起隐藏（Vehicle._Mount_Model），物理碰撞盒始终是 CollisionShape3D 这一个。
+; task_40 Step 5：ModelUAV 改挂 assets/chassis/uav_quadrotor.glb（Poly Pizza Drone / NateGazzard，
+;   CC BY 3.0，见 assets/ATTRIBUTION.md）。归一后 AABB = P(-0.32, 0.00, -0.32) S(0.64, 0.14, 0.64)，
+;   与 UAV 碰撞盒 0.40 × 0.12 × 0.40 的差异在既有容差内 ⇒ 物理一行不改（动力学零改动）。
 ; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
 ; 节点引用必须靠 node_paths=PackedStringArray(...) 才会绑定（COMPONENTS.md §9.1 E16）。
 
@@ -13,7 +16,7 @@
 
 [ext_resource type="Script" path="res://src/vehicle/Vehicle.gd" id="1_vehicle"]
 [ext_resource type="PackedScene" path="res://assets/chassis/ugv_chassis.glb" id="5_model_ugv"]
-[ext_resource type="PackedScene" path="res://assets/uav_quadrotor_lowpoly.glb" id="6_model_uav"]
+[ext_resource type="PackedScene" path="res://assets/chassis/uav_quadrotor.glb" id="6_model_uav"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_placeholder"]
 size = Vector3(0.3, 0.25, 0.25)

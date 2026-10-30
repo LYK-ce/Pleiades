@@ -71,6 +71,17 @@ pub trait Chassis: Send + Sync {
         false
     }
 
+    /// 车栈连续**档位**指令（task_40 §二.7）：`speed` 前进档位 0~100、`turn` 带符号转向档位 −100..+100
+    /// （**档位，不是物理量**；百分比 → m/s / rad/s 的换算只在世界侧 `DiffDrive.gd`）。
+    ///
+    /// 与上一条 [`Self::Apply_Velocity`]（机栈物理量）**并存**：Rust 没有重载，故用不同方法名
+    /// （偏差 D1，见 `tmp/task40/plan.md` §5）。默认**不支持** → 车栈若走到这里就按停车收场
+    /// （`sim_handler` 的 `Actuator::UgvVelocity` 臂）。
+    /// 返回 `true` = 本底盘**支持**这路指令（**不代表已送达**，语义与 `Apply_Velocity` 相同）。
+    fn Apply_Velocity_Pct(&self, _speed: u8, _turn: i16) -> bool {
+        false
+    }
+
     /// 与真机 `handle_manual_cmd` 同形（设备选择性响应：车不响应 Takeoff/Land）
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd);
 
@@ -291,6 +302,19 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "车栈不该下发任何速度帧"
+        );
+    }
+
+    #[test]
+    fn test_apply_velocity_pct_default_unsupported() {
+        // task_40 §二.7：四旋翼不实现 Apply_Velocity_Pct（默认 false）→ 机栈永不因此下发档位帧，
+        // `chassis/uav.rs` 一行不改（本变体保留为「万一」的兜底，与 Apply_Velocity 同款）
+        let (tx, mut rx) = channel();
+        let ch = Build("quadrotor_uav", &cfg(), tx, state()).expect("能建");
+        assert!(!ch.Apply_Velocity_Pct(30, -30), "默认必须返回 false（不支持）");
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "四旋翼不该下发任何档位帧"
         );
     }
 }

@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://bel0paefoqdak"
-path="res://.godot/imported/uav_quadrotor_lowpoly.glb-c5f710bc900bcae828fef6ff25055016.scn"
+uid="uid://dftxhpff85l0h"
+path="res://.godot/imported/uav_quadrotor.glb-981ca00c841f0d2aea2d0ea06a95285a.scn"
 
 [deps]
 
-source_file="res://assets/uav_quadrotor_lowpoly.glb"
-dest_files=["res://.godot/imported/uav_quadrotor_lowpoly.glb-c5f710bc900bcae828fef6ff25055016.scn"]
+source_file="res://assets/chassis/uav_quadrotor.glb"
+dest_files=["res://.godot/imported/uav_quadrotor.glb-981ca00c841f0d2aea2d0ea06a95285a.scn"]
 
 [params]
 

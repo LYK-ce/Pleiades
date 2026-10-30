@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-23
+# Modified Date ： 2026-10-29
 #
 # 差速底盘 diff_drive_ugv（Step 5 / COMPONENTS.md §4.4）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED（D3）+ 差速运动学 + 世界侧速度环。
@@ -22,10 +22,14 @@
 #   backward -> v_target = -max_speed·pct , yaw_target = 0
 #   left     -> v_target = 0              , yaw_target = +max_turn_rate·pct
 #   right    -> v_target = 0              , yaw_target = -max_turn_rate·pct
+#   velocity -> v_target = +max_speed·speed% , yaw_target = +max_turn_rate·turn%
+#               （车栈连续档：**前进与转向同时生效**，task_40 §二.5；speed 0~100、turn −100..+100）
 #   up/down  -> 0（UGV 无竖直自由度）；stop / 未知 / 缺 action -> 0
 #
 # 坐标：前进 = 局部 +X，局部 +Z = 车体右侧；velocity = global_basis * (v, 0, 0)。
 # yaw_rate 是 **Godot rotation.y** 的角速度（正 = 左转），世界 yaw = -rotation.y。
+#   "velocity" 的 turn 与 rotation.y **同号**：turn < 0 ⇒ yaw_target < 0 ⇒ rotation.y 减小
+#   ⇒ 世界 yaw 增大（右转）。与 sim 侧 `sim/ugv_sim/executor.rs` 文件头的证据链一致。
 #
 # 不声明全局类名（§9.1 E5）。
 
@@ -91,6 +95,8 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 
 
 ## 指令 -> 速度环目标（只存最新，不排队；pct 缺失/非法一律 0）。
+## `"velocity"` 的两个字段按底盘解释（task_40 §二.5）：`cmd.speed` = 0~100 前进档，
+## `cmd.turn` = −100..+100 带符号转向档（机栈的 `v`/`omega` 物理量由 `Quadrotor.gd` 自己解析）。
 func SetCommand(cmd: Dictionary) -> void:
 	super.SetCommand(cmd)
 	var pct := SpeedPct(cmd)
@@ -107,6 +113,11 @@ func SetCommand(cmd: Dictionary) -> void:
 		"right":
 			_speed_target = 0.0
 			_yaw_target = -_max_turn_rate * pct
+		"velocity":
+			# 车栈连续档（task_40 §二.5）：前进档位与转向档位**同时生效** —— 本步唯一的新行为 = 解除互斥。
+			# speed 走基类 SpeedPct（0~100 → 0~1，容错与离散档一致）；turn 是带符号档位（−100..+100）。
+			_speed_target = _max_speed * pct
+			_yaw_target = _max_turn_rate * _TurnPct(cmd)
 		_:
 			# stop / up / down / 未知 action / 缺 action：UGV 只认平面运动
 			_speed_target = 0.0
@@ -146,6 +157,15 @@ func GetBodySize() -> Vector3:
 
 
 # ================================================================ 私有
+
+## motion_cmd 的带符号档位（−100..+100，车栈 "velocity" 用）：缺失 / 非数字 / 非法类型 → 0.0（不崩）。
+## 与基类 SpeedPct 的分工：speed 只前进（0~100），turn 有符号（−100..+100）。
+## 复用基类 _to_float（类型容错已在那里），本文件不新增第二套解析。
+func _TurnPct(cmd: Dictionary) -> float:
+	if not cmd.has("turn"):
+		return 0.0
+	return clampf(_to_float(cmd["turn"], 0.0), -100.0, 100.0) / 100.0
+
 
 ## 轮子摆位：x = ±wheel_base/2（前 +，后 −）、z = ±track_width/2（左 −，右 +）、y = 半径。
 ## 纯视觉，不参与物理；子节点缺失只告警一次并跳过（不崩）。

@@ -172,6 +172,34 @@ impl MotionSender {
         }
     }
 
+    /// 车栈连续档位指令（task_40 §二.6）：`speed` = 前进档位 0~100、`turn` = 带符号转向档位 −100..+100
+    /// （**档位，不是物理量**；百分比 → m/s / rad/s 只在世界侧 `DiffDrive.gd` 换算）。
+    ///
+    /// 与 [`Self::Send_Velocity`] **同构**（只换字段）：
+    /// - 未装配 → `debug!` 丢弃 + `Ok(())`；
+    /// - 通道满/关闭 → 限流 `warn!`（`world.velocity_pct_dropped`）+ `Err`；
+    /// - **不登记 `pending_stop`**：50 ms 下一拍自愈，安全停车仍走 [`Self::Send_Stop_Priority`]；
+    /// - `seq` 与其它帧**共用同一个计数器**；
+    /// - `v` / `omega` 恒 `None`，`turn` 恒 `Some(clamp(−100, 100))`。
+    pub fn Send_Velocity_Pct(&self, speed: u8, turn: i16) -> Result<(), String> {
+        if !self.Is_Assembled() {
+            debug!(
+                "[world] 未装配，丢弃 motion_cmd action={} speed={speed} turn={turn}",
+                protocol::ACTION_VELOCITY
+            );
+            return Ok(());
+        }
+        match self.Push_Velocity_Pct(speed, turn) {
+            Ok(()) => Ok(()),
+            Err(msg) => {
+                Warn_Throttled("world.velocity_pct_dropped", 1000, || {
+                    format!("[world] {msg}（世界只取最新一条，不补发历史）")
+                });
+                Err(msg)
+            }
+        }
+    }
+
     /// supervisor 每 [`STOP_RESEND_MS`] 取一次：`Some` = 需要立即补发这条 stop
     /// （**已带新 `seq`，标志已清**，绝不重复补发）
     pub fn Take_Pending_Stop(&self) -> Option<protocol::MotionCmd> {
@@ -191,6 +219,7 @@ impl MotionSender {
             // 离散动作帧不带速度字段（`skip_serializing_if` ⇒ 旧 JSON 逐字不变）
             v: None,
             omega: None,
+            turn: None,
         }
     }
 
@@ -212,6 +241,7 @@ impl MotionSender {
             speed: 0,
             v: Some(v),
             omega: Some(omega),
+            turn: None,
         }
     }
 
@@ -219,6 +249,32 @@ impl MotionSender {
         let cmd = self.Next_Velocity_Cmd(v, omega);
         self.tx.try_send(cmd).map_err(|e| {
             format!("motion_cmd 未投递（action={} v={v} omega={omega}）：{e}", protocol::ACTION_VELOCITY)
+        })
+    }
+
+    /// 组一条车栈连续档位帧（`action = ACTION_VELOCITY`；`v` / `omega` 恒 `None`）
+    ///
+    /// `turn` 是**带符号**档位：`clamp(−100, 100)`（负 = 右转，符号见 `sim::ugv_sim::executor` 文件头）；
+    /// `speed` 是前进档位：`min(100)`。`seq` 与 [`Self::Next_Cmd`] **共用同一个计数器**。
+    fn Next_Velocity_Pct_Cmd(&self, speed: u8, turn: i16) -> protocol::MotionCmd {
+        protocol::MotionCmd {
+            msg: protocol::MSG_MOTION_CMD,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
+            action: protocol::ACTION_VELOCITY,
+            speed: speed.min(100),
+            v: None,
+            omega: None,
+            turn: Some(turn.clamp(-100, 100)),
+        }
+    }
+
+    fn Push_Velocity_Pct(&self, speed: u8, turn: i16) -> Result<(), String> {
+        let cmd = self.Next_Velocity_Pct_Cmd(speed, turn);
+        self.tx.try_send(cmd).map_err(|e| {
+            format!(
+                "motion_cmd 未投递（action={} speed={speed} turn={turn}）：{e}",
+                protocol::ACTION_VELOCITY
+            )
         })
     }
 }
@@ -1297,5 +1353,50 @@ mod tests {
         // 通道里仍然只有那一条普通动作
         assert_eq!(rx.try_recv().expect("第 1 条").action, "forward");
         assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    // ============================================================ 车栈连续档位指令（task_40 §二.6）
+
+    #[test]
+    fn test_motion_sender_velocity_pct_when_assembled() {
+        // 装配后：一帧 `action="velocity"` + speed / turn，v / omega 恒 None，seq 与 Send 共用计数器
+        let (tx, mut rx) = assembled(MOTION_CHANNEL_CAP);
+        tx.Send("forward", 30).expect("普通动作先占掉 seq=1");
+        tx.Send_Velocity_Pct(30, -30).expect("装配后必须投递成功");
+        let c1 = rx.try_recv().expect("应收到普通动作帧");
+        assert_eq!((c1.action, c1.speed, c1.turn), ("forward", 30, None));
+        let c2 = rx.try_recv().expect("应收到档位帧");
+        assert_eq!(c2.action, protocol::ACTION_VELOCITY);
+        assert_eq!(c2.speed, 30);
+        assert_eq!(c2.turn, Some(-30), "Δθ>0（右）⇒ turn 为负，原值透传");
+        assert_eq!((c2.v, c2.omega), (None, None), "车栈帧不带物理量字段");
+        assert_eq!(c2.msg, protocol::MSG_MOTION_CMD);
+        assert_eq!((c1.seq, c2.seq), (1, 2), "seq 与 Send 共用同一个计数器");
+    }
+
+    #[test]
+    fn test_motion_sender_velocity_pct_clamps() {
+        // 两维都夹：speed → 0..100、turn → −100..+100（二次兜底，`SpeedBinding` 已夹过一次）
+        let (tx, mut rx) = assembled(MOTION_CHANNEL_CAP);
+        tx.Send_Velocity_Pct(250, -500).expect("投递");
+        let c = rx.try_recv().expect("收到");
+        assert_eq!((c.speed, c.turn), (100, Some(-100)));
+        tx.Send_Velocity_Pct(0, 300).expect("投递");
+        let c = rx.try_recv().expect("收到");
+        assert_eq!((c.speed, c.turn), (0, Some(100)));
+    }
+
+    #[test]
+    fn test_motion_sender_velocity_pct_dropped_before_assembled() {
+        // 未装配：返回 Ok(()) 但绝不进通道；且**不登记 pending_stop**（与 Send_Velocity 同款）
+        let (tx, mut rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
+        assert!(!tx.Is_Assembled());
+        assert_eq!(tx.Send_Velocity_Pct(30, -30), Ok(()));
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        assert!(tx.Take_Pending_Stop().is_none(), "档位帧不许登记 pending_stop");
+        // 置 true 后才真正下发
+        tx.Set_Assembled(true);
+        assert_eq!(tx.Send_Velocity_Pct(30, -30), Ok(()));
+        assert_eq!(rx.try_recv().expect("收到").turn, Some(-30));
     }
 }

@@ -17,11 +17,11 @@
 |---|---|
 | `.gitkeep` | 占位（保留） |
 | `humans/` | 人形资产，见 `humans/README.md`（Renderpeople 免费页，非 CC0） |
-| `sensors/` `chassis/` `uav_quadrotor_lowpoly.glb` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用） |
+| `sensors/` `chassis/` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用）；`chassis/uav_quadrotor.glb` = **task_40 Step 5 换的四旋翼外观**，见 §5 与 `ATTRIBUTION.md` |
 | `textures/` | **task_38 Step 1a 新增**：4 套 PBR 贴图（12 个文件），CC0，见 §2 |
 | `hdri/` | **task_38 Step 1a 新增**：1 张 2K 晴天正午 HDRI，CC0，见 §3 |
 
-> 除 `humans/`（Renderpeople 免费页条款）外，`textures/` 与 `hdri/` 全部为 **CC0 1.0**（Poly Haven / ambientCG 的公共领域授权），可商用、可修改、无归属义务；本仓库仍逐条记账来源以便复核。
+> 除 `humans/`（Renderpeople 免费页条款）与 `chassis/uav_quadrotor.glb`（**CC BY 3.0**，须署名，见 `ATTRIBUTION.md`）外，`textures/` 与 `hdri/` 全部为 **CC0 1.0**（Poly Haven / ambientCG 的公共领域授权），可商用、可修改、无归属义务；本仓库仍逐条记账来源以便复核。
 > **贴图与 `.import` 必须一起提交**：干净检出先跑 `godot --headless --path orion-simulation-world --import`，否则 `load()` 返回 `null`（`COMPONENTS.md` §9.1 **E28**）。
 
 ## 2. `textures/` — 4 套 PBR（CC0，task_38 Step 1a）
@@ -64,6 +64,23 @@
 |---|---|
 | 本步新增 12 贴图 + 1 HDRI | 9 506 040 |
 | 本步新增 13 个 `.import` | 12 431 |
-| `assets/` 总体积（`du -sb`，含既有资产与 `.import`） | 24 306 445 |
+| **task_40 Step 5 增量**（新 glb 299 376 + 2 个 `.import` 2 231 + 抽出贴图 2 882 + 许可 19 467 + 署名 5 289 − 删旧件 20 460 − 删旧 `.import` 1 185 = 资产净 **+307 600**；本文件台账 +3 001） | **+310 601** |
+| `assets/` 总体积（`du -sb`，2026-10-29 实测 ≈ **24.62 MB**；本文件自身字节也算在内，故精确值随文档微调而变） | ≈ 24 617 000 |
 
 判据：贴图单张 ≤ 1.5 MB（最大 `ground_paving_nor.jpg` 975 127）、HDRI ≤ 6 MB、`assets/` 增量 **9 524 411** ≤ 10 MB —— 全部通过。
+task_40 Step 5 另核：模型 glb **299 376 B ≤ 1 MB**、贴图 128×128 ≤ 2K、tris **4 564 ≤ 50k**。
+
+## 5. `chassis/` — 四旋翼外观 1 件（**CC BY 3.0**，task_40 Step 5）
+
+| 文件 | 是什么 | 来源 | 来源 URL | 许可 | 处理 | 字节 | sha256[:16] |
+|---|---|---|---|---|---|---|---|
+| `chassis/uav_quadrotor.glb` | `Vehicle/ModelUAV` 的四旋翼外观（`ApplyChassis("quadrotor_uav")` 时可见） | Poly Pizza `Drone` / **NateGazzard**（上传 2023-12-31，站内 `Tris: 4564`） | https://poly.pizza/m/DNbUoMtG3H（直下 https://static.poly.pizza/4eb88feb-cb2d-46c3-980d-3e704868361c.glb） | **CC BY 3.0** | Blender 归一：朝 +X / 底面 `y=0` / 非等比缩放到 AABB `0.64 × 0.14 × 0.64` / `Body` 正面面片重涂 `UAV_NoseRed` / 导出 GLB Y-up（详见 `ATTRIBUTION.md` §3） | 299 376 | 7aa77d6b21213819 |
+| `chassis/uav_quadrotor.glb.import` | 场景导入描述（`importer="scene"`） | — | — | — | `godot --headless --path orion-simulation-world --import` 生成，**不要手改** | 1 169 | — |
+| `chassis/uav_quadrotor_ColorPalette.png` | **Godot 从 glb 里抽出的调色板贴图**（128×128，同 `humans/*_dif.jpg` 的先例） | 同上 | 同上 | CC BY 3.0 | 导入时自动落地（`gltf/embedded_image_handling=1`），像素未改 | 2 882 | — |
+| `chassis/uav_quadrotor_ColorPalette.png.import` | 贴图导入描述 | — | — | — | 同上，**必须与 png 一起提交**（`COMPONENTS.md` §9.1 **E28**） | 1 062 | — |
+| `chassis/LICENSE_uav_quadrotor.txt` | CC BY 3.0 Unported **许可全文**（与 `humans/LICENSE_renderpeople.txt` 同一命名习惯） | <https://creativecommons.org/licenses/by/3.0/legalcode.txt> | 同左 | — | 字节级搬运，未改一字 | 19 467 | — |
+
+- **抓取日期**：2026-10-29；源文件 `259 676 B` / `sha256 = bc9f0d765e0fdb838a9baf26b472f955a11bb2509a3337e918054241b134638d`（下载脚本见 `tmp/task40/`，直连成功、未走代理）。
+- **署名**：`"Drone" by NateGazzard — https://poly.pizza/m/DNbUoMtG3H — CC BY 3.0`（完整署名 + 改动说明 + 选型证据见 `ATTRIBUTION.md`）。
+- **碰撞盒未随外观变更**：模型 AABB `0.64 × 0.14 × 0.64` 与 §6.5 的目标 `0.64 × 0.13 × 0.64` 只差 **1.0 cm**（y 轴，且 `0.11 ≤ y ≤ 0.15` 与 `check_sensor_models` 的 `0.14 ±2%` 都要求 y 取 0.14）⇒ **`UAV_HULL` 仍是 `(0.40, 0.12, 0.40)`，碰撞盒与动力学一行未改**。
+- **贴图与 `.import` 必须一起提交**；旧件 `assets/uav_quadrotor_lowpoly.glb`（20 460 B）+ 其 `.import` 已 `git rm`（git 可回溯）。
