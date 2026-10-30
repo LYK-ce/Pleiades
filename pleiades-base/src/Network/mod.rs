@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-04-24
-//Modified Date ： 2026-08-18
+//Modified Date ： 2026-10-30
 
 //! 网络层模块
 //!
@@ -85,5 +85,6 @@ pub use session_stream::protocol::{
 pub use Gossipsub::{
     TOPIC_PEER_INFO, TOPIC_MODELS, TOPIC_SESSIONS,
     TOPIC_ROBOT_POSE, TOPIC_ROBOT_MAP, TOPIC_RTK_RTCM,
+    TOPIC_ROBOT_ASSIST_REQUEST,
     SnapshotCache,
 };

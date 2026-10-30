@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-07
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-30
 
 //! 5 条消息的 payload 编解码（协议文档 §3）
 //!
@@ -48,22 +48,24 @@ pub struct ManualControl {
     pub param: i16,
 }
 
-/// ORION_TASK_SET 任务项（9 字节）
+/// ORION_TASK_SET 任务项（按 type 变长：`0/2` = 9 字节，`3` = 13 字节；task_41 §3.2）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MissionItem {
     pub mission_type: u8,
     pub x: f32,
     pub y: f32,
+    /// 半边长（米）：**仅 type=3 Containment 编码**，`0` / `2` 恒 `0.0`
+    pub half_side: f32,
 }
 
-/// ORION_TASK_SET 载荷（Task 36 §十二 Step 3：删除群发名单段）
+/// ORION_TASK_SET 载荷（Task 36 §十二 Step 3：删除群发名单段；task_41 §3.2：记录变长）
 ///
-/// 协议布局：mission_count u8 + missions[](9 × mission_count)
+/// 协议布局：mission_count u8 + missions[]（总长 `1 + Σlen`，`len` 见 [`mission_wire_len`]）
 /// - mission_count == 0 → 取消全部任务（唯一取消入口）
-/// - mission_count > 0  → 逐条入队（未知 type 由上层 warn + 丢弃）
+/// - mission_count > 0  → 逐条入队（未知 type 由 `decode_task_set` 整帧拒）
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskSetPayload {
-    /// 任务列表（MISSION_GOTO 等）
+    /// 任务列表（MISSION_GOTO / MISSION_FOLLOW / MISSION_CONTAINMENT）
     pub missions: Vec<MissionItem>,
 }
 
@@ -257,44 +259,122 @@ pub const MISSION_GOTO: u8 = 0;
 /// ⚠️ **必须用 2，不能用 1**：`1` 是 Task 36 已删除的旧 `Circle`，
 /// 地面站/旧工具链里可能仍有该值，复用会让旧 Circle 帧被误认成 Follow。
 pub const MISSION_FOLLOW: u8 = 2;
+/// Containment（task_41 §3.2）：`type=3 | cx(f32) | cy(f32) | half(f32)`（13 B）
+///
+/// `1` 仍是 Task 36 已删除的旧 `Circle`，**不得复用**；`3` 才是封控。
+pub const MISSION_CONTAINMENT: u8 = 3;
 
-/// 编码任务队列：mission_count(1) + missions[](9 × mission_count)
+/// 记录长度表（含 type 字节；task_41 §3.2）。`None` = 未知 type → 整帧拒。
+fn mission_wire_len(t: u8) -> Option<usize> {
+    match t {
+        MISSION_GOTO | MISSION_FOLLOW => Some(9),
+        MISSION_CONTAINMENT => Some(13),
+        _ => None,
+    }
+}
+
+/// 编码任务队列：mission_count(1) + missions[]（记录变长，总长 `1 + Σlen`）
 ///
 /// `mission_count` 为 u8，协议上限 255（超出会截断导致接收端校验失败）。
+/// 未知 type 记 warn 后**跳过该条**（生产编码链路只有 Pictor，Pictor 对未知 type 直接不发帧）。
 pub fn encode_task_set(payload: &TaskSetPayload) -> Vec<u8> {
-    // 显式截断（release 下 debug_assert 无效）
-    let mission_n = payload.missions.len().min(u8::MAX as usize);
-    if payload.missions.len() > mission_n {
-        tracing::warn!("encode_task_set: missions {} 超出 u8 上限，截断", payload.missions.len());
-    }
-    let mut buf = Vec::with_capacity(1 + 9 * mission_n);
-    buf.push(mission_n as u8);
-    for m in &payload.missions[..mission_n] {
+    let mut buf = Vec::with_capacity(1 + 13 * payload.missions.len());
+    buf.push(0); // count 占位，最后回填（未知 type 会被跳过，条数不等于输入长度）
+    let mut n = 0usize;
+    for m in &payload.missions {
+        let Some(len) = mission_wire_len(m.mission_type) else {
+            tracing::warn!("encode_task_set: 未知 mission type {}，跳过该条", m.mission_type);
+            continue;
+        };
+        // 显式截断（release 下 debug_assert 无效）
+        if n >= u8::MAX as usize {
+            tracing::warn!("encode_task_set: missions 超出 u8 上限，截断");
+            break;
+        }
         buf.push(m.mission_type);
         buf.extend_from_slice(&m.x.to_be_bytes());
         buf.extend_from_slice(&m.y.to_be_bytes());
+        if len == 13 {
+            buf.extend_from_slice(&m.half_side.to_be_bytes());
+        }
+        n += 1;
     }
+    buf[0] = n as u8;
     buf
 }
 
-/// 解码任务队列 payload（Task 36 §十二 Step 3 布局）
+/// 解码任务队列 payload（task_41 §3.2：按 type 变长，**严格**校验）
 ///
-/// 校验：非空；长度**严格** `1 + 9 × mission_count`（旧帧含 member 段 → 长度不符 → None）。
+/// 任何不符 → `None`（调用方 warn，队列不动）：
+/// - 空 payload / 记录截断 / 循环后偏移 ≠ `payload.len()`（多 1 B、`count` 与条数不符）
+/// - 未知 type（含退役的 `1`）→ 无法知道长度 → 整帧拒
+/// - `half_side` 非有限或 `<= 0.0` → 整帧拒
 pub fn decode_task_set(payload: &[u8]) -> Option<TaskSetPayload> {
     let mission_count = *payload.first()? as usize;
-    if payload.len() != 1 + 9 * mission_count {
-        return None;
-    }
+    let mut off = 1usize;
     let mut missions = Vec::with_capacity(mission_count);
-    for i in 0..mission_count {
-        let o = 1 + i * 9;
-        missions.push(MissionItem {
-            mission_type: payload[o],
-            x: f32::from_be_bytes(payload[o + 1..o + 5].try_into().ok()?),
-            y: f32::from_be_bytes(payload[o + 5..o + 9].try_into().ok()?),
-        });
+    for _ in 0..mission_count {
+        let t = *payload.get(off)?; // 越界 → None
+        let len = mission_wire_len(t)?; // 未知 type（含 1）→ 整帧 None
+        let end = off.checked_add(len)?;
+        if end > payload.len() {
+            return None;
+        }
+        let x = f32::from_be_bytes(payload[off + 1..off + 5].try_into().ok()?);
+        let y = f32::from_be_bytes(payload[off + 5..off + 9].try_into().ok()?);
+        let half_side = if t == MISSION_CONTAINMENT {
+            let h = f32::from_be_bytes(payload[off + 9..off + 13].try_into().ok()?);
+            if !h.is_finite() || h <= 0.0 {
+                return None;
+            }
+            h
+        } else {
+            0.0
+        };
+        missions.push(MissionItem { mission_type: t, x, y, half_side });
+        off = end;
+    }
+    if off != payload.len() {
+        return None; // 多 1 B / count 与条数不符 → None
     }
     Some(TaskSetPayload { missions })
+}
+
+// ============================================================
+// ORION_ASSIST_REQUEST (msgid 7)
+// ============================================================
+
+/// 协助请求载荷（msgid 7，**严格 8 字节**）：`x f32 BE | y f32 BE`（task_41 §5.3）
+///
+/// 语义：sim 机栈封控树的 `InsideSquare` 条件里，首次发现入侵者、以及目标相对上次发送点
+/// 移动 > 1 m 时发出；`x/y` = 目标（人）的世界坐标（米，x 东 / y 南）。
+/// 单向：只有地面站订阅 `TOPIC_ROBOT_ASSIST_REQUEST`，车 / 机不订阅、不回复。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AssistRequest {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// 编码协助请求（恒 8 B；**不做有限性校验**——生产调用方（树）已先判有限，
+/// 非有限值由解码侧拒，见 [`decode_assist_request`]）
+pub fn encode_assist_request(x: f32, y: f32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    buf.extend_from_slice(&x.to_be_bytes());
+    buf.extend_from_slice(&y.to_be_bytes());
+    buf
+}
+
+/// 解码协助请求 payload（必须**恰好 8 字节**；`x`/`y` 非有限 → `None`）
+pub fn decode_assist_request(payload: &[u8]) -> Option<AssistRequest> {
+    if payload.len() != 8 {
+        return None;
+    }
+    let x = f32::from_be_bytes(payload[0..4].try_into().ok()?);
+    let y = f32::from_be_bytes(payload[4..8].try_into().ok()?);
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    Some(AssistRequest { x, y })
 }
 
 // ============================================================
@@ -363,18 +443,18 @@ mod tests {
 
     #[test]
     fn test_task_set_roundtrip_new_layout() {
-        // Task 36 §12.3.4：mission_count(1) + 9×mission_count
+        // Task 36 §12.3.4：mission_count(1) + 9×mission_count（type 0/2 每条 9 B）
         for missions in [
-            vec![MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 }],
+            vec![MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0, half_side: 0.0 }],
             vec![
-                MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 },
-                MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0 },
-                MissionItem { mission_type: 7, x: -1.5, y: 128.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0, half_side: 0.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0, half_side: 0.0 },
+                MissionItem { mission_type: MISSION_FOLLOW, x: -1.5, y: 128.0, half_side: 0.0 },
             ],
         ] {
             let payload = TaskSetPayload { missions: missions.clone() };
             let encoded = encode_task_set(&payload);
-            assert_eq!(encoded.len(), 1 + 9 * missions.len(), "帧长必须是 1 + 9×count");
+            assert_eq!(encoded.len(), 1 + 9 * missions.len(), "全 9B type 帧长必须是 1 + 9×count");
             assert_eq!(encoded[0] as usize, missions.len(), "count 在首字节");
             assert_eq!(decode_task_set(&encoded).unwrap(), payload);
         }
@@ -386,14 +466,19 @@ mod tests {
         assert_eq!(MISSION_FOLLOW, 2);
         assert_ne!(MISSION_FOLLOW, 1, "1 是已删除的旧 Circle，不得复用");
         let missions = vec![
-            MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0 },
-            MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0 },
+            MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, half_side: 0.0 },
+            MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0, half_side: 0.0 },
         ];
         let payload = TaskSetPayload { missions: missions.clone() };
         let encoded = encode_task_set(&payload);
         assert_eq!(encoded.len(), 1 + 9 * missions.len(), "帧长必须是 1 + 9×count");
         assert_eq!(encoded[1], MISSION_FOLLOW, "首条 type 必须是 2");
         assert_eq!(decode_task_set(&encoded).unwrap(), payload);
+        // 单条 Follow(0,0) 金标逐字不变（10 B）
+        let single = TaskSetPayload {
+            missions: vec![MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, half_side: 0.0 }],
+        };
+        assert_eq!(encode_task_set(&single), hex("01020000000000000000"));
     }
 
     #[test]
@@ -408,14 +493,14 @@ mod tests {
     #[test]
     fn test_task_set_rejects_old_layout_with_member_segment() {
         // 旧布局（Task 14）：count=1 + member_count=1 + len=1 + peer=7 + 9B mission = 13 字节
-        // 新校验要求恰好 1 + 9×1 = 10 → 旧帧必被拒
+        // 现在首条 type=1 是退役的旧 Circle（长度表里没有）→ **整帧 None**
         let mut old = vec![1u8, 1, 1, 7];
         old.push(MISSION_GOTO);
         old.extend_from_slice(&64.0f32.to_be_bytes());
         old.extend_from_slice(&64.0f32.to_be_bytes());
         assert_eq!(old.len(), 13);
         assert!(decode_task_set(&old).is_none());
-        // 老 count=0 取消帧（1 字节）在新布局下**合法**（1 + 9×0 = 1）
+        // 老 count=0 取消帧（1 字节）在新布局下**合法**（总长 1 + Σ0 = 1）
         assert!(decode_task_set(&[0]).is_some());
     }
 
@@ -435,16 +520,155 @@ mod tests {
     fn test_task_set_max_count() {
         // 上限 255 条：1 + 9×255 = 2296 字节，编解码一致、不 panic
         let payload = TaskSetPayload {
-            missions: vec![MissionItem { mission_type: MISSION_GOTO, x: 1.0, y: 2.0 }; 255],
+            missions: vec![
+                MissionItem { mission_type: MISSION_GOTO, x: 1.0, y: 2.0, half_side: 0.0 };
+                255
+            ],
         };
         let encoded = encode_task_set(&payload);
         assert_eq!(encoded.len(), 1 + 9 * 255);
         assert_eq!(decode_task_set(&encoded).unwrap().missions.len(), 255);
         // 256 条越 u8 上限 → 截断为 255（warn 已打，不 panic）
         let over = TaskSetPayload {
-            missions: vec![MissionItem { mission_type: MISSION_GOTO, x: 0.0, y: 0.0 }; 256],
+            missions: vec![
+                MissionItem { mission_type: MISSION_GOTO, x: 0.0, y: 0.0, half_side: 0.0 };
+                256
+            ],
         };
         assert_eq!(encode_task_set(&over).len(), 1 + 9 * 255);
+    }
+
+    // ---------------------------------------------------- task_41 §3.2：变长 TASK_SET
+
+    /// hex 字面量 → 字节（金标硬编码，与 Pictor / Python 用同一串）
+    fn hex(s: &str) -> Vec<u8> {
+        assert!(s.len() % 2 == 0, "hex 长度必须是偶数");
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("合法 hex"))
+            .collect()
+    }
+
+    /// type=3 帧：`type u8 | cx | cy | half`（13 B）
+    fn containment_item(x: f32, y: f32, half_side: f32) -> MissionItem {
+        MissionItem { mission_type: MISSION_CONTAINMENT, x, y, half_side }
+    }
+
+    /// 长度表：0/2 → 9、3 → 13、其余（含退役的 1）→ None
+    #[test]
+    fn test_mission_wire_len_table() {
+        assert_eq!(mission_wire_len(MISSION_GOTO), Some(9));
+        assert_eq!(mission_wire_len(MISSION_FOLLOW), Some(9));
+        assert_eq!(mission_wire_len(MISSION_CONTAINMENT), Some(13));
+        assert_eq!(mission_wire_len(1), None, "1 是退役的旧 Circle，不得复用");
+        assert_eq!(mission_wire_len(9), None, "未知 type 无长度 → 整帧拒");
+        assert_eq!(MISSION_CONTAINMENT, 3);
+    }
+
+    /// 单条 Containment(64,64,8) = 14 B，金标逐字节；roundtrip 含 `half_side`
+    #[test]
+    fn test_task_set_containment_golden() {
+        let payload = TaskSetPayload { missions: vec![containment_item(64.0, 64.0, 8.0)] };
+        let encoded = encode_task_set(&payload);
+        assert_eq!(encoded.len(), 14, "单条 Containment = 1 + 13");
+        assert_eq!(encoded, hex("0103428000004280000041000000"));
+        assert_eq!(decode_task_set(&encoded).unwrap(), payload);
+        // Goto 金标逐字不变（10 B）
+        let goto = TaskSetPayload {
+            missions: vec![MissionItem {
+                mission_type: MISSION_GOTO,
+                x: 64.0,
+                y: 64.0,
+                half_side: 0.0,
+            }],
+        };
+        assert_eq!(encode_task_set(&goto), hex("01004280000042800000"));
+    }
+
+    /// 混合 [Goto(64,64), Containment(64,64,8)] = 23 B，偏移与顺序正确
+    #[test]
+    fn test_task_set_mixed_goto_containment() {
+        let payload = TaskSetPayload {
+            missions: vec![
+                MissionItem { mission_type: MISSION_GOTO, x: 64.0, y: 64.0, half_side: 0.0 },
+                containment_item(64.0, 64.0, 8.0),
+            ],
+        };
+        let encoded = encode_task_set(&payload);
+        assert_eq!(encoded.len(), 23, "[Goto, Containment] = 1 + 9 + 13");
+        assert_eq!(encoded, hex("0200428000004280000003428000004280000041000000"));
+        assert_eq!(encoded[0], 2, "count 在首字节");
+        assert_eq!(encoded[1], MISSION_GOTO, "第 0 条 type");
+        assert_eq!(encoded[10], MISSION_CONTAINMENT, "第 1 条 type 在 1+9 处");
+        assert_eq!(&encoded[19..23], &[0x41, 0x00, 0x00, 0x00], "half_side = 8.0 大端");
+        let back = decode_task_set(&encoded).unwrap();
+        assert_eq!(back, payload, "顺序与值往返");
+        assert_eq!(back.missions[0].half_side, 0.0, "非 3 的 half_side 恒 0.0");
+        assert_eq!(back.missions[1].half_side, 8.0);
+    }
+
+    /// 未知 type（如 9）→ 整帧 None（不知道长度，不能跳过）
+    #[test]
+    fn test_task_set_rejects_unknown_type() {
+        let raw = vec![1u8, 9, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(decode_task_set(&raw).is_none(), "未知 type → 整帧拒");
+        // 混合帧里出现未知 type 也整帧拒（不是滤掉那一条）
+        let mut mixed = vec![2u8, MISSION_GOTO];
+        mixed.extend_from_slice(&64.0f32.to_be_bytes());
+        mixed.extend_from_slice(&64.0f32.to_be_bytes());
+        mixed.extend_from_slice(&raw);
+        assert!(decode_task_set(&mixed).is_none(), "[Goto, 未知 9] → 整帧拒");
+    }
+
+    /// `half_side` 非有限或 `<= 0` → 整帧 None
+    #[test]
+    fn test_task_set_rejects_bad_half_side() {
+        for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            // 编码端不做校验（Pictor 才是生产编码链路，那边整帧不发），此处直接用非法值造帧
+            let raw = encode_task_set(&TaskSetPayload {
+                missions: vec![containment_item(64.0, 64.0, bad)],
+            });
+            assert_eq!(raw.len(), 14);
+            assert!(decode_task_set(&raw).is_none(), "half_side = {bad} 必须整帧拒");
+        }
+        // 合法边界：极小正数照收
+        let ok = encode_task_set(&TaskSetPayload {
+            missions: vec![containment_item(64.0, 64.0, 0.5)],
+        });
+        assert_eq!(decode_task_set(&ok).unwrap().missions[0].half_side, 0.5);
+    }
+
+    /// 旧接收端语义：含 13 B 记录的帧总长不符 → 整帧拒；截断 / 多 1 B 同理
+    #[test]
+    fn test_task_set_old_receiver_rejects_containment_frame() {
+        // 旧端按 `1 + 9n` 校验：count=1 + 13 B = 14 B ≠ 1 + 9×1 → 拒
+        // （本端也拒：count=1 只吃 9 B，剩 4 B → 偏移 ≠ 长度）
+        let mut old = vec![1u8, MISSION_GOTO];
+        old.extend_from_slice(&64.0f32.to_be_bytes());
+        old.extend_from_slice(&64.0f32.to_be_bytes());
+        old.extend_from_slice(&8.0f32.to_be_bytes());
+        assert_eq!(old.len(), 14);
+        assert!(decode_task_set(&old).is_none());
+        // 混合帧截掉最后 1 B（22 B）→ 拒
+        let mixed = encode_task_set(&TaskSetPayload {
+            missions: vec![
+                MissionItem { mission_type: MISSION_GOTO, x: 64.0, y: 64.0, half_side: 0.0 },
+                containment_item(64.0, 64.0, 8.0),
+            ],
+        });
+        assert!(decode_task_set(&mixed[..22]).is_none(), "截断 1 B → 拒");
+        let mut extra = mixed.clone();
+        extra.push(0);
+        assert!(decode_task_set(&extra).is_none(), "多 1 B → 拒");
+    }
+
+    /// `count` 与实际条数不符（count=2 但只有 1 条 13 B）→ 拒
+    #[test]
+    fn test_task_set_rejects_count_mismatch_containment() {
+        let mut raw = encode_task_set(&TaskSetPayload {
+            missions: vec![containment_item(64.0, 64.0, 8.0)],
+        });
+        raw[0] = 2;
+        assert!(decode_task_set(&raw).is_none(), "count=2 但只有 1 条 → 循环越界读 type → 拒");
     }
 
     #[test]
@@ -491,5 +715,74 @@ mod tests {
         assert_eq!(decoded.msgid, super::super::MSGID_POSE);
         assert_eq!(decoded.sysid, vec![7]);
         assert_eq!(decode_pose(&decoded.payload).unwrap(), p);
+    }
+
+    // ---------------------------------------------------- task_41 §5.3：ASSIST_REQUEST（msgid 7）
+
+    /// 8 B 金标：`[x=1.0, y=2.0]` → `3f80000040000000`（与 Pictor 单测同一串）
+    #[test]
+    fn test_assist_request_golden() {
+        let p = encode_assist_request(1.0, 2.0);
+        assert_eq!(p.len(), 8, "payload 恒 8 B");
+        assert_eq!(p, hex("3f80000040000000"));
+        // 负值 / 0 的 BE 字节
+        assert_eq!(encode_assist_request(0.0, 0.0), hex("0000000000000000"));
+        assert_eq!(encode_assist_request(-1.5, 64.25), hex("bfc0000042808000"));
+    }
+
+    /// roundtrip + 长度严格（7 / 9 / 空 → None）
+    #[test]
+    fn test_assist_request_roundtrip_and_reject() {
+        for (x, y) in [(1.0f32, 2.0f32), (-0.5, 128.0), (0.0, -0.0), (63.75, 71.5)] {
+            let p = encode_assist_request(x, y);
+            assert_eq!(p.len(), 8);
+            let back = decode_assist_request(&p).expect("8 B 必须解出");
+            assert_eq!(back.x.to_bits(), x.to_bits(), "x 位模式往返");
+            assert_eq!(back.y.to_bits(), y.to_bits(), "y 位模式往返");
+        }
+        let p = encode_assist_request(1.0, 2.0);
+        assert!(decode_assist_request(&p[..7]).is_none(), "7 B → None");
+        let mut nine = p.clone();
+        nine.push(0);
+        assert!(decode_assist_request(&nine).is_none(), "9 B → None");
+        assert!(decode_assist_request(&[]).is_none(), "空 → None");
+    }
+
+    /// 非有限值拒（NaN / ±inf；解码侧是唯一门控）
+    #[test]
+    fn test_assist_request_rejects_non_finite() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                decode_assist_request(&encode_assist_request(bad, 0.0)).is_none(),
+                "x = {bad} 必须拒"
+            );
+            assert!(
+                decode_assist_request(&encode_assist_request(0.0, bad)).is_none(),
+                "y = {bad} 必须拒"
+            );
+        }
+    }
+
+    /// 帧级契约：`encode_frame(7, uav_peer_id, COMPID_ROBOT, 8 B)` → msgid/compid/sysid/len 全对
+    #[test]
+    fn test_assist_request_frame_contract() {
+        let sysid = vec![0x11u8; 34]; // 真实 libp2p PeerId 是 38 B multihash，这里用 34 B 便于数长
+        let payload = encode_assist_request(1.0, 2.0);
+        let frame = super::super::frame::encode_frame(
+            super::super::MSGID_ASSIST_REQUEST,
+            &sysid,
+            super::super::COMPID_ROBOT,
+            &payload,
+        );
+        // 固定头 10 + sysid 34 + payload 8 + checksum 2 = 54
+        assert_eq!(frame.len(), 10 + 34 + 8 + 2);
+        let dec = super::super::frame::decode_frame(&frame).expect("帧可解");
+        assert_eq!(dec.msgid, 7);
+        assert_eq!(dec.compid, super::super::COMPID_ROBOT);
+        assert_eq!(dec.sysid, sysid);
+        assert_eq!(
+            decode_assist_request(&dec.payload).unwrap(),
+            AssistRequest { x: 1.0, y: 2.0 }
+        );
     }
 }

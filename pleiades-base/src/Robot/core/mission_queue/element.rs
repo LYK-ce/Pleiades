@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-30
 
 //! 队列元素定义（Task 36 §12.1）
 //!
@@ -24,6 +24,14 @@ pub enum Mission {
     /// 不进跟随逻辑，只让队列前进一条（**不得**返回 `Err`，那是「清队列 + 停车」）。
     /// 跟随的「下一格」怎么算在设备端：`uav_sim/mission/follow.rs` 不经 D*，朝目标方向给一格（§六.3）。
     Follow { x: f32, y: f32 },
+    /// 封控（task_41 §3.2，`type=3`）：在轴对齐正方形内巡逻，识别到人且人在正方形内 → 跟随
+    ///
+    /// - `x` / `y`：正方形**中心**（世界坐标，米）
+    /// - `half_side`：**半边长**（米，必须 `> 0`；非法值由 `decode_task_set` 整帧拒）
+    /// - 正方形轴对齐世界坐标：`|px − x| ≤ half_side && |py − y| ≤ half_side`
+    /// - 只有 **sim 机栈**真实现（`uav_sim/mission/containment.rs`）；真机 ugv/uav 与 sim ugv 只建
+    ///   平凡树（一拍 `Success` + warn），**不得**返回 `Err`（那是「清队列 + 停车」）
+    Containment { x: f32, y: f32, half_side: f32 },
     // 未来: Patrol, Explore, ...
 }
 

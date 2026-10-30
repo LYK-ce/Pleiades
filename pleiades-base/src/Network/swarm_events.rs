@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-05-16
-//Modified Date ： 2026-08-18
+//Modified Date ： 2026-10-30
 
 //! Swarm 事件处理器
 //!
@@ -366,8 +366,12 @@ impl Network_Service {
                             }).to_string(),
                         });
                     }
-                    super::TOPIC_ROBOT_POSE | super::TOPIC_ROBOT_MAP | super::TOPIC_RTK_RTCM => {
+                    super::TOPIC_ROBOT_POSE
+                    | super::TOPIC_ROBOT_MAP
+                    | super::TOPIC_RTK_RTCM
+                    | super::TOPIC_ROBOT_ASSIST_REQUEST => {
                         // ORION 二进制帧（位姿/地图），不做 JSON 解析，直接透传 robot_bus（Task 12：由 RR 广播迁移到 gossipsub）
+                        // 协助请求（msgid 7）与位姿/地图/RTCM 同待遇：不解析，原样进 robot_bus
                         let _ = self.robot_bus.Publish(Bus_Event::StreamRaw { payload: message.data });
                     }
                     _ => { debug!("未知 gossipsub topic: {}", message.topic); }

@@ -1,7 +1,7 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-10-30（Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更新日期：2026-10-30（Task 41 Step 3：协助请求 topic（`TOPIC_ROBOT_ASSIST_REQUEST` = `pleiades/robot/assist_request`，`MSGID_ASSIST_REQUEST = 7`，payload 8 B）+ sim 机栈树 v2（`InsideSquare` 内发请求，1 m 阈值/离开重置）+ Pictor `CoopController`（3 m 环 N 点 / 最近一对一 / 逐车下发），§8.13 与 D-S11。Task 41 Step 1：`Mission` 加第三变体 `Containment { x, y, half_side }`（`type=3`），`TASK_SET` 记录改为**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`；未知 type / 长度不符 / 非法 `half_side` → **整帧拒**），sim 机栈新增封控树 `uav_sim/mission/containment.rs`（正方形巡逻 + 界内跟随 + 出界回巡逻），真车/真机/sim 车栈 naive 一拍 `Success`，Pictor 变长编解码 + 未知 type 报错不发帧 + `containment` 子命令，§8.12 与 D-S10。Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -158,6 +158,10 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
 | D-S8 | **执行器分家**：`sim/executor.rs` 保留车栈离散三状态机（一行不改）；`sim/uav_sim/executor.rs` 新增机栈连续速度（`DEADBAND_DEG=5` / `SPIN_DEG=20`，输出 `VelocityCmd{v,omega}`，`omega` 取负 = 右转） | `pleiades-sim/src/sim/{executor.rs, uav_sim/executor.rs, chassis/mod.rs, chassis/uav.rs}` | task_39 §四。真机本来就是两份（车 `executor` / 机 `uav/`），sim 只是历史上共用一份；下发侧新增 `Chassis::Apply_Velocity`（默认 false）+ `motion_cmd{action:"velocity", v, omega}`（世界 `Quadrotor.SetCommand` 认 `"velocity"`，与 6 个离散 action 并存）；`omega` 取负的符号推导见 `action_map.rs:21-24`。**task_40 Step 1 之后 `sim/executor.rs` 仍是一行不改的原件**（与 `pleiades-ugv/src/ugv/executor.rs` 逐字相同），但它**不再是 sim 车栈的活动路径** —— 活动路径见 D-S9 |
 | D-S9 | **车栈连续档位**：`UgvVelocityExecutor`（`decide(next_cell,x,y,yaw) -> VelocityCmd{speed:u8,turn:i16}`，`DEADBAND_DEG=8` / `ARC_MAX_DEG=12` / `PASS_THROUGH_M=0.5`；`Δθ>0 ⇒ turn<0`）+ `Chassis::Apply_Velocity_Pct`（默认 false）+ `MotionSender::Send_Velocity_Pct` + `motion_cmd{action:"velocity", speed, turn}`；`sim_handler` 用三态 `Actuator{UgvDiscrete,UgvVelocity,Uav}` 分派 | `pleiades-sim/src/sim/{ugv_sim/executor.rs, ugv_sim/mod.rs, sim_handler.rs, chassis/mod.rs, chassis/ugv.rs}`、`pleiades-sim/src/world_link/{mod.rs, protocol.rs}`、`orion-simulation-world/src/chassis/DiffDrive.gd` | task_40 §二。**量纲只在世界侧换算**（`max_speed=1.5` / `max_turn_rate=90` 不出 `DiffDrive.gd`）；`turn` 与机栈 `v/omega` 并存于同一 `action` 字面量（按底盘解释，两份脚本不共享解析代码）；`Apply_Velocity_Pct` 换名是因 Rust 无重载（`Apply_Velocity` 已被机栈占用）；`Actuator::UgvDiscrete` 保留 = A/B 回退点（不加配置开关，回退 = 回退代码）；**task_40 Step 6（§七.3）把死区 5°→8°、弧线档 10°→12°**：过冲 ≈ ω × 0.15 s ≈ 4.0°（尖峰 4.8°）< 8°，余量约 2 倍 |
 
+| D-S10 | **封控树 v1（sim 机栈）**：`Containment` → `ReactiveFallback[ ReactiveSequence[ InsideSquare(有目标 & 未过期 & 在正方形内), follow::build ], RepeatForever(Sequence[4×goto::build(角点)]) ]`；角点顺序 `(cx−h,cy−h)→(cx+h,cy−h)→(cx+h,cy+h)→(cx−h,cy+h)`；`InsideSquare` 与 Follow 子树**共享同一个 `Arc<TargetSource>`**（同一份 age 追踪，两处快照不矛盾）；无 detector → **原地 Hold**（`Action` 恒 `Running` + `next_cell=None`，**不得一拍 `Success`**，否则任务静默消失）；真车 / 真机 / sim 车栈 naive（warn + 一拍 `Success`） | `sim/uav_sim/mission/containment.rs`（新）、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_41 Step 1。外层必须 `Reactive*`：本仓 `Fallback` 是记忆式，而 Follow 的 `StepLeaf`/`HoldLeaf` 恒 `Running`（持续任务）→ 记忆式组合会**永久锁在跟随分支**，人出界不回巡逻（与 D-S6/D-S7 同一条坑）。巡逻某角超时（`goto` 自带 `Timeout(60 s)`）是**唯一**失败路径；人离开只是切分支 |
+
+| D-S11 | **协助请求走独立 topic + msgid 7**（不复用 POSE/TASK_SET）：topic `pleiades/robot/assist_request`、payload `x f32 BE \| y f32 BE`（严格 8 B）、帧 `sysid = UAV peer_id`；`InsideSquare` 持 `last_sent: Option<(f32,f32)>`，`None` 或目标相对上次发送点移动 > `ASSIST_MOVE_M = 1.0` 才发，条件失败（无目标/过期/出界）与 `halt` 清；发布者是薄 trait `AssistPublisher`（生产 `NodeHandlePublisher` 在 `sim_handler.rs`，单测记录型 `FakePublisher`）；发布失败只 1 s 限流 `warn`，不影响树 | `base/Network/{Gossipsub/mod.rs, swarm_events.rs, mod.rs}`、`base/Robot/core/protocol/{mod.rs, messages.rs}`、`sim/uav_sim/mission/containment.rs`、`sim/uav_sim/{mission/mod.rs, mod.rs}`、`sim/sim_handler.rs`、Pictor `src/cooperation/coop_controller.gd`（新） | task_41 Step 3（§二.9 / §二.10）。为什么独立 topic：协助请求是**上行事件**（UAV → 地面站），POSE 是 10 Hz 遥测、TASK_SET 是下行任务队列，语义/频率/方向都不同，混用会让地面站误当位姿或误下发。**Network 层改动是经人类批准的本任务破例**。树内仍不引 `tracing`（10 Hz tick）：告警在发布者实现里。切分支会 `halt` → `last_sent` 清 → 人再进来立即重发（期望行为，非 bug） |
+
 **分层语义**：`base`（协议/状态/世界/命令/集群，共享）→ 设备端 `ugv`/`uav`/`sim`（驱动 + 决策 + 寻路 + 建图，各写各的）→ `terminal`（地面站，纯透传）。
 
 ```mermaid
@@ -201,7 +205,7 @@ flowchart TB
 | `Robot` | `base/robot/core/robot.rs` | 中枢：共享状态/广播通道/模式/队列/集群表句柄；`new()` 建共享态，`run(device)` 跑主循环骨架 |
 | `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`build_task`（建树，幂等）/`on_tick`（返回 `TickOutcome`）/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
 | `TickOutcome` | `base/robot/core/robot.rs` | 设备 tick 的结果：`Running` / `Terminated(Option<FailCode>)`；`Terminated` 才由 `main_loop` 出队 |
-| `Mission` | `base/robot/core/mission_queue/element.rs` | 两变体：`Goto { x, y }` + `Follow { x, y }`（Task 37 §五，`x/y` 预留）；`Follow` **只在 sim 机栈真跟**（`type=2`），真机/车栈建平凡树。`TASK_SET` 只解 `type=0/2`，其余值收到即 `warn` 丢弃。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
+| `Mission` | `base/robot/core/mission_queue/element.rs` | **三变体**：`Goto { x, y }`（`type=0`）、`Follow { x, y }`（`type=2`，Task 37 §五，`x/y` 预留）、`Containment { x, y, half_side }`（`type=3`，task_41 §3.2：`x/y` = 正方形中心、`half_side` = 半边长 m、轴对齐）；`Follow` / `Containment` **只在 sim 机栈真跑**，真机/车栈建平凡树（一拍 `Success` + `warn`）。`TASK_SET` 记录**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`），解码严格：未知 type（含退役的 `1`）/ 长度不符 / `half_side` 非法 → **整帧拒**（队列不动）。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
 | `OpMode` | `base/robot/core/mode.rs` | `Manual` / `Auto`，**默认 Auto** |
 | `ClusterInfoTable` | `base/robot/core/cluster/cluster_info.rs` | `HashMap<peer_id, ClusterInfo>`，他车位姿（x/y/yaw/vx/vy/sub_target） |
 | `OccupancyGrid` | `base/robot/core/grid.rs` | 地图表示（own/merged 双表 + log-odds），CRDT 合并前提 |
@@ -394,6 +398,7 @@ Circle 环形散布（● = 圆心，X = ring_cells(2) 的 16 格，与圆心隔
 | `TOPIC_SESSIONS` | 会话状态 `Vec<SessionSummary>` | Network |
 | `TOPIC_ROBOT_POSE` | ORION `MSGID_POSE` 二进制帧（他车位姿） | `state_notifier`（100ms） |
 | `TOPIC_ROBOT_MAP` | ORION `MSGID_MAP_DELTA` 二进制帧（地图增量） | `slam_task`（200ms，节流 1s） |
+| `TOPIC_ROBOT_ASSIST_REQUEST` | ORION `MSGID_ASSIST_REQUEST` 二进制帧（协助请求，8 B payload） | sim 机栈 `containment::InsideSquare`（事件驱动；仅地面站订阅） |
 
 **Robot 侧两条广播链**：
 
@@ -484,7 +489,7 @@ main_loop（base 骨架）收 Command，按 op_mode 分发到 device：
 ```
 
 - 命令走 **request-response unicast**，车端收到后回 `OK` ACK 闭环。
-- `parse_orion_frame` 对 `MSGID_TASK_SET` 单分支（Task 36）：`mission_count == 0` → 取消；`> 0` → 逐条 `Mission::Goto` 入队；未知 `type` 该条丢弃，全丢则整帧不生效（队列不动）。
+- `parse_orion_frame` 对 `MSGID_TASK_SET` 单分支（Task 36；task_41 §3.2 改造）：`mission_count == 0` → 取消；`> 0` → 逐条按 `type` 取变长记录（`type ∈ {0,2,3}`；记录 9/9/13 B；总长 `1 + Σlen`）→ `Mission::Goto` / `Mission::Follow` / `Mission::Containment` 顺序入队。**未知 `type`（含退役的 `1`）/ 长度不符 / `half_side` 非法/ `count` 与条数不符 → 整帧拒**（`decode_task_set → None`，队列不动，不再逐条丢）。
 - `ManualCmd` 超集共享 + **设备选择性响应**（车响应 Beep/StartLidarScan 不响应 Takeoff；机响应 Takeoff/Land 不响应 Beep），能力差异靠「响应」而非「声明」表达。
 
 ```mermaid
@@ -821,6 +826,158 @@ survey_seconds = 180
 
 ---
 
+### 8.12 sim 机栈封控树 v1 与变长 `TASK_SET`（task_41 Step 1）
+
+**口径来源**：`Task/task_41_containment.md` §二（人类 2026-10-30 已定）+ §3.2 线格式。本步只有 **tree v1**
+（正方形巡逻 + 界内跟随 + 出界回巡逻）；**协助请求是 Step 3**（v2），不在本步。
+
+#### 树形（`pleiades-sim/src/sim/uav_sim/mission/containment.rs`）
+
+```text
+ReactiveFallback
+├─ ReactiveSequence
+│  ├─ InsideSquare         // 有目标 && 未过期（!follow::lost）&& 目标 (x,y) 在正方形内
+│  └─ follow::build(...)   // 复用现有 Follow 子树（TargetGate / Condition / StepLeaf / HoldLeaf）
+└─ RepeatForever
+   └─ Sequence [ goto::build(角1), goto::build(角2), goto::build(角3), goto::build(角4) ]
+```
+
+- **角点顺序写死（也是初始航向）**：`(cx−h, cy−h) → (cx+h, cy−h) → (cx+h, cy+h) → (cx−h, cy+h)`（纯函数
+  `containment::corners(cx, cy, half)`）。
+- **正方形判定**：轴对齐、边界含在界内 —— `|px − cx| ≤ h && |py − cy| ≤ h`（`containment::inside_square`）。
+- **「本拍有入侵者」**= `有目标 && 未过期 && 在正方形内`（`containment::intruder`，纯函数）。Step 1 **不加边界迟滞**
+  （§二：出界即回巡逻，每拍独立判）。多目标沿用 `follow.rs` 的「取 `range_m` 最近的一个」。
+- **为什么外层必须是 `ReactiveFallback` / 内层必须 `ReactiveSequence`**：本仓 `Fallback` 是**记忆式**
+  （`base/.../behavior_tree/composite.rs`），而 Follow 的 `StepLeaf` / `HoldLeaf` 恒返回 `Running`（`Follow` /
+  `Containment` 都是持续任务，一旦 `Success` 队列就把这条弹走）。记忆式组合会**永久锁在跟随分支** —— 人出界
+  不再切巡逻、人回来也不再重判（task_37 已踩过这条坑，见 D-S6/D-S7）。
+- **为什么 `InsideSquare` 与 Follow 子树共享同一个 `Arc<TargetSource>`**：`TargetSource` 内部持有「首次见到该
+  `frame_seq`」的本地单调时钟。各建一份 → 条件判「未过期」与叶子判「未过期」会是两套 age，同一拍可能互相矛盾
+  （条件说新鲜、叶子说丢了）。共用一份 → 一帧一算、两处一致。
+- **分支切换**：人离开 / 丢失 → `ReactiveSequence` 失败并 `halt` Follow（`TargetGate` 清快照、`StepLeaf` 清迟滞）
+  → `ReactiveFallback` 切巡逻；人再进入 → 每拍从第 0 个子重判、`halt` 巡逻回跟随。
+- **巡逻循环**：四个角都 `Success` → `Sequence` 回角 1 并 `Success` 一拍 → `RepeatForever` 计数 +1、`halt` 子树
+  （`GoToLeaf::armed` 清零）→ 返回 `Running`，下一拍**从角 1 重新开始**，永不终值。
+- **唯一失败路径**：巡逻某个角超时（`goto::build` 自带 `Timeout(60 s)`）→ `Failure(Timeout)` 上抛 → 任务终值。
+- **不引 `tracing`**（10 Hz tick，与 `follow.rs` 同纪律：动作日志已在 `sim_handler.rs`）。
+
+#### 无 detector 的退化（`uav_sim/mission/mod.rs`）
+
+`[detector].enabled = false` 或无相机 → `tracing::warn!` + `Action` 恒 `Running` + `next_cell = None`
+（**原地 Hold**）。**不得**一拍 `Success`：那会让队列把这条任务弹走，封控任务**静默消失**（task_41 §二.8 明确禁止）。
+
+#### 三端 naive（真车 / 真机 / sim 车栈）
+
+`pleiades-ugv`、`pleiades-uav`、`sim/ugv_sim` 收到 `Containment` 只建**平凡树**：`warn` + `Action` 恒 `Success`
+（一拍终值，队列进下一条）。**不得**返回 `Err`（那是「清队列 + 停车」），也**不得**返回 `Running`（会永久占住队首）。
+真子树只在 sim 机栈（本步不做真机封控）。
+
+#### 变长 `TASK_SET`（与 Pictor / Rust 双向同一契约）
+
+```text
+payload = mission_count u8 | mission[0] | … | mission[count-1]     总长 = 1 + Σlen
+type 0 Goto        : type u8 | x  f32 BE | y f32 BE                 = 9 B
+type 2 Follow      : type u8 | x  f32 BE | y f32 BE                 = 9 B
+type 3 Containment : type u8 | cx f32 BE | cy f32 BE | half f32 BE  = 13 B
+```
+
+- 长度表：`mission_wire_len(t) -> Option<usize>`（Rust）/ `_Mission_Wire_Len(mt)`（GDScript）/
+  `mission_wire_len(t)`（Python 工具）三处同口径：`0|2 → 9`、`3 → 13`、其余 `None/0`。
+- **未知 type（含退役的 `1` = Circle）→ 整帧拒**：不知道长度就不能跳过该条，否则偏移会串。
+- 解码循环结束后要求「偏移 == `payload.len()`」（多 1 B / `count` 与条数不符 → 拒）。
+- `type=3` 的 `half_side` 必须 `is_finite()` 且 `> 0.0`，否则整帧拒。
+- `mission_count == 0` 仍是**唯一取消入口**（payload 为 1 字节 `00`）。
+- 字节契约：单条 Goto = 10 B（`01004280000042800000`）、单条 Follow = 10 B（`01020000000000000000`）、
+  单条 Containment = 14 B（`0103428000004280000041000000`）、`[Goto, Containment]` = 23 B
+  （`0200428000004280000003428000004280000041000000`）—— 三方单测硬编码同一串。
+- **同批升级**：记录变长，旧接收端按 `1 + 9n` 校验 → 含 13 B 记录的帧必然整帧拒；车 / 机 / Pictor 同批上线。
+
+#### Pictor 侧（独立仓）
+
+- `ProtocolDef.MISSION_TYPE_CONTAINMENT := 3`；`Mission_Type_From("containment" / "contain")` → 3
+  （未知字符串仍 → 0，那是 LLM 防御路径）。
+- `Encode_Task_Set` / `Decode_Task_Set` 按 type 变长；未知 type / 非法 `half_side` → `printerr` + **空数组（不发帧）**，
+  不再降级成 Goto。`Build_Cmd` 对空 payload 返回空帧（`kernel_bridge` 已有 `frame.is_empty()` 短路，未改）。
+- `ws_command_server._Handle_Task_Set`：逐条 type 门控（∉{0,2,3} → `ok:false`）+ type=3 的 `half_side` 校验
+  （缺失 / 非有限 / `<= 0` → `ok:false`），**一帧都不发**（`Encode` 的 `printerr` 不出现在 ack 里，脚本看不到）。
+- CLI：`pictor_ws_ctl.py containment --target <车> --cx --cy --half [--watch N]`；`--type 9` 从「未知类型仍降级」
+  改为「**明确报错 / 不发帧**」探针。
+
+#### 验收（本步只做代码 + 单测，不跑封控实验）
+
+- `cargo check -p {pleiades-base,pleiades-sim,pleiades-ugv,pleiades-uav} --all-targets` 0 error、新增代码 0 warning；
+- `cargo test -p pleiades-base --lib protocol`（base 用 `--lib`）、`cargo test -p pleiades-sim --bins containment`、
+  `cargo test -p <crate> --bins mission`（三个 Rust crate 只有 `[[bin]]`，故用 `--bins`）；
+- `godot --headless --path Pictor -s src/test/test_orion_protocol.gd` → `=== ALL PASS: true ===`；
+- 封控端到端实验属 **Step 2**（sim 机栈 tree v1 验证），本步不启动 sim / Godot 长跑。
+
+### 8.13 协助请求与 Pictor 协同控制（task_41 Step 3）
+
+**口径来源**：`Task/task_41_containment.md` §二.9 / §二.10（人类 2026-10-30 已定）+ §5.3 线格式。本步只做实现与单测，
+端到端（1 UAV + 4 UGV）属 Step 4。
+
+#### 树 v2（`pleiades-sim/src/sim/uav_sim/mission/containment.rs`）
+
+```text
+ReactiveFallback
+├─ ReactiveSequence
+│  ├─ InsideSquare(+ publisher / last_sent)   // 判条件，并在条件成功时发协助请求
+│  └─ follow::build(...)                     // 一行未改
+└─ RepeatForever
+   └─ Sequence [ goto::build(角1..4) ]       // 一行未改
+```
+
+- `AssistPublisher`：`pub trait AssistPublisher: Send + Sync { fn publish(&self, x: f32, y: f32); }`（薄端口，
+  树不关心是 gossipsub 还是记录器）。`build(..., publisher: Option<Arc<dyn AssistPublisher>>)`：`None` = 只判条件、不发。
+- 发送时机：条件**成功**且（`last_sent == None` 或目标相对上次发送点移动 **> `ASSIST_MOVE_M = 1.0` m**）→
+  `publish(x, y)` 并记 `last_sent`；坐标非有限值不发也不记账。
+- 重置：条件**失败**（无目标 / 过期 / 出正方形）→ `last_sent = None`；`halt()` 同样清（幂等）。
+  于是「人再进来」「树被切分支后重进」都会**立即**重发一次（Step 4 看到多次 assist 属正常）。
+- 生产发布者 `NodeHandlePublisher`（`sim_handler.rs`）：`frame = encode_frame(7, local_peer_id, COMPID_ROBOT(1), encode_assist_request(x,y))`
+  → `Gossipsub_Publish_Try(TOPIC_ROBOT_ASSIST_REQUEST, frame)`；失败只 1 s 限流 `warn`（丢一帧，不影响树）。
+- `TaskDeps.assist` / `uav_sim::Stack::new(..., detector, assist)` 逐层透传；车栈无此字段（不动）。
+
+#### 帧 / 字节契约
+
+```text
+topic   = "pleiades/robot/assist_request"
+payload = x f32 BE | y f32 BE                     严格 8 B（7 / 9 / 空 → 拒；非有限 → 拒）
+frame   = encode_frame(msgid=7, sysid=UAV peer_id, compid=COMPID_ROBOT(1), payload)
+金标    : [x=1.0, y=2.0] → 3f80000040000000
+帧例    : 34 B sysid → 10 + 34 + 8 + 2 = 54 B
+```
+
+- **单向**：只有地面站订阅；车 / 机 / sim 不订阅、不回复、无 ACK。
+- 前置（**Step 4 必做，非源码**）：Pictor 内核实例的 `[Network].subscribe_topics` 必须含
+  `pleiades/robot/assist_request`（`network_service.rs` 的默认订阅清单只有 POSE/MAP，那是既有代码，本步不改）。
+- 已知行为（不在本步修）：`NodeCommand::GossipsubPublish` 会更新快照缓存，**晚订阅的地面站会先收到最后一帧 assist**
+  （MQTT retained 语义）。§5.7「不做额外限流」→ 不为此加去重。
+
+#### Pictor 链路与协同控制（独立仓）
+
+```text
+robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Request）
+            → kernel_bridge（vid = 请求者 sysid hex）→ EventBus.assist_request_received(vid, x, y)
+            → CoopController._on_assist_request
+```
+
+- `CoopController`（`Pictor/src/cooperation/coop_controller.gd`，`main.tscn` 挂在 `VehicleRegistry` 之后）：
+  取在线 UGV（`VehicleRegistry`，`node_type == "car"`；`(0,0)` 视为未收到首帧 POSE，复用 `TargetAlloc.POS_EPS`）→
+  N 个等角点（`θ_i = 2π·i/N`，`R = 3.0 m`，offset = 0 → N=4 落在 +x/+y/−x/−y 四条轴上）→
+  **最近一对一**（`N ≤ 6` 全排列暴力取总距离最小，`N > 6` 贪心）→ **逐车一帧** `TASK_SET`（`missions:[{type:0,x,y}]`）→
+  `[Coop] 协助请求 …` / `[Coop] 指派 车=… 点#…` 日志（Step 4 据此解析）。
+- 接受 TASK_SET 整体替换带来的 reset 顿挫，**不做额外限流**（§二.10）；每次给每辆车都发。
+- 单测：`godot --headless --path Pictor -s src/test/test_coop_controller.gd`（点位 / 分配 / 最优性 / 贪心 / 参数不匹配）。
+
+#### 验收（本步只做代码 + 单测，不跑端到端）
+
+- `cargo check -p {pleiades-base,pleiades-sim,pleiades-ugv,pleiades-uav} --all-targets` 0 error、新增代码 0 warning；
+- `cargo test -p pleiades-base --lib protocol`（含 8 B 金标）、`cargo test -p pleiades-sim --bins containment|mission|sim_handler|uav_sim`；
+- `godot --headless --path Pictor -s src/test/test_coop_controller.gd` / `src/test/test_orion_protocol.gd` → `=== ALL PASS: true ===`；
+- 端到端属 **Step 4**（1 UAV + 4 UGV），本步不启动 sim / Godot 长跑。
+
+---
+
 ## 附：关键常量速查
 
 | 常量 | 值 | 含义 |
@@ -834,6 +991,8 @@ survey_seconds = 180
 | `PASS_THROUGH_M`（车） | 0.5 m（= 1 格） | 目标格心在身后且比这更近 ⇒ 直行穿过，不掉头（task_40） |
 | `[chassis].turn_speed` | 30（= 27 °/s，`R = 0.95 m`） | 车栈连续档转向档位；改到 ≥ 60 须同步抬 `DEADBAND_DEG` 到 7~8°（task_40 §八 #1） |
 | 对角步长 | √2 格 ≈ 0.707 m（SQRT_2 × CELL_RESOLUTION） | 8 连通对角边代价（Task 39 §三；禁切角） |
+| `ASSIST_MOVE_M` | 1.0 m | 协助请求重发阈值（目标相对上次发送点；`containment.rs`，task_41 §二.9） |
+| `RING_RADIUS_M` | 3.0 m | Pictor 协同包围环半径（`coop_controller.gd`，task_41 §二.10） |
 | `auto_tick` | 50 ms | 决策主 tick |
 | `state_notifier` | 100 ms | 位姿广播周期 |
 | `slam_task` | 200 ms（节流 1s） | 建图 + 增量广播周期 |

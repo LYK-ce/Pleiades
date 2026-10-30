@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-08
-//Modified Date ： 2026-08-08
+//Modified Date ： 2026-10-30
 
 //! GossipSub 业务状态广播模块
 //!
@@ -31,6 +31,10 @@ pub const TOPIC_ROBOT_POSE: &str = "pleiades/robot/pose";
 pub const TOPIC_ROBOT_MAP: &str = "pleiades/robot/map";
 /// robot rtcm topic：RTK 改正数据（RTCM 3.x 帧包 ORION msgid=6，Task 24）
 pub const TOPIC_RTK_RTCM: &str = "pleiades/robot/rtcm";
+/// robot assist request topic：UAV → 地面站的协助请求（ORION msgid=7，task_41 §5.3）
+///
+/// **单向**：只有地面站订阅（终端的 `[Network].subscribe_topics`），车 / 机 / sim 不订阅。
+pub const TOPIC_ROBOT_ASSIST_REQUEST: &str = "pleiades/robot/assist_request";
 
 // ===== 快照缓存（通用消息层机制，类似 MQTT retained message） =====
 

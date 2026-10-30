@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-30
 
 //! 任务层（Task 36 §12.4.4）：任务 → 树的**编译期穷尽**分派 + 树依赖包
 //!
@@ -19,6 +19,7 @@ use pleiades_base::robot::core::state::RobotState;
 
 use crate::sim::uav_sim::nav::Navigator;
 
+pub mod containment;
 pub mod follow;
 pub mod goto;
 
@@ -28,6 +29,8 @@ pub struct TaskDeps {
     pub robot_state: Arc<RwLock<RobotState>>,
     /// 跟随的目标来源（task_37 Step 4）：`None` = 没启用 detector → Follow 建「原地 Hold」树
     pub detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
+    /// 协助请求发布者（task_41 §5.3）：`None` = 不发（真机/无网络/单测）
+    pub assist: Option<Arc<dyn containment::AssistPublisher>>,
 }
 
 /// 任务 → 树（每次入队任务**新建实例**，不复用节点对象，§十一 #12）
@@ -46,6 +49,29 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
             None => {
                 tracing::warn!(
                     "[Sim/uav] Follow：未启用 detector（[detector].enabled=false 或无相机）→ 原地 Hold"
+                );
+                Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
+                    f.out.next_cell = None;
+                    Status::Running
+                })))
+            }
+        },
+        // task_41 §3.2：sim 机栈才真的封控（正方形内巡逻 + 跟随 + 出界回巡逻）
+        // v2（task_41 §5.3）：`InsideSquare` 条件内发协助请求（`deps.assist = None` 时只判条件）
+        Mission::Containment { x, y, half_side } => match deps.detector.as_ref() {
+            Some(dev) => Ok(containment::build(
+                deps.nav.clone(),
+                deps.robot_state.clone(),
+                Arc::new(follow::TargetSource::new(Some(dev.clone()))),
+                (*x, *y),
+                *half_side,
+                deps.assist.clone(),
+            )),
+            None => {
+                // 未启用 detector → **原地 Hold**（持续任务，不终值）。
+                // `Success` 会让队列把这条弹走 → 任务静默消失（task_41 §二.8 明确禁止）。
+                tracing::warn!(
+                    "[Sim/uav] Containment：未启用 detector（[detector].enabled=false 或无相机）→ 原地 Hold"
                 );
                 Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
                     f.out.next_cell = None;
@@ -78,7 +104,7 @@ mod tests {
             0.2,
             ARRIVAL_THRESHOLD_M,
         );
-        TaskDeps { nav: Arc::new(Mutex::new(nav)), robot_state: state, detector: None }
+        TaskDeps { nav: Arc::new(Mutex::new(nav)), robot_state: state, detector: None, assist: None }
     }
 
     /// 无 detector：Follow 建「原地 Hold」树 —— 一拍 `Running`（**不终值**）、不动
@@ -94,6 +120,20 @@ mod tests {
         }
     }
 
-    // 有 detector 的建树路径由 `follow::tests` 用 `FakeFeed` 覆盖
-    // （真 `DetectorDevice` 需要权重文件，单测不加载模型 → 此处只验无 detector 的退化路径）。
+    /// 无 detector：Containment 建「原地 Hold」树 —— 连 3 拍 `Running`（**不得一拍 Success**）、不动
+    #[tokio::test]
+    async fn test_containment_without_detector_is_hold_tree() {
+        let d = deps();
+        let mission = Mission::Containment { x: 64.0, y: 64.0, half_side: 8.0 };
+        let mut tree = build(&mission, &d).expect("Containment 不得返回 Err");
+        let mut out = MotionOut::default();
+        let mut f = Frame { dt_ms: 50, tick_no: 0, out: &mut out };
+        for i in 0..3 {
+            assert_eq!(tree.tick(&mut f).await, Status::Running, "第 {i} 拍必须 Running（不终值）");
+            assert_eq!(f.out.next_cell, None, "Hold 不得给出下一格");
+        }
+    }
+
+    // 有 detector 的建树路径需要真 `DetectorDevice`（权重文件），单测不加载模型 → 此处只验无 detector 的
+    // 退化路径；树本身的行为由 `containment::tests`（`FakeFeed` + 假 nav）直接覆盖。
 }

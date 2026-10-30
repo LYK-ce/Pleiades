@@ -1,0 +1,185 @@
+{
+  "task": "Task/task_41_containment.md",
+  "workbook": "Workbook/wb_41_containment.md",
+  "tmp": "tmp/task41",
+  "steps": [
+    {
+      "n": 1,
+      "title": "Step 1 — 封控指令贯通（base 变体 + 变长 TASK_SET + Pictor + sim 机栈 v1 + 三端 naive）",
+      "doc": "§三",
+      "side": "base 协议/Mission + sim 机栈 containment 树 v1 + 三端 naive 桩 + Pictor type=3（不跑实验）",
+      "brief": [
+        "按任务文档 §三 实施。**只做代码与单测**，不跑封控实验。",
+        "1) `Mission` 加第三变体 `Containment { x, y, half_side }`（x/y=中心，half_side=半边长米、>0、轴对齐）。",
+        "2) `TASK_SET` 记录按 type 变长：`0/2 = 9 B`、`3 = 13 B`，总长 `1+Σlen`；未知 type / 长度不符 / `half_side` 非法 → **整帧拒**；`count==0` 仍是取消；`1` 仍是退役 Circle，不得复用；`3` = Containment。",
+        "3) `messages.rs`：`MISSION_CONTAINMENT=3`、`MissionItem.half_side`、`mission_wire_len`、encode/decode（循环后偏移必须等于 payload 长度）；`command_decode.rs` type 3 → `Mission::Containment`。",
+        "4) sim 机栈新文件 `uav_sim/mission/containment.rs`：`ReactiveFallback[ ReactiveSequence[ Condition(有目标 & 未过期 & 在正方形内), follow::build(...) ], RepeatForever(Sequence[4×goto::build(角点)]) ]`；角点顺序 `(cx−h,cy−h)→(cx+h,cy−h)→(cx+h,cy+h)→(cx−h,cy+h)`；条件与 Follow 共享同一个 `Arc<TargetSource>`。",
+        "5) `sim/uav_sim/mission/mod.rs`：type 3 分派；有 detector → containment::build；无 detector → warn + 原地 Hold（Action 恒 Running + next_cell=None），**不得一拍 Success**。",
+        "6) 三端 naive（真机 ugv / 真机 uav / sim ugv）：warn + `Action` 恒 `Success`（一拍终值，不得 Running），各加单测。",
+        "7) Pictor：`MISSION_TYPE_CONTAINMENT=3`；`Encode_Task_Set` / `Decode_Task_Set` 按 type 变长；未知 type **报错不发帧**（不再降级为 Goto）；`ws_command_server.gd` 校验 type=3 的 `half_side`；`pictor_ws_ctl.py` 加 containment 子命令与金标（原 `--type 3` 未知探针改为 9）；`test_orion_protocol.gd` 覆盖单条/混合/未知 type。",
+        "8) 文档：`Architecture/robot_arch.md`（Mission 三变体、type 3、变长协议）与 `Pictor/docs/orion_protocol.md`。",
+        "验收：逐 crate `cargo check --all-targets`；base 协议单测、sim `containment` 单测、三端 naive 单测全绿；`godot --headless --path Pictor -s src/test/test_orion_protocol.gd` 全绿；字节契约单条 Goto/Follow=10 B、Containment=14 B、`[Goto,Containment]`=23 B；`git diff` 只含允许路径。",
+        "**不动**：`follow.rs` / `nav/` / 执行器 / 世界 / 真机行为（只加 naive 分支）。"
+      ],
+      "allowed": [
+        "pleiades-base/src/Robot/core/mission_queue/element.rs",
+        "pleiades-base/src/Robot/core/protocol/messages.rs",
+        "pleiades-base/src/Robot/core/protocol/command_decode.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/containment.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/mod.rs",
+        "pleiades-sim/src/sim/ugv_sim/mission/mod.rs",
+        "pleiades-ugv/src/ugv/mission/mod.rs",
+        "pleiades-uav/src/uav/mission/mod.rs",
+        "Pictor/src/websocket/protocol/",
+        "Pictor/src/kernel/ws_command_server.gd",
+        "Pictor/src/test/test_orion_protocol.gd",
+        "Pictor/tool/pictor_ws_ctl.py",
+        "Pictor/docs/orion_protocol.md",
+        "Architecture/robot_arch.md",
+        "Workbook/wb_41_containment.md"
+      ]
+    },
+    {
+      "n": 2,
+      "title": "Step 2 — sim 机栈 containment 验证（tree v1）",
+      "doc": "§四",
+      "side": "只验不改：验证脚本 + 结果目录（不动 Rust / 世界 / Pictor / 任务文档）",
+      "brief": [
+        "按任务文档 §四 **只验证 tree v1**：不调参、不改判据、不改被测代码。",
+        "1) 环境：`RobotSim_TestEnv/world_fast/`（msaa_3d=0）+ `xvfb-run -a`；UAV 实例 `simq_uav_containment`（从 `simq_s4_uav` 模板生成：detector/相机、`vel_fwd=0.8`、`yaw_rate_deg=30`、`model=yolov8s.safetensors`、`listen_port=9125`、control=9122）；Pictor `godot --headless --path Pictor -- --ws-port=9100`，CWD=`RobotSim_TestEnv/pictor_ws`；行人 `pedestrian_client.py`（python3 -u，0.5 m/s）。",
+        "2) 用例：S2-A 无行人 150 s 巡逻；S2-B 行人（0.5 m/s）(64,80)→(64,72) 停 20 s（等 UAV 到南边朝 +x、x∈[56,60] 时再放人，等待上限 120 s）→ 走到中心 (64,64)；S2-C 行人走向 (64,50) 离开。",
+        "3) 判据 P1~P7（任务文档 §4.4）：任务贯通、巡逻到 ≥2 角（150 s 窗）、进入 5 s 内切跟随且 10 s 位移 ≥3 m、离开 20 s 内回巡逻、安全（越界/突跳/卡死）、v=0.8 与位姿龄、无异常；P3 的 t0 必须从行人 spawn 之后算（spawn 前的 phantom 不算）。",
+        "4) 产物：`RobotSim_TestEnv/results/task41_s2_<UTC>/{verdict.md, sim.log, world.log, ped.log, pictor.log, trace.csv, cases.json}`；结论写 `Workbook/wb_41_containment.md`。",
+        "5) **本步只 1 轮，FAIL 不重试**：引擎会发邮件并终止整个程序。若失败原因是环境（fps 低、位姿龄大、检测链不稳），在 verdict 里记 `FAIL(env)` 并如实说明，不要为了跑通而改脚本或参数。",
+        "6) 修改现有 `Tool/sim_task41_containment_test.py`（不重写）：行人 0.5 m/s、P2 150 s、P3 t0 从 spawn 后算、P4 20 s、P6 v=0.8/检测率 ≥1 Hz、detector 用 `yolov8s.safetensors`；`Tool/sim_task41_pedestrian.py` 同步 0.5 m/s。",
+        "7) 收尾：world/sim/Pictor/行人全部退出，9999/9122/9100/9125 端口空闲，无 Xvfb 残留。",
+        "8) 启动顺序：**Pictor 先起**，等 WS 9100 与 kernel libp2p 9123 都可连后再起 sim（脚本已按此改，不要并行起）。kernel 读的是 `Pictor/.config/config.toml`（CWD=Pictor），已固定 `listen_port=9123 / peer_name=pictor_s2 / node_type=ground_station`；不要改回 `pictor_ws` 的配置。",
+        "9) detector 已修：`Target` 只收 `person`（uav/sim 两份副本，单测已过）；本轮**只验不改 Rust**。P3 的 t0 必须来自 `class=person` 且 `判定=采纳` 的行，bench 等类别不得计入。"
+      ],
+      "allowed": [
+        "Tool/",
+        "RobotSim_TestEnv/",
+        "Workbook/wb_41_containment.md"
+      ]
+    },
+    {
+      "n": 3,
+      "title": "Step 3 — 行为树 v2 + 协助请求 topic + Pictor 协同控制",
+      "doc": "§五",
+      "side": "新增 assist_request topic/msgid、UAV 树 v2（Condition 内发请求）、Pictor 协同控制模块（4 点 3 m / 最近一对一 / 逐车下发）",
+      "brief": [
+        "按任务文档 §五 实施。**只做实现与单测**，不跑端到端。",
+        "1) Network（人类已批准破例）：`TOPIC_ROBOT_ASSIST_REQUEST = \"pleiades/robot/assist_request\"`；`swarm_events.rs` 转发白名单加入该 topic；`Network/mod.rs` re-export。",
+        "2) 协议：`MSGID_ASSIST_REQUEST=7`，payload `x f32 BE | y f32 BE`（8 B 严格）；encode/decode + 单测。",
+        "3) UAV 树 v2：`InsideSquare` 内维护 `last_sent`；条件成功且（首次或移动 > 1.0 m）→ `AssistPublisher::publish(x,y)` 并更新；条件失败 → 清 `last_sent`；`halt` 也清。发送用 `Gossipsub_Publish_Try(TOPIC_ROBOT_ASSIST_REQUEST, frame)`，帧 `encode_frame(7, local_peer_id, COMPID_ROBOT, payload)`；失败只限流 warn。",
+        "4) `TaskDeps` 加 `assist: Option<Arc<dyn AssistPublisher>>`；`uav_sim::Stack::new` 与 `sim_handler` 透传（生产实现用 `node_handle`；单测用记录型假实现）。",
+        "5) Pictor：`protocol_def.gd` 加 `MSGID_ASSIST_REQUEST=7`；`orion_messages.gd` 加 `Decode_Assist_Request`；`message_parser.gd` 分支；`event_bus.gd` 加 `assist_request_received(requester_id,x,y)`；`kernel_bridge.gd` 分发。",
+        "6) 新模块 `Pictor/src/cooperation/coop_controller.gd`：订阅信号 → 取在线 car（VehicleRegistry）→ N 个等角点（半径 3 m，角度 `2πi/N`）→ **一对一最近分配**（N≤6 暴力枚举，大 N 贪心）→ 逐车 `cmd_send([vid], TASK_SET Goto)`（一帧一车）→ 打 `[Coop]` 日志。`main.tscn` 挂节点（排在 VehicleRegistry 之后）。",
+        "7) 单测：协议 8 B 金标；树（首次发/0.9m 不发/1.1m 发/离开重置/无 publisher 不发）；Pictor 点位与分配（4 点等角、3 m、无重复、最优排列）。",
+        "8) 文档：`orion_protocol.md`（msgid 7）、`robot_arch.md`（topic/模块/树 v2）。",
+        "验收：逐 crate `cargo check --all-targets`；base/sim 单测；`godot --headless --path Pictor -s src/test/test_coop_controller.gd` 全绿；`git diff` 只含允许路径（Pictor 独立仓另看）。",
+        "**不动**：巡逻/Follow 决策、`follow.rs`、`nav/`、世界、真机行为。"
+      ],
+      "allowed": [
+        "pleiades-base/src/Network/Gossipsub/mod.rs",
+        "pleiades-base/src/Network/swarm_events.rs",
+        "pleiades-base/src/Network/mod.rs",
+        "pleiades-base/src/Robot/core/protocol/mod.rs",
+        "pleiades-base/src/Robot/core/protocol/messages.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/containment.rs",
+        "pleiades-sim/src/sim/uav_sim/mission/mod.rs",
+        "pleiades-sim/src/sim/uav_sim/mod.rs",
+        "pleiades-sim/src/sim/sim_handler.rs",
+        "Pictor/src/websocket/protocol/",
+        "Pictor/src/event_bus/event_bus.gd",
+        "Pictor/src/kernel/kernel_bridge.gd",
+        "Pictor/src/cooperation/",
+        "Pictor/src/main/main.tscn",
+        "Pictor/src/test/",
+        "Pictor/docs/",
+        "Architecture/robot_arch.md",
+        "Workbook/wb_41_containment.md"
+      ]
+    },
+    {
+      "n": 4,
+      "title": "Step 4 — 端到端验证（1 UAV + 4 UGV）",
+      "doc": "§六",
+      "side": "只验不改：1 UAV + 4 UGV + Pictor + 行人；验证 v2 与协助链路",
+      "brief": [
+        "按任务文档 §六 **只验证 tree v2 与整条协助链路**：不调参、不改判据、不改被测代码。",
+        "1) 环境：`world_fast` + `xvfb-run -a`；1×UAV `simq_uav_containment`（同 Step 2：`vel_fwd=0.8`、`yaw_rate_deg=30`、`model=yolov8s.safetensors`）；4×UGV `simq_ugv_c1..c4`：`[sim_world].chassis=\"diff_drive_ugv\"`、`[sim_world.chassis_params] max_speed=2.0`、`[chassis] forward_speed=100`、`turn_speed=35`、各自唯一 listen/control 端口与 peer_name；Pictor CWD=`RobotSim_TestEnv/pictor_ws`，`[Network].subscribe_topics` 含 `pleiades/robot/assist_request`；行人 `python3 -u`。",
+        "2) 前置自检：世界 fps ≥5、位姿龄中位 ≤200 ms、5 个 sim 全部 assembly；不满足记 `FAIL(env)`。",
+        "3) 用例：S4-A 无行人 30 s；S4-B 行人 (64,80)→(64,72) 停 20 s→(64,64) 停 20 s；S4-C 行人 (64,64)→(66,64) 停 10 s；S4-D 行人走向 (64,50) 离开。",
+        "4) 判据 Q1~Q8（任务文档 §6.4）：链路贯通、点位 3 m 且四点不重复、40 s 内到达且车间距 ≥1 m、四象限覆盖、分配稳定、车速 ≤2.05 且无 Blocked/急停 ≤1、UAV 复验 P1~P4、无异常。",
+        "5) 产物：`RobotSim_TestEnv/results/task41_s4_<UTC>/{verdict.md, sim_uav.log, sim_ugv_c1..c4.log, pictor.log, ped.log, world.log, trace.csv, cases.json}`；结论写 workbook。",
+        "6) **本步只 1 轮，FAIL 不重试**：引擎会发邮件并终止整个程序。环境不好就如实记 `FAIL(env)`，不要硬验证、不要调参重跑。",
+        "7) 收尾：所有进程退出、端口空闲、无 Xvfb 残留。",
+        "8) 摆位与停留：4 车出生被世界排在中心 2 m 环（会挡人），起跑后先用各车 control 口 `goto` 到四角 (52,52)/(76,52)/(76,76)/(52,76)，等 15 s 停稳再放人；行人 leg0 在 (64,71) 停 **120 s**（等 UAV 巡逻贴近 ≤5 m/被采纳），再走中心→(66,64)→出界。",
+        "9) 纪律：只跑 1 轮；Q8 按定稿口径（`[Coop]` ≥1 行 + 解析率 100%），不得事后放宽；不得在出结果后改脚本/判据；`--reanalyze` 只允许同一批产物的一次渲染修复并记录。"
+      ],
+      "allowed": [
+        "Tool/",
+        "RobotSim_TestEnv/",
+        "Workbook/wb_41_containment.md"
+      ]
+    }
+  ],
+  "prompts": {
+    "plan": [
+      "你是「规划」子 agent，只读代码 + 写计划，禁止修改任何源码。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "任务文档：Task/task_41_containment.md（本任务全部设计结论；§二 是已定口径，不得再改）",
+      "工作记录：Workbook/wb_41_containment.md（看前面 step 的进展）",
+      "必读：",
+      "1. tmp/task41/step.md —— 本 step 要求、轮次、允许改动范围（越界即 FAIL）",
+      "2. tmp/task41/prev_issues.md —— 上一轮评审问题（若为 (无) 则首轮）",
+      "3. 任务文档里 step.md 指定的那一节（§二 已定口径一并遵守）",
+      "4. tmp/task41/git_baseline.txt（本步进场基线）",
+      "5. 按需读相关源码（pleiades-base/、pleiades-sim/、Pictor/、Tool/）",
+      "产出：用 writeTextFile 写 tmp/task41/plan.md：改动清单（文件:行号）、接口与常量、实施顺序、风险、验收命令与逐条判据、上轮 issues 处理。",
+      "硬约束：",
+      "- 只在 step.md 列出的路径内改动；不改 Task/、.github/、Cargo.toml/Cargo.lock",
+      "- 不 git add / git commit；不跑 cargo fmt",
+      "- cargo check 逐 crate：`cargo check -p <crate> --all-targets`；本仓三个 Rust crate 只有 [[bin]]，测试用 `--bins` 不用 `--lib`",
+      "- Godot 只允许 `--headless`（`--import` / `--quit` / `-s <脚本>`）；需要显示时用 `xvfb-run -a`",
+      "- 计划必须具体到能直接照做，禁止“视情况而定”",
+      "最终回复：200 字以内的计划摘要（会被写进 workbook）。"
+    ],
+    "impl": [
+      "你是「实现」子 agent。按计划实施，不要重新设计。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task41/step.md、tmp/task41/plan.md、Task/task_41_containment.md 对应章节（§二 是已定口径）。",
+      "规则：",
+      "- 只改 step.md 允许的路径",
+      "- 文件头注释：Presented by KeJi / Created Date / Modified Date（Modified 用今天；GDScript 用 #，Rust 用 //）",
+      "- 命名跟随所在文件既有风格（Rust/GDScript 里已有的 Pascal_Snake 保持原样）",
+      "- 不做计划之外的顺手重构；偏差记进 tmp/task41/impl.md",
+      "- 不 git add / git commit；**禁止 cargo fmt**",
+      "- 验证：`cargo check -p <crate> --all-targets`、`cargo test -p <crate> --bins <filter>`（base 用 --lib）",
+      "- Godot：`godot --headless --path orion-simulation-world --import` / `--quit` / `-s <脚本>`；需要显示用 `xvfb-run -a`",
+      "- 长驻进程：step.md 若不允许就不得起 pleiades-sim / Godot 长跑；允许时必须在结束时收干净（进程 + 端口）",
+      "- 需要联网时直连优先，失败再加 `-x http://127.0.0.1:7897`",
+      "- 计划与代码现实冲突时以代码为准，并在 impl.md 记录偏差",
+      "产出：用 writeTextFile 写 tmp/task41/impl.md：改了哪些文件、每个文件做了什么、跑了什么命令与结果、与计划的偏差。",
+      "最终回复：150 字以内摘要。"
+    ],
+    "review": [
+      "你是「评审」子 agent，独立评审本轮实现。不要修改源码（只允许写 tmp/task41/review.json）。",
+      "项目根目录：/vepfs-mlp2/c20250205/240804016/Workspace/Orion",
+      "必读：tmp/task41/step.md、plan.md、impl.md、Task/task_41_containment.md 对应章节（含 §二 已定口径）、tmp/task41/git_baseline.txt",
+      "逐项检查：",
+      "5. 回归：本步新增/修改路径相关的单测必须全绿；**存量红**（HEAD 即红、路径本步未改、与本步无关）只记录，不作为 FAIL 理由；新增门禁必须存在。",
+      "2. 判据是否真满足：自己跑（逐 crate `cargo check --all-targets`、`cargo test --bins <filter>`；Godot 自检 `--headless`）；Step 2/4 必须读 `RobotSim_TestEnv/results/task41_s*/verdict.md`，核对实测值与 PASS/FAIL 是否一致。",
+      "3. 是否违反定稿结论：Step 1 变长 TASK_SET、type 3、naive 桩、Pictor 不降级；Step 3 的 assist 请求（1 m 阈值/离开重置）、topic/msgid、Pictor 4 点 3 m/最近一对一/一帧一车；Step 4 的 2 m/s 与 turn_speed=35。",
+      "4. 代码规范：文件头注释、命名、模块注释。",
+      "5. 回归：原有单测不全绿即 FAIL；新增门禁必须存在。",
+      "6. 死代码、未使用导入、副本一致性（`sim/executor.rs` 与 `pleiades-ugv/src/ugv/executor.rs` 必须仍逐字相同）。",
+      "7. **Step 2/4 特殊口径**：这两步只验不改，**FAIL 就是 FAIL**，不得因为“可能是环境问题”而放过；若 verdict 中为 `FAIL(env)`，评审应确认其证据（fps/位姿龄/端口/残留），然后照样判 FAIL 并说明。",
+      "产出：写 tmp/task41/review.json：{\"verdict\":\"PASS\" 或 \"FAIL\", \"issues\":[\"...\"]}",
+      "- FAIL 的 issues 要具体到「文件:行号 + 期望 vs 实际 + 复现命令」",
+      "- 不要放水；超出本 step 范围的建议不要写进 issues",
+      "最终回复：第一行 VERDICT: PASS 或 VERDICT: FAIL，第二行一句理由。"
+    ]
+  }
+}

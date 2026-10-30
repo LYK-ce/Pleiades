@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-10-30
 
 //! 机栈（Task 36 §12.6）：复刻 `pleiades-uav/src/uav/` 的 `nav/` + `mission/`
 //!
@@ -47,6 +47,8 @@ pub struct Stack {
     robot_state: Arc<RwLock<RobotState>>,
     /// 机栈独有（task_37 Step 4）：跟随的目标来源（车栈没有这个字段）
     detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
+    /// 协助请求发布者（task_41 §5.3；机栈独有，车栈没有这个字段）
+    assist: Option<Arc<dyn mission::containment::AssistPublisher>>,
     trees: Mutex<TreeSet>,
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
@@ -54,7 +56,8 @@ pub struct Stack {
 
 impl Stack {
     /// 建栈（`start()` 里一次）。`map_tx = Some` → 订阅建图增量（sim 独有）；
-    /// `detector = Some` → `Mission::Follow` 建真跟随树（`None` → 原地 Hold）
+    /// `detector = Some` → `Mission::Follow` 建真跟随树（`None` → 原地 Hold）；
+    /// `assist = Some` → `Mission::Containment` 的 `InsideSquare` 会发协助请求（`None` → 只判条件）
     pub fn new(
         grid: Arc<RwLock<OccupancyGrid>>,
         cluster_table: Arc<ClusterInfoTable>,
@@ -62,6 +65,7 @@ impl Stack {
         obstacle_inflation_radius: f32,
         map_tx: Option<&broadcast::Sender<Vec<MapDelta>>>,
         detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
+        assist: Option<Arc<dyn mission::containment::AssistPublisher>>,
     ) -> Self {
         let mut nav = Navigator::new(
             robot_state.clone(),
@@ -79,6 +83,7 @@ impl Stack {
             nav: Arc::new(Mutex::new(nav)),
             robot_state,
             detector,
+            assist,
             trees: Mutex::new(TreeSet::default()),
             tick_no: AtomicU64::new(0),
         }
@@ -96,6 +101,7 @@ impl Stack {
             nav: self.nav.clone(),
             robot_state: self.robot_state.clone(),
             detector: self.detector.clone(),
+            assist: self.assist.clone(),
         };
         let tree = mission::build(&task.mission, &deps)?;
         ts.trees.insert(task.id, tree);
@@ -196,7 +202,7 @@ mod tests {
             .await;
         let state = Arc::new(RwLock::new(RobotState::default()));
         // 膨胀 1 m：Respect 下 20 拍就会 Blocked，Ignore 下必须一直有路
-        let s = Stack::new(grid, table, state.clone(), 1.0, None, None);
+        let s = Stack::new(grid, table, state.clone(), 1.0, None, None, None);
         s.build(&goto_task(1, 12.0, 12.0)).await.expect("建树");
         // §12.6.7 #4：建树后恰一个实例；同一 `TaskId` 再次 `build`（抢占恢复路径）只激活、不重建
         assert_eq!(s.instance_count().await, 1, "建树后应只有一个实例");
@@ -219,7 +225,7 @@ mod tests {
         let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
         let table = Arc::new(ClusterInfoTable::new());
         let state = Arc::new(RwLock::new(RobotState::default()));
-        let s = Stack::new(grid, table, state.clone(), 0.2, None, None);
+        let s = Stack::new(grid, table, state.clone(), 0.2, None, None, None);
         set_pose(&state, 10.0, 10.0).await;
 
         s.build(&QueuedTask { id: TaskId(1), mission: Mission::Follow { x: 0.0, y: 0.0 } })

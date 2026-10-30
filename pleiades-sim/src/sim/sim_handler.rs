@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-10-30
 
 #![allow(non_snake_case)]
 
@@ -74,11 +74,14 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use pleiades_base::network::NodeHandle;
+use pleiades_base::network::{NodeHandle, TOPIC_ROBOT_ASSIST_REQUEST};
 use pleiades_base::orchestrator::{Capabilities, DeviceCapability};
 use pleiades_base::robot::core::behavior_tree::{Frame, MotionOut, Status};
 use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
+use pleiades_base::robot::core::protocol::{
+    encode_assist_request, encode_frame, COMPID_ROBOT, MSGID_ASSIST_REQUEST,
+};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
@@ -96,6 +99,7 @@ use crate::sim::sensors::lidar::LidarSensor;
 use crate::sim::sensors::{Sensor, SensorSet, Should_Log, Warn_Throttled};
 use crate::sim::uav_sim;
 use crate::sim::uav_sim::executor::{UavExecutor, DEADBAND_DEG, SPIN_DEG};
+use crate::sim::uav_sim::mission::containment::AssistPublisher;
 use crate::sim::ugv_sim;
 // 车栈连续档位常量起别名：`DEADBAND_DEG` 已被上面机栈的同名常量占用（同名不同值，各自口径）
 use crate::sim::ugv_sim::executor::{
@@ -391,6 +395,34 @@ fn Select_Camera(set: &SensorSet) -> Option<Arc<CameraSensor>> {
     }
 }
 
+/// 协助请求帧（**纯函数**，便于单测钉死字节契约）：msgid 7 + sysid=UAV peer_id + compid=COMPID_ROBOT
+fn assist_frame(sysid: &[u8], x: f32, y: f32) -> Vec<u8> {
+    let payload = encode_assist_request(x, y);
+    encode_frame(MSGID_ASSIST_REQUEST, sysid, COMPID_ROBOT, &payload)
+}
+
+/// 协助请求的生产发布者（task_41 §5.5.7）：树 → gossipsub `TOPIC_ROBOT_ASSIST_REQUEST`
+///
+/// 为什么在这里而不在 `containment.rs`：发送是**传输层**的事（要 `tracing` 限流告警、要 `NodeHandle`），
+/// 而 `containment.rs` 有「不引 `tracing`」的纪律（10 Hz tick 防刷屏）。
+struct NodeHandlePublisher {
+    node_handle: Arc<NodeHandle>,
+    /// 本机 PeerId 字节（= 帧的 `sysid`，Pictor 侧据此知道请求者）
+    local_peer_id: Vec<u8>,
+}
+
+impl AssistPublisher for NodeHandlePublisher {
+    fn publish(&self, x: f32, y: f32) {
+        let frame = assist_frame(&self.local_peer_id, x, y);
+        if let Err(e) = self.node_handle.Gossipsub_Publish_Try(TOPIC_ROBOT_ASSIST_REQUEST, frame) {
+            // 失败只限流 warn（通道满 = 丢一帧，目标下次移动再发；不影响树）
+            Warn_Throttled("sim.uav.assist", 1000, || {
+                format!("[Sim/uav] 协助请求广播失败：{e}")
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl DeviceHandler for SimDeviceHandler {
     async fn start(&self) -> Result<(), String> {
@@ -596,6 +628,11 @@ impl DeviceHandler for SimDeviceHandler {
                 obstacle_inflation_radius,
                 None,
                 detector.clone(), // 车栈不传：ugv_sim 收到 Follow 走平凡树
+                // 协助请求发布者（task_41 §5.3）：sysid = 本机 PeerId，与 POSE/MAP 广播同源
+                Some(Arc::new(NodeHandlePublisher {
+                    node_handle: self.node_handle.clone(),
+                    local_peer_id: self.node_handle.Get_Local_Peer_Id().to_bytes(),
+                }) as Arc<dyn AssistPublisher>),
             )),
         };
         // 规划时间预算（Task 39 §二）：`Stack::new` 不收预算（它的调用点不在本 step 允许路径内），
@@ -949,5 +986,23 @@ mod tests {
             Some(pleiades_base::robot::core::state::MotionAction::MoveForward)
         );
         assert_eq!(result.sub_target, Some((20, 20)));
+    }
+
+    /// task_41 §5.3：字节契约 —— `assist_frame(34 B sysid, 1.0, 2.0)` → 54 B，msgid=7 / compid=1 / payload 8 B 金标
+    #[test]
+    fn test_assist_frame_contract() {
+        let sysid = vec![0x11u8; 34];
+        let frame = assist_frame(&sysid, 1.0, 2.0);
+        assert_eq!(frame.len(), 10 + 34 + 8 + 2, "10 头 + sysid + 8 payload + 2 checksum");
+        let dec = pleiades_base::robot::core::protocol::decode_frame(&frame).expect("帧可解");
+        assert_eq!(dec.msgid, MSGID_ASSIST_REQUEST);
+        assert_eq!(dec.msgid, 7, "msgid 恒 7");
+        assert_eq!(dec.compid, COMPID_ROBOT);
+        assert_eq!(dec.sysid, sysid, "sysid = 本机 PeerId（Pictor 据此认请求者）");
+        assert_eq!(
+            dec.payload,
+            vec![0x3F, 0x80, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00],
+            "x=1.0 / y=2.0 大端金标"
+        );
     }
 }

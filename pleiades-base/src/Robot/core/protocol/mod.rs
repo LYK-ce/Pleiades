@@ -16,12 +16,13 @@ pub mod command_decode;
 pub use frame::{decode_frame, encode_frame, Frame};
 pub use command_decode::parse_orion_frame;
 pub use messages::{
-    decode_manual_control, decode_map_delta, decode_map_full, decode_pose, decode_task_set,
-    encode_manual_control, encode_map_delta, encode_map_full, encode_pose, encode_task_set,
+    decode_assist_request, decode_manual_control, decode_map_delta, decode_map_full, decode_pose,
+    decode_task_set, encode_assist_request, encode_manual_control, encode_map_delta,
+    encode_map_full, encode_pose, encode_task_set,
     ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT,
     ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,
-    ACTION_SWITCH_TO_MANUAL, MISSION_FOLLOW, MISSION_GOTO, ManualControl, MapDeltaEntry,
-    MissionItem, PoseData, TaskSetPayload,
+    ACTION_SWITCH_TO_MANUAL, AssistRequest, MISSION_FOLLOW, MISSION_GOTO, ManualControl,
+    MapDeltaEntry, MissionItem, PoseData, TaskSetPayload,
 };
 
 /// 消息 ID 常量（与协议文档 §3 一致）
@@ -31,6 +32,8 @@ pub const MSGID_MAP_DELTA: u16 = 3;
 pub const MSGID_MANUAL_CONTROL: u16 = 4;
 pub const MSGID_TASK_SET: u16 = 5;
 pub const MSGID_RTCM: u16 = 6;
+/// 协助请求（UAV → 地面站；**非下行命令**，地面站不回复，task_41 §5.3）
+pub const MSGID_ASSIST_REQUEST: u16 = 7;
 
 /// compid 约定（协议文档 §4.3）
 pub const COMPID_ROBOT: u8 = 1;

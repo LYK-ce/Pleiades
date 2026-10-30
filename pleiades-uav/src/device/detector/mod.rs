@@ -142,6 +142,11 @@ pub struct Target {
     pub frame_seq: u64,
 }
 
+/// 是否属于本任务的目标类别：当前只认 `person`（bench/dog 等仍进 `Detections`，只写日志）。
+fn Is_Person(d: &Detection) -> bool {
+    d.class_name == "person"
+}
+
 /// 一帧的完整结果：检测框 + 由它算出的世界坐标目标（**同一次覆盖**，读者看不到半成品）
 #[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
@@ -487,14 +492,17 @@ async fn Run_Loop(ctx: Loop_Ctx) {
                     let (u, v) = projection::Bottom_Center(d.xmin, d.xmax, d.ymax);
                     let one = projector.Project(intr, p, u, v);
                     if let Ok(g) = &one {
-                        targets.push(Target {
-                            x: g.x,
-                            y: g.y,
-                            range_m: g.range_m,
-                            bearing_deg: g.bearing_deg,
-                            frame_ts_ms: frame.captured_at_ms,
-                            frame_seq: frame.seq,
-                        });
+                        // 只有 person 进目标列表；bench/dog 等仍进 Detections 供日志（task_41 Step 2 实测）
+                        if Is_Person(d) {
+                            targets.push(Target {
+                                x: g.x,
+                                y: g.y,
+                                range_m: g.range_m,
+                                bearing_deg: g.bearing_deg,
+                                frame_ts_ms: frame.captured_at_ms,
+                                frame_seq: frame.seq,
+                            });
+                        }
                     }
                     guesses.push(one);
                 }
@@ -537,10 +545,13 @@ async fn Run_Loop(ctx: Loop_Ctx) {
             ));
             let (u, v) = projection::Bottom_Center(d.xmin, d.xmax, d.ymax);
             match guesses.get(i) {
-                Some(Ok(g)) => line.push_str(&format!(
-                    " → 世界=({:.2},{:.2}) 距离={:.2}m 方位={:+.1}° 相对机头={:+.1}° 判定=采纳",
-                    g.x, g.y, g.range_m, g.bearing_deg, g.rel_bearing_deg
-                )),
+                Some(Ok(g)) => {
+                    let verdict = if Is_Person(d) { "采纳" } else { "非person（忽略）" };
+                    line.push_str(&format!(
+                        " → 世界=({:.2},{:.2}) 距离={:.2}m 方位={:+.1}° 相对机头={:+.1}° 判定={}",
+                        g.x, g.y, g.range_m, g.bearing_deg, g.rel_bearing_deg, verdict
+                    ));
+                }
                 Some(Err(r)) => line.push_str(&format!(
                     " 像素=({},{}) 判定=拒答（{}） 世界=-",
                     u as i32,
@@ -658,6 +669,13 @@ mod tests {
             xmax,
             ymax,
         }
+    }
+
+    #[test]
+    fn test_is_person_only_person() {
+        assert!(Is_Person(&Det_Of("person", 0.9, 10.0, 20.0, 30.0, 60.0)));
+        assert!(!Is_Person(&Det_Of("bench", 0.9, 10.0, 20.0, 30.0, 60.0)));
+        assert!(!Is_Person(&Det_Of("dog", 0.9, 10.0, 20.0, 30.0, 60.0)));
     }
 
     fn Frame_Of(marker: u8, seq: u64, captured_at_ms: u64) -> Frame {
