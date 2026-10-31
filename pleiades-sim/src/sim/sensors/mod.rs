@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-24
+//Modified Date ： 2026-10-31
 
 #![allow(non_snake_case)]
 
@@ -91,7 +91,8 @@ pub struct SensorSet {
     /// 不改任何既有字段/签名/行为（数据零拷贝分歧）
     lidars: Vec<Arc<LidarSensor>>,
     /// 类型化 camera 句柄（与 `lidars` 同法：**同一个 `Arc` 实例**再留一份，
-    /// `Arc<dyn Sensor>` 把 `Latest()` / `Age_Ms()` 擦掉了；也是 `camera_sim` cap 的数据来源）
+    /// `Arc<dyn Sensor>` 把 `Latest()` / `Age_Ms()` 擦掉了；detector 的 `FrameSource` 从这份句柄取帧
+    /// （Lua 表 `camera_sim` 已按 task_43 §二 #5 移除）
     cameras: Vec<Arc<CameraSensor>>,
 }
 
@@ -127,6 +128,8 @@ impl SensorSet {
                 }
                 "camera" => {
                     // 相机不建 task、不读外参：`mount` 在世界侧决定（sim 只做"最新帧"快递）
+                    // **与 chassis 无关**（task_43 Step 2 查证）：本分支只读 slot/params；
+                    // `ctx`(`MappingCtx`) 里没有底盘名 → 车/机共用同一份相机实现
                     let sensor =
                         Arc::new(CameraSensor::New(&decl.slot, CameraParams::From_Json(&decl.params)));
                     // 与 lidar 同法：类型化句柄与擦除后的句柄是**同一个实例**
@@ -159,7 +162,7 @@ impl SensorSet {
         &self.lidars
     }
 
-    /// 全部 camera（声明顺序）。`camera_sim` 只暴露一个，取哪个由 `sim_handler::Select_Camera` 决定
+    /// 全部 camera（声明顺序）。detector 只用一个相机，取哪个由 `sim_handler::Select_Camera` 决定
     pub fn Cameras(&self) -> &[Arc<CameraSensor>] {
         &self.cameras
     }

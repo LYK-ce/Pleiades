@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-31
 
 #![allow(non_snake_case)]
 
@@ -374,7 +374,7 @@ fn Queue_Auto_Cmd(kind: &str, missions: Vec<Mission>) -> Command {
 /// `follow` → `Command::Auto(AutoCmd::Set(vec![Mission::Follow { x: 0, y: 0 }]))`
 ///
 /// 与 `goto` **同一条注入路径**（`robot_cmd_tx`）；`op_mode` 门闩由 `main_loop` 判，
-/// 控制口只 `warn` 不拦（task_37 Step 4：跟随是 sim 无人机的测试夹具）。
+/// 控制口只 `warn` 不拦（task_37 Step 4 / task_43 §五：跟随车/机通用）。
 fn Follow_Command() -> Command {
     Command::Auto(AutoCmd::Set(vec![Mission::Follow { x: 0.0, y: 0.0 }]))
 }
@@ -415,7 +415,7 @@ fn Help_Data() -> Value {
     json!({ "commands": [
         {"cmd":"goto",    "args":["x","y"],    "note":"单车前往目标点（米，[0,128)）"},
         {"cmd":"circle",  "args":["x","y"],    "note":"单车围圈（x/y 为圆心，米）"},
-        {"cmd":"follow",  "args":[],           "note":"跟随（sim 无人机；x/y 预留）"},
+        {"cmd":"follow",  "args":[],           "note":"跟随（车/机通用；x/y 预留）"},
         {"cmd":"queue",   "args":["missions"], "note":"整体替换队列（missions=[] = 取消）"},
         {"cmd":"append",  "args":["missions"], "note":"追加队尾（当前任务不受影响）"},
         {"cmd":"preempt", "args":["missions"], "note":"插队头（当前任务挂起、可恢复）"},

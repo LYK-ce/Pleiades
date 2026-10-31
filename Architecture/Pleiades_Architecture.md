@@ -2,7 +2,7 @@
 
 > **用途**: 指导 Agent 编写代码时正确使用已有组件，避免重复造轮子或绕过系统基础设施。
 >
-> **最后更新**: 2026-10-19 (workspace 五 crate 化, Robot 章节改指 robot_arch.md)
+> **最后更新**: 2026-10-31 (task_43: 设备相机 Lua 出口全部移除; 上版 2026-10-19 workspace 五 crate 化)
 
 ---
 
@@ -363,6 +363,8 @@ end
 ```
 
 #### 3.7.3 Lua 可用 API 完整参考
+
+> 注（task_43）：设备相机的 Lua 出口已全部移除 —— `camera_uav` / `camera_pc` / `camera_sim` 三张表与 `programs/user/` 下 6 个相机脚本一并删除；取帧改由 Rust 侧 `latest_frame()` 提供。
 
 **`caps` 表 (基础能力)**:
 ```lua

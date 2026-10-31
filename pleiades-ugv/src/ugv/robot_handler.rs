@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-10-31
 
 //! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.4.7 改成树驱动）
 //!
@@ -31,6 +31,7 @@ use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::{DEFAULT_PLAN_BUDGET_MS, UgvConfig};
+use crate::device::camera_ugv::Ugv_Camera;
 use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
 use crate::ugv::executor::DecisionExecutor;
@@ -56,6 +57,9 @@ struct CarInner {
     lidar: Option<LidarDevice>,
     /// RTK 流动站（enabled=false 时为 None）
     lg290p: Option<Lg290pDevice>,
+    /// 车载相机（enabled=false 时为 None）。**本 step 不消费**：只把 `Arc` 挂在这里，
+    /// 留给将来的车端 detector 用 `latest_frame()` 取帧（task_43 §三）
+    camera: Option<Arc<Ugv_Camera>>,
     /// 导航器（原目标服务；**不再持队列、不再出队**）
     nav: Arc<Mutex<Navigator>>,
     executor: DecisionExecutor,
@@ -70,6 +74,8 @@ pub struct CarDeviceHandler {
     origin: (f32, f32, f32),
     node_handle: Arc<NodeHandle>,
     robot_bus: Arc<EventBus>,
+    /// 车载相机（bootstrap 已打开成功才为 Some；本 step 只持有，不消费）
+    camera: Option<Arc<Ugv_Camera>>,
     inner: OnceLock<CarInner>,
 }
 
@@ -80,8 +86,9 @@ impl CarDeviceHandler {
         node_handle: Arc<NodeHandle>,
         robot_bus: Arc<EventBus>,
         origin: (f32, f32, f32),
+        camera: Option<Arc<Ugv_Camera>>,
     ) -> Self {
-        Self { robot, config, origin, node_handle, robot_bus, inner: OnceLock::new() }
+        Self { robot, config, origin, node_handle, robot_bus, camera, inner: OnceLock::new() }
     }
 }
 
@@ -215,6 +222,7 @@ impl DeviceHandler for CarDeviceHandler {
             stm32,
             lidar,
             lg290p,
+            camera: self.camera.clone(),
             nav,
             executor: DecisionExecutor::new(),
             trees: Mutex::new(TreeSet::default()),
@@ -355,6 +363,11 @@ impl DeviceHandler for CarDeviceHandler {
 
     async fn shutdown(&self) {
         let Some(d) = self.inner.get() else { return; };
+        // 相机先关：独占 USB 的设备早一点释放，别等到进程退出（task_43）
+        if let Some(c) = &d.camera {
+            info!("正在关闭 camera_ugv...");
+            c.Close();
+        }
         if let Some(l) = &d.lidar {
             info!("正在停止 LiDAR...");
             let _ = l.stop_scan().await;

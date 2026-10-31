@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-10-31
 
 //! 车栈（Task 36 §12.6）：复刻 `pleiades-ugv/src/ugv/` 的 `nav/` + `mission/`
 //!
@@ -46,19 +46,27 @@ struct TreeSet {
 pub struct Stack {
     pub nav: Arc<Mutex<Navigator>>,
     robot_state: Arc<RwLock<RobotState>>,
+    /// 跟随的目标来源（task_43 §五）：`None` = 未启用 detector → `Follow` 建原地 Hold 树
+    detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
+    /// 协助请求发布者（task_43 §七，与机栈同形）：`None` = 不发（单测 / 无网络）
+    assist: Option<Arc<dyn mission::containment::AssistPublisher>>,
     trees: Mutex<TreeSet>,
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
 }
 
 impl Stack {
-    /// 建栈（`start()` 里一次）。`map_tx = Some` → 订阅建图增量（sim 独有）
+    /// 建栈（`start()` 里一次）。`map_tx = Some` → 订阅建图增量（sim 独有）；
+    /// `detector = Some` → `Mission::Follow` 建真跟随树（`None` → 原地 Hold）；
+    /// `assist = Some` → `Mission::Containment` 的 `InsideSquare` 发协助请求（`None` → 只判条件）
     pub fn new(
         grid: Arc<RwLock<OccupancyGrid>>,
         cluster_table: Arc<ClusterInfoTable>,
         robot_state: Arc<RwLock<RobotState>>,
         obstacle_inflation_radius: f32,
         map_tx: Option<&broadcast::Sender<Vec<MapDelta>>>,
+        detector: Option<Arc<crate::sim::detector::DetectorDevice>>,
+        assist: Option<Arc<dyn mission::containment::AssistPublisher>>,
     ) -> Self {
         let mut nav = Navigator::new(
             robot_state.clone(),
@@ -75,6 +83,8 @@ impl Stack {
         Self {
             nav: Arc::new(Mutex::new(nav)),
             robot_state,
+            detector,
+            assist,
             trees: Mutex::new(TreeSet::default()),
             tick_no: AtomicU64::new(0),
         }
@@ -88,7 +98,12 @@ impl Stack {
             info!("[Sim/ugv] 任务 {:?} 已有树实例，只激活", task.id);
             return Ok(());
         }
-        let deps = TaskDeps { nav: self.nav.clone(), robot_state: self.robot_state.clone() };
+        let deps = TaskDeps {
+            nav: self.nav.clone(),
+            robot_state: self.robot_state.clone(),
+            detector: self.detector.clone(),
+            assist: self.assist.clone(),
+        };
         let tree = mission::build(&task.mission, &deps)?;
         ts.trees.insert(task.id, tree);
         ts.active = Some(task.id);
@@ -157,6 +172,8 @@ mod tests {
             Arc::new(ClusterInfoTable::new()),
             state.clone(),
             0.2,
+            None,
+            None,
             None,
         );
         (s, state)
@@ -241,7 +258,7 @@ mod tests {
             }
         }
         let state = Arc::new(RwLock::new(RobotState::default()));
-        let s = Stack::new(grid, Arc::new(ClusterInfoTable::new()), state.clone(), 0.2, None);
+        let s = Stack::new(grid, Arc::new(ClusterInfoTable::new()), state.clone(), 0.2, None, None, None);
         s.build(&goto_task(1, 12.0, 12.0)).await.expect("建树");
         set_pose(&state, 10.0, 10.0).await;
 
@@ -289,5 +306,35 @@ mod tests {
         let mut out = MotionOut::default();
         assert_eq!(s.tick(&mut frame(&mut out, 0)).await, None);
         assert_eq!(out.next_cell, None);
+    }
+
+    /// task_43 §五 验收 3：`detector = None` 时建 `Follow` 树成功，且**一拍 `Running`、不动**
+    /// （不终值 → 队列不会被弹走；`Follow` 只能靠 TASK_SET 替换或 `mission_count=0` 结束）。
+    /// 与 `follow.rs` 文档里 `ugv_sim/mod.rs::test_follow_tree_holds_without_detector` 交叉引用一致。
+    #[tokio::test]
+    async fn test_follow_tree_holds_without_detector() {
+        let grid = Arc::new(RwLock::new(OccupancyGrid::new()));
+        let table = Arc::new(ClusterInfoTable::new());
+        let state = Arc::new(RwLock::new(RobotState::default()));
+        let s = Stack::new(grid, table, state.clone(), 0.2, None, None, None);
+        set_pose(&state, 10.0, 10.0).await;
+
+        s.build(&QueuedTask { id: TaskId(1), mission: Mission::Follow { x: 0.0, y: 0.0 } })
+            .await
+            .expect("Follow 建树不得 Err");
+        assert_eq!(s.instance_count().await, 1, "建树后应恰一个实例");
+
+        for n in 0..3u64 {
+            let mut out = MotionOut::default();
+            let (id, st) = s.tick(&mut frame(&mut out, n)).await.expect("有活动树");
+            assert_eq!(id, TaskId(1));
+            assert_eq!(st, Status::Running, "第 {n} 拍 Follow 不得终值");
+            assert_eq!(out.next_cell, None, "无 detector → 原地 Hold，不给下一格");
+        }
+        assert_eq!(
+            s.nav.lock().await.status(),
+            nav::NavStatus::Idle,
+            "Hold 分支必须把 nav 目标清干净（状态回 Idle）"
+        );
     }
 }

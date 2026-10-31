@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-30
+//Modified Date ： 2026-10-31
 
 #![allow(non_snake_case)]
 
@@ -101,6 +101,8 @@ use crate::sim::uav_sim;
 use crate::sim::uav_sim::executor::{UavExecutor, DEADBAND_DEG, SPIN_DEG};
 use crate::sim::uav_sim::mission::containment::AssistPublisher;
 use crate::sim::ugv_sim;
+// 车栈的协助请求端口（task_43 §七，与机栈同名不同 trait —— 按口径 #1 各端自带一份）
+use crate::sim::ugv_sim::mission::containment::AssistPublisher as UgvAssistPublisher;
 // 车栈连续档位常量起别名：`DEADBAND_DEG` 已被上面机栈的同名常量占用（同名不同值，各自口径）
 use crate::sim::ugv_sim::executor::{
     UgvVelocityExecutor, ARC_MAX_DEG as UGV_ARC_MAX_DEG, DEADBAND_DEG as UGV_DEADBAND_DEG,
@@ -293,7 +295,7 @@ pub struct SimDeviceHandler {
     /// 世界链路句柄：`None` = 未配置 / `enabled = false`（此时门闩不生效，决策链照跑）
     world: OnceLock<WorldLinkHandle>,
     /// base 的能力容器（task_34 Step 4）：`start()` 里把相机 cap 推进 `device_caps`
-    /// → `spawn_lua_script` 遍历时注册出 Lua 表 `camera_sim`。
+    /// → `spawn_lua_script` 遍历时调用（现为空实现：Lua 表 `camera_sim` 已按 task_43 §二 #5 移除）。
     /// **只写 `device_caps`：不碰 `user_cmd_tx`、不碰控制口、不新增任何命令通路。**
     capabilities: Arc<Capabilities>,
 }
@@ -367,13 +369,16 @@ fn Select_Lidar(lidars: &[Arc<LidarSensor>]) -> Option<Arc<LidarSensor>> {
         .cloned()
 }
 
-/// 相机用哪个 `slot`（`camera_sim` 只能暴露**一个**，与急停只吃一个 lidar 同一取舍）
+/// 相机用哪个 `slot`（只决定 detector / 相机能力占位用哪**一个** camera，与急停只吃一个 lidar 同一取舍）
 ///
 /// 规则与 [`Select_Lidar`] 同法：**优先 slot 名以 `camera_` 开头的第一个，否则回退到声明顺序第一个**
-/// （纯前缀规则会让"有相机但 slot 不叫 camera_*"的车**永远没有 camera_sim** ——
+/// （纯前缀规则会让"有相机但 slot 不叫 camera_*"的车**永远没有可用相机** ——
 /// 静默失效比"用错一个"更危险）。
-/// 多于一个时打一条 `warn!`：脚本里只有 `camera_sim` 一个表名，不做 `camera_sim_<slot>` 之类的新别名
+/// 多于一个时打一条 `warn!`：只有一份相机能力占用位，不做 `camera_sim_<slot>` 之类的新别名
 /// （多相机不在本 task）。
+///
+/// 日志文案保留 `camera_sim` 字样：`Tool/sim_follow_test.py:1210` 用正则锚
+/// `\[camera\] camera_sim 使用 slot=… rate_hz=(\d+)`（`Tool/` 不在本步允许路径）。
 fn Select_Camera(set: &SensorSet) -> Option<Arc<CameraSensor>> {
     let cameras = set.Cameras();
     if cameras.len() > 1 {
@@ -418,6 +423,21 @@ impl AssistPublisher for NodeHandlePublisher {
             // 失败只限流 warn（通道满 = 丢一帧，目标下次移动再发；不影响树）
             Warn_Throttled("sim.uav.assist", 1000, || {
                 format!("[Sim/uav] 协助请求广播失败：{e}")
+            });
+        }
+    }
+}
+
+/// 同一个 `NodeHandlePublisher` 的**第二份 impl**（task_43 §五 / §七）：车栈 `Containment` 用。
+/// 方法体与机栈那份逐字相同（共用 `assist_frame` 纯函数），只有限流 key 与日志前缀按车/机分桶，
+/// 便于 Step 6 一眼看出是哪一侧发不出请求。
+impl UgvAssistPublisher for NodeHandlePublisher {
+    fn publish(&self, x: f32, y: f32) {
+        let frame = assist_frame(&self.local_peer_id, x, y);
+        if let Err(e) = self.node_handle.Gossipsub_Publish_Try(TOPIC_ROBOT_ASSIST_REQUEST, frame) {
+            // 失败只限流 warn（通道满 = 丢一帧，目标下次移动再发；不影响树）
+            Warn_Throttled("sim.ugv.assist", 1000, || {
+                format!("[Sim/ugv] 协助请求广播失败：{e}")
             });
         }
     }
@@ -538,7 +558,7 @@ impl DeviceHandler for SimDeviceHandler {
                         c.Params().rate_hz
                     ),
                     None => info!(
-                        "[camera] 无 camera 零件（未配置 sensor=\"camera\"）：Lua 里不会有 camera_sim"
+                        "[camera] 无 camera 零件（未配置 sensor=\"camera\"）：detector 不会启动"
                     ),
                 }
                 sensors = set.All().to_vec();
@@ -609,9 +629,16 @@ impl DeviceHandler for SimDeviceHandler {
         };
 
         // ---- 5.6) 任务栈（§12.6.5）：底盘名 → 车栈 / 机栈，二选一后全程转发
-        //      **必须放在 5.5 之后**：机栈的 `TaskDeps` 要 detector（task_37 Step 4 跟随）。
-        //      本块原先在 3.5，与 4)/5.5) 无任何相互依赖 → 纯代码下移，语义不变。
+        //      **必须放在 5.5 之后**：两栈的 `TaskDeps` 都要 detector（task_37 Step 4 机栈跟随；
+        //      task_43 §五 车栈跟随）。
         //      车栈订建图增量（`map_tx`），机栈不订（D6：真机两边都不订，sim 只有车栈订）
+        //
+        //      协助请求发布者（task_41 §5.3）：sysid = 本机 PeerId，与 POSE/MAP 广播同源。
+        //      task_43 §五：**提到 `match` 外只构造一次**，两栈共用同一实例（`Arc` 克隆）。
+        let assist_publisher = Arc::new(NodeHandlePublisher {
+            node_handle: self.node_handle.clone(),
+            local_peer_id: self.node_handle.Get_Local_Peer_Id().to_bytes(),
+        });
         let kind = Kind_Of_World(&world_name);
         let stack = match kind {
             StackKind::Ugv => TaskStack::Ugv(ugv_sim::Stack::new(
@@ -620,6 +647,8 @@ impl DeviceHandler for SimDeviceHandler {
                 self.robot.robot_state.clone(),
                 obstacle_inflation_radius,
                 Some(&self.robot.map_tx),
+                detector.clone(), // task_43 §五：车栈也真跟（None → 原地 Hold）
+                Some(assist_publisher.clone() as Arc<dyn UgvAssistPublisher>),
             )),
             StackKind::Uav => TaskStack::Uav(uav_sim::Stack::new(
                 self.robot.grid.clone(),
@@ -627,12 +656,8 @@ impl DeviceHandler for SimDeviceHandler {
                 self.robot.robot_state.clone(),
                 obstacle_inflation_radius,
                 None,
-                detector.clone(), // 车栈不传：ugv_sim 收到 Follow 走平凡树
-                // 协助请求发布者（task_41 §5.3）：sysid = 本机 PeerId，与 POSE/MAP 广播同源
-                Some(Arc::new(NodeHandlePublisher {
-                    node_handle: self.node_handle.clone(),
-                    local_peer_id: self.node_handle.Get_Local_Peer_Id().to_bytes(),
-                }) as Arc<dyn AssistPublisher>),
+                detector.clone(),
+                Some(assist_publisher as Arc<dyn AssistPublisher>),
             )),
         };
         // 规划时间预算（Task 39 §二）：`Stack::new` 不收预算（它的调用点不在本 step 允许路径内），
@@ -683,7 +708,7 @@ impl DeviceHandler for SimDeviceHandler {
             })
             .map_err(|_| "设备已启动".to_string())?;
         // ---- 6.5) 相机 cap 推进 `device_caps`（task_34 Step 4）
-        //          只写 base 的能力容器：Lua 表 `camera_sim` 由 `spawn_lua_script` 遍历时注册。
+        //          只写 base 的能力容器；`CameraSimCap::register_lua_caps` 现为空实现（task_43 §二 #5）。
         //          **不新增 `user_cmd_tx`、不碰控制口、不改 on_tick。**
         if let Some(cam) = camera {
             let cap: Arc<dyn DeviceCapability> = Arc::new(CameraSimCap::New(cam));
@@ -692,7 +717,7 @@ impl DeviceHandler for SimDeviceHandler {
                 // 锁中毒不 panic（与本 crate 其它锁同纪律），取回内层继续写
                 Err(poisoned) => poisoned.into_inner().push(cap),
             }
-            info!("[camera] camera_sim 已注入 Lua（capture() / info()）");
+            info!("[camera] 相机能力占位已登记（Lua 表 camera_sim 已移除，register_lua_caps 为空实现）");
         }
         info!("[Sim] 模拟设备启动（无硬件：决策链 + 底盘 + 传感器，动作经世界链路下发）");
         // ---- 7) 起控制口（**在 inner.set 之后**：注入的 Command 走到 device.reset() 时 inner 已就绪）

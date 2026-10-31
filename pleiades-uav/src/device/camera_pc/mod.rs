@@ -1,15 +1,17 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-31
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
 //! 开发机（电脑）USB 摄像头 sensor（Task 34 Step 1：由 2026-09-08 的 `device/camera/` 整体迁入，逻辑未改）
 //!
-//! 职责：抓一帧（NV12）→ 解码 RGB → 编码 JPEG，通过 `DeviceCapability` 把
-//! `camera_pc.capture()` / `camera_pc.info()` 注册进 Lua。调用方是 base 的 Lua 脚本
-//! （`exec program`），不是 uav 的 Rust 决策链。
+//! 职责：抓一帧（NV12）→ 解码 RGB → 编码 JPEG，供 Rust 侧取帧。
+//!
+//! **task_43 起 Lua 出口已移除**（口径 §二 #5：`camera_pc` 表随另外两张相机表一起删除，
+//! `programs/user/` 下 6 个相机脚本一并删除）：`DeviceCapability` 只保留空实现，
+//! 业务能力改由 [`Pc_Camera::latest_frame`] / [`Pc_Camera::capture`] 在 Rust 侧提供。
 //!
 //! 线程模型（Task 28 D4 的结构，task_37 Step 1 改为常转）：`open()` 起一个 `std::thread`
 //! 常驻线程，nokhwa 摄像头对象只在该线程内创建/使用（不跨线程）；worker 持 `Arc<Pc_Inner>`
@@ -19,7 +21,8 @@
 //! 用于 `info()` 的元数据。
 //!
 //! 与另一个相机 sensor（机载相机）的关系：**没有关系**。两个 sensor 各自一份实现、
-//! 各自一条打开流程、各自一个 Lua 表名，重复代码是刻意接受的代价（Task 34 硬要点 1）。
+//! 各自一条打开流程、各自一个 `DeviceCapability` 实现，重复代码是刻意接受的代价
+//! （Task 34 硬要点 1）。
 //! 因此本文件里不出现对方的模块名（验收 A5 要求两侧互不引用，连注释也不提）。
 //!
 //! Task 34 Step 1 相对迁移前的差异（逐项可对照 `tmp/task34/plan.md` §2.4）：
@@ -103,6 +106,11 @@ struct Pc_Open_Info {
 }
 
 /// `info()` 的返回值（字段名与另一侧 sensor / 仿真侧逐字一致；**不要加第五个字段**）。
+///
+/// task_43 起 Lua 出口已移除，本结构体只剩 `Info_Impl` 一个读取点（不再有 `Info_Table`）；
+/// 保留它是为了保住 `age_ms` 语义给后续 detector，因此整体标 `allow(dead_code)`
+/// （单靠函数级 allow 盖不住"字段从未被读"）。
+#[allow(dead_code)]
 struct Sensor_Info {
     width: u32,
     height: u32,
@@ -196,6 +204,9 @@ impl Pc_Inner {
     /// - 表示「距最近一次成功抓帧过了多久」；抓帧失败**不会**刷新它（失败不写 `last_frame`）；
     /// - **从未抓到帧时取 `0`**（不是 -1、也不是 u64::MAX）：四字段契约里没有「是否已有帧」位，
     ///   `0` 配合 `format = "none"` 表示「没有帧可谈」，且不会因 `u64 → i64` 溢出在 Lua 侧报错。
+    ///
+    /// task_43 起只服务 Rust 侧（Lua 表已删除），故标 `allow(dead_code)`。
+    #[allow(dead_code)]
     fn Info_Impl(&self) -> Sensor_Info {
         // 先拷出来（`Last_Frame: Copy`），守卫立刻释放：一次只持一把锁。
         let last = *Lock(&self.last_frame);
@@ -428,7 +439,7 @@ impl Pc_Camera {
     }
 
     /// 拍一张：发 Capture + await oneshot，返回 JPEG 字节。
-    /// 预留 Rust 侧 API（task_28 D3）；Lua 侧走 `register_lua_caps` → `capture_impl`。
+    /// 预留 Rust 侧 API（task_43 起 **Lua 出口已移除**，只有 Rust 调用方）。
     #[allow(dead_code)]
     pub async fn capture(&self) -> Result<Vec<u8>, String> {
         self.inner.capture_impl().await
@@ -453,38 +464,14 @@ impl Drop for Pc_Camera {
     }
 }
 
-/// 设备能力注册（uav 侧，实现 base 的 `DeviceCapability` trait）。
+/// 设备能力注册：**Lua 出口已移除**（task_43 §二 #5：`camera_uav` / `camera_pc` /
+/// `camera_sim` 三张表全删，`programs/user/` 下 6 个相机脚本一并删除）。
 ///
-/// Lua 表 `camera_pc` 有两个成员：
-/// - `capture()`：异步，返回 JPEG 二进制字符串；
-/// - `info()`：**同步**，返回 `{width, height, format, age_ms}`（永不抛错、永不返回 nil）。
-///
-/// 闭包只做薄胶水：`capture_impl()` + `lua.create_string(jpeg)`；`Info_Impl()` + `Info_Table()`。
+/// 保留空实现只为让 `device_caps` 的注入契约（`uav_bootstrap` 里
+/// `Arc<dyn DeviceCapability>`）原地不变 —— 业务能力改由 Rust 侧
+/// [`Pc_Camera::latest_frame`] / [`Pc_Camera::capture`] 提供，不再有 Lua 出口。
 impl DeviceCapability for Pc_Camera {
-    fn register_lua_caps(&self, lua: &mlua::Lua) -> mlua::Result<()> {
-        let inner = self.inner.clone();
-        let table = lua.create_table()?;
-        table.set(
-            "capture",
-            lua.create_async_function(move |lua, (): ()| {
-                let inner = inner.clone();
-                async move {
-                    let jpeg = inner.capture_impl().await.map_err(mlua::Error::runtime)?;
-                    lua.create_string(jpeg)
-                }
-            })?,
-        )?;
-
-        let info_inner = self.inner.clone();
-        table.set(
-            "info",
-            lua.create_function(move |lua, (): ()| {
-                let info = info_inner.Info_Impl();
-                Info_Table(lua, &info)
-            })?,
-        )?;
-
-        lua.globals().set("camera_pc", table)?;
+    fn register_lua_caps(&self, _lua: &mlua::Lua) -> mlua::Result<()> {
         Ok(())
     }
 }
@@ -557,19 +544,6 @@ fn Format_Token(format: FrameFormat) -> &'static str {
         FrameFormat::RAWRGB => "RGB",
         FrameFormat::RAWBGR => "BGR",
     }
-}
-
-/// `Sensor_Info` → Lua table：**只做类型转换**（`as i64` + `set`），字段名逐字固定。
-///
-/// 数值一律转 `i64`：Lua 5.4 的 `mlua` 对 `u64` 超出 `i64::MAX` 会报错，
-/// 而 `age_ms` 的量级足以触发这个问题。
-fn Info_Table(lua: &mlua::Lua, info: &Sensor_Info) -> mlua::Result<mlua::Table> {
-    let table = lua.create_table()?;
-    table.set("width", info.width as i64)?;
-    table.set("height", info.height as i64)?;
-    table.set("format", info.format.clone())?;
-    table.set("age_ms", info.age_ms)?;
-    Ok(table)
 }
 
 /// 取锁，毒化（某线程 panic 过）时恢复内部数据而不是二次 panic（只用于 Step 2 新增状态）。
@@ -879,190 +853,5 @@ mod tests {
         assert!(first >= 40, "同一起点测得至少 40ms：{first}");
         assert!(second >= first, "同一起点两次测量必须单调不减");
         assert!(Age_Ms(Instant::now()) >= 0, "刚打的戳不该是负数");
-    }
-
-    #[test]
-    fn lua_info_table_matches_contract() {
-        let lua = mlua::Lua::new();
-        let info = Sensor_Info {
-            width: 1280,
-            height: 720,
-            format: "NV12".to_string(),
-            age_ms: 42,
-        };
-        let table = Info_Table(&lua, &info).expect("info 表应能构造");
-        lua.globals().set("info", table).expect("info 应能挂到全局");
-
-        // 字段数必须恰好 4（多一个少一个都算破坏契约）
-        let count: i64 = lua
-            .load("local n = 0 for _ in pairs(info) do n = n + 1 end return n")
-            .eval()
-            .expect("统计字段数应成功");
-        assert_eq!(count, 4, "契约恰好四个字段");
-
-        let (width, height): (i64, i64) = lua
-            .load("return info.width, info.height")
-            .eval()
-            .expect("宽高应是整数");
-        let format: String = lua
-            .load("return info.format")
-            .eval()
-            .expect("format 应是字符串");
-        let age_ms: i64 = lua
-            .load("return info.age_ms")
-            .eval()
-            .expect("age_ms 应是整数");
-        assert_eq!((width, height), (1280, 720));
-        assert_eq!(format, "NV12");
-        assert_eq!(age_ms, 42);
-
-        // 数值字段必须是 Lua integer（用 u64 会溢出 / 变成 float，脚本拼字符串就能看出差别）
-        let (width_kind, height_kind, age_kind): (String, String, String) = lua
-            .load("return math.type(info.width), math.type(info.height), math.type(info.age_ms)")
-            .eval()
-            .expect("math.type 应可调用");
-        assert_eq!(width_kind, "integer", "width 必须是 Lua integer");
-        assert_eq!(height_kind, "integer", "height 必须是 Lua integer");
-        assert_eq!(age_kind, "integer", "age_ms 必须是 Lua integer");
-    }
-
-    #[test]
-    fn camera_photo_script_parses() {
-        // 本机没有 lua / luac 二进制（step.md 验收允许），用仓库自带的 mlua 编译脚本兜底：
-        // 与 base `ProgramRegistry::parse_script` 的加载方式一致（load + eval::<()>）。
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../programs/user/camera_photo.lua");
-        let script = std::fs::read_to_string(path).expect("camera_photo.lua 应存在且可读");
-        let lua = mlua::Lua::new();
-        lua.load(&script)
-            .eval::<()>()
-            .expect("camera_photo.lua 必须是合法的 Lua 5.4");
-
-        let globals = lua.globals();
-        let command: String = globals.get("COMMAND").expect("COMMAND 应存在");
-        assert_eq!(command, "camera_photo");
-        let description: String = globals.get("DESCRIPTION").expect("DESCRIPTION 应存在");
-        assert!(!description.is_empty(), "DESCRIPTION 不应为空");
-        let execute_kind: String = lua
-            .load("return type(execute)")
-            .eval()
-            .expect("type(execute) 应可调用");
-        assert_eq!(execute_kind, "function", "execute 必须是函数");
-    }
-
-    /// 桩 `caps`：只实现脚本用到的两个成员，并把结果记在全局表里供断言。
-    const STUB_CAPS: &str = r#"
-        PRINTS = {}
-        WROTE = { size = 0, released = false, path = "" }
-        caps = {
-            print = function(text) PRINTS[#PRINTS + 1] = tostring(text) end,
-            storage_acquire_write = function(name)
-                return {
-                    write = function(self, bytes) WROTE.size = #bytes end,
-                    path = function(self) return "/tmp/orion-stub/" .. name end,
-                    release = function(self) WROTE.released = true end,
-                }
-            end,
-        }
-    "#;
-
-    /// 一个只含脚本 `COMMAND`/`execute` 定义（不执行）+ 桩 caps 的干净 Lua 状态
-    fn Lua_With_Script_And_Stub_Caps() -> mlua::Lua {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../programs/user/camera_photo.lua");
-        let script = std::fs::read_to_string(path).expect("camera_photo.lua 应存在且可读");
-        let lua = mlua::Lua::new();
-        lua.load(&script)
-            .eval::<()>()
-            .expect("camera_photo.lua 必须是合法的 Lua 5.4");
-        lua.load(STUB_CAPS).eval::<()>().expect("桩 caps 应能建立");
-        lua
-    }
-
-    #[test]
-    fn photo_script_runtime_with_stub_caps() {
-        // 场景 1：只有 camera_pc 存在，capture() 返回 10 字节 → "ok" + 落盘 + 已 release
-        let lua = Lua_With_Script_And_Stub_Caps();
-        lua.load(
-            r#"
-            camera_pc = {
-                info = function()
-                    return { width = 640, height = 480, format = "NV12", age_ms = 0 }
-                end,
-                capture = function() return string.rep("J", 10) end,
-            }
-            "#,
-        )
-        .eval::<()>()
-        .expect("桩 sensor 应能建立");
-        let (result, size, released, prints): (String, i64, bool, i64) = lua
-            .load(
-                r#"
-                local result = execute({})
-                return result, WROTE.size, WROTE.released, #PRINTS
-                "#,
-            )
-            .eval()
-            .expect("execute 应能跑完");
-        assert_eq!(result, "ok");
-        assert_eq!(size, 10, "写盘字节数应与 capture() 返回一致");
-        assert!(released, "handle:release() 必须被调用");
-        assert!(prints >= 3, "至少打印 sensor/info/字节数 三行：{prints}");
-
-        // 场景 2：三个表都不存在 → 明确报错 + 返回 "no-camera"（不是抛错）
-        let lua = Lua_With_Script_And_Stub_Caps();
-        let result: String = lua.load("return execute({})").eval().expect("execute 应能跑完");
-        assert_eq!(result, "no-camera");
-
-        // 场景 3：仿真 sensor 与开发机 sensor 同时存在 → 按内置顺序取前者；
-        // 它 capture() 返回 nil 时必须归一化成 "no-jpeg"，不能因为 #nil 把脚本炸掉。
-        let lua = Lua_With_Script_And_Stub_Caps();
-        lua.load(
-            r#"
-            camera_sim = {
-                info = function()
-                    return { width = 1280, height = 720, format = "MJPG", age_ms = 33 }
-                end,
-                capture = function() return nil end,
-            }
-            camera_pc = {
-                info = function()
-                    return { width = 640, height = 480, format = "NV12", age_ms = 0 }
-                end,
-                capture = function() return string.rep("J", 10) end,
-            }
-            "#,
-        )
-        .eval::<()>()
-        .expect("桩 sensor 应能建立");
-        let result: String = lua.load("return execute({})").eval().expect("execute 应能跑完");
-        assert_eq!(result, "no-jpeg", "nil 帧必须归一化成可读错误，不能 #nil");
-        // 探测顺序：前面那个 sensor 优先，且日志里点明了 sensor 名
-        let joined: String = lua
-            .load(r"return table.concat(PRINTS, '\n')")
-            .eval()
-            .expect("PRINTS 应能拼接");
-        assert!(joined.contains("sensor=camera_sim"), "{joined}");
-        assert!(
-            joined.contains("info: width=1280 height=720 format=MJPG age_ms=33"),
-            "{joined}"
-        );
-        assert!(
-            !joined.contains("sensor=camera_pc"),
-            "探测顺序错了，竟然选了后一个 sensor：{joined}"
-        );
-
-        // 场景 4：capture() 返回 0 字节 → "empty-jpeg"
-        let lua = Lua_With_Script_And_Stub_Caps();
-        lua.load(
-            r#"
-            camera_pc = {
-                info = function() return { width = 4, height = 4, format = "none", age_ms = 0 } end,
-                capture = function() return "" end,
-            }
-            "#,
-        )
-        .eval::<()>()
-        .expect("桩 sensor 应能建立");
-        let result: String = lua.load("return execute({})").eval().expect("execute 应能跑完");
-        assert_eq!(result, "empty-jpeg");
     }
 }

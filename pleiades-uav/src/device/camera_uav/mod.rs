@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-24
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-31
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -29,8 +29,9 @@
 //! 2. **抓帧超时不 `join` worker**：worker 可能永久卡在驱动 `frame()` 里，`join` 会挂死进程；
 //! 3. 所有失败返回 `Err(String)` + 排查提示，**不 panic / 不 unwrap / 不 expect**。
 //!
-//! Task 34 Step 2 增补：Lua 表多一个**同步** `info()`，返回
-//! `{width, height, format, age_ms}`；数据来源三级回退
+//! Task 34 Step 2 增补（**task_43 起 Lua 出口已移除**，口径 §二 #5）：`info()` 的
+//! `{width, height, format, age_ms}` 四字段语义**保留在 `Info_Impl`**（Rust 侧，
+//! 供将来的 detector / 诊断用），只是不再注册成 Lua 表；数据来源三级回退
 //! 「最近一次成功抓帧 → 打开时协商到的格式 → `[camera_uav].resolutions` 首项
 //! （显式空列表则回落 640x480）」。
 //!
@@ -141,6 +142,11 @@ struct Last_Frame {
 }
 
 /// `info()` 的返回值（字段与另一侧 sensor 逐字一致；**不要加第五个字段**）。
+///
+/// task_43 起 Lua 出口已移除，本结构体只剩 `Info_Impl` 一个读取点（不再有 `Info_Table`）；
+/// 保留它是为了保住 `age_ms` 语义给后续 detector，因此整体标 `allow(dead_code)`
+/// （单靠函数级 allow 盖不住"字段从未被读"）。
+#[allow(dead_code)]
 struct Sensor_Info {
     width: u32,
     height: u32,
@@ -272,6 +278,9 @@ impl Uav_Inner {
     ///   （失败不写 `last_frame`，`age_ms` 会继续变大，正是想要的表现）；
     /// - **从未抓到帧时取 `0`**（不是 -1、也不是 u64::MAX）：四字段契约里没有「是否已有帧」位，
     ///   `0` 配合 `format = "none"` 表示「没有帧可谈」，且不会因 `u64 → i64` 溢出在 Lua 侧报错。
+    ///
+    /// task_43 起只服务 Rust 侧（Lua 表已删除），故标 `allow(dead_code)`。
+    #[allow(dead_code)]
     fn Info_Impl(&self) -> Sensor_Info {
         // 先拷出来（`Last_Frame: Copy`），守卫立刻释放：一次只持一把锁。
         let last = *Lock(&self.last_frame);
@@ -434,7 +443,7 @@ impl Uav_Camera {
 
     /// 取最新一帧的 JPEG 字节（`open_stream()` 后 `frame()` 即最新帧，不额外缓冲）。
     ///
-    /// 预留 Rust 侧 API；Lua 侧走 [`DeviceCapability::register_lua_caps`] 的 `camera_uav.capture`。
+    /// 预留 Rust 侧 API（task_43 起 **Lua 出口已移除**，只有 Rust 调用方）。
     #[allow(dead_code)]
     pub async fn Capture(&self) -> Result<Vec<u8>, String> {
         self.inner.Capture_Impl().await
@@ -486,35 +495,14 @@ impl Drop for Uav_Camera {
     }
 }
 
-/// 设备能力注册：Lua 表 `camera_uav` 有两个成员——
-/// `capture()`（异步，返回 JPEG 二进制字符串）与
-/// `info()`（**同步**，返回 `{width, height, format, age_ms}`，永不抛错、永不返回 nil）。
-/// 闭包只做薄胶水：`Capture_Impl()` + `lua.create_string(jpeg)`；`Info_Impl()` + `Info_Table()`。
+/// 设备能力注册：**Lua 出口已移除**（task_43 §二 #5：`camera_uav` / `camera_pc` /
+/// `camera_sim` 三张表全删，`programs/user/` 下 6 个相机脚本一并删除）。
+///
+/// 保留空实现只为让 `device_caps` 的注入契约（`uav_bootstrap` 里
+/// `Arc<dyn DeviceCapability>`）原地不变 —— 业务能力改由 Rust 侧
+/// [`Uav_Camera::latest_frame`] 提供，不再有 Lua 出口。
 impl DeviceCapability for Uav_Camera {
-    fn register_lua_caps(&self, lua: &mlua::Lua) -> mlua::Result<()> {
-        let inner = self.inner.clone();
-        let table = lua.create_table()?;
-        table.set(
-            "capture",
-            lua.create_async_function(move |lua, (): ()| {
-                let inner = inner.clone();
-                async move {
-                    let jpeg = inner.Capture_Impl().await.map_err(mlua::Error::runtime)?;
-                    lua.create_string(jpeg)
-                }
-            })?,
-        )?;
-
-        let info_inner = self.inner.clone();
-        table.set(
-            "info",
-            lua.create_function(move |lua, (): ()| {
-                let info = info_inner.Info_Impl();
-                Info_Table(lua, &info)
-            })?,
-        )?;
-
-        lua.globals().set("camera_uav", table)?;
+    fn register_lua_caps(&self, _lua: &mlua::Lua) -> mlua::Result<()> {
         Ok(())
     }
 }
@@ -853,19 +841,6 @@ fn Format_Token(format: FrameFormat) -> &'static str {
     }
 }
 
-/// `Sensor_Info` → Lua table：**只做类型转换**（`as i64` + `set`），字段名逐字固定。
-///
-/// 数值一律转 `i64`：Lua 5.4 的 `mlua` 对 `u64` 超出 `i64::MAX` 会报错，
-/// 而 `age_ms` 的量级足以触发这个问题。
-fn Info_Table(lua: &mlua::Lua, info: &Sensor_Info) -> mlua::Result<mlua::Table> {
-    let table = lua.create_table()?;
-    table.set("width", info.width as i64)?;
-    table.set("height", info.height as i64)?;
-    table.set("format", info.format.clone())?;
-    table.set("age_ms", info.age_ms)?;
-    Ok(table)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,48 +993,6 @@ mod tests {
         assert_eq!((info.width, info.height), (1920, 1080), "应取最近帧的宽高");
         assert_eq!(info.format, "MJPG", "MJPEG 的对外写法是 MJPG");
         assert!(info.age_ms >= 25, "帧龄至少 25ms（单调测量）：{}", info.age_ms);
-    }
-
-    #[test]
-    fn lua_info_table_matches_contract() {
-        let lua = mlua::Lua::new();
-        let info = Sensor_Info {
-            width: 640,
-            height: 480,
-            format: "MJPG".to_string(),
-            age_ms: 7,
-        };
-        let table = Info_Table(&lua, &info).expect("info 表应能构造");
-        lua.globals().set("info", table).expect("info 应能挂到全局");
-
-        // 字段数必须恰好 4（与另一侧 sensor 的契约逐字一致）
-        let count: i64 = lua
-            .load("local n = 0 for _ in pairs(info) do n = n + 1 end return n")
-            .eval()
-            .expect("统计字段数应成功");
-        assert_eq!(count, 4, "契约恰好四个字段");
-
-        let (width, height): (i64, i64) = lua
-            .load("return info.width, info.height")
-            .eval()
-            .expect("宽高应是整数");
-        let format: String = lua
-            .load("return info.format")
-            .eval()
-            .expect("format 应是字符串");
-        let age_ms: i64 = lua
-            .load("return info.age_ms")
-            .eval()
-            .expect("age_ms 应是整数");
-        assert_eq!((width, height), (640, 480));
-        assert_eq!(format, "MJPG");
-        assert_eq!(age_ms, 7);
-
-        let age_kind: String = lua
-            .load("return math.type(info.age_ms)")
-            .eval()
-            .expect("math.type 应可调用");
-        assert_eq!(age_kind, "integer", "age_ms 必须是 Lua integer");
     }
 
     /// 构造一个只有 `path` 有意义的配置（其余字段全走缺省）

@@ -2,6 +2,8 @@
 
 本文档面向 Lua 脚本开发者，列出系统中所有可用的能力函数。
 
+> 注（task_43）：设备相机的 Lua 出口已全部移除 —— `camera_uav` / `camera_pc` / `camera_sim` 三张表与 `programs/user/` 下 6 个相机脚本一并删除；取帧改由 Rust 侧 `latest_frame()` 提供。
+
 > 注册实现：`pleiades-base/src/VM/capability_binding.rs`（`register_caps` / `register_storage_caps` / `register_network_caps` / `register_ml_caps` / `register_webui_caps` / `register_logging_caps`）+ `pleiades-base/src/VM/local_stream.rs`（`register_local_stream_caps`）。
 
 ---

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-10-31
 
 //! UAV（机）设备装配（Task 23 C0：从 base 的 robot_bootstrap 拆出）
 //!
@@ -66,7 +66,7 @@ pub async fn uav_bootstrap(
                     .unwrap()
                     .push(camera as Arc<dyn DeviceCapability>);
                 info!(
-                    "[UAV] sensor=camera_pc 已打开（耗时 {elapsed_ms}ms）：{describe}；camera_pc.capture 已注册到 Lua"
+                    "[UAV] sensor=camera_pc 已打开（耗时 {elapsed_ms}ms）：{describe}"
                 );
             }
             Err(e) => warn!(
@@ -105,7 +105,7 @@ pub async fn uav_bootstrap(
                                 device_info.format_lines.join("\n")
                             );
                             info!(
-                                "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms）：设备「{}」（index {}）选定 {}，理由：{}；{}；camera_uav.capture 已注册到 Lua",
+                                "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms）：设备「{}」（index {}）选定 {}，理由：{}；{}",
                                 device_info.name,
                                 device_info.index,
                                 Format_Line(device_info.format),
@@ -114,7 +114,7 @@ pub async fn uav_bootstrap(
                             );
                         }
                         None => info!(
-                            "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms，未取到设备信息）；{}；camera_uav.capture 已注册到 Lua",
+                            "[UAV] sensor=camera_uav 已打开（耗时 {elapsed_ms}ms，未取到设备信息）；{}",
                             camera.Describe_Stream()
                         ),
                     }

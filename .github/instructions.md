@@ -13,7 +13,7 @@ agent必须严格遵守以下规则
 - `Task/` — Robot 任务文件
 - `Workbook/` — Robot 工作记录
 - Robot 相关的 Lua 绑定（`pleiades-base/src/VM/capability_binding.rs` 中 robot 部分）
-- Robot 相关的测试脚本和工具（`programs/user/test_camera.lua`、`programs/user/yolo_*.lua`、`Tool/yolo_viewer.html`、`Tool/test_lidar.py`）
+- Robot 相关的测试脚本和工具（`Tool/yolo_viewer.html`、`Tool/test_lidar.py`）
 
 **禁止在 `Pleiades-Orion` 分支上修改以下内容**（这些由 `ML_review` 分支负责）：
 - ML_Engine 推理引擎
