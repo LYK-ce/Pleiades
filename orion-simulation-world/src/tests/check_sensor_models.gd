@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-23
-# Modified Date ： 2026-10-29
+# Modified Date ： 2026-10-31
 #
 # task_33 Step 1 — 传感器 / 底盘模型资产自检（29 项断言）。
 # 用法：timeout 200 godot --headless --path orion-simulation-world --fixed-fps 60 \
@@ -27,7 +27,7 @@ extends SceneTree
 ## ── 资产路径 ──────────────────────────────────────────────
 const LIDAR_GLB := "res://assets/sensors/lidar_tmini.glb"
 const CAMERA_GLB := "res://assets/sensors/camera_module.glb"
-const UGV_GLB := "res://assets/chassis/ugv_chassis.glb"
+const UGV_GLB := "res://assets/chassis/ugv_m1.glb"   # task_42 Step 3：自建（Blender），AABB 不变
 const UAV_GLB := "res://assets/chassis/uav_quadrotor.glb"   # task_40 Step 5：下载件（Poly Pizza，CC BY 3.0），不经 build_models.py
 
 ## ── 期望 AABB（Godot 轴序：x 长 / y 高 / z 宽，米）──────────

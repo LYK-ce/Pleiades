@@ -106,13 +106,13 @@ orion-simulation-world/
     ├── README.md                 #   目录边界说明：代码与场景一律 src/
     ├── uav_quadrotor_lowpoly.glb #   四旋翼整机低模（0.64 × 0.14 × 0.64；原点 = 底面中心）
     ├── ugv_x3plus_lowpoly.glb    #   旧 UGV 外观（保留不删，回退用；task_33 Step 3 起 `ModelUGV`
-    │                             #     改用 `chassis/ugv_chassis.glb`）
+    │                             #     改用 `chassis/ugv_m1.glb`（task_42 Step 3））
     ├── sensors/                  #   [task_33 Step 1] 传感器模型（纯视觉，无碰撞体）；
     │                             #     Step 3 起由 `Lidar2D.tscn` / `CameraSensor.tscn` 的 `Body` 静态挂载
     │   ├── lidar_tmini.glb       #     2D 激光雷达：⌀0.080 × 高 0.054；原点 = 扫描面中心
     │   └── camera_module.glb     #     相机模组：0.055 × 0.036 × 0.030；原点 = 镜片前表面中心
     ├── chassis/                  #   [task_33 Step 1] 底盘模型
-    │   └── ugv_chassis.glb       #     UGV 外观：0.30 × 0.25 × 0.25；原点 = 底面中心、车头 +x
+    │   └── ugv_m1.glb           #     UGV 外观（**自有资产**，task_42 Step 3）：0.30 × 0.25 × 0.25；原点 = 底面中心、车头 +x
     └── humans/                   #   [human_model Step 4] 人形资产（**只放最终选用 + 1 个备选**）
         ├── README.md             #     来源 URL / 许可 / 处理方式（单位·缩放·朝向·贴图·三角数）/ 摆位 / 换备选方法
         ├── LICENSE_renderpeople.txt  # Renderpeople 免费页条款原文（883 B；与 tmp 侧原件逐字节相同）
@@ -482,7 +482,7 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 |---|---|---|---|---|---|---|---|
 | 1 | `src/scenes/World.tscn` | `Node3D` | `src/world/World.gd` | 根场景：地面 / 体素 / 环境 / 容器 | 2 | 主场景（`run/main_scene`） | 引擎 |
 | 2 | `src/scenes/ObserverCamera.tscn` | `Camera3D` | `src/camera/ObserverCamera.gd` | 观察者相机（自由 / 环绕 / 跟随） | 3 | `World/ObserverCamera` | 静态实例 |
-| 3 | `src/scenes/Vehicle.tscn` | `CharacterBody3D` | `src/vehicle/Vehicle.gd` | avatar 身体：物理 + 装配接口；`ModelUGV = assets/chassis/ugv_chassis.glb`（模型 = 碰撞盒，D11） | 4 ✅ | — | `WebSocketManager` → `World/Vehicles` |
+| 3 | `src/scenes/Vehicle.tscn` | `CharacterBody3D` | `src/vehicle/Vehicle.gd` | avatar 身体：物理 + 装配接口；`ModelUGV = assets/chassis/ugv_m1.glb`（模型 = 碰撞盒，D11） | 4 ✅ | — | `WebSocketManager` → `World/Vehicles` |
 | 4 | `src/scenes/chassis/DiffDrive.tscn` | `Node3D` | `src/chassis/DiffDrive.gd` | 差速底盘（`GROUNDED`） | 5 ✅ | — | `Vehicle.ApplyChassis()` → `Vehicle/Chassis` |
 | 5 | `src/scenes/WebSocketManager.tscn` | `Node` | `src/net/WebSocketManager.gd` | WS 服务端：装配 + 收发 | 6 ✅ | `World/Systems/WebSocketManager` | 静态实例 |
 | 6 | `src/scenes/chassis/Quadrotor.tscn` | `Node3D` | `src/chassis/Quadrotor.gd` | 四旋翼底盘（`FLOATING`） | 7 ✅ | — | `Vehicle.ApplyChassis()` → `Vehicle/Chassis` |
@@ -893,8 +893,8 @@ Vehicle (CharacterBody3D)            script: res://src/vehicle/Vehicle.gd
 ├── CollisionShape3D                 position=(0, 0.125, 0)；占位 BoxShape3D(0.30, 0.25, 0.25)（**唯一碰撞体**）
 ├── Chassis (Node3D)                 ← 底盘挂载点（运行时**至多一个**子节点）
 ├── Sensors (Node3D)                 ← 传感器挂载点（运行时子节点名 = slot）
-├── ModelUGV (Node3D)                instance res://assets/chassis/ugv_chassis.glb；visible=false（task_33 Step 3 起）
-│                                    ↑ 子树 9 个节点：Hull / NosePlate / Cabin / Roof + WheelFL/FR/RL/RR
+├── ModelUGV (Node3D)                instance res://assets/chassis/ugv_m1.glb；visible=false（task_42 Step 3 起）
+│                                    ↑ 子树 16 个节点：Hull / NosePlate / FrontCamera / Deck / Roof / Lidar(+LidarBand) / RearPanel / SideArmorL,R / NoseLed + WheelFL/FR/RL/RR
 └── ModelUAV (Node3D)                instance res://assets/uav_quadrotor_lowpoly.glb；visible=false
 ```
 
@@ -907,7 +907,7 @@ Vehicle (CharacterBody3D)            script: res://src/vehicle/Vehicle.gd
 
 | 项 | 值 | 依据 |
 |---|---|---|
-| `ModelUGV` 场景 | `res://assets/chassis/ugv_chassis.glb`（旧 `ugv_x3plus_lowpoly.glb` **保留不删**，回退用） | task_33 Step 1 建模 |
+| `ModelUGV` 场景 | `res://assets/chassis/ugv_m1.glb`（**自有资产**，task_42 Step 3 自建；旧 `ugv_chassis.glb` 已 `git rm`，git 可回溯） | task_42 Step 3 建模 |
 | 模型 AABB（Vehicle 局部系） | `P(-0.15, 0.00, -0.125)` `S(0.30, 0.25, 0.25)` | `check_models` 的 `M3-ugv-aabb` / `M3b-ugv-model-equals-hull` |
 | 碰撞盒 | `BoxShape3D(0.30, 0.25, 0.25)`，`CollisionShape3D.position = (0, 0.125, 0)` | `DiffDrive` 默认 `wheel_base 0.30 / height 0.25 / track_width 0.25` → `ApplyBodySize()` |
 | 世界 `y` 区间 | 模型与碰撞盒**都是** `y ∈ [0, 0.25]`（原点 = 底面中心） | 同上 |
@@ -936,7 +936,7 @@ signal sensor_attached(slot: String, sensor: Node)  # 传感器挂载完成
 @export var collision_shape: CollisionShape3D = null
 @export var chassis_root: Node3D = null
 @export var sensors_root: Node3D = null
-@export var model_ugv: Node3D = null      # ModelUGV：assets/chassis/ugv_chassis.glb 实例（task_33 Step 3 起）
+@export var model_ugv: Node3D = null      # ModelUGV：assets/chassis/ugv_m1.glb 实例（task_42 Step 3 起）
 @export var model_uav: Node3D = null      # ModelUAV：uav_quadrotor_lowpoly.glb 实例
 
 var _chassis: Node3D = null          # 底盘策略节点（Chassis 的唯一子节点）
@@ -1065,7 +1065,7 @@ func Step(current_velocity: Vector3, delta: float) -> Dictionary # {velocity: Ve
 - `pct = clamp(speed, 0, 100) / 100.0`（`speed` 是百分比，对应 §六 的 `"speed": 50`）。
 - **速度环在世界侧**（§6.3-1，与真机 STM32 内部跑速度环同构）：线速度与角速度按加速度上限斜坡逼近目标（`max_accel ≈ 3 m/s²`、`max_yaw_accel ≈ 180 °/s²`），再 `clamp` 到 `max_speed` / `max_turn_rate`。
 - 车体速度：`velocity = global_basis * Vector3(v, 0, 0)`（**前进轴 = 局部 +X**，与 `rotation.y = -yaw` 自洽）。
-- 默认参数：`{max_speed: 1.5, max_turn_rate: 90.0, wheel_base: 0.30, track_width: 0.25, height: 0.25}`；碰撞形状 `BoxShape3D(wheel_base, height, track_width)`（Godot **X=前**、Z=横；与 `src/scenes/Vehicle.tscn` 占位形状 `(0.30, 0.25, 0.25)` 一致）。**task_33 Step 3 起 5 个几何默认值 = `ugv_chassis.glb` 的 AABB**（D11：模型 = 碰撞盒）。
+- 默认参数：`{max_speed: 1.5, max_turn_rate: 90.0, wheel_base: 0.30, track_width: 0.25, height: 0.25}`；碰撞形状 `BoxShape3D(wheel_base, height, track_width)`（Godot **X=前**、Z=横；与 `src/scenes/Vehicle.tscn` 占位形状 `(0.30, 0.25, 0.25)` 一致）。**task_33 Step 3 起 5 个几何默认值 = `ugv_m1.glb` 的 AABB**（D11：模型 = 碰撞盒；task_42 Step 3 起外观件为 `ugv_m1.glb`，AABB 逐轴不变）。
 - `Configure()` 设 `motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED`，`floor_snap_length` 用默认。
 
 由 `Vehicle.ApplyChassis("diff_drive_ugv", params)` 实例化并挂在 `Vehicle/Chassis`；换底盘先 `queue_free()` 旧节点。
@@ -2115,7 +2115,7 @@ World.tscn
 
 组件场景自身的静态 instance（task_33 Step 3，随组件加载、无运行时代码）：
 Vehicle.tscn
-  └─ ModelUGV   instance res://assets/chassis/ugv_chassis.glb            → Vehicle/ModelUGV（visible=false，装配后显示）
+  └─ ModelUGV   instance res://assets/chassis/ugv_m1.glb                → Vehicle/ModelUGV（visible=false，装配后显示）
 Lidar2D.tscn
   └─ Body       instance res://assets/sensors/lidar_tmini.glb            → <slot>/Body（identity，随场景可见）
 CameraSensor.tscn
@@ -2436,7 +2436,7 @@ const DEFAULTS := {
 
 > `DEFAULTS["diff_drive_ugv"]` 的 5 个值必须与 `DiffDrive.GetDefaultParams()` **逐键一致**（`check_diff_drive` 的
 > `default-params` 断言直接比对两份字典）。task_33 Step 3 起其中的几何三项（`wheel_base 0.30` / `track_width 0.25` /
-> `height 0.25`）= `assets/chassis/ugv_chassis.glb` 的 AABB（D11：模型 = 碰撞盒）。
+> `height 0.25`）= `assets/chassis/ugv_m1.glb` 的 AABB（task_42 Step 3 起；与旧 `ugv_chassis.glb` 逐轴相同，D11：模型 = 碰撞盒）。
 
 > **`pedestrian` 是"特殊底盘"（task_35 Step 1）**：`DEFAULTS["pedestrian"]` = `{max_speed 1.26, max_turn_rate 180.0}`
 > 必须与 `Pedestrian.GetDefaultParams()` **逐键一致**（`check_pedestrian` 的 `default-params` 断言三处一起比对：
@@ -2643,7 +2643,7 @@ Modified Date ： YYYY-MM-DD
 |---|---|---|
 | 传感器 | **只有 `lidar_2d`**（D6），**外观模型已接入**（task_33 Step 3） | `imu` / `gnss` **不做**（不是零件、也不发消息）：位姿由 `pose` 文本消息提供，见 §8.1-8 / §9.1 E23。`Lidar2D` / `CameraSensor` 两个场景已挂 `Body`（`lidar_tmini.glb` / `camera_module.glb`，**纯视觉、无碰撞**，E27）；`SensorCatalog` 仍只登记 `lidar_2d`（相机不进目录） |
 | 位姿下行 | `pose`（10 Hz，走底盘连接） | task_31 Step 1；**理想真值**，无噪声 / 无延迟 / 无丢包；`z` 由世界给（UGV `0.0` / UAV `2.5`），消费方不得假设 `z==0`；`vz` 不上线 |
-| 底盘 | `diff_drive_ugv` / `quadrotor_uav` 两种（D6） | 目录外名字直接拒绝。`diff_drive_ugv` 的几何默认值 = `ugv_chassis.glb` 的 AABB **`0.30 × 0.25 × 0.25`**（D11：模型 = 碰撞盒，task_33 Step 3）；车体截面由 `0.16/0.24` 变 `0.25/0.25` **会改变贴墙 / 绕行 / 急停余量**（同样的墙面，车头更早接触），goto 冒烟需按新尺寸复核 |
+| 底盘 | `diff_drive_ugv` / `quadrotor_uav` 两种（D6） | 目录外名字直接拒绝。`diff_drive_ugv` 的几何默认值 = `ugv_m1.glb` 的 AABB **`0.30 × 0.25 × 0.25`**（D11：模型 = 碰撞盒，task_33 Step 3）；车体截面由 `0.16/0.24` 变 `0.25/0.25` **会改变贴墙 / 绕行 / 急停余量**（同样的墙面，车头更早接触），goto 冒烟需按新尺寸复核 |
 | 世界边界 | **可见 2 m 体素矮墙 + 不可见 32 m 空气墙 + 32 m 顶盖**（空气墙在 layer 1，与地面同层） | task_32 Step 2；矮墙只作视觉 / 近距障碍，真正的硬边界是空气墙：20 m/s 四面冲撞 10 s 与 5 m/s 持续爬升 10 s 都出不去（`src/tests/check_bounds.gd` 的 B2~B6）；雷达贴边时会把空气墙扫成静态障碍 → SLAM 地图边缘出现"墙"，**预期行为**（task_32 §三.5-3）。另：UAV 还有 `[0, 31.8]` **软件 clamp 兜底**（`Quadrotor.ClampAltitude()`，task_32 Step 3），即使物理失效也飞不出 32 m 顶盖 |
 | 静态人物 | **2 个实例**（`rp_carla_rigged_001` ×2；备选 `rp_eric` **在库但未摆**） | human_model Step 4：纯视觉 / **零碰撞** / 无动画 / 无 AI / 不进装配线 / 不参与决策链；不随 `motion_cmd` 移动、不被射线扫到（`check_lidar` F7/F8 逐字不变）；只在 Step 5 用于"相机拍得到 + YOLOv8n 能认出人"的视觉验证 |
 | 行走人物 | **0 个自动走动实例**（task_35 Step 3 起自动绕圈已移除） | walking_person Step 2/3 曾用 1 个 `rp_nathan_animated_003_walk` 沿 44 m 闭合矩形路径以 `1.260 m/s` 走动；**task_35 Step 3 把 `World.WALKERS` / `BuildWalkers()` 整节删除**，世界**不再**自己让人走（走动能力与 `PersonWalking.tscn` 资产保留给 §4.10 的人形自检，`Person.gd` / `Person.tscn` 一字未改）。世界里现在的人见下一行 |
@@ -2723,12 +2723,12 @@ Step 1（本文 + 骨架）
 | `src/scenes/World.tscn` | ✅ Step 1 占位 → Step 2 扩展为完整世界 → **Step 3 用 `ObserverCamera` 实例替换临时 `DebugCamera`**（`World` + `WorldEnvironment` + `Sun` + `Ground`(+2 子) + `VoxelWorld` + `Vehicles` + `Systems` + `ObserverCamera`） |
 | `src/scenes/ObserverCamera.tscn` | ✅ Step 3 观察者相机（`Camera3D` + 6 个引擎原生属性，`current=true`） |
 | `src/camera/ObserverCamera.gd` | ✅ Step 3 三视角脚本（零依赖、无物理 API、只用 `_unhandled_input`） |
-| `src/scenes/Vehicle.tscn` | ✅ Step 4 `CharacterBody3D` + `Body`(`Nose`) + `CollisionShape3D` + `Chassis`/`Sensors` 两个空挂载点；`collision_layer=4`、`collision_mask=7`；6 个 `@export` 节点引用靠 `node_paths` 绑定（E16）。**task_33 Step 3**：`ModelUGV` 换 `res://assets/chassis/ugv_chassis.glb`，占位 `BoxMesh`/`BoxShape3D` 改 `0.30 × 0.25 × 0.25`、`Body`/`CollisionShape3D` 抬到 `y=0.125`（模型 = 碰撞盒，D11） |
+| `src/scenes/Vehicle.tscn` | ✅ Step 4 `CharacterBody3D` + `Body`(`Nose`) + `CollisionShape3D` + `Chassis`/`Sensors` 两个空挂载点；`collision_layer=4`、`collision_mask=7`；6 个 `@export` 节点引用靠 `node_paths` 绑定（E16）。**task_33 Step 3 / task_42 Step 3**：`ModelUGV` 换 `res://assets/chassis/ugv_m1.glb`（task_42 自建，AABB 不变），占位 `BoxMesh`/`BoxShape3D` 改 `0.30 × 0.25 × 0.25`、`Body`/`CollisionShape3D` 抬到 `y=0.125`（模型 = 碰撞盒，D11） |
 | `src/vehicle/Vehicle.gd` | ✅ Step 4 装配（挂底盘 / 挂传感器 / 卸传感器）+ 物理步进（`move_and_slide()` 是唯一位置更新点）+ 位姿 / 采样查询；含 `apply_motion` / `sample_sensors` / `get_pose` 三个契约别名。**task_33 Step 3**：`AttachSensor()` 支持可选 `mount.pitch`（度，缺省 0 = 不预置任何角度；`rotation = (deg_to_rad(pitch), -yaw, 0)`，正 = 抬头 / 负 = 低头），失败语义完全不变 |
 | `src/tests/check_vehicle.gd` | ✅ Vehicle 自检（Step 4；`SELF-CHECK OK` + `exit 0`，**40 项断言**：task_33 Step 3 增 `placeholder-size`（占位 = `0.30 × 0.25 × 0.25`）与 `mount-pitch-default` / `mount-pitch-down` / `mount-pitch-up`） |
 | `src/scenes/chassis/DiffDrive.tscn` | ✅ Step 5 差速底盘组件（`Node3D` + `Wheels` + `WheelFL/FR/RL/RR`；`CylinderMesh` r=0.06 h=0.04 纯视觉；无内嵌脚本）。task_33 Step 3：占位轮位随默认轮距改 `z=±0.125` |
 | `src/chassis/ChassisModel.gd` | ✅ Step 5 底盘基类（4 个契约方法 + `GetParam`/`SpeedPct`/`ActionOf`/`RateToRad`/`Approach`/`ApplyMotionMode`/`ApplyBodySize`；不含运动学） |
-| `src/chassis/DiffDrive.gd` | ✅ Step 5 差速底盘（`MOTION_MODE_GROUNDED` + 世界侧速度环 + 差速运动学；只给控制量，不写 position）。task_33 Step 3：默认 `track_width 0.24 -> 0.25`、`height 0.16 -> 0.25`（几何 = `ugv_chassis.glb` 的 AABB，D11） |
+| `src/chassis/DiffDrive.gd` | ✅ Step 5 差速底盘（`MOTION_MODE_GROUNDED` + 世界侧速度环 + 差速运动学；只给控制量，不写 position）。task_33 Step 3：默认 `track_width 0.24 -> 0.25`、`height 0.16 -> 0.25`（几何 = `ugv_m1.glb` 的 AABB，D11；task_42 Step 3 只换外观，值一行未改） |
 | `src/chassis/ChassisCatalog.gd` | ✅ Step 5 底盘目录（`SCENES` / `DEFAULTS` + `Has` / `GetScene`（`load()`+缓存）/ `GetDefaults`；`quadrotor_uav` 已于 Step 7 落地）。task_33 Step 3：`DEFAULTS["diff_drive_ugv"]` 的 `track_width/height` 同步 0.25/0.25 |
 | `src/scenes/chassis/Quadrotor.tscn` | ✅ Step 7 四旋翼底盘组件（`Node3D` + `Rotors` + `RotorFL/FR/RL/RR`；`CylinderMesh` 平盘 r=0.12 h=0.02 `radial_segments=16` 纯视觉；无内嵌脚本、无 `uid`） |
 | `src/chassis/Quadrotor.gd` | ✅ Step 7 四旋翼底盘（`MOTION_MODE_FLOATING` + 世界侧速度环 + 三轴运动学：平移 / 爬升 / 偏航；不施加重力、不写 position）+ **task_32 Step 3 高度软件限幅**（`ClampAltitude()`：宿主车身世界 z 夹到 `[0, 31.8]`，越界 `velocity.y = 0` + 1 s 限流 warn；用 `global_transform`，不动运动学与参数表） |
@@ -2770,11 +2770,11 @@ Step 1（本文 + 骨架）
 | `COMPONENTS.md` | ✅ 本文 |
 | `assets/sensors/lidar_tmini.glb` | ✅ task_33 Step 1 雷达模型（17 444 B / 324 tri / 4 网格 / 材质 `ORION_MetalGray` + `ORION_GlassBlue`(BLEND) + `ORION_MatteBlack`；原点 = 罐体底面中心，AABB `0.080 × 0.054 × 0.080`） |
 | `assets/sensors/camera_module.glb` | ✅ task_33 Step 1 相机模组（11 944 B / 208 tri / 4 网格；原点 = 镜片前表面中心，AABB `0.055 × 0.036 × 0.030`） |
-| `assets/chassis/ugv_chassis.glb` | ✅ task_33 Step 1 UGV 外观（21 888 B / 416 tri / 8 网格；原点 = 车体底面中心、车头 +x，AABB **`0.30 × 0.25 × 0.25`**，与 D11 的碰撞盒逐轴相等） |
+| `assets/chassis/ugv_m1.glb` | ✅ task_42 Step 3 UGV 外观（**自有资产**，Blender 自建：67 752 B / 1 792 tri / 15 网格 / 4 材质 / 0 贴图；原点 = 车体底面中心、车头 +x，AABB **`0.30 × 0.25 × 0.25`**，与 D11 的碰撞盒逐轴相等；旧 `ugv_chassis.glb` 已 `git rm`） |
 | `src/tests/check_sensor_models.gd` | ✅ task_33 Step 1 资产自检（`SELF-CHECK OK` + `exit 0`，**29 项断言**：每件 9 项（loads / instantiates / root-identity / aabb-size / origin / no-collision / materials / tri-budget / file-size）+ `uav-loads` + `uav-aabb`（复核锁定 `0.64 × 0.14 × 0.64`）） |
 | `Tool/blender/models/build_models.py` | ✅ task_33 Step 1 bpy 构建脚本（**工程根下，不在 `orion-simulation-world/` 内**；`Build_Lidar` / `Build_Camera` / `Build_Ugv` 各一函数、参数集中在顶部常量区、建完自断言 AABB 与三角数，不符即 `RuntimeError` → 进程 EXIT≠0） |
 | `Tool/blender/models/export_all.sh` | ✅ task_33 Step 1 一键导出（`blender -b -P build_models.py` → `blend2glb.sh` ×3 → `file` + 体积校验，`set -euo pipefail`） |
-| `Tool/blender/models/{lidar_tmini,camera_module,ugv_chassis}.blend` | ✅ task_33 Step 1 模型源文件（各 ~90 KB，可在任意 Blender 里继续手工编辑） |
+| `Tool/blender/models/{lidar_tmini,camera_module,ugv_chassis}.blend` | ✅ task_33 Step 1 模型源文件（各 ~90 KB，可在任意 Blender 里继续手工编辑）（`ugv_m1` 的 `.blend` 只落 `tmp/task42/step2/`，未入库） |
 | `src/scenes/sensors/CameraSensor.tscn` | ✅ task_33 Step 2 相机组件（`Node3D` + `Viewport(SubViewport 1280×720, own_world_3d=false, update_mode=0)` + `Lens(Camera3D fov=70 near=0.05 far=200 current=true)`；`node_paths=PackedStringArray("viewport","lens")`；无内嵌脚本、无 `uid`）。task_33 Step 3：加 `Body`（`camera_module.glb` 实例根，`rotation_degrees=(0,90,0)`，不写 position，**无碰撞**，E27） |
 | `src/sensors/CameraSensor.gd` | ✅ task_33 Step 2 相机（`Configure` / `Capture_Jpeg` / `Capture_To_File` / `Get_Image_Size` + `Can_Capture`；warmup 2 帧 + `UPDATE_ONCE` + `await frame_post_draw` + `get_image` + `save_jpg_to_buffer`；抓拍前手工同步 `lens.global_transform`；四类失败 `push_error` + 空数组，路径类失败只 `push_warning`；无碰撞体、无物理 API、不碰 socket）。**task_34 Step 3**：+`rate_hz`（`DEFAULT_RATE_HZ=1.0` / `MIN_RATE` / `ACCUM_EPS`）+ `frame_produced` 信号 + `SetStream`/`ClearStream`/`HasStream`/`Tick_Stream`/`Emit_Frame`/`Get_Tick_Count`/`Get_Frame_Count` + `_Capture_Tick()`/`_Warn_No_Renderer()`/`_exit_tree()`；`_process` 只转发累加器；`Can_Capture()==false` 时**只 warn 一次、绝不出帧、绝不 await**（§4.8.3） |
 | `src/tests/check_camera_sensor.gd` | ✅ task_33 Step 2 相机自检 + **task_34 Step 3 出帧断言**（`SELF-CHECK OK` + `exit 0`，**A 组 18 项 + B 组 10 项**；headless 下 B 组 `[skip]` 不计入 total → `total=18`（`[skip]` ×10），Xvfb 下 `total=28`。新增 `A13` 流绑定 / `A14` 帧头 / `A15` seq+空图 / `A16` `rate_hz` 节奏 / `A17` 无渲染器闸门 / `A18` 目录登记 / `B10` 真抓拍→真帧，用内联 `StubLink` + 手工 `Tick_Stream()` 推步，不依赖墙钟与像素） |

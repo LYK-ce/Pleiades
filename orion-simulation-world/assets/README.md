@@ -2,7 +2,7 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-22
-> Modified Date ： 2026-10-29
+> Modified Date ： 2026-10-31
 
 本目录**只放真正的资源文件**：位图/纹理（`.png` `.jpg` `.webp`）、
 3D 模型（`.glb` `.gltf` `.obj` `.fbx`）、材质与环境（`.material` `.tres` `.env`）、
@@ -17,11 +17,12 @@
 |---|---|
 | `.gitkeep` | 占位（保留） |
 | `humans/` | 人形资产，见 `humans/README.md`（Renderpeople 免费页，非 CC0） |
-| `sensors/` `chassis/` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用）；`chassis/uav_quadrotor.glb` = **task_40 Step 5 换的四旋翼外观**，见 §5 与 `ATTRIBUTION.md` |
+| `sensors/` `chassis/` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用）；`chassis/uav_quadrotor.glb` = **task_40 Step 5 换的四旋翼外观**，见 §5 与 `ATTRIBUTION.md`；`chassis/ugv_m1.glb` = **task_42 Step 3 换的 UGV 外观（自有资产）**，见 §6 |
 | `textures/` | **task_38 Step 1a 新增**：4 套 PBR 贴图（12 个文件），CC0，见 §2 |
 | `hdri/` | **task_38 Step 1a 新增**：1 张 2K 晴天正午 HDRI，CC0，见 §3 |
 
 > 除 `humans/`（Renderpeople 免费页条款）与 `chassis/uav_quadrotor.glb`（**CC BY 3.0**，须署名，见 `ATTRIBUTION.md`）外，`textures/` 与 `hdri/` 全部为 **CC0 1.0**（Poly Haven / ambientCG 的公共领域授权），可商用、可修改、无归属义务；本仓库仍逐条记账来源以便复核。
+> `chassis/ugv_m1.glb` 是本仓库 **Blender 自建的自有资产**（无第三方素材/贴图），不适用 CC0 / CC-BY，也不需要署名。
 > **贴图与 `.import` 必须一起提交**：干净检出先跑 `godot --headless --path orion-simulation-world --import`，否则 `load()` 返回 `null`（`COMPONENTS.md` §9.1 **E28**）。
 
 ## 2. `textures/` — 4 套 PBR（CC0，task_38 Step 1a）
@@ -65,7 +66,8 @@
 | 本步新增 12 贴图 + 1 HDRI | 9 506 040 |
 | 本步新增 13 个 `.import` | 12 431 |
 | **task_40 Step 5 增量**（新 glb 299 376 + 2 个 `.import` 2 231 + 抽出贴图 2 882 + 许可 19 467 + 署名 5 289 − 删旧件 20 460 − 删旧 `.import` 1 185 = 资产净 **+307 600**；本文件台账 +3 001） | **+310 601** |
-| `assets/` 总体积（`du -sb`，2026-10-29 实测 ≈ **24.62 MB**；本文件自身字节也算在内，故精确值随文档微调而变） | ≈ 24 617 000 |
+| **task_42 Step 3 增量**（新 glb 67 752 + `.glb.import` 1 148 − 删旧 `ugv_chassis.glb` 21 888 − 旧 `.import` 1 163 = **+45 849**；本文件台账自身增长另计） | **+45 849** |
+| `assets/` 总体积（`du -sb`，2026-10-31 实测 ≈ **24.67 MB**；本文件自身字节也算在内，故精确值随文档微调而变） | ≈ 24 665 490 |
 
 判据：贴图单张 ≤ 1.5 MB（最大 `ground_paving_nor.jpg` 975 127）、HDRI ≤ 6 MB、`assets/` 增量 **9 524 411** ≤ 10 MB —— 全部通过。
 task_40 Step 5 另核：模型 glb **299 376 B ≤ 1 MB**、贴图 128×128 ≤ 2K、tris **4 564 ≤ 50k**。
@@ -84,3 +86,14 @@ task_40 Step 5 另核：模型 glb **299 376 B ≤ 1 MB**、贴图 128×128 ≤ 
 - **署名**：`"Drone" by NateGazzard — https://poly.pizza/m/DNbUoMtG3H — CC BY 3.0`（完整署名 + 改动说明 + 选型证据见 `ATTRIBUTION.md`）。
 - **碰撞盒未随外观变更**：模型 AABB `0.64 × 0.14 × 0.64` 与 §6.5 的目标 `0.64 × 0.13 × 0.64` 只差 **1.0 cm**（y 轴，且 `0.11 ≤ y ≤ 0.15` 与 `check_sensor_models` 的 `0.14 ±2%` 都要求 y 取 0.14）⇒ **`UAV_HULL` 仍是 `(0.40, 0.12, 0.40)`，碰撞盒与动力学一行未改**。
 - **贴图与 `.import` 必须一起提交**；旧件 `assets/uav_quadrotor_lowpoly.glb`（20 460 B）+ 其 `.import` 已 `git rm`（git 可回溯）。
+
+## 6. `chassis/ugv_m1.glb` — UGV 外观（**自有资产**，task_42 Step 3）
+
+| 文件 | 是什么 | 来源 | 许可 | 处理 | 规格 | 字节 | sha256 |
+|---|---|---|---|---|---|---|---|
+| `chassis/ugv_m1.glb` | `Vehicle/ModelUGV` 的 UGV 外观（`ApplyChassis("diff_drive_ugv")` 时可见） | **本仓库自建**：`Tool/blender/models/build_models.py` 的 `Build_Ugv_M1()`（旧 `ugv` 键一行未改，可逐字复现旧件）+ `Tool/blender/models/export_all.sh` ⑤ 段 | **自有资产**（Blender 参数化建模，无第三方素材/贴图，不适用 CC0/CC-BY，无需署名；`.blend` 源只落 `tmp/task42/step2/ugv_m1.blend`，按 §二.5 不入库） | Blender 4.5.14 建（方盒下车体 + 斜引擎盖 + 平顶 + 顶置激光雷达 + 浅灰前唇 `NosePlate` + 蓝 LED + 4 支麦克纳姆视觉轮）；导出 GLB（Y-up、无 Draco、0 贴图、4 材质） | 15 网格 / **1 792 tri** ≤ 12 000 / AABB **`0.3000 × 0.2500 × 0.2500`** / 原点 = 底面中心、车头 **+X** / 4 材质 0 贴图 | **67 752** | `2067d34f277da2c2d3a52f14d520f6880d652489eff317f51614cde1e2169545` |
+| `chassis/ugv_m1.glb.import` | 场景导入描述（`importer="scene"`，`uid="uid://dwy17ous1dlyq"`） | — | — | `godot --headless --path orion-simulation-world --import` 生成，**不要手改** | — | 1 148 | — |
+
+- **碰撞盒未随外观变更**：AABB 与 `0.30 × 0.25 × 0.25` 逐轴相等 ⇒ `DiffDrive` 常量 / `UGV_HULL` / `CollisionShape3D` / `check_models` 的 M5/M6 **一行未改**（物理零改动）。
+- **旧件已删**：`chassis/ugv_chassis.glb`（21 888 B）+ `ugv_chassis.glb.import`（1 163 B）在本步验收全绿后 `git rm`（git 可回溯）。旧 `ugv` 构建键与 `Tool/blender/models/ugv_chassis.blend` **保留**：不带 `ORION_BUILD_LEGACY=0` 重跑 `export_all.sh` 会重新生成该旧 glb，属**预期**（可复现性），需要时 `git status` 会看到它重新变成未跟踪文件。
+- **贴图与 `.import` 必须一起提交**（老规矩：干净检出先 `--import`，否则 `load()` 返回 `null`）。

@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://ckp68ndu5br3y"
-path="res://.godot/imported/ugv_chassis.glb-5a1124b430139007963cdcf2041f19d5.scn"
+uid="uid://dwy17ous1dlyq"
+path="res://.godot/imported/ugv_m1.glb-02b9b5b9e0bc288dd4f35e1023c96345.scn"
 
 [deps]
 
-source_file="res://assets/chassis/ugv_chassis.glb"
-dest_files=["res://.godot/imported/ugv_chassis.glb-5a1124b430139007963cdcf2041f19d5.scn"]
+source_file="res://assets/chassis/ugv_m1.glb"
+dest_files=["res://.godot/imported/ugv_m1.glb-02b9b5b9e0bc288dd4f35e1023c96345.scn"]
 
 [params]
 

@@ -1,9 +1,9 @@
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-29
+; Modified Date ： 2026-10-31
 ;
 ; Vehicle 组件（Step 4）。节点树与接口见 COMPONENTS.md §4.3。
-; task_33 Step 3：ModelUGV 改挂 assets/chassis/ugv_chassis.glb（模型 = 碰撞盒，D11）。
+; task_33 Step 3 / task_42 Step 3：ModelUGV 改挂 assets/chassis/ugv_m1.glb（task_42 自建 M1 风格底盘；AABB 仍 0.30 × 0.25 × 0.25 ⇒ 模型 = 碰撞盒，D11）。
 ;   占位 BoxMesh/CollisionShape3D 尺寸同步为模型 AABB 0.30 × 0.25 × 0.25，抬升 y = 0.125；
 ;   有模型时占位与 Nose 一起隐藏（Vehicle._Mount_Model），物理碰撞盒始终是 CollisionShape3D 这一个。
 ; task_40 Step 5：ModelUAV 改挂 assets/chassis/uav_quadrotor.glb（Poly Pizza Drone / NateGazzard，
@@ -15,7 +15,7 @@
 [gd_scene load_steps=9 format=3]
 
 [ext_resource type="Script" path="res://src/vehicle/Vehicle.gd" id="1_vehicle"]
-[ext_resource type="PackedScene" path="res://assets/chassis/ugv_chassis.glb" id="5_model_ugv"]
+[ext_resource type="PackedScene" path="res://assets/chassis/ugv_m1.glb" id="5_model_ugv"]
 [ext_resource type="PackedScene" path="res://assets/chassis/uav_quadrotor.glb" id="6_model_uav"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_placeholder"]

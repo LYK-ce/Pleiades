@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-22
-# Modified Date ： 2026-10-29
+# Modified Date ： 2026-10-31
 #
 # 低模外观自检（Step 2 + task_33 Step 3 + task_40 Step 5）：模型静态挂在 Vehicle.tscn / 两个传感器场景上，
 # 显隐正确 / 尺寸朝向正确 / 模型 = 碰撞盒 / 传感器模型零碰撞。
@@ -11,7 +11,7 @@
 # 决定本文件写法的实测事实（plan.md §0 / §3）：
 #   - 旧 UGV 低模（ugv_x3plus_lowpoly.glb）里**没有**名字含 Nose 的节点：红色车头是 Body 这个
 #     MeshInstance3D 的第 2 个 surface（材质名 UGV_NoseRed / UAV_NoseRed），所以 UAV 的朝向断言
-#     仍走"节点名 + 材质名"双通道。task_33 Step 3 起 ModelUGV 改用 assets/chassis/ugv_chassis.glb，
+#     仍走"节点名 + 材质名"双通道。task_33 Step 3 / task_42 Step 3 起 ModelUGV 改用 assets/chassis/ugv_m1.glb（自建），
 #     它的车头是**独立节点 NosePlate**（新 glb 没有 NoseRed 材质通道）→ UGV 命中走 by-name。
 #     task_40 Step 5 起 ModelUAV 改用 assets/chassis/uav_quadrotor.glb（Poly Pizza `Drone` /
 #     NateGazzard，CC BY 3.0，见 assets/ATTRIBUTION.md）：它同样**没有**名字含 Nose 的节点，
@@ -23,7 +23,7 @@
 #     Body 是 glb 实例根（Node3D），子弹节点才是 MeshInstance3D（E27 见 COMPONENTS.md §9.1）。
 #     雷达 AABB（holder 系）= P(-0.04, 0.00, -0.04) S(0.08, 0.054, 0.08)，扫描面 = 原点；
 #     相机 AABB（Body 系）= P(-0.055, -0.021, -0.015) S(0.055, 0.036, 0.030)，镜片前表面 = 光心。
-#   - 节点总数（实测）：空车 25、装一个底盘 31（ugv_chassis 模型子树 9 个节点；
+#   - 节点总数（实测，task_42 Step 3 换模型后）：空车 29、装一个底盘 35（ugv_m1 模型子树 16 个节点 = 根 + 15 mesh；
 #     模型节点是静态实例，装配只改 visible，所以 M7/M8 的 _count_nodes 基线恒定）。
 #   - mi.get_aabb() 是 **mesh 局部 AABB**（不含节点自身旋转/缩放）→ 必须 8 角点过变换。
 #   - 树外读 global_transform 会 ERROR（P8）→ AABB / 朝向断言只能在 add_child 之后。
@@ -36,7 +36,7 @@
 extends SceneTree
 
 const VEHICLE_SCENE := "res://src/scenes/Vehicle.tscn"
-const UGV_MODEL_SCENE := "res://assets/chassis/ugv_chassis.glb"
+const UGV_MODEL_SCENE := "res://assets/chassis/ugv_m1.glb"
 const UAV_MODEL_SCENE := "res://assets/chassis/uav_quadrotor.glb"
 const LIDAR_SCENE := "res://src/scenes/sensors/Lidar2D.tscn"
 const CAMERA_SCENE := "res://src/scenes/sensors/CameraSensor.tscn"
