@@ -591,3 +591,117 @@ S4-A2『停稳』实际未停稳（Tool/sim_task41_coop_test.py:1064-1066 与 :1
 ?? Workbook/wb_41_containment.md
 ?? pleiades-sim/src/sim/uav_sim/mission/containment.rs
 ```
+
+## 执行引擎启动（Step 4 重跑（kernel .so 重建 + pty 采集））
+- 开始时间：2026-10-30 07:33:45Z
+- 引擎：Tool/execution_engine_task41.ts + .config.json（本次只跑 Step 4；配置/三提示词未改）
+- 运行标记：Step 4 重跑（kernel .so 重建 + pty 采集）
+- 本轮前置（主 agent 人工完成）：`cargo build --release -p pleiades-terminal` 重建地面站内核 →
+  `libpleiades_terminal.so` sha256 `216607035d6b…1730` 已拷 `Pictor/bin/` 与 `RobotSim_TestEnv/pictor_ws/bin/`（三处一致）；
+  `strings` 复核：`assist_request` 字节已存在（上一轮是 2026-10-29 的旧 .so，内核无 assist 转发分支 ⇒ Q1 必假红）。
+- 采集修复（D18）：`Tool/sim_task41_coop_test.py` 起 Pictor 改为 pty（`script -q -f -e -c "timeout N godot …" /dev/null`）——
+  两次 s4 的 `pictor.log` 都只有前 ~40 s 的 30 行（1847 B、md5 相同），`[Coop]` 结构性丢失。
+- 判据 Q1~Q8 与全部参数（0.8 / 2.0 / 35 / 3 m / 2.5 m）未动；只 1 轮，FAIL → 邮件 + 终止。
+
+### Step 4 真跑结果（1/1 轮：`task41_s4_20261030T074445Z`，只验不改）
+- 轮次 **1/1**；2026-10-30T07:44:45Z → 07:53:05Z（502.9 s：S4-A 30.8 / 摆位 63.4 / 放人等待 101.7 / 连续观测 247.5）；**rc=1**（有 FAIL）；未调参、未改判据、**未重跑**；`--reanalyze` **0 次**（verdict 一次渲染成功）
+- 前置：**19/19 OK**；`#20` 软自检 OK —— `strings -a libpleiades_terminal.so | grep -c assist_request` = **1**，sha256 `216607035d6b74fe`（含 assist 转发分支的新内核已生效）
+- 环境：世界 fps 中位 6.0（n=454，≥5）｜UAV 位姿龄中位 84 ms（≤200）｜detector 1.62 Hz（≥1）
+- **Q1 PASS**（链路贯通，上一轮的结构性假红已消除）：`[Coop] 协助请求` **43** 条（requester == UAV vid）、`[Coop] 指派` **172** 条（每事件 4 条）、4 车 `开始任务 … Goto` 各 **44** 行且坐标对上指派点、`unknown msgid` 0 行、vid 未映射 **0** 条（`vidmap=5`，D20 生效）
+- **Q2 FAIL**：四点两两不同 ✔、距请求坐标 3.0±0.05 m ✔、**距人 3±1 m ✘**（43 事件里 **16** 个超界，逐事件 min~max 0.79~5.30 m）
+- **Q3 FAIL**：40 s 窗内 c1 28.3 s 到、c4 20.7 s 到、**c2/c3 未达**；车间最小间距 3.97 m ✔
+- **Q4 FAIL**：3 个 dwell 均到点，但只覆盖 `EN/WN/WS`，**缺 ES** 象限
+- **Q5 PASS**：每车点序号变化 0/2/2/0（≤2）、每车指派 29 条（≥1，D22 收紧生效）、同事件两车同点 0 次
+- **Q6 FAIL**：D11 差分逐车 max v = 2.68 / 2.69 / 2.66 / 2.53 m/s > 2.05；`Blocked` 行 c4=2；急停段 1/1/1/0（≤1 ✔）；不越界 ✔。D23 诊断（**不参与判据**）：位姿龄补偿后 `vmax_pose` = 1.81 / 1.69 / 1.69 / **2.37** m/s ⇒ 交人类裁决，未放宽任何阈值
+- **Q7 FAIL**：P1 ✔（+0.05 s）/ P2 ✔（角点 4、新目标 4、失败 0、Timeout 0）/ **P3 ✘**（t0 后 10 s 位移 **1.01 m** < 2.5 m；首/末 5 s 均距 7.77→7.57 m）/ P4 ✔（+0.8 s 命中角点 (56,56)，10.26→2.95 m）
+- **Q8 FAIL**：`[Sim] 任务 … 失败` **2** 行（c1/c2，原因码 1 = Timeout）+ `Blocked` 2 行；三族解析率 sim=7126/nav=169/coop=215、未解析 0 ✔；**残留 2 活进程 + 端口 [9100,9123]** ✘；X lock 0、冻结路径一致、Pictor 仓一致 ✔
+- 摆位（D21，`ctl_stage.json`）：`settled=True`、63.4 s、未超时；逐车 `(距角点, nav_status, queue_len, still, idle, off_corridor, fail_lines)` = c1 `(2.54, idle, 0, T,T,T, 2)`、c2 `(5.29, idle, 0, T,T,T, 2)`、c3 `(1.02, …, 0)`、c4 `(0.58, …, 0)` ⇒ 停稳判据（队列空 + 非 navigating + ≈2 s 位移 <5 cm + 离走廊 ≥3 m）生效；c1/c2 摆位 Goto 的 Timeout **未被隐藏**，照旧计入 Q8a
+- 产物：`RobotSim_TestEnv/results/task41_s4_20261030T074445Z/`（11 件主产物齐 + `ped_trace.csv`/`driver.log`/`ctl_*.json`/`configs/`/`mirror_diff.txt`/`pictor_kernel.log`；`trace.csv` 4553 行、目标点列非空 2322 行；`cases.json.placeholders = []`（D24 修复生效）、`configs.checks = 19`、`vehicles.vidmap = 5`；`script_sha = 3e211253…` 真跑前后一致）
+- 收尾四查（真跑结束后）：**0 残留进程** / **13 端口全空** / 无 `/tmp/.X*-lock` / `git status` 只多 `M Workbook/wb_41_containment.md`（允许路径）、Pictor 仓 0 条、源码与冻结路径零改动
+- 已知瑕疵（不改脚本，只记录）：脚本收尾时 Pictor 经 `script -q -f -e -c "timeout 2100 godot …"` 启动，`terminate()` 只杀到 `script`，其 pty 子进程存活 ⇒ verdict 的 Q8c 如实记「残留 2 活、端口 9100/9123」；真跑结束后手工 `kill 3212624`（07:53:10Z）再复核已清干净。出结果后未改脚本（step.md:19）
+
+## Step 4 — Step 4 — 端到端验证（1 UAV + 4 UGV）（Step 4 重跑（kernel .so 重建 + pty 采集））
+- 起止：2026-10-30 07:33:45Z → 2026-10-30 08:01:49Z
+- 范围：只验不改：1 UAV + 4 UGV + Pictor + 行人；验证 v2 与协助链路
+- 轮次：1 / 1（只验不改）
+- 结果：FAIL（已中断）
+- 规划要点：计划已写入 [plan.md](tmp/task41/plan.md)（467 行，源码零改动，`git status` 仅多引擎写的 workbook）。 plan.md 定稿（源码零改）。只改 coop 脚本六处：`[Coop] 车=` 是 vid，补 vid→peer 映射（否则 Q1d/Q3 假红）；停稳改判（队列空+非航行+2 s<5 cm+离走廊 3 m）；verdict 加前置段含 #20 .so 自检；placeholders 顺序；Q5 无数据即 FAIL；Q6 仅加诊断。判据不动，1 轮。风险：UGV 2 m/s 导航超时计 Q8。
+- 未通过的问题：
+Q2「点位正确」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:40（逐事件明细 :71-113）记 43 个派发事件中 **16 个**的 4 个目标点超出「距人真实位置 3.0±1.0 m（即 2.0~4.0 m）」；期望每事件 4 点全部落在 2.0~4.0 m，实测 min~max 0.79~5.30 m，超界事件 #1,2,4,5,6,7,8,13,16,21,22,23,25,31,33,35；我独立复算同集合（16/43，0.82~5.26 m）。不是测量错：4 点相对**请求坐标**严格 3.0±0.05 m，但请求坐标是 UAV detector 的目标快照，行人走动时与真值最大差 2.25 m（事件 1：请求 (64.33,70.33) vs 真值 (64.0,72.58)，导致 #0 点离人仅 0.82 m）。复现：`python3 -c "import json,csv,math,bisect;O='RobotSim_TestEnv/results/task41_s4_20261030T074445Z';R=list(csv.DictReader(open(O+'/trace.csv')));T=[float(r['t_world']) for r in R];d=json.load(open(O+'/cases.json'));g=lambda e:[math.hypot(a['x']-float(R[bisect.bisect_left(T,e['t_world'])]['ped_x']),a['y']-float(R[bisect.bisect_left(T,e['t_world'])]['ped_y'])) for a in e['asg']];b=[(k,round(min(s),2),round(max(s),2)) for k,e in enumerate(d['dispatch'],1) for s in [g(e)] if not all(2<=x<=4 for x in s)];print(len(b),b)"` → `16 [(1, 0.82, 5.26), (2, 1.64, 4.48), ...]`。
+Q3「到达」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:41 记 40 s 窗内 c1 28.3 s、c4 20.7 s 首次距其（当时最新）指派点 ≤1.0 m，**c2/c3 未达**；期望 4 车全部 ≤1.0 m。我独立复算（按「时刻 t 之前最近一次事件的指派」判，与脚本同逻辑）：c1 28.2 s、c4 20.7 s、c2 未达（窗内最小距 **20.31 m**）、c3 未达（最小距 **3.96 m**）；车间最小间距 3.97 m ≥1.0 m 成立。复现：
+```
+python3 - <<'PY2'
+import json,csv,math
+O='RobotSim_TestEnv/results/task41_s4_20261030T074445Z'
+R=list(csv.DictReader(open(O+'/trace.csv')))
+d=json.load(open(O+'/cases.json'))
+V=d['vehicles']['vidmap']
+D=[dict(e,assign={V.get(a['car'],a['car']):a for a in e['asg']}) for e in d['dispatch']]
+t0=D[0]['t_world']
+def aa(c,t):
+    s=[e for e in D if c in e['assign'] and e['t_world']<=t]
+    return max(s,key=lambda e:e['t_world']) if s else None
+for c in ('simq_ugv_c1','simq_ugv_c2','simq_ugv_c3','simq_ugv_c4'):
+    k=c.split('_')[-1]; hits=[]
+    for r in R:
+        t=float(r['t_world'])
+        if not (t0<=t<=t0+40): continue
+        e=aa(c,t)
+        if not e: continue
+        a=e['assign'][c]
+        if math.hypot(float(r[k+'_x'])-a['x'],float(r[k+'_y'])-a['y'])<=1.0: hits.append(t-t0)
+    print(c, round(min(hits),1) if hits else '未达')
+PY2
+```
+→ `c1 28.2 / c2 未达 / c3 未达 / c4 20.7`。
+Q4「覆盖」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:42 与逐 dwell 表 :119-121 记 3 个 dwell 全部到点，但覆盖只有 EN/WN/WS（**3 个 dwell 全部缺 ES**）；期望每个 dwell 的 4 车覆盖 EN/ES/WN/WS 各 ≥1 台。实测 dwell0 象限 {EN:[c1,c2], WN:[c1,c4], WS:[c3]}，dwell1/dwell2 同缺 ES（c2/c3 停在 (63.9,72.2)/(63.6,72.3)，距人 8.0/8.1 m）。复现：`python3 -c "import json;d=json.load(open('RobotSim_TestEnv/results/task41_s4_20261030T074445Z/cases.json'));print([(x['leg'],sorted(x['quads']),x['ok']) for x in d['dwells']])"` → `[(0,['EN','WN','WS'],False),(1,['EN','WN','WS'],False),(2,['EN','WN','WS'],False)]`。
+Q6「车运动」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:44 逐车 max v = 2.68/2.69/2.66/2.53 m/s（阈值 ≤2.05，D11 差分口径未改），且 c4 有 **2 行** `[Nav] 连续 20 拍无路 → Blocked`（`sim_ugv_c4.log:8411`（Dynamic）、`:12745`（NoPath）），期望 0 Blocked。我用同口径（Δt∈[0.15,0.6] s 的相邻 `[Sim] UGV 位置` 行）独立复算 = 2.678/2.689/2.659/2.526 m/s，与 verdict 一致；D23 位姿龄补偿后 c4 仍 **2.37 > 2.05**（verdict.md:160），因此不是纯测量伪影。复现：`grep -c '拍无路' RobotSim_TestEnv/results/task41_s4_20261030T074445Z/sim_ugv_c4.log` → 2；`grep -n '拍无路' RobotSim_TestEnv/results/task41_s4_20261030T074445Z/sim_ugv_c4.log` → 8411/12745。
+Q7 P3「进入跟随」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:45 记 t0=223.712 s（world）、cls=person conf=0.89、5 s 内已转向，但 **10 s 位移 1.01 m < 2.5 m**；期望 ≥2.5 m（§4.4 人类裁决口径）。我独立复算 = **1.02 m**：UAV 从 (72.23,72.39) 到 (71.32,71.92)，首/末 5 s 均距 7.76→7.57 m（P3c 成立，P3b 不成立）。复现：`python3 -c "import csv,math,json;O='RobotSim_TestEnv/results/task41_s4_20261030T074445Z';R=list(csv.DictReader(open(O+'/trace.csv')));t0=json.load(open(O+'/cases.json'))['anchors']['t_first_in_square_detect'];at=lambda t:min(R,key=lambda r:abs(float(r['t_world'])-t));a,b=at(t0),at(t0+10);print(t0,a['uav_x'],a['uav_y'],b['uav_x'],b['uav_y'],round(math.hypot(float(b['uav_x'])-float(a['uav_x']),float(b['uav_y'])-float(a['uav_y'])),2))"` → `223.712 72.23 72.39 71.324 71.918 1.02`。
+Q8「无异常」未满足（FAIL）：RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md:46 与收尾段 :203-205 —— 期望 0 `任务失败`/0 Blocked/0 残留/13 端口全空；实测 `[Sim] 任务 TaskId(0) 失败，原因码 1` **2 行**（`sim_ugv_c1.log:4801`、`sim_ugv_c2.log:4769`，均为摆位阶段 07:46:33 的 Goto Timeout；两车摆位结束时距角点 2.54/5.29 m）+ c4 2 行 Blocked + verdict 写盘时**残留 2 个活进程占 9100/9123**（`timeout 2100 godot ... pictor_ws` 及其子 `godot`）。三族解析率 sim/nav/coop=7126/169/215、未解析 0、X lock 0、冻结路径与 Pictor 仓一致这些子项成立，但整体 Q8 = FAIL 成立。复现：`grep -c '\[Sim\] 任务 .* 失败，原因码' RobotSim_TestEnv/results/task41_s4_20261030T074445Z/sim_ugv_c*.log` → `1/1/0/0`；`sed -n '202,206p' RobotSim_TestEnv/results/task41_s4_20261030T074445Z/verdict.md`。
+（本步自伤，须下一轮真跑前修）`Tool/sim_task41_coop_test.py:2674-2679` 起 Pictor 改成了 `script -q -f -e -c "timeout N godot --headless --path ..."`（D18 的 pty 采集），但收尾只对 `script` 壳进程 terminate，pty 子进程 `timeout`+`godot` 存活 ⇒ 直接造成 Q8c「残留 2 活 + 端口 [9100
+
+## 引擎结束
+- 结束时间：2026-10-30 08:01:49Z
+- 状态：ABORTED — Step 4（Step 4 — 端到端验证（1 UAV + 4 UGV））验证 FAIL
+- 邮件：已发送
+- 产物：/vepfs-mlp2/c20250205/240804016/Workspace/Orion/RobotSim_TestEnv/results/task41_s4_20261030T074445Z
+
+## 人类裁决（2026-10-30 16:17 +08:00）
+- **Step 4 = PASS（人类本地验证通过）**：原话「我自己本地进行验证了，没有问题。step 4 可以通过了，虽然还有点小问题，但是可以了」。
+- 依据：`RobotSim_TestEnv/results/task41_s4_20261030T074445Z/` —— **Q1 PASS**（协助链路贯通：`[Coop] 请求` 43 条 / `指派` 172 条 / 4 车各 44 次 Goto 且坐标对上 / unknown msgid 0）、**Q5 PASS**（点序号变化 0/2/2/0，无同点）；Q2/Q3/Q4/Q6/Q7/Q8 的 FAIL 经人类复核**不再作为阻塞**，转为已知遗留。
+- 本轮真正修掉的两个结构性阻塞（均已验证）：
+  1. 内核 `.so` 陈旧（2026-10-29 产物，无 assist 转发分支）→ 重建 `pleiades-terminal`，sha256 `216607035d6b…1730`，`strings` 含 `assist_request`，三处一致；
+  2. `pictor.log` 采集截断（两次 s4 都只有前 ~40 s 的 30 行）→ 改 pty（`script -q -f -e -c`），本轮抓到 247 行、`[Coop]` 215 行。
+
+### 已知遗留（未修，后续处理）
+| # | 项 | 位置 / 证据 | 归属 |
+|---|---|---|---|
+| L1 | pty 采集的**收尾泄漏**：`terminate()` 只杀 `script` 壳，`timeout`+`godot` 因 `setsid` 逃出进程组 ⇒ Q8c「残留 2 活 + 端口 9100/9123」 | `Tool/sim_task41_coop_test.py` 起 Pictor 段 + `Proc.stop`；verdict Q8c | 下一轮真跑前必修（否则 Q8 恒红） |
+| L2 | `InsideSquare` **无出界迟滞**（D-S10 / §二 口径），人贴 y=72 边界时分支每拍翻转 ⇒ UAV 在 (71.5,72.2) 冻住 ~5 s，Q7 P3 只走 1.01 m | `pleiades-sim/src/sim/uav_sim/mission/containment.rs` | 另开 task 或经人类批准后改口径 |
+| L3 | `turn_speed=35` + `max_speed=2.0` ⇒ R=2.0/0.55≈**3.6 m**，与 sim 到达容差 0.26 m 不匹配 ⇒ 摆位/协作段 Goto 易 60 s Timeout（c1/c2 摆位失败，Q3/Q4 连带红） | `ugv_sim/executor.rs` 常量 + 实例 `[chassis] turn_speed` | 参数/常量同步问题，见 robot_arch §8.11 联动约束 |
+| L4 | Q6 测量口径缺**位姿龄时间对齐**；补偿后 c4 仍 2.37 m/s（>2.05），需另查该车 | `Tool/sim_task41_coop_test.py` D11 差分；verdict D23 | 判据口径（需人类批准） |
+| L5 | detector 位置误差（Q2c 预登记）：请求坐标与行人真值差 0.79~5.30 m，43 事件中 16 个超 3±1 m | `pleiades-sim/src/sim/detector/`（projection） | 精度问题，非本任务范围 |
+
+### task_41 状态
+- Step 1（协议 + 树 v1 + 三端 naive）/ Step 2（tree v1 验证，2.5 m 口径）/ Step 3（树 v2 + assist + Pictor 协控）/ **Step 4（端到端，人类裁决 PASS）** 全部落地。
+- 任务文档 §七（后续 Step）与 §八（整体完成判据）仍为「待定」⇒ **暂不归档**，等人类决定是否补 Step 5（修 L1~L3）或直接归档到 `Task/archived task/`。
+
+## Tool/ 整理（2026-10-30 16:2x +08:00，人类要求）
+- 口径：**`Tool/` 只放整个项目的公共工具**；为某一个 task 专门准备的东西归 `tmp/`（已被 `.gitignore` 忽略）。
+- 本次清理：`Tool/` 5.0 MB → 2.3 MB；根目录文件 49 → 16。删除 29 个受 git 跟踪的文件（可 `git checkout` 恢复）：
+  - 缓存/备份：`__pycache__/`、`blender/models/*.blend1` ×3；
+  - 已归档任务的引擎脚本 20 个：`execution_engine_task30~39.{ts,config.json}` + `_uav_camera` / `_auto_survey` / `_pedestrian` / `_walking_person` / `_human_model`（**保留 task_40 作流程模板**）；
+  - 被取代的 sim 脚本 `sim_task39_step3_test.py`；死掉的 LiDAR SDK 簇 `_ydlidar.so` + `ydlidar.py` + `sdk_{test,plot_test,tmini_test}.py` + `test_lidar_raw.py`。
+- **task_41 专用脚本移出 Tool/** → `tmp/task41_tools/`：
+  `sim_task41_coop_test.py`、`sim_task41_containment_test.py`、`sim_task41_pedestrian.py`、`execution_engine_task41.ts`、`execution_engine_task41.config.json`。
+  （不在版本库里了；git 历史仍在 `8253a09` 的 `Tool/` 路径下。）
+- 移动后的引用修正（已自检 `--help` 通过）：三个 python 脚本的 `sys.path` 从「`__file__` 上两级 + `Tool`」改成「向上找到含 `Tool/sim_queue_test.py` 的目录」；`sim_task41_pedestrian.py` 同样向上找含 `orion-simulation-world/` 的仓库根；引擎 `CFG_PATH` 改为 `tmp/task41_tools/execution_engine_task41.config.json`。
+- 本文件中此前出现的 `Tool/sim_task41_*`、`Tool/execution_engine_task41.*` 路径，一律按本节理解为 `tmp/task41_tools/` 下的同名文件。
+- 仍在 `Tool/` 的共享设施（未动）：`sim_queue_test.py`（Proc/Control/LogTail 基座）、`sim_task40_ugv_test.py`、`sim_follow_test.py`、`test_lidar.py`、`yolo_viewer.html`、`execution_engine_task40.*`、`lg290p_enu.py`、ML 侧 3 个（`validate_pgguf.py` / `convert_hf_to_gguf.py` / `chat.py`）、子目录 `blender/` `models/` `hf2gguf/` `investigation/`。
+
+### tmp/ 整理（2026-10-30 18:15 +08:00，人类要求）
+- `tmp/` **1454 MB → 2.3 MB**。按人类指令：`tmp/control_research/` **保留**，其余清理。
+- 删除 12 个目录：`walking_person/`(520M) `human_model/`(931M) `pdf/` `scan/` `arch_review/` `task33_review/` `task33_shots/` `task35/` `task39/` `e2e/` `review_t36/` `camera_sim/`；另删 3 个根级报告 `review_world_godot.md` / `review_sim_rust.md` / `review_contract_check.md`（先查过 Task/Workbook/Architecture/.github/docs 引用数均为 0）。
+- 保留：`control_research/`(1.4M，人类指定) `task41_tools/`(577K，task_41 现役脚本) `auto_survey/`(274K) `research/`(65K) `read_survey/`(25K)。
+- `tmp/` 全部在 `.gitignore` 内 ⇒ 本次清理不影响版本库；被删内容为下载素材/渲染帧/日志/旧评审报告，均可重新生成或下载。
+- 当前：`Tool/` 2.2M（47 个文件）、`tmp/` 2.3M。
