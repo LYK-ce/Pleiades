@@ -86,3 +86,43 @@
 - 结果：PASS
 - 提交：ok 1ba17e7
 - 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（492 行），未改任何源码，`git status` 与进场基线一致（新增的 `tmp/task44/plan.md` 不在 git 视野内的跟踪路径中）。 **计划摘要（≤200 字）** Step 4 只在 pleiades-ugv 的 9 个文件内实施：`types.rs` 加 `M1=0x0A`（`from_u8`/`"m1"`/limits 0.7/0.7/3.2）；`config.rs` 删 `forward_speed`/`turn_speed`，换 `DEFAULT_CRUISE_SPEED=0.45`/`DEFAULT_CRUISE_YAW_RATE=0.5`，`fill_chassis` 与 handler 缺省都改 M1；`stm32/` 删 `pack_car_run`/`FUNC_CAR_RUN`/`MotionState`/六个离散动作/`set_motion`，加 `apply_velocity(v,omega)`（`vx=v`、`vy=0`、`vz=死区0.2+ω/0.70`，边走边转 `/1.96`，`|vz|≤3.2`，`ω=0` 必发 0）与 `stop()`=`0x12` 全零带原重试；`executor.rs` 整份照抄 sim 那份（`diff` 须零差异）；`robot_handler` ④ 改 `apply_velocity`、nav 补 `subscribe_map`。验收 V1~V11：0 error、0 新增 warning、`--bins` 全绿、7 组 grep、`diff`/越界自检；已登记 `device/camera_ugv/sdk.rs:1122` 的 `0x11` 属越界不可改。
+
+## Step 5 — 真机：mavlink 换连续执行器 + 清掉 base 的 MotionAction（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 05:46:36Z → 2026-11-01 06:21:46Z
+- 范围：pleiades-uav 执行器/mavlink/handler + pleiades-base state.rs 清理
+- 轮次：3 / 3
+- 结果：PASS
+- 提交：ok 96e52f2
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（304 行），源码一行未改，`git status` 与进场完全一致。 **摘要（≤200 字）** Step 5 前两轮产物仍在树内，已落地约 95%：执行器与 sim 机零差异、mavlink 换 `apply_velocity`、base 删两类型，uav check 0 error、153 测试全绿、验收 grep 全空。本轮只补 4 处：`mavlink/mod.rs:347` 的 `apply_velocity` 改为**非零速度才解除** `takeoff_pending`（否则 on_tick 每拍 (0,0) 会打断起降，违反验收 4）、`stop()` 显式解除、加 2 条单测锁该语义、`robot_handler.rs:283` 加「第④步」编号对照注释。其余是取证：V0~V13 含 base `--all-targets` 存量 71 error 逐行比对、sim 465/2（mount.pitch 存量红）、Pictor 不变。三处 sim 连带改动按「删尽所有引用 + grep 为空」申报放行。`prev_issues.md` 已损坏（`[object Object]`），两条 issue 由产物重建并逐条给出对策。
+
+## Step 6 — 仿真世界验证（sim 车 + sim 机 + 手动两轴）（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 06:37:11Z（第 2 次，即唯一一次真跑；第 1 次 06:34:59Z 是驱动器 bug，见下）→ 2026-11-01 06:41:20Z
+- 范围：只验不改：世界（`world_fast` 副本）+ Pictor 镜像 + 1 台 sim ugv + 1 台 sim uav；源码改动 **0 行**
+- 轮次：1 / 1（第 1 次尝试在 P2 闸门因驱动器正则写错即收尾、未注入，产物保留为 `task44_s6_20261101T063459Z_attempt1_driver_bug`）
+- 结果：PASS（H1~H7 全 PASS）
+- 提交：不做 `git add` / `git commit`（由引擎提交）；未 `cargo fmt`
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（566 行，未改任何源码；`git status` 与基线逐行一致）。 **摘要（≤200 字）** 单轮驱动器 `RobotSim_TestEnv/task44_step6/step6_driver.py`：xvfb 起世界、headless 起 Pictor（:9100 命令口 / :9123 内核）+ 1 台 sim ugv（9171/9181，带 camera_front+detector）+ 1 台 sim uav（9172/9182，无相机）→ 车 goto (64,70)、机 goto (72,68) → 手动六条 (0.45,0)/(0,±0.5)/(0.45,±0.5)/(0,0) → Pictor TASK_SET 注入 Containment(64,64±8) 与 Follow → 20 Hz `status` 采样 + 原样收尾。硬判据只判「行为是否出现」，半径/误差/耗时/频率/位姿龄只进软观测（口径 #10）；收尾断言 7 端口全空、无残留、git 基线不变。
+
+**H1~H7（逐条一句话）**
+- **H1 PASS**：`[Robot] 开始任务 TaskId(0)：Goto { x: 64.0, y: 70.0 }` → `[Nav] 已在目标格且逐轴误差 <= 0.26 m，到达 (64.00, 70.00)`（+18.3 s）→ `[Robot] 任务完成`；全程 panic=0。
+- **H2 PASS**：机 `Goto { x: 72.0, y: 68.0 }` → `[Nav] 到达目标（预测停点）(72.00, 68.00)`（+38.2 s）→ `[Robot] 任务完成`。
+- **H3 PASS**：C4 同给 (0.45,+0.5)：Δpos=1.041 m、Δyaw=70.5°；C5 (0.45,−0.5)：Δpos=0.992 m、Δyaw=66.7° —— **既走又转**（不是只直行、也不是只原地转）。
+- **H4 PASS**：C2 (0,+0.5) Δyaw=47.6°/Δpos=0.000 m；C3 (0,−0.5) Δyaw=47.6°/Δpos=0.000 m —— **原地转**。
+- **H5 PASS**：C6 (0,0) 窗内 Δpos=0.000 m、Δyaw=0.0° —— **停住**。
+- **H6 PASS**：Containment 金标 `0103428000004280000041000000`(14 B)、ack ok、`TaskId(1) 建树完成`、25 s 窗内 task_id=1 恒定 / queue_len=1 / task_ticks 1→499（494 次严格增长）、无失败；Follow 金标 `01020000000000000000`(10 B)、ack ok、`TaskId(2) 建树完成`、15 s 窗内 task_id=2 恒定 / queue_len=1 / ticks 1→300。detector 起来了（`[camera] … 首帧` + `[detector] 已启动`，Hold 退化 0 次），且日志有 `[Nav] 新目标 (56.00, 56.00)` —— **真树在跑**（§5.1 第一档）。
+- **H7 PASS**：`verdict.md`/`cases.json`/`checks.json`/`env.json`/`ctx.json`/`driver.log`/`world.log`/`pictor.log`/`pictor_kernel.log`/`sim_ugv.log`/`sim_uav.log`/`status_ugv.csv`/`status_uav.csv`/`manual_trace.csv`/三份 config/`ctl_containment.json`/`ctl_follow.json`/`cleanup.txt` 全部存在且 >0 B。
+
+**软观测（只记录，不判 FAIL）**
+- 到位误差 / 耗时：ugv 0.255 m / 18.3 s；uav 0.10 m / 38.2 s（`status` 的 `nav_status=arrived` 首样本）。
+- 弧线半径：C4/C5 都是 **0.902 m**（名义 v/ω = 0.45/0.5 = 0.90 m，误差 0.2%）；实测角速度 0.435 / 0.413 rad/s、线速度 0.368 / 0.352 m/s（窗内含斜坡爬升，故略低于定值）。C1 直行 0.690 m / 1.87 s = 0.369 m/s、航向变化 0.0°。
+- `motion_cmd` 频率：Containment 窗 `task_ticks` 20 Hz（20 ms tick 逻辑 50 ms ⇒ 19.97 Hz 实测）；`[Sim] UGV/UAV 位置` 行 5 Hz；位姿龄中位 78 ms、最大 184 ms。
+- 世界 fps：227 个采样，中位 7、5~8（软件 GL / xvfb 下正常，只记录）。
+- 急停 / blocked：`[Sim] 前方障碍` 0 行、`拍无路` 0 行、`nav_status=blocked` 0 样本。
+- 世界 / Pictor 解析报错：`unknown msgid`/`未知 action` 0 次；Pictor `SCRIPT ERROR` 0 / `Parse Error` 0；内核监听 `[9123]`；**msgid 4 8 B 端到端旁证**：Pictor 发 `manual` 帧 payload `3ee666663f000000`（v=0.45 / ω=0.5，8 B 金标命中）。
+
+**偏差与两次驱动器 bug（数据无损，详见 `verdict.md` 的「偏差」段）**
+- D6：第 1 次尝试在 P2 闸门收尾——驱动器把内核监听正则写成 `监听 tcp/<port>`，源码实为 `监听地址: /ip4/…/tcp/9123/p2p/…`。
+- D7：第 2 次运行期两处**判定** bug（不丢数据）：车侧到达走的是 `[Nav] 已在目标格且逐轴误差 <=` 分支而非 `[Nav] 到达目标（预测停点）`；`建树完成` 实际打在 `[Robot] 开始任务` **前一行**。修好后用 `--regrade` 对同一份日志只读重算，**未重跑仿真**。
+- D1~D5：驱动器落 `RobotSim_TestEnv/task44_step6/`（不是任务文档写的 `tmp/task44_tools/`，step.md 未允许）；手动两轴走控制口、Pictor 8 B 帧只作旁证；Containment/Follow 走 Pictor `TASK_SET`（`Mission::Containment` 无第二入口）；`cargo test --bins` 2 条 `mount.pitch` 存量红只判「新增红=0」。
+
+**收尾（干净）**：7 个端口（9999/9100/9123/9171/9172/9181/9182）全空、`pgrep pleiades-sim|godot` 无残留、`/tmp/.X*-lock` 前后都是 `[]`、根仓 `git status` 行集合 == 基线 7 行、`git -C Pictor status --short` 10 行与进场逐行相同。产物：`RobotSim_TestEnv/results/task44_s6_20261101T063711Z/`（副本 `tmp/task44/verdict.md`）。
