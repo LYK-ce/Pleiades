@@ -1,8 +1,8 @@
 //Presented by KeJi
 //Created Date ： 2026-08-07
-//Modified Date ： 2026-10-30
+//Modified Date ： 2026-11-01
 
-//! 5 条消息的 payload 编解码（协议文档 §3）
+//! 6 条消息的 payload 编解码（协议文档 §3）
 //!
 //! 所有数值大端（BE）。坐标/计数为 i32，与内部类型一致。
 
@@ -41,11 +41,15 @@ pub struct MapDeltaEntry {
     pub delta: i8,
 }
 
-/// ORION_MANUAL_CONTROL 载荷（msgid 4，3 字节）
+/// ORION_MANUAL_CONTROL 载荷（msgid 4，按长度分流：8 B = 运动 / 3 B = 事件）
+///
+/// task_44 §1.2 #3：msgid 4 原地改布局，**不做版本兼容**（四端 + Pictor 同批升级）。
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ManualControl {
-    pub action: u8,
-    pub param: i16,
+pub enum ManualPayload {
+    /// 8 B：`v f32 BE | omega f32 BE`（v m/s；omega rad/s，**omega > 0 = 左转/逆时针**）
+    Motion { v: f32, omega: f32 },
+    /// 3 B：`action u8 | param i16 BE`
+    Event { action: u8, param: i16 },
 }
 
 /// ORION_TASK_SET 任务项（按 type 变长：`0/2` = 9 字节，`3` = 13 字节；task_41 §3.2）
@@ -215,37 +219,83 @@ pub fn decode_map_delta(payload: &[u8]) -> Option<(u32, Vec<MapDeltaEntry>)> {
 // ORION_MANUAL_CONTROL (msgid 4)
 // ============================================================
 
-/// action 枚举（协议文档 §3.4）
-pub const ACTION_FORWARD: u8 = 0;
-pub const ACTION_BACKWARD: u8 = 1;
-pub const ACTION_SPIN_LEFT: u8 = 2;
-pub const ACTION_SPIN_RIGHT: u8 = 3;
-pub const ACTION_STOP: u8 = 4;
-pub const ACTION_BEEP: u8 = 5;
-pub const ACTION_START_LIDAR: u8 = 6;
-pub const ACTION_STOP_LIDAR: u8 = 7;
-pub const ACTION_SWITCH_TO_MANUAL: u8 = 8;
-pub const ACTION_SWITCH_TO_AUTO: u8 = 9;
-pub const ACTION_TAKEOFF: u8 = 10; // Task 22_4：起飞
-pub const ACTION_LAND: u8 = 11;    // Task 22_4：降落
+/// action 枚举（协议文档 §3.4；task_44 重排，旧 0~4 运动项已删除）
+pub const ACTION_BEEP: u8 = 1;
+pub const ACTION_START_LIDAR: u8 = 2;
+pub const ACTION_STOP_LIDAR: u8 = 3;
+pub const ACTION_TAKEOFF: u8 = 4; // 机
+pub const ACTION_LAND: u8 = 5;    // 机
 
-/// 编码手动命令（3 字节）
-pub fn encode_manual_control(action: u8, param: i16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(3);
+/// 模式（msgid 8，协议文档 §3.6）
+pub const MODE_MANUAL: u8 = 0;
+pub const MODE_AUTO: u8 = 1;
+
+/// 长度常量（`decode_*` 的唯一分流依据）
+pub const MANUAL_MOTION_LEN: usize = 8;
+pub const MANUAL_EVENT_LEN: usize = 3;
+pub const MODE_LEN: usize = 1;
+
+/// 编码运动（恒 8 B，大端：`v f32 BE | omega f32 BE`）
+///
+/// **不做有限性校验**（与 [`encode_assist_request`] 同风格）：生产编码端是 Pictor，
+/// 门控在解码侧，非有限值由下游执行器 clamp 兜底。
+pub fn encode_manual_motion(v: f32, omega: f32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(MANUAL_MOTION_LEN);
+    buf.extend_from_slice(&v.to_be_bytes());
+    buf.extend_from_slice(&omega.to_be_bytes());
+    buf
+}
+
+/// 编码事件（恒 3 B，大端：`action u8 | param i16 BE`）
+///
+/// 未知 action 也照编（编码端不校验，门控在 [`decode_manual_control`] / 解码侧）。
+pub fn encode_manual_event(action: u8, param: i16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(MANUAL_EVENT_LEN);
     buf.push(action);
     buf.extend_from_slice(&param.to_be_bytes());
     buf
 }
 
-/// 解码手动命令 payload（需恰好 3 字节）
-pub fn decode_manual_control(payload: &[u8]) -> Option<ManualControl> {
-    if payload.len() != 3 {
+/// 解码手动命令 payload：8 B → [`ManualPayload::Motion`] / 3 B → [`ManualPayload::Event`] /
+/// 其它长度 → `None`（整帧拒，**不做猜测、不做兜底截断**）
+///
+/// 门控只有「长度」与「action」两条（action 由调用方 `command_decode` 校验）：
+/// `v` / `omega` 的有限性本函数**不校验**，非有限值由下游执行器 clamp 兜底（task_44 Step 2/4）。
+pub fn decode_manual_control(payload: &[u8]) -> Option<ManualPayload> {
+    match payload.len() {
+        MANUAL_MOTION_LEN => {
+            let v = f32::from_be_bytes(payload[0..4].try_into().ok()?);
+            let omega = f32::from_be_bytes(payload[4..8].try_into().ok()?);
+            Some(ManualPayload::Motion { v, omega })
+        }
+        MANUAL_EVENT_LEN => Some(ManualPayload::Event {
+            action: payload[0],
+            param: i16::from_be_bytes([payload[1], payload[2]]),
+        }),
+        _ => None,
+    }
+}
+
+// ============================================================
+// ORION_MODE (msgid 8)
+// ============================================================
+
+/// 编码模式（恒 1 B，**不做值校验**——与 [`encode_assist_request`] 同风格，生产编码端是 Pictor）
+pub fn encode_mode(mode: u8) -> Vec<u8> {
+    vec![mode]
+}
+
+/// 解码模式 payload（msgid 8，协议文档 §3.6）
+///
+/// `len != 1` → `None`；`mode ∉ {0, 1}` → `None`（整帧拒，不猜）。
+pub fn decode_mode(payload: &[u8]) -> Option<u8> {
+    if payload.len() != MODE_LEN {
         return None;
     }
-    Some(ManualControl {
-        action: payload[0],
-        param: i16::from_be_bytes([payload[1], payload[2]]),
-    })
+    match payload[0] {
+        MODE_MANUAL | MODE_AUTO => Some(payload[0]),
+        _ => None,
+    }
 }
 
 // ============================================================
@@ -429,16 +479,6 @@ mod tests {
         // 空 entries 合法（count=0）
         let empty = encode_map_delta(1, &[]);
         assert_eq!(decode_map_delta(&empty).unwrap().1.len(), 0);
-    }
-
-    #[test]
-    fn test_manual_control_roundtrip() {
-        let encoded = encode_manual_control(ACTION_FORWARD, 30);
-        assert_eq!(encoded.len(), 3);
-        let mc = decode_manual_control(&encoded).unwrap();
-        assert_eq!(mc.action, ACTION_FORWARD);
-        assert_eq!(mc.param, 30);
-        assert!(decode_manual_control(&encoded[..2]).is_none());
     }
 
     #[test]
@@ -696,6 +736,114 @@ mod tests {
         assert!(decode_map_full(&payload[..100]).is_none());
         assert!(decode_map_full(&[]).is_none());
         assert!(decode_map_full(&payload[..payload.len() - 1]).is_none());
+    }
+
+    // ---------------------------------------------------- task_44 Step 1：msgid 4 两轴 + msgid 8 模式
+
+    /// 五条金标逐字节（task_44 §二 Step 1 第 6 条；与 Pictor / Python 用同一串）
+    ///
+    /// ⚠️ f32 大端是**位模式直传**：`0.0` → `00000000`、`-0.0` → `80000000`，
+    /// 所以「全零运动」必须传 `0.0`（不是 `-0.0`）。
+    #[test]
+    fn test_manual_motion_golden() {
+        let m1 = encode_manual_motion(0.5, 0.0);
+        assert_eq!(m1.len(), MANUAL_MOTION_LEN, "运动 payload 恒 8 B");
+        assert_eq!(m1, hex("3f00000000000000"), "v=0.5, omega=0");
+
+        let m2 = encode_manual_motion(0.0, 0.0);
+        assert_eq!(m2.len(), MANUAL_MOTION_LEN);
+        assert_eq!(m2, hex("0000000000000000"), "v=0, omega=0（全零帧即停车）");
+
+        let m3 = encode_manual_motion(0.0, -0.5);
+        assert_eq!(m3.len(), MANUAL_MOTION_LEN);
+        assert_eq!(m3, hex("00000000bf000000"), "v=0, omega=-0.5（右转）");
+
+        let manual = encode_mode(MODE_MANUAL);
+        assert_eq!(manual.len(), MODE_LEN, "模式 payload 恒 1 B");
+        assert_eq!(manual, vec![0x00], "mode=manual");
+
+        let auto = encode_mode(MODE_AUTO);
+        assert_eq!(auto.len(), MODE_LEN);
+        assert_eq!(auto, vec![0x01], "mode=auto");
+    }
+
+    /// 长度分流（8 → Motion / 3 → Event）与非法长度整帧拒（不猜、不兜底截断）
+    #[test]
+    fn test_manual_payload_length_split() {
+        let motion = decode_manual_control(&encode_manual_motion(0.45, 0.5)).expect("8 B 必须解出");
+        assert!(
+            matches!(motion, ManualPayload::Motion { .. }),
+            "8 B 必须分流到 Motion，实际 {motion:?}"
+        );
+        let event = decode_manual_control(&encode_manual_event(ACTION_BEEP, 500)).expect("3 B 必须解出");
+        assert!(
+            matches!(event, ManualPayload::Event { .. }),
+            "3 B 必须分流到 Event，实际 {event:?}"
+        );
+        // 其它长度一律 None（0/1/2/4/5/6/7/9/11/16）
+        for len in [0usize, 1, 2, 4, 5, 6, 7, 9, 11, 16] {
+            let payload = vec![0u8; len];
+            assert!(decode_manual_control(&payload).is_none(), "{len} B 必须整帧拒");
+        }
+    }
+
+    /// action 常量表 + 3 B 往返（`param` 覆盖 0 / -1 / i16 边界）
+    #[test]
+    fn test_manual_event_actions() {
+        assert_eq!(
+            (ACTION_BEEP, ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF, ACTION_LAND),
+            (1, 2, 3, 4, 5),
+            "task_44 重排后的 action 表"
+        );
+        for action in [ACTION_BEEP, ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF, ACTION_LAND]
+        {
+            for param in [0i16, -1, i16::MIN, i16::MAX] {
+                let encoded = encode_manual_event(action, param);
+                assert_eq!(encoded.len(), MANUAL_EVENT_LEN, "事件 payload 恒 3 B");
+                assert_eq!(encoded[0], action, "action 在首字节");
+                assert_eq!(
+                    decode_manual_control(&encoded),
+                    Some(ManualPayload::Event { action, param }),
+                    "action={action} param={param} 往返"
+                );
+            }
+        }
+    }
+
+    /// 位移模式往返（用 `to_bits()`，不引浮点相等语义；含 `-0.0` 的 `80000000`）
+    #[test]
+    fn test_manual_motion_roundtrip() {
+        for (v, omega) in [(0.45f32, 0.5f32), (-0.45, -0.5), (0.0, 0.5), (-0.0, 0.0)] {
+            let encoded = encode_manual_motion(v, omega);
+            let back = decode_manual_control(&encoded).expect("8 B 必须解出");
+            match back {
+                ManualPayload::Motion { v: dv, omega: domega } => {
+                    assert_eq!(dv.to_bits(), v.to_bits(), "v 位模式往返（{v}）");
+                    assert_eq!(domega.to_bits(), omega.to_bits(), "omega 位模式往返（{omega}）");
+                }
+                other => panic!("8 B 必须分流到 Motion，实际 {other:?}"),
+            }
+        }
+        // `-0.0` 的位模式是 80000000，与 `0.0` 字节不同（金标写错就靠这条抓）
+        assert_eq!(encode_manual_motion(-0.0, 0.0)[0..4], [0x80, 0x00, 0x00, 0x00]);
+    }
+
+    /// 模式解码：0/1 合法，长度不符或值非法一律整帧拒
+    #[test]
+    fn test_mode_golden_and_reject() {
+        assert_eq!(decode_mode(&[0]), Some(MODE_MANUAL));
+        assert_eq!(decode_mode(&[1]), Some(MODE_AUTO));
+        assert_eq!(MODE_MANUAL, 0, "mode manual 值");
+        assert_eq!(MODE_AUTO, 1, "mode auto 值");
+        for bad in [
+            vec![],
+            vec![0, 0],
+            vec![1, 1],
+            vec![2],
+            vec![0xFF],
+        ] {
+            assert!(decode_mode(&bad).is_none(), "{bad:?} 必须整帧拒");
+        }
     }
 
     #[test]

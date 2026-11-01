@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-10-30
+//Modified Date ： 2026-11-01
 
 //! ORION 命令帧 → 内部 Command 解码
 //!
@@ -9,21 +9,33 @@
 
 use crate::robot::core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
 use super::frame::Frame;
-use super::{MSGID_MANUAL_CONTROL, MSGID_TASK_SET};
+use super::{MSGID_MANUAL_CONTROL, MSGID_MODE, MSGID_TASK_SET};
 use super::messages::{
-    decode_manual_control, decode_task_set, ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD,
-    ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT, ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR,
-    ACTION_SWITCH_TO_AUTO, ACTION_SWITCH_TO_MANUAL, ACTION_TAKEOFF, ACTION_LAND,
-    MISSION_CONTAINMENT, MISSION_FOLLOW, MISSION_GOTO,
+    decode_manual_control, decode_mode, decode_task_set, ACTION_BEEP, ACTION_LAND,
+    ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF, MISSION_CONTAINMENT, MISSION_FOLLOW,
+    MISSION_GOTO, MODE_AUTO, MODE_MANUAL, ManualPayload,
 };
 
 /// 解析 ORION 帧 → 内部命令（入站：终端/地面站 → 车）
 pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
     match frame.msgid {
-        MSGID_MANUAL_CONTROL => {
-            let mc = decode_manual_control(&frame.payload)?;
-            manual_action_to_command(mc.action, mc.param)
-        }
+        MSGID_MANUAL_CONTROL => match decode_manual_control(&frame.payload)? {
+            // task_44 §1.2 #2/#3：8 B 两轴连续量 → 手动运动命令（门控只有长度）
+            ManualPayload::Motion { v, omega } => {
+                Some(Command::Manual(ManualCmd::Motion { v, omega }))
+            }
+            // 3 B 事件：action 1..5，未知 action 整帧拒
+            ManualPayload::Event { action, param } => manual_event_to_command(action, param),
+        },
+        MSGID_MODE => match decode_mode(&frame.payload)? {
+            // 口径 §1.2 #4：模式必须绕过 main_loop 的手动模式门闩 → 只能走 Command::Mode
+            MODE_MANUAL => Some(Command::Mode(ModeCmd::SwitchToManual)),
+            MODE_AUTO => Some(Command::Mode(ModeCmd::SwitchToAuto)),
+            other => {
+                tracing::warn!("[Cmd] 非法 mode: {other}（decode_mode 已整帧拒，理论不可达）");
+                None
+            }
+        },
         MSGID_TASK_SET => {
             let ts = decode_task_set(&frame.payload)?;
             // Task 36 §12.3.4 单分支：`mission_count == 0` **才是**取消（唯一取消入口）；
@@ -66,19 +78,15 @@ pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
     }
 }
 
-/// action 枚举 → 内部命令（未知动作保守返回 None）
-fn manual_action_to_command(action: u8, param: i16) -> Option<Command> {
+/// 事件 `action` → 内部命令（task_44 重排：1..5，其余一律拒）
+///
+/// 未知 action 保守返回 `None`（整帧不生效）。`Beep(param as u16)` 沿用既有语义：
+/// i16 → u16 **位模式直传**，不做负值钳制。
+fn manual_event_to_command(action: u8, param: i16) -> Option<Command> {
     match action {
-        ACTION_FORWARD => Some(Command::Manual(ManualCmd::Forward(param))),
-        ACTION_BACKWARD => Some(Command::Manual(ManualCmd::Backward(param))),
-        ACTION_SPIN_LEFT => Some(Command::Manual(ManualCmd::SpinLeft(param))),
-        ACTION_SPIN_RIGHT => Some(Command::Manual(ManualCmd::SpinRight(param))),
-        ACTION_STOP => Some(Command::Manual(ManualCmd::Stop)),
         ACTION_BEEP => Some(Command::Manual(ManualCmd::Beep(param as u16))),
         ACTION_START_LIDAR => Some(Command::Manual(ManualCmd::StartLidarScan)),
         ACTION_STOP_LIDAR => Some(Command::Manual(ManualCmd::StopLidarScan)),
-        ACTION_SWITCH_TO_MANUAL => Some(Command::Mode(ModeCmd::SwitchToManual)),
-        ACTION_SWITCH_TO_AUTO => Some(Command::Mode(ModeCmd::SwitchToAuto)),
         ACTION_TAKEOFF => Some(Command::Manual(ManualCmd::Takeoff)),
         ACTION_LAND => Some(Command::Manual(ManualCmd::Land)),
         other => {
@@ -90,14 +98,14 @@ fn manual_action_to_command(action: u8, param: i16) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
-    use crate::robot::core::command::{AutoCmd, Command, Mission};
+    use crate::robot::core::command::{AutoCmd, Command, ManualCmd, Mission, ModeCmd};
     use crate::robot::core::protocol::command_decode::parse_orion_frame;
     use crate::robot::core::protocol::frame::Frame;
     use crate::robot::core::protocol::messages::{
-        encode_task_set, MissionItem, MISSION_CONTAINMENT, MISSION_FOLLOW, MISSION_GOTO,
-        TaskSetPayload,
+        encode_manual_event, encode_manual_motion, encode_task_set, MissionItem, MISSION_CONTAINMENT,
+        MISSION_FOLLOW, MISSION_GOTO, TaskSetPayload,
     };
-    use crate::robot::core::protocol::MSGID_TASK_SET;
+    use crate::robot::core::protocol::{MSGID_MANUAL_CONTROL, MSGID_MODE, MSGID_TASK_SET};
 
     /// 用 encoder 造帧（**只给合法 type**：未知 type 必须手写 raw，见 `raw_task_set_frame`）
     fn task_set_frame(payload: &TaskSetPayload) -> Frame {
@@ -136,6 +144,16 @@ mod tests {
             Some(Command::Auto(AutoCmd::Set(list))) => assert_eq!(list, expected),
             other => panic!("预期 AutoCmd::Set，实际 {other:?}"),
         }
+    }
+
+    /// 一条 msgid 4 帧（payload 原样给定，用于合法 / 非法长度）
+    fn manual_frame(payload: Vec<u8>) -> Frame {
+        Frame { msgid: MSGID_MANUAL_CONTROL, sysid: vec![], compid: 200, payload }
+    }
+
+    /// 一条 msgid 8 帧（payload 原样给定）
+    fn mode_frame(payload: Vec<u8>) -> Frame {
+        Frame { msgid: MSGID_MODE, sysid: vec![], compid: 200, payload }
     }
 
     #[test]
@@ -291,6 +309,129 @@ mod tests {
         match parse_orion_frame(&f) {
             Some(Command::Auto(AutoCmd::Set(list))) => assert_eq!(list.len(), 255),
             other => panic!("预期 255 条 Goto，实际 {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------- task_44 Step 1：msgid 4 两轴 + msgid 8 模式
+
+    /// msgid 4 + 8 B → `ManualCmd::Motion { v, omega }`（位模式断言，不引浮点相等）
+    #[test]
+    fn test_manual_motion_frame_decoded() {
+        let f = manual_frame(encode_manual_motion(0.45, 0.5));
+        assert!(
+            matches!(
+                parse_orion_frame(&f),
+                Some(Command::Manual(ManualCmd::Motion { v, omega }))
+                    if v.to_bits() == 0.45f32.to_bits() && omega.to_bits() == 0.5f32.to_bits()
+            ),
+            "8 B 运动帧必须解成 ManualCmd::Motion"
+        );
+        // 全零 8 B = 停车（协议里没有 stop 动作）
+        let stop = manual_frame(encode_manual_motion(0.0, 0.0));
+        assert!(
+            matches!(
+                parse_orion_frame(&stop),
+                Some(Command::Manual(ManualCmd::Motion { v, omega }))
+                    if v.to_bits() == 0.0f32.to_bits() && omega.to_bits() == 0.0f32.to_bits()
+            ),
+            "全零运动帧 → Motion{{0,0}}（不是 ManualCmd::Stop）"
+        );
+    }
+
+    /// msgid 4 + 3 B：五个 action 全覆盖（含 `Beep` 的 i16 → u16 位模式语义）
+    #[test]
+    fn test_manual_event_frames_decoded() {
+        assert!(
+            matches!(
+                parse_orion_frame(&manual_frame(encode_manual_event(1, 500))),
+                Some(Command::Manual(ManualCmd::Beep(500)))
+            ),
+            "action=1 param=500 → Beep(500)"
+        );
+        // 既有语义锁死：`param as u16` 位模式直传，-1 → 65535（不做负值钳制）
+        assert!(
+            matches!(
+                parse_orion_frame(&manual_frame(encode_manual_event(1, -1))),
+                Some(Command::Manual(ManualCmd::Beep(65535)))
+            ),
+            "action=1 param=-1 → Beep(65535)（位模式）"
+        );
+        for (action, expected) in [
+            (2u8, "StartLidarScan"),
+            (3, "StopLidarScan"),
+            (4, "Takeoff"),
+            (5, "Land"),
+        ] {
+            let cmd = parse_orion_frame(&manual_frame(encode_manual_event(action, 0)));
+            let ok = match expected {
+                "StartLidarScan" => matches!(cmd, Some(Command::Manual(ManualCmd::StartLidarScan))),
+                "StopLidarScan" => matches!(cmd, Some(Command::Manual(ManualCmd::StopLidarScan))),
+                "Takeoff" => matches!(cmd, Some(Command::Manual(ManualCmd::Takeoff))),
+                "Land" => matches!(cmd, Some(Command::Manual(ManualCmd::Land))),
+                other => panic!("测试表写错：{other}"),
+            };
+            assert!(ok, "action={action} 必须解成 {expected}");
+        }
+    }
+
+    /// 未知 action 整帧拒（含旧 0~4 运动项、旧 8/9 模式、旧 11 land）
+    #[test]
+    fn test_manual_unknown_action_rejected() {
+        for action in [0u8, 6, 7, 8, 9, 11, 255] {
+            let f = manual_frame(encode_manual_event(action, 0));
+            assert!(
+                parse_orion_frame(&f).is_none(),
+                "未知 action={action} 必须整帧拒（旧值不做兼容映射）"
+            );
+        }
+        // 编码端不校验：未知 action 照编 3 B，门控在解码侧
+        assert_eq!(encode_manual_event(0, 0).len(), 3);
+    }
+
+    /// 非法 payload 长度整帧拒（特别覆盖最容易被"猜"的 7 B / 9 B）
+    #[test]
+    fn test_manual_bad_length_frame_rejected() {
+        for len in [0usize, 1, 2, 4, 7, 9, 12] {
+            let f = manual_frame(vec![0u8; len]);
+            assert!(
+                parse_orion_frame(&f).is_none(),
+                "{len} B 手动帧必须整帧拒（按长度分流，不猜）"
+            );
+        }
+    }
+
+    /// msgid 8 → `Command::Mode`（**变体断言**：绝不能走 `Command::Manual`）
+    #[test]
+    fn test_mode_frame_maps_to_command_mode() {
+        let manual = mode_frame(vec![0]);
+        assert!(
+            matches!(parse_orion_frame(&manual), Some(Command::Mode(ModeCmd::SwitchToManual))),
+            "mode=0 必须 → Command::Mode(SwitchToManual)"
+        );
+        assert!(
+            !matches!(parse_orion_frame(&manual), Some(Command::Manual(_))),
+            "模式绝不能走 Manual（否则「手动切回自动」会被手动门闩拦住）"
+        );
+
+        let auto = mode_frame(vec![1]);
+        assert!(
+            matches!(parse_orion_frame(&auto), Some(Command::Mode(ModeCmd::SwitchToAuto))),
+            "mode=1 必须 → Command::Mode(SwitchToAuto)"
+        );
+        assert!(
+            !matches!(parse_orion_frame(&auto), Some(Command::Manual(_))),
+            "模式绝不能走 Manual"
+        );
+    }
+
+    /// msgid 8 非法值 / 非法长度整帧拒
+    #[test]
+    fn test_mode_frame_bad_value_or_length_rejected() {
+        for bad in [vec![2u8], vec![0xFF], vec![], vec![0, 0], vec![1, 1]] {
+            assert!(
+                parse_orion_frame(&mode_frame(bad.clone())).is_none(),
+                "mode payload {bad:?} 必须整帧拒"
+            );
         }
     }
 }

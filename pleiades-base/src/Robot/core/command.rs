@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-11-01
 
 //! Robot 统一命令定义
 //!
@@ -32,10 +32,15 @@ pub enum ModeCmd {
 /// 手动遥控命令
 #[derive(Debug, Clone)]
 pub enum ManualCmd {
-    Forward(i16),
-    Backward(i16),
-    SpinLeft(i16),
-    SpinRight(i16),
+    /// 两轴连续量（task_44 §1.2 #2/#6）：`WASD` 可同时前进 + 转向，全松 = `(0, 0)`。
+    ///
+    /// - `v`：线速度，m/s（正 = 前进，负 = 后退；执行器 clamp 兜底）
+    /// - `omega`：角速度，rad/s，**`omega > 0` = 左转（逆时针）**，`omega < 0` = 右转
+    ///
+    /// ⚠️ 与 `ORION_POSE.yaw`（顺时针为正）符号相反：`d(yaw)/dt = −omega`（协议文档 §5.2）。
+    Motion { v: f32, omega: f32 },
+    /// 显式停车（**内部命令**）：协议里已无 `stop` 动作（全零 8 B 运动帧即停）；
+    /// 本变体只作内部命令（sim 控制口 `stop`、切模式时显式停车），设备端按 `(0, 0)` 执行。
     Stop,
     Beep(u16),
     StartLidarScan,

@@ -1,7 +1,7 @@
 # Orion 统一通信协议（Orion Communication Protocol）
 
 > 创建日期：2026-08-07
-> 修改日期：2026-10-28
+> 修改日期：2026-11-01
 > 状态：设计中（消息字段以本文件为准，后续讨论补充其余章节）
 
 ---
@@ -119,6 +119,7 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 | 4 | `ORION_MANUAL_CONTROL` | 终端/集群 → 车 | 事件驱动 |
 | 5 | `ORION_TASK_SET` | 终端/集群 → 车 | 事件驱动 |
 | 6 | `ORION_RTCM` | 基站/终端 → 车（gossipsub 广播） | 1Hz（基站 RTCM 实时流，Task 24 新增） |
+| 8 | `ORION_MODE` | 终端/集群 → 车 | 事件驱动（模式切换，task_44 新增） |
 
 > 字段命名遵循 MAVLink 风格（`snake_case`、C 类型）。类型字节序：大端（与 MAVLink 一致）。
 
@@ -234,40 +235,85 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
 来源映射（2026-08-11，Task 13_2）：`slam::update` 返回的 `Vec<Delta{gx,gy,delta}>`，slam_task 跨帧聚合净变化（**不做 ±8 clamp，发真实差分**；接收方应用时 clamp ±8 完成精确重放）。
 频率：每 5 帧（1s）发送一次（slam_task 模 5 节流，WS 与 gossip 链路一致）。
 
-### 3.4 ORION_MANUAL_CONTROL（msgid 4）— 手动命令 + 模式切换
+### 3.4 ORION_MANUAL_CONTROL（msgid 4）— 手动两轴连续量
 
-自定义枚举语义（MAVLink 标准 `MANUAL_CONTROL` 为摇杆轴量，与小车"动作+速度"命令不匹配，不采用）。
+task_44 起，手动命令由「一维动作枚举」改为「**两轴连续量**（v, ω）+ 事件」，**按 payload 长度分流**：
+`8 字节` = 运动，`3 字节` = 事件，其它长度整帧拒。口径 §1.2 #5：**不做版本兼容**，四端（base / 真车 / 真机 /
+sim）与 Pictor **必须同批升级**，无过渡期。
 
-| 字段 | 类型 | 说明 |
+统一量纲（§1.2 #2）：`(v m/s, ω rad/s)`，**`ω > 0` = 左转（逆时针）**——注意与 §5.2 的 `yaw`
+（顺时针为正）符号相反：`d(yaw)/dt = −ω`。
+
+**表 A：运动（8 字节，大端）**
+
+| 偏移 | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | `v` | float | 线速度，**m/s**（正 = 前进，负 = 后退） |
+| 4 | `omega` | float | 角速度，**rad/s**，`> 0` = 左转（逆时针），`< 0` = 右转 |
+
+> 手动就是 task_44 §1.4 那张输出表：`W` → `(0.45, 0)`、`W+A` → `(0.45, +0.5)`、`A` → `(0, +0.5)`、全松 → `(0, 0)`。
+> 金标字节串（单测硬编码，三端共用同一串）：
+
+```
+v=0.5,  omega=0      -> 3f00000000000000
+v=0,    omega=0      -> 0000000000000000
+v=0,    omega=-0.5   -> 00000000bf000000
+```
+
+> 每串 8 字节 = 前 4 B（`v`）| 后 4 B（`omega`）。
+
+> ⚠️ f32 大端是**位模式直传**：`0.0` → `00000000`、`-0.0` → `80000000`。全零运动必须用 `+0.0`，
+> 不要写 `-0.0`（`-0.0` 的字节是 `80000000`，与"全零"不等）。
+
+**表 B：事件（3 字节，大端）**
+
+| 偏移 | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | `action` | uint8 | 事件枚举（见下） |
+| 1 | `param` | int16 | 动作参数（`beep` = 时长 ms）；其余事件填 0 |
+
+`action` 枚举（task_44 重排，旧的 `0~4` 运动项与 `8/9` 模式项已删除）：
+
+| 值 | 动作 | param 含义 | 端 |
+|---|---|---|---|
+| 1 | `beep` | 时长 ms | 车 |
+| 2 | `start_lidar` | — | 车 |
+| 3 | `stop_lidar` | — | 车 |
+| 4 | `takeoff` | — | 机 |
+| 5 | `land` | — | 机 |
+
+**长度分流表**：
+
+| payload 长度 | 语义 | 处理 |
 |---|---|---|
-| `action` | uint8 | 动作枚举（见下） |
-| `param` | int16 | 动作参数：速度档位（forward/backward/spin）或时长 ms（beep）；其余动作填 0 |
+| `== 8` | 运动（表 A） | `ManualPayload::Motion { v, omega }` |
+| `== 3` | 事件（表 B） | `ManualPayload::Event { action, param }` |
+| 其它 | 非法帧 | `decode_manual_control` 返回 `None` → **整帧拒**（日志 warn，队列/执行器不动） |
 
-**payload 布局**（大端，共 3 字节）：
+`action` ∉ `{1,2,3,4,5}` → **整帧拒**（未知 action 不做兼容映射）。
 
-| 偏移 | 字段 | 类型 |
+**映射**：
+
+| 载荷 | 内部命令 |
+|---|---|
+| 运动 8 B | `Command::Manual(ManualCmd::Motion { v, omega })` |
+| 事件 `beep` | `ManualCmd::Beep(param as u16)`（i16 → u16 位模式直传，不钳负值） |
+| 事件 `start_lidar` / `stop_lidar` | `ManualCmd::StartLidarScan` / `StopLidarScan` |
+| 事件 `takeoff` / `land` | `ManualCmd::Takeoff` / `Land` |
+
+**停车语义**：协议里**没有 `stop` 动作**；全零 8 B 运动帧 `(0, 0)` 即停。`ManualCmd::Stop` 只作
+**内部命令**保留（sim 控制口的 `stop`、切模式时的显式停车），设备端把它解释为 `(0, 0)`。
+
+**⚠️ 旧值警告（无兼容过渡期，混跑即事故）**：
+
+| 旧值（旧 msgid 4 的 action） | 新语义 | 后果 |
 |---|---|---|
-| 0 | `action` | u8 |
-| 1 | `param` | i16 |
+| `0`~`4`（`forward` / `backward` / `spin_left` / `spin_right` / `stop`） | 新表中不存在 | 整帧拒（车收不到） |
+| `8` / `9`（`switch_to_manual` / `switch_to_auto`） | 已迁到 **`msgid 8`**（§3.6）；出现在 msgid 4 里按未知拒 | 整帧拒（模式切不了） |
+| `5`（旧 `beep`） | 新表 `5` = **`land`** | ⚠️ **机端会误降落** ⇒ 必须同批升级，不得混跑 |
+| 旧 3 B 帧（`action` + `param`） | 3 B 仍是合法长度 → 按**事件**解 | 旧 `6`/`7`（旧 `start/stop_lidar`）在新表里不存在 → 整帧拒 |
 
-`action` 枚举：
-
-| 值 | 动作 | param 含义 |
-|---|---|---|
-| 0 | `forward` | 速度 |
-| 1 | `backward` | 速度 |
-| 2 | `spin_left` | 速度 |
-| 3 | `spin_right` | 速度 |
-| 4 | `stop` | — |
-| 5 | `beep` | 时长 ms |
-| 6 | `start_lidar` | — |
-| 7 | `stop_lidar` | — |
-| 8 | `switch_to_manual` | — |
-| 9 | `switch_to_auto` | — |
-| 10 | `takeoff` | —（Task 22_4，机） |
-| 11 | `land` | —（Task 22_4，机） |
-
-映射：`ORION_MANUAL_CONTROL` → `Command::Manual(ManualCmd::*)` / `Command::Mode(ModeCmd::*)`。
+频率：事件驱动（Pictor 按键集合变化才发一帧，Step 3 落地）；全松键发 `(0, 0)`。
 
 ### 3.5 ORION_TASK_SET（msgid 5）— 任务队列（Task 36：单分支，无群发段）
 
@@ -311,7 +357,41 @@ Pictor（Godot 地面站）迁移至 libp2p 之前，**WebSocket 链路保留**�
   车端不再持有名单、不做分配（`planning/assignment.rs` 三份已删）
 - ⚠️ **同批升级无过渡期**：车端与 Pictor 必须同批上线；旧帧（含 `member_count`/`members` 段）因长度校验必然被拒
 
-### 3.6 ORION_RTCM（msgid 6）— RTK 改正数据（Task 24 新增）
+### 3.6 ORION_MODE（msgid 8）— 模式切换
+
+> 本节按 task_44 编排插在 RTCM 之前（节序因此略偏离 msgid 升序）；msgid 6 RTCM 见 §3.7。
+
+模式切换拆成**独立消息**（task_44 §1.2 #4）：payload **恒 1 字节**，事件驱动（Pictor 面板勾选）。
+
+| 偏移 | 字段 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | `mode` | uint8 | `0` = 手动（manual） / `1` = 自动（auto） |
+
+金标字节串（单测硬编码）：
+
+```
+mode=manual  -> 00
+mode=auto    -> 01
+```
+
+**解码规则**（`decode_mode`，不猜）：
+
+| 条件 | 处理 |
+|---|---|
+| `len != 1` | 拒（整帧） |
+| `mode ∉ {0, 1}` | 拒（整帧） |
+
+**映射**：`mode 0` → `Command::Mode(ModeCmd::SwitchToManual)`；`mode 1` → `Command::Mode(ModeCmd::SwitchToAuto)`。
+
+> ⚠️ **关键约束：必须映射到 `Command::Mode`，不得映射成 `Command::Manual`** —— 它要**绕过**
+> `main_loop` 的手动模式门闩；否则「从手动切回自动」这条命令会被手动门闩自己拦住。
+
+**取代关系**：原 `msgid 4` 的 `action` 旧值 `8` / `9`（旧的 `switch_to_manual` / `switch_to_auto`，
+已删除）不再存在，模式切换**只走本消息**；`msgid 4` 里出现这两个值按未知 action 整帧拒。
+
+方向：终端/集群 → 车（`compid = 200`）。
+
+### 3.7 ORION_RTCM（msgid 6）— RTK 改正数据（Task 24 新增）
 
 基站（`pleiades-terminal` / UM960）向所有车广播的 **RTCM 3.x 原始帧**，供车侧流动站（LG290P）解算厘米级定位。**双层帧**：外层 ORION 帧（传输 + 身份），内层 RTCM（业务数据），payload 无自定义字段结构。
 
@@ -374,6 +454,8 @@ sysid = libp2p PeerId 的 multihash 字节数组（Ed25519 下 38B）
 - **顺时针为正**（右转 → yaw 增大）——STM32 AHRS 实测定义
 - 开机朝向 = 0（非磁北，无绝对航向）
 - ⚠️ **踩坑记录**：早期代码误用标准数学"逆时针为正"约定，导致转向/建图镜像错乱；实车测试后修正为顺时针为正（`890e2fc` 对调 spin 方向）。**yaw 不是逆时针为正！**
+- ⚠️ **角速度 ω 的正方向与此相反**：`ω > 0` = 左转（逆时针）= **yaw 减小**；即 `d(yaw)/dt = −ω`
+  （task_44 §1.2 #2 / §1.4 的 ± 号来源——驱动反解与执行器符号都按这条，写反会左右颠倒）。
 
 ### 5.3 网格坐标
 
@@ -386,7 +468,8 @@ sysid = libp2p PeerId 的 multihash 字节数组（Ed25519 下 38B）
 | 量 | 单位 |
 |---|---|
 | 位置 | 米（m） |
-| 速度 | 米/秒（m/s） |
+| 线速度 | 米/秒（m/s） |
+| 角速度 | 弧度/秒（rad/s），**ω > 0 = 左转（逆时针）** |
 | 角度 | 弧度（rad），**顺时针为正** |
 | 时间 | 毫秒（ms），开机起算 |
 

@@ -1,13 +1,13 @@
 //Presented by KeJi
 //Created Date ： 2026-08-07
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-11-01
 
 //! Orion 统一通信协议（MAVLink 风格帧 + 自定义消息）
 //!
 //! 设计文档：`docs/design_doc/orion_protocol.md`
 //!
 //! - `frame.rs`   帧编解码（magic/len/seq/sysid/compid/msgid/payload/checksum）
-//! - `messages.rs` 5 条消息的 payload 编解码
+//! - `messages.rs` 6 条消息的 payload 编解码
 
 pub mod frame;
 pub mod messages;
@@ -16,13 +16,13 @@ pub mod command_decode;
 pub use frame::{decode_frame, encode_frame, Frame};
 pub use command_decode::parse_orion_frame;
 pub use messages::{
-    decode_assist_request, decode_manual_control, decode_map_delta, decode_map_full, decode_pose,
-    decode_task_set, encode_assist_request, encode_manual_control, encode_map_delta,
-    encode_map_full, encode_pose, encode_task_set,
-    ACTION_BACKWARD, ACTION_BEEP, ACTION_FORWARD, ACTION_SPIN_LEFT, ACTION_SPIN_RIGHT,
-    ACTION_START_LIDAR, ACTION_STOP, ACTION_STOP_LIDAR, ACTION_SWITCH_TO_AUTO,
-    ACTION_SWITCH_TO_MANUAL, AssistRequest, MISSION_FOLLOW, MISSION_GOTO, ManualControl,
-    MapDeltaEntry, MissionItem, PoseData, TaskSetPayload,
+    decode_assist_request, decode_manual_control, decode_map_delta, decode_map_full, decode_mode,
+    decode_pose, decode_task_set, encode_assist_request, encode_manual_event, encode_manual_motion,
+    encode_map_delta, encode_map_full, encode_mode, encode_pose, encode_task_set,
+    ACTION_BEEP, ACTION_LAND, ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF,
+    MANUAL_EVENT_LEN, MANUAL_MOTION_LEN, MODE_AUTO, MODE_LEN, MODE_MANUAL, AssistRequest,
+    MISSION_FOLLOW, MISSION_GOTO, ManualPayload, MapDeltaEntry, MissionItem, PoseData,
+    TaskSetPayload,
 };
 
 /// 消息 ID 常量（与协议文档 §3 一致）
@@ -34,6 +34,11 @@ pub const MSGID_TASK_SET: u16 = 5;
 pub const MSGID_RTCM: u16 = 6;
 /// 协助请求（UAV → 地面站；**非下行命令**，地面站不回复，task_41 §5.3）
 pub const MSGID_ASSIST_REQUEST: u16 = 7;
+/// 模式切换（终端 → 车，payload 恒 1 B；task_44 §1.2 #4）
+///
+/// ⚠️ 解码必须映射到 `Command::Mode`，**不得**映射成 `Command::Manual`——
+/// 它要绕过 `main_loop` 的手动模式门闩（否则「从手动切回自动」会被自己拦住）。
+pub const MSGID_MODE: u16 = 8;
 
 /// compid 约定（协议文档 §4.3）
 pub const COMPID_ROBOT: u8 = 1;
