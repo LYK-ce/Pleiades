@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 //! 世界链路 wire 协议（`orion-simulation-world/scripts/net/WireProtocol.gd` 的 Rust 镜像）
 //!
@@ -24,12 +24,11 @@ pub const MSG_CHASSIS_READY: &str = "chassis_ready";
 pub const MSG_SENSOR_HELLO: &str = "sensor_hello";
 pub const MSG_SENSOR_READY: &str = "sensor_ready";
 pub const MSG_MOTION_CMD: &str = "motion_cmd";
-/// 连续档位 / 速度指令的 `action`（task_39 §四.4、task_40 §二.6）：与
-/// `forward/backward/left/right/up/down/stop` 七个离散 action **并存**。
+/// 连续速度指令的 `action`（task_39 §四.4、task_44 §1.3）：车栈与机栈**共用**这一个字面量。
 ///
-/// 同一 `action` 按**底盘**解释（两个底盘脚本不共享解析代码，故同一字面量不冲突）：
-/// - 机栈 `Quadrotor.gd` 读 `v` / `omega`（物理量，m/s / rad/s，task_39）；
-/// - 车栈 `DiffDrive.gd` 读 `speed` / `turn`（百分比档位，task_40）。
+/// 载荷只有 `v` / `omega` 两个物理量（`v` m/s、`omega` rad/s，`omega > 0` = 左转）：
+/// - 机栈 → 世界 `Quadrotor.gd` 的 `"velocity"` 分支（直接 `clampf`，task_39）；
+/// - 车栈 → 世界 `DiffDrive.gd` 的 `"velocity"` 分支（同样直接收物理量，task_44 §1.3）。
 pub const ACTION_VELOCITY: &str = "velocity";
 pub const MSG_ASSEMBLY_READY: &str = "assembly_ready";
 pub const MSG_POSE: &str = "pose";
@@ -86,30 +85,28 @@ pub struct SensorHello<'a> {
 
 /// 一条动作帧（世界 `motion_cmd`）
 ///
-/// task_39 §四.4 在**同一个结构体**上加 `v` / `omega` 两个可选字段，task_40 §二.6 再加 `turn`，
-/// 而不是换结构体 / 换 enum：本类型是动作通道的元素类型（`mpsc::Receiver<protocol::MotionCmd>`），
+/// task_39 §四.4 在**同一个结构体**上加 `v` / `omega` 两个可选字段，而不是换结构体 / 换 enum：
+/// 本类型是动作通道的元素类型（`mpsc::Receiver<protocol::MotionCmd>`），
 /// 且 `sim::chassis::ugv.rs` 以 `m.action` / `m.speed` 字段访问它 —— 换类型会让差速底盘编不过。
-/// 三个可选字段全 `None` 时 ⇒ 序列化**逐字不变**（`skip_serializing_if` 整键省略，由单测锁住）。
+/// 两个可选字段全 `None` 时 ⇒ 序列化**逐字不变**（`skip_serializing_if` 整键省略，由单测锁住）。
+///
+/// task_44 §1.3 起 `v` / `omega` 是**两个栈共用**的载荷（车与机都读这两个键）；
+/// `speed` 只服务 `up` / `down`（爬升百分比）与 `stop`（恒 0），velocity 帧恒 0 且世界两侧都不读。
 #[derive(Debug, Clone, Serialize)]
 pub struct MotionCmd {
     pub msg: &'static str,
     pub seq: u64,
     pub action: &'static str,
-    /// 前进档位（车栈连续档 / 旧离散动作共用同一个字段；机栈速度帧填 0）
+    /// 爬升 / 停车的百分比（`up`/`down`/`stop` 用；velocity 帧恒 0）
     pub speed: u8,
-    /// 连续速度的水平速度（仅 `action == ACTION_VELOCITY` 且机栈时 `Some`）：**m/s**
-    /// （物理量，与真机 UAV 的 `vel_fwd` 同口径；task_39 §四 修订）
+    /// 连续速度的水平速度（仅 `action == ACTION_VELOCITY` 时 `Some`）：**m/s**
+    /// （物理量，车与机同口径；task_39 §四 修订 / task_44 §1.3）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub v: Option<f32>,
-    /// 连续速度的偏航角速度（同上）：**rad/s**（与真机 UAV 的 `yaw_rate_deg` 同口径；
-    /// 符号见 `sim::uav_sim::executor` 的文件头推导）
+    /// 连续速度的偏航角速度（同上）：**rad/s**（`omega > 0` = 左转；
+    /// 符号见 `sim::ugv_sim::executor` / `sim::uav_sim::executor` 的文件头推导）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omega: Option<f32>,
-    /// 车栈连续档位的**转向档位**（仅 `action == ACTION_VELOCITY` 且车栈时 `Some`）：**−100..+100**
-    /// 带符号百分比（`Δθ > 0`（目标在右）⇒ `turn < 0`；符号证据链见 `sim::ugv_sim::executor` 文件头）。
-    /// `skip_serializing_if` ⇒ 旧帧（离散动作 / 机栈速度帧）JSON **逐字不变**。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn: Option<i16>,
 }
 
 // ================================================================ 入站
@@ -373,23 +370,22 @@ mod tests {
 
     #[test]
     fn test_serialize_motion_cmd() {
-        // 三个可选字段全 None ⇒ JSON **逐字**等于 task_39 之前的旧帧（task_40 §二.6 单测 ①）
+        // 两个可选字段全 None ⇒ JSON **逐字**等于 task_39 之前的旧帧
         let cmd = MotionCmd {
             msg: MSG_MOTION_CMD,
             seq: 7,
-            action: "forward",
-            speed: 50,
+            action: "up",
+            speed: 10,
             v: None,
             omega: None,
-            turn: None,
         };
         let v = serde_json::to_value(&cmd).expect("serialize");
-        assert_eq!(v, json!({"msg":"motion_cmd","seq":7,"action":"forward","speed":50}));
+        assert_eq!(v, json!({"msg":"motion_cmd","seq":7,"action":"up","speed":10}));
     }
 
     #[test]
     fn test_serialize_motion_velocity_cmd() {
-        // task_39 §四.4：速度帧带 v / omega；`speed` 仍恒序列化（世界 `"velocity"` 分支不读它）
+        // task_44 §1.3：velocity 帧带 v / omega（车与机共用）；`speed` 仍恒序列化且恒 0
         let cmd = MotionCmd {
             msg: MSG_MOTION_CMD,
             seq: 12,
@@ -397,7 +393,6 @@ mod tests {
             speed: 0,
             v: Some(0.5),
             omega: Some(-0.25),
-            turn: None,
         };
         let v = serde_json::to_value(&cmd).expect("serialize");
         assert_eq!(
@@ -405,12 +400,12 @@ mod tests {
             json!({"msg":"motion_cmd","seq":12,"action":"velocity","speed":0,"v":0.5,"omega":-0.25})
         );
         let obj = v.as_object().expect("object");
-        assert!(!obj.contains_key("turn"), "机栈速度帧不该出现 turn 键");
+        assert!(!obj.contains_key("turn"), "velocity 帧不该出现 turn 键");
     }
 
     #[test]
     fn test_serialize_motion_cmd_without_velocity_keys() {
-        // 双锁「None 时三个键**整键省略**」（旧帧 JSON 逐字不变，R4）
+        // 双锁「None 时两个键**整键省略**」（旧帧 JSON 逐字不变，R4）
         let cmd = MotionCmd {
             msg: MSG_MOTION_CMD,
             seq: 1,
@@ -418,74 +413,38 @@ mod tests {
             speed: 0,
             v: None,
             omega: None,
-            turn: None,
         };
         let v = serde_json::to_value(&cmd).expect("serialize");
         assert_eq!(v, json!({"msg":"motion_cmd","seq":1,"action":"stop","speed":0}));
         let obj = v.as_object().expect("object");
         assert!(!obj.contains_key("v"), "None 不该出现 v 键");
         assert!(!obj.contains_key("omega"), "None 不该出现 omega 键");
-        assert!(!obj.contains_key("turn"), "None 不该出现 turn 键");
+        assert!(!obj.contains_key("turn"), "turn 键已随百分比档位删除");
     }
 
     #[test]
-    fn test_serialize_motion_cmd_turn_negative() {
-        // task_40 §二.6：车栈帧 = action="velocity" + speed 前进档 + turn 带符号转向档，
-        // `v` / `omega` 整键省略（世界 `DiffDrive.gd` 的 `"velocity"` 分支读 speed/turn）
+    fn test_serialize_motion_cmd_keys_are_physical() {
+        // task_44 §1.4 定值落地：velocity 帧的载荷只有 v / omega 两个**物理量**，
+        // 逐字金标（车与机共用同一帧格式）
         let cmd = MotionCmd {
             msg: MSG_MOTION_CMD,
-            seq: 13,
+            seq: 12,
             action: ACTION_VELOCITY,
-            speed: 30,
-            v: None,
-            omega: None,
-            turn: Some(-50),
+            speed: 0,
+            v: Some(0.45),
+            omega: Some(-0.5),
         };
         let v = serde_json::to_value(&cmd).expect("serialize");
+        // `0.45_f32 as f64` 才是线上逐字的值（0.44999998807907104）—— 直接写 `0.45` 会让
+        // serde_json 的 `json!` 拿 f64 精确值比对而假红
         assert_eq!(
             v,
-            json!({"msg":"motion_cmd","seq":13,"action":"velocity","speed":30,"turn":-50})
+            json!({
+                "msg":"motion_cmd","seq":12,"action":"velocity","speed":0,
+                "v": 0.45_f32 as f64, "omega": -0.5_f32 as f64,
+            })
         );
         let obj = v.as_object().expect("object");
-        assert!(!obj.contains_key("v"), "车栈帧不该出现 v 键");
-        assert!(!obj.contains_key("omega"), "车栈帧不该出现 omega 键");
-    }
-
-    #[test]
-    fn test_serialize_motion_cmd_turn_zero_is_present() {
-        // 0 ≠ None：`turn = 0`（直行）必须**留在** JSON 里，否则世界侧会当成"没带 turn"
-        let cmd = MotionCmd {
-            msg: MSG_MOTION_CMD,
-            seq: 14,
-            action: ACTION_VELOCITY,
-            speed: 30,
-            v: None,
-            omega: None,
-            turn: Some(0),
-        };
-        let v = serde_json::to_value(&cmd).expect("serialize");
-        assert_eq!(
-            v,
-            json!({"msg":"motion_cmd","seq":14,"action":"velocity","speed":30,"turn":0})
-        );
-    }
-
-    #[test]
-    fn test_serialize_motion_cmd_turn_positive() {
-        // 正 turn（目标在左）⇒ 世界 `rotation.y` 增大（左转）
-        let cmd = MotionCmd {
-            msg: MSG_MOTION_CMD,
-            seq: 15,
-            action: ACTION_VELOCITY,
-            speed: 30,
-            v: None,
-            omega: None,
-            turn: Some(45),
-        };
-        let v = serde_json::to_value(&cmd).expect("serialize");
-        assert_eq!(
-            v,
-            json!({"msg":"motion_cmd","seq":15,"action":"velocity","speed":30,"turn":45})
-        );
+        assert!(!obj.contains_key("turn"), "velocity 帧只带物理量：不许出现 turn 键");
     }
 }

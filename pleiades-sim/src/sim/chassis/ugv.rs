@@ -1,31 +1,31 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
-//! 差速底盘（世界零件 `diff_drive_ugv`）—— task_31 §六.5.4
+//! 差速底盘（世界零件 `diff_drive_ugv`）—— task_31 §六.5.4 / task_44 §1.3
 //!
 //! 只写**真正不同**的部分：`Handle_Manual_Cmd` 里的 `Beep` / `Takeoff` / `Land` / `Lidar` 分支。
-//! 其余（动作分发、手动运动命令、位姿写回、停车）全在 [`ChassisBase`] 里，两个底盘共用。
+//! 其余（手动运动命令、位姿写回、停车）全在 [`ChassisBase`] 里，两个底盘共用。
 //!
-//! 真机对照（`pleiades-ugv/src/ugv/stm32/mod.rs:134-164`，只读参考、不引用）：
-//! - `apply_action`：`MoveForward → forward(forward_speed)`、`TurnLeft → spin_left(turn_speed)`（原地偏航）、
-//!   `Stop → stop()`（有界重试）
-//! - `handle_manual_cmd`：`Forward(_)/Backward(_)` **忽略载荷**、`Stop → stop()`、
-//!   `Beep(ms) → beep(ms)`（车支持蜂鸣，**世界不支持**）、`_ => return`（车不响应 Takeoff/Land/LiDAR）
+//! 与世界的对应（task_44 §1.3）：[`Chassis::Apply_Velocity`] `(v, omega)` →
+//! `motion_cmd{action:"velocity", v, omega}` → 世界 `DiffDrive.gd` 直接收物理量
+//! （`v` m/s、`omega` rad/s，`omega > 0` = 左转；clamp 上限 `max_speed` / `max_turn_rate`）。
+//! 手动就是同一条路：`ManualCmd::Motion { v, omega }` **原值透传**（`W` → `(0.45, 0)`、
+//! `W+A` → `(0.45, +0.5)`、`A` → `(0, +0.5)`、全松 → `(0, 0)`，见 task_44 §1.4）。
 //!
-//! 与世界的对应：`TurnLeft → "left"`、`TurnRight → "right"`（世界侧也是「`speed=0` + 纯偏航」，
-//! 语义严格对齐，符号**不取反**，§六.2.2）。
+//! 真机对照（`pleiades-ugv`，只读参考、不引用）：`Handle_Manual_Cmd` 里 `Stop → stop()`、
+//! `Beep(ms) → beep(ms)`（车支持蜂鸣，**世界不支持**）、`_ => return`（车不响应 Takeoff/Land/LiDAR）。
+//!
+//! 符号**不取反**：`omega` 的符号证据链四步在 `sim/ugv_sim/executor.rs` 文件头，本文件只透传。
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::debug;
 
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::state::MotionAction;
 
 use crate::sim::chassis::pose_ingest::{PoseFields, SpawnFields};
 use crate::sim::chassis::{Chassis, ChassisBase};
@@ -47,22 +47,16 @@ impl Chassis for DiffDriveChassis {
         &self.base.name
     }
 
-    fn Apply_Action(&self, action: MotionAction) {
-        self.base.Dispatch(action);
-    }
-
-    /// 车栈连续档位指令（task_40 §二.7）：一帧 `action="velocity"` + `speed` / `turn` 档位，
+    /// 连续速度指令（task_44 §1.3）：一帧 `action="velocity"` + `v` / `omega` 物理量，
     /// 恒返回 `true`（= 支持）；`Err` 只表示这一帧没进通道（未装配 / 通道满），50 ms 下一拍自愈。
-    fn Apply_Velocity_Pct(&self, speed: u8, turn: i16) -> bool {
-        if let Err(e) = self.base.motion.Send_Velocity_Pct(speed, turn) {
-            debug!("[chassis] {} 连续档位未投递：{e}", self.base.name);
-        }
+    fn Apply_Velocity(&self, v: f32, omega: f32) -> bool {
+        self.base.Send_Velocity(v, omega);
         true
     }
 
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd) {
-        // Forward / Backward / SpinLeft / SpinRight / Stop（5 个运动分支，共用实现）
-        if self.base.Send_Manual_Motion(cmd) {
+        // Motion / Stop（两个运动分支，共用实现）
+        if self.base.Dispatch_Manual(cmd) {
             return;
         }
         match cmd {
@@ -114,7 +108,7 @@ mod tests {
 
     type Rx = mpsc::Receiver<crate::world_link::protocol::MotionCmd>;
 
-    /// 已装配的差速底盘（默认 30/10）
+    /// 已装配的差速底盘（缺省 0.45 m/s / 0.5 rad/s）
     fn diff() -> (Arc<dyn Chassis>, Rx) {
         let (tx, rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
         tx.Set_Assembled(true);
@@ -154,25 +148,25 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_manual_ignores_payload() {
-        // 载荷（i16）一律忽略，速度永远取配置（与真机 forward_speed / turn_speed 一致）
+    fn test_diff_manual_motion_passthrough() {
+        // task_44 §1.4：手动就是同一张定值表 —— (v, omega) **原值透传**，不做换算
         let (ch, mut rx) = diff();
 
-        ch.Handle_Manual_Cmd(&ManualCmd::Forward(999));
-        let m = rx.try_recv().expect("Forward 应下发");
-        assert_eq!((m.action, m.speed), ("forward", 30), "载荷 999 不能变成速度");
+        ch.Handle_Manual_Cmd(&ManualCmd::Motion { v: 0.45, omega: 0.5 });
+        let m = rx.try_recv().expect("Motion 应下发");
+        assert_eq!(m.action, "velocity");
+        assert_eq!((m.v, m.omega), (Some(0.45), Some(0.5)), "W+A ⇒ (0.45, +0.5)");
+        assert_eq!(m.speed, 0, "速度帧不带百分比档位");
 
-        ch.Handle_Manual_Cmd(&ManualCmd::Backward(-5));
-        let m = rx.try_recv().expect("Backward 应下发");
-        assert_eq!((m.action, m.speed), ("backward", 30), "负载荷必须被忽略");
+        // 后退：v 取负是合法的（世界侧 clamp 到 ±max_speed）
+        ch.Handle_Manual_Cmd(&ManualCmd::Motion { v: -0.45, omega: 0.0 });
+        let m = rx.try_recv().expect("后退 Motion 应下发");
+        assert_eq!((m.v, m.omega), (Some(-0.45), Some(0.0)));
 
-        ch.Handle_Manual_Cmd(&ManualCmd::SpinLeft(1000));
-        let m = rx.try_recv().expect("SpinLeft 应下发");
-        assert_eq!((m.action, m.speed), ("left", 10));
-
-        ch.Handle_Manual_Cmd(&ManualCmd::SpinRight(0));
-        let m = rx.try_recv().expect("SpinRight 应下发");
-        assert_eq!((m.action, m.speed), ("right", 10));
+        // 全松键 (0, 0) 也是合法指令（不是 stop 帧：世界侧两者都归零，语义等价）
+        ch.Handle_Manual_Cmd(&ManualCmd::Motion { v: 0.0, omega: 0.0 });
+        let m = rx.try_recv().expect("(0,0) Motion 应下发");
+        assert_eq!((m.v, m.omega), (Some(0.0), Some(0.0)));
 
         ch.Handle_Manual_Cmd(&ManualCmd::Stop);
         let m = rx.try_recv().expect("Stop 应下发");
@@ -188,26 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_apply_action_wire() {
-        // §六.2.1 的表经 apply_action 走到底（动作 → action/speed）
-        let (ch, mut rx) = diff();
-
-        ch.Apply_Action(MotionAction::TurnLeft);
-        let m = rx.try_recv().expect("TurnLeft 应下发");
-        assert_eq!((m.action, m.speed), ("left", 10));
-
-        ch.Apply_Action(MotionAction::MoveForward);
-        let m = rx.try_recv().expect("MoveForward 应下发");
-        assert_eq!((m.action, m.speed), ("forward", 30));
-
-        ch.Apply_Action(MotionAction::Stop);
-        let m = rx.try_recv().expect("Stop 应下发");
-        assert_eq!((m.action, m.speed), ("stop", 0));
-    }
-
-    #[test]
     fn test_diff_stop_uses_config_and_channel() {
-        // `Chassis::Stop` 也是走同一条通道（安全关键路径）
+        // `Chassis::Stop` 也是走同一条通道（安全关键路径），与配置无关（恒 speed=0）
         let (ch, mut rx) = diff();
         ch.Stop();
         let m = rx.try_recv().expect("Stop 应下发");
@@ -215,25 +191,25 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_apply_velocity_pct_dispatch() {
-        // task_40 §二.7：档位直接透传到 wire（不做任何换算），两向都过一遍
+    fn test_diff_apply_velocity_dispatch() {
+        // task_44 §1.3：物理量原值直接透传到 wire（不做任何换算），两向都过一遍
         let (ch, mut rx) = diff();
-        assert!(ch.Apply_Velocity_Pct(30, -30), "差速底盘必须支持连续档位");
+        assert!(ch.Apply_Velocity(0.45, -0.5), "差速底盘必须支持 Apply_Velocity");
 
-        let m = rx.try_recv().expect("档位帧应下发");
+        let m = rx.try_recv().expect("速度帧应下发");
         assert_eq!(m.action, "velocity");
-        assert_eq!(m.speed, 30);
-        assert_eq!(m.turn, Some(-30), "右转 ⇒ turn < 0（符号见 ugv_sim/executor.rs 文件头）");
-        assert_eq!((m.v, m.omega), (None, None), "车栈帧不带物理量字段");
+        assert_eq!(m.speed, 0, "速度帧不带百分比档位");
+        assert_eq!(m.v, Some(0.45));
+        assert_eq!(m.omega, Some(-0.5), "右转 ⇒ omega < 0（符号见 ugv_sim/executor.rs 文件头）");
 
-        assert!(ch.Apply_Velocity_Pct(0, 30));
+        assert!(ch.Apply_Velocity(0.0, 0.5));
         let m = rx.try_recv().expect("原地左转应下发");
-        assert_eq!((m.speed, m.turn), (0, Some(30)));
+        assert_eq!((m.v, m.omega), (Some(0.0), Some(0.5)));
     }
 
     #[test]
-    fn test_diff_apply_velocity_pct_before_assembled_still_supported() {
-        // 未装配：仍返回 true（= 底盘支持），只是这一帧被 `Send_Velocity_Pct` 静默丢弃
+    fn test_diff_apply_velocity_before_assembled_still_supported() {
+        // 未装配：仍返回 true（= 底盘支持），只是这一帧被 `Send_Velocity` 静默丢弃
         let (tx, mut rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
         let base = ChassisBase::New(
             "diff_drive_ugv",
@@ -242,7 +218,7 @@ mod tests {
             Arc::new(RwLock::new(RobotState::default())),
         );
         let ch = DiffDriveChassis::New(base);
-        assert!(ch.Apply_Velocity_Pct(30, -30));
+        assert!(ch.Apply_Velocity(0.45, -0.5));
         assert_empty(&mut rx);
     }
 

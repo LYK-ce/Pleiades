@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-29
+# Modified Date ： 2026-11-01
 #
 # 差速底盘 diff_drive_ugv（Step 5 / COMPONENTS.md §4.4）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED（D3）+ 差速运动学 + 世界侧速度环。
@@ -10,26 +10,24 @@
 #   于是 ApplyBodySize(Vector3(wheel_base, height, track_width)) 生成的 BoxShape3D 与模型逐轴相等。
 #   车体截面从 0.16/0.24 变成 0.25/0.25 是**有意的行为变更**：贴墙余量/绕行余量会变。
 #
-# 控制接口与真机一致（§6.3-1）：只吃 motion_cmd{action, speed(百分比)}，
-#   速度环在底盘内部跑 —— sim 侧的控制器组件与真机完全相同。
+# 控制接口与真机一致（§6.3-1）：只吃 motion_cmd{action:"velocity", v, omega}（**物理量**，
+#   v 单位 m/s、omega 单位 rad/s），速度环在底盘内部跑 —— sim 侧的控制器组件与真机完全相同。
 #
 # 分工（D8）：本文件只产出**控制量** {velocity(全局), yaw_rate(rotation.y 角速度)}；
 #   位置一律由 Vehicle._physics_process() 推进（唯一位置更新点）。
 #   因此这里不写 position、不调物理推进 API、不做堵转检测。
 #
-# action 语义（§4.4 表，逐行照做；left/right 线速度为 0 = **原地转**，是设计）：
-#   forward  -> v_target = +max_speed·pct , yaw_target = 0
-#   backward -> v_target = -max_speed·pct , yaw_target = 0
-#   left     -> v_target = 0              , yaw_target = +max_turn_rate·pct
-#   right    -> v_target = 0              , yaw_target = -max_turn_rate·pct
-#   velocity -> v_target = +max_speed·speed% , yaw_target = +max_turn_rate·turn%
-#               （车栈连续档：**前进与转向同时生效**，task_40 §二.5；speed 0~100、turn −100..+100）
-#   up/down  -> 0（UGV 无竖直自由度）；stop / 未知 / 缺 action -> 0
+# action 语义（task_44 §1.3，逐行照做）：
+#   velocity -> _speed_target = clampf(v, ±max_speed)      # v 是 m/s，不乘任何百分比
+#               _yaw_target  = clampf(omega, ±max_turn_rate)  # omega 是 rad/s
+#   stop / 未知 / 缺 action -> 0 / 0（归零 = 停车，语义不变）
+#   max_speed / max_turn_rate **只作 clamp 上限**（缺省 1.5 m/s、90 °/s；定值 0.45 / 0.5 离上限
+#   还有 3 倍余量），不做任何百分比 → 物理量的换算。
 #
 # 坐标：前进 = 局部 +X，局部 +Z = 车体右侧；velocity = global_basis * (v, 0, 0)。
 # yaw_rate 是 **Godot rotation.y** 的角速度（正 = 左转），世界 yaw = -rotation.y。
-#   "velocity" 的 turn 与 rotation.y **同号**：turn < 0 ⇒ yaw_target < 0 ⇒ rotation.y 减小
-#   ⇒ 世界 yaw 增大（右转）。与 sim 侧 `sim/ugv_sim/executor.rs` 文件头的证据链一致。
+#   omega 与 rotation.y **同号**：omega < 0 ⇒ yaw_target < 0 ⇒ rotation.y 减小 ⇒ 世界 yaw 增大
+#   （右转）。与 sim 侧 `sim/ugv_sim/executor.rs` 文件头的证据链一致。
 #
 # 不声明全局类名（§9.1 E5）。
 
@@ -45,8 +43,8 @@ const WHEEL_NAMES := ["WheelFL", "WheelFR", "WheelRL", "WheelRR"]
 
 
 # 生效参数（Configure 从 params 读，带默认回退）
-var _max_speed := 1.5              # m/s
-var _max_turn_rate := PI * 0.5     # rad/s（= 90 °/s）
+var _max_speed := 1.5              # m/s（**只是 clamp 上限**）
+var _max_turn_rate := PI * 0.5     # rad/s（= 90 °/s，**只是 clamp 上限**）
 var _wheel_base := 0.30            # m（纵向，X）
 var _track_width := 0.25           # m（横向，Z）= 模型 AABB z
 var _height := 0.25                # m = 模型 AABB y（D11）
@@ -54,8 +52,8 @@ var _height := 0.25                # m = 模型 AABB y（D11）
 # 速度环状态（世界侧）：当前值与目标值，按加速度上限斜坡逼近
 var _speed := 0.0                  # 当前线速度（局部 +X 正向，m/s）
 var _yaw_rate := 0.0               # 当前 rotation.y 角速度（rad/s，正 = 左转）
-var _speed_target := 0.0
-var _yaw_target := 0.0
+var _speed_target := 0.0           # 目标线速度（m/s，来自 motion_cmd 的 v）
+var _yaw_target := 0.0             # 目标 rotation.y 角速度（rad/s，来自 motion_cmd 的 omega）
 
 var _warned_wheels := false        # 轮子缺失只告警一次（每帧刷屏没有意义）
 
@@ -94,32 +92,19 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 	_layout_wheels()
 
 
-## 指令 -> 速度环目标（只存最新，不排队；pct 缺失/非法一律 0）。
-## `"velocity"` 的两个字段按底盘解释（task_40 §二.5）：`cmd.speed` = 0~100 前进档，
-## `cmd.turn` = −100..+100 带符号转向档（机栈的 `v`/`omega` 物理量由 `Quadrotor.gd` 自己解析）。
+## 指令 -> 速度环目标（只存最新，不排队；缺键/非法类型一律 0）。
+## task_44 §1.3：车栈与机栈共用 `{"velocity", v, omega}` 两个**物理量**
+## （`v` m/s、`omega` rad/s）；百分比换算与 5 个离散 action 分支已整体删除。
 func SetCommand(cmd: Dictionary) -> void:
 	super.SetCommand(cmd)
-	var pct := SpeedPct(cmd)
 	match ActionOf(cmd):
-		"forward":
-			_speed_target = _max_speed * pct
-			_yaw_target = 0.0
-		"backward":
-			_speed_target = -_max_speed * pct
-			_yaw_target = 0.0
-		"left":
-			_speed_target = 0.0
-			_yaw_target = _max_turn_rate * pct
-		"right":
-			_speed_target = 0.0
-			_yaw_target = -_max_turn_rate * pct
 		"velocity":
-			# 车栈连续档（task_40 §二.5）：前进档位与转向档位**同时生效** —— 本步唯一的新行为 = 解除互斥。
-			# speed 走基类 SpeedPct（0~100 → 0~1，容错与离散档一致）；turn 是带符号档位（−100..+100）。
-			_speed_target = _max_speed * pct
-			_yaw_target = _max_turn_rate * _TurnPct(cmd)
+			# v = 水平速度 m/s（局部 +X）；omega = rotation.y 角速度 rad/s（正 = 左转）。
+			# max_speed / max_turn_rate 只作 clamp 上限，不做任何 ×100 / ÷100 换算。
+			_speed_target = clampf(_VelocityField(cmd, "v"), -_max_speed, _max_speed)
+			_yaw_target = clampf(_VelocityField(cmd, "omega"), -_max_turn_rate, _max_turn_rate)
 		_:
-			# stop / up / down / 未知 action / 缺 action：UGV 只认平面运动
+			# stop / up / down / 未知 action / 缺 action：UGV 只认平面运动，目标一律归零
 			_speed_target = 0.0
 			_yaw_target = 0.0
 
@@ -158,13 +143,12 @@ func GetBodySize() -> Vector3:
 
 # ================================================================ 私有
 
-## motion_cmd 的带符号档位（−100..+100，车栈 "velocity" 用）：缺失 / 非数字 / 非法类型 → 0.0（不崩）。
-## 与基类 SpeedPct 的分工：speed 只前进（0~100），turn 有符号（−100..+100）。
-## 复用基类 _to_float（类型容错已在那里），本文件不新增第二套解析。
-func _TurnPct(cmd: Dictionary) -> float:
-	if not cmd.has("turn"):
+## motion_cmd 的数值字段（容错口径与基类的参数解析一致）：缺失 / 非法类型 -> 0.0，不崩。
+## 与 `Quadrotor.gd` 的同名副本逐字相同（两个底盘脚本不共享解析代码）。
+func _VelocityField(cmd: Dictionary, key: String) -> float:
+	if not cmd.has(key):
 		return 0.0
-	return clampf(_to_float(cmd["turn"], 0.0), -100.0, 100.0) / 100.0
+	return _to_float(cmd[key], 0.0)
 
 
 ## 轮子摆位：x = ±wheel_base/2（前 +，后 −）、z = ±track_width/2（左 −，右 +）、y = 半径。

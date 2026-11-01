@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
@@ -11,7 +11,8 @@
 //! 不是车体型号。整段缺失 = `None` = 不连世界（等价现状：纯决策链空跑）。
 //!
 //! `[chassis]` 段（task_31 §六.5.1）与 pleiades-ugv 的 `[chassis]` **同名同字段同默认**：
-//! sim 只读 `enabled` / `forward_speed` / `turn_speed`（0~100 百分比，默认 30/10），
+//! sim 只读 `enabled` / `cruise_speed`（m/s，缺省 0.45）/ `cruise_yaw_rate`（rad/s，缺省 0.5）
+//! （task_44 §1.2 #11/#12：百分比键已删），
 //! `port` / `baudrate` / `car_type` 等硬件键由 serde 忽略——同一份 TOML 被两个进程各解释一遍。
 //! 整段缺失 = 不建底盘（§六.5.7：无 `[chassis]` → `chassis = None` → `on_tick` 保持 Idle）。
 //!
@@ -202,21 +203,23 @@ impl DetectorCameraConfig {
     }
 }
 
-/// 底盘速度绑定（task_31 §六.5.1）：与 pleiades-ugv 的 `[chassis]` 同名同字段、同默认值
-/// （真机 `robot_handler.rs:99-100` 的 `forward_speed` / `turn_speed`）。
+/// 底盘速度绑定（task_31 §六.5.1，task_44 §1.2 #11/#12 改连续量）：与 pleiades-ugv 的
+/// `[chassis]` 同名同字段、同默认值（缺省 0.45 m/s / 0.5 rad/s 由
+/// `sim::chassis::action_map::SpeedBinding::From_Config` 补）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChassisConfig {
     /// 缺省 true（段存在即建底盘；§六.5.7 的「无段 → None」由 `Option` 表达）
     pub enabled: Option<bool>,
-    /// 前进/后退速度档位（0~100 百分比，缺省 30）
-    pub forward_speed: Option<i32>,
-    /// 转向速度档位（0~100 百分比，缺省 10）；UAV 的 `up`/`down` 也复用它（G3 近似）
-    pub turn_speed: Option<i32>,
+    /// 巡航线速度（**米/秒**，缺省 0.45）；负数 / 非有限 → 由 `SpeedBinding` 回默认
+    pub cruise_speed: Option<f32>,
+    /// 巡航偏航角速度绝对值（**弧度/秒**，缺省 0.5）；方向由执行器定符号
+    pub cruise_yaw_rate: Option<f32>,
 }
 
 /// 飞控速度配置（task_39 §四 修订）：与 `pleiades-uav` 的 `[flight_ctrl]` **同名同单位**
 ///
-/// sim 机栈的连续执行器只读这两个键；车栈仍用 `[chassis]` 的 `forward_speed/turn_speed`。
+/// sim 机栈的连续执行器只读这两个键；车栈改用 `[chassis]` 的
+/// `cruise_speed/cruise_yaw_rate`（m/s、rad/s）。
 /// 整段缺失 / 缺键 → 取真机同款默认（`vel_fwd = 0.3 m/s`、`yaw_rate_deg = 15°/s`）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FlightCtrlConfig {
@@ -447,39 +450,42 @@ rate_hz = 10
         let toml_s = r#"
 [chassis]
 enabled = true
-forward_speed = 55
-turn_speed = 7
+cruise_speed = 0.45
+cruise_yaw_rate = 0.5
 "#;
         let cfg: SimConfig = toml::from_str(toml_s).expect("[chassis] 段必须能解析");
         let c = cfg.chassis.as_ref().expect("[chassis] 段应被解析出来");
         assert_eq!(c.enabled, Some(true));
-        assert_eq!(c.forward_speed, Some(55));
-        assert_eq!(c.turn_speed, Some(7));
+        assert_eq!(c.cruise_speed, Some(0.45));
+        assert_eq!(c.cruise_yaw_rate, Some(0.5));
 
-        // 段存在但缺键 → 全部 None（默认值由 SpeedBinding::From_Config 填 30/10）
+        // 段存在但缺键 → 全部 None（默认值由 SpeedBinding::From_Config 填 0.45 / 0.5）
         let cfg: SimConfig = toml::from_str("[chassis]\n").expect("空 [chassis] 段必须能解析");
         let c = cfg.chassis.as_ref().expect("空段也是 Some");
         assert_eq!(c.enabled, None);
-        assert_eq!(c.forward_speed, None);
-        assert_eq!(c.turn_speed, None);
+        assert_eq!(c.cruise_speed, None);
+        assert_eq!(c.cruise_yaw_rate, None);
     }
 
     #[test]
     fn test_sim_config_chassis_ignores_ugv_keys() {
-        // 同一段里带 ugv 的硬件键（port / baudrate / car_type）仍能解析：serde 忽略未知键
+        // 同一段里带 ugv 的硬件键（port / baudrate / car_type）仍能解析：serde 忽略未知键；
+        // 旧百分比键（forward_speed / turn_speed）同样只是被忽略 —— RobotSim_TestEnv 里
+        // 遗留的 config.toml 因此不会报错，缺省 0.45 / 0.5 生效（task_44 §1.4）。
         let toml_s = r#"
 [chassis]
 enabled = true
 port = "/dev/ttyUSB0"
 baudrate = 115200
-car_type = "X3Plus"
+car_type = "M1"
 forward_speed = 30
 turn_speed = 10
 "#;
         let cfg: SimConfig = toml::from_str(toml_s).expect("ugv 的硬件键必须被忽略而不是报错");
         let c = cfg.chassis.as_ref().expect("[chassis] 段应被解析出来");
-        assert_eq!(c.forward_speed, Some(30));
-        assert_eq!(c.turn_speed, Some(10));
+        assert_eq!(c.enabled, Some(true));
+        assert_eq!(c.cruise_speed, None, "旧百分比键不许被当成 cruise_speed");
+        assert_eq!(c.cruise_yaw_rate, None, "旧百分比键不许被当成 cruise_yaw_rate");
     }
 
     #[test]

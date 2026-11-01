@@ -1,15 +1,16 @@
 //Presented by KeJi
 //Created Date ： 2026-10-29
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
-//! 机栈连续速度执行器（task_39 §四.2a）
+//! 机栈连续速度执行器（task_39 §四.2a，task_44 §1.3 起与车栈同形）
 //!
-//! **与车栈 `crate::sim::executor::DecisionExecutor` 刻意分成两份**：真机本来就是
-//! 「车一套、机一套」，sim 只是历史原因共用。车栈继续跑离散三状态机，**车栈一个字都不碰**。
+//! **与车栈 `crate::sim::ugv_sim::executor` 同形**：同一个 `VelocityCmd { v, omega }`、
+//! 同一套 `decide(next_cell, x, y, yaw)` 签名；差异只在**档位数**（机三档 / 车五档）与**阈值**
+//! （机 5°/20° / 车 8°/12°）。真机本来就是「车一套、机一套」，sim 侧保持两份独立文件。
 //!
 //! **口径与真机 UAV 一致**（task_39 §四 修订，2026-10-29）：输出的是**物理量**
 //! —— `v` 单位 m/s、`omega` 单位 rad/s；两个值来自 `[flight_ctrl]` 的 `vel_fwd` /
-//! `yaw_rate_deg`（与 `pleiades-uav` 同名同单位），不再借用车的 `[chassis]` 百分比档位。
+//! `yaw_rate_deg`（与 `pleiades-uav` 同名同单位），不借用车的 `[chassis]`。
 //!
 //! 控制律（三档全有全无 —— 没有比例项、没有中间值）：
 //!
@@ -20,13 +21,12 @@
 //! | > [`SPIN_DEG`]（20°） | `0` | `±yaw_rate_rps` | 原地转 |
 //!
 //! `omega` 的符号**取负**（本文件最容易写错的一处，证据链）：
-//! - 决策侧：`delta > 0` → `MotionAction::TurnRight`（`sim/executor.rs`）；
-//! - 翻译表：`TurnRight → action="right"`（`sim/chassis/action_map.rs`）；
-//! - 世界侧：`"right" → _yaw_target = -_max_yaw_rate·pct`（`Quadrotor.gd` 的 `"right"` 分支）；
-//! - 坐标：`rotation.y = -世界 yaw`（`common/WorldTransform.gd`）⇒ 世界 `right` = `rotation.y` 减小；
+//! - 决策侧：`delta > 0` ⇒ 目标在右；
+//! - 世界侧：`rotation.y = -世界 yaw`（`common/WorldTransform.gd`）⇒ 右转 = `rotation.y` 减小；
+//! - 世界 `"velocity"` 分支直接 `clampf(omega, …)`，不再取反（`Quadrotor.gd`）；
 //!
-//! ⇒ Δθ > 0（右）必须让 `rotation.y` **减小** ⇒ `omega = -yaw_rate_rps`
-//! （世界侧 `"velocity"` 分支直接 `clampf(omega, …)`，不再取反）。
+//! ⇒ Δθ > 0（右）必须让 `rotation.y` **减小** ⇒ `omega = -yaw_rate_rps`。
+//! 车栈是同一套证据链（四步逐条写在 `ugv_sim/executor.rs` 文件头），两个底盘脚本各写一条符号单测。
 //!
 //! 到达不归执行器管：nav 判到达 → 叶子写 `None` → `v = omega = 0`。
 

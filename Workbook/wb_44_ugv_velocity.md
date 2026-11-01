@@ -54,3 +54,11 @@
 **文档节序说明**：按任务文档 §二 Step 1 字面「新增 §3.6 模式切换」，MODE 落在 §3.6、原 RTCM 顺延为 §3.7（节序略偏离 msgid 升序，§3.6 首段已加一句指路）。
 
 **未做（按计划 §2.4 守住）**：不做 `v`/`omega` 有限性校验、不做版本兼容/旧 action 映射、不改 `Frame`/`encode_frame`/compid、不碰设备 crate / Pictor / Task / 根 Cargo、不 `cargo fmt`、不 `git add`。
+
+## Step 1 — 协议层：msgid 4 改两轴连续量 + 新增 msgid 8 模式切换（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 04:52:39Z → 2026-11-01 05:02:05Z
+- 范围：约 base 协议（messages/mod/command_decode）+ command.rs 的 ManualCmd + 协议文档
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok c1424c4
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（420 行，未改任何源码）。 **摘要（≤200 字）** Step 1 只在 base 协议层实施：`messages.rs` 把 `ManualControl` 换成 `ManualPayload`（8 B 运动、3 B 事件，其它长度直接拒绝）、action 重排为 1 到 5、增加 `MODE_*` 与 `msgid 8` 编解码、五条金标逐字节写进单测；`mod.rs` 加 `MSGID_MODE=8` 并重排导出；`command_decode.rs` 按长度分流，`msgid 8 → Command::Mode`（用 `matches!` 断言变体，并反向断言不是 Manual）；`command.rs` 删四个运动变体、加 `Motion{v,omega}`、留 `Stop`；文档改 §3 总览表、整写 §3.4、新增 §3.6 模式（RTCM 顺延 §3.7）、§5.2/§5.4 注明 `d(yaw)/dt=−ω`。 验收：`cargo check -p pleiades-base --lib` 与 `cargo test -p pleiades-base --lib protocol`，11 条新用例；`--all-targets` 存量 30 errors、`--lib` 存量 2 failed 只对照基线记数（V1~V10 已列）。风险：sim/ugv/uav 旧变体引用必红，属预期，交 Step 2/4/5；Pictor 一律不碰。上轮 issues 为(无)，首轮已预防 6 个失分点。

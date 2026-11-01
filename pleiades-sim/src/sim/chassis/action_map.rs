@@ -1,170 +1,146 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-21
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
-//! **唯一翻译入口**：`MotionAction`（真机语义）→ 世界 `motion_cmd` 的 `(action, speed)`
+//! **速度绑定**：`[chassis]` 的配置 → 车栈执行器用的两个巡航物理量
 //!
-//! 本文件就是 task_31 §六.2.1 的对照表的**全部内容**，一行都不许自行发挥：
+//! 本文件原名「动作翻译表」——`MotionAction`（真机语义）→ 世界 `motion_cmd` 的
+//! `(action, speed)` 那张 4+1 行表**已随 `0x11 FUNC_CAR_RUN` 一起删除**（task_44 §1.2 #1），
+//! 文件名保留只为 `git log --follow` 还能接上历史。
 //!
-//! | `MotionAction` | 真机（STM32 `apply_action`） | 世界 `action` | 世界 `speed` |
-//! |---|---|---|---|
-//! | `MoveForward`  | `forward(forward_speed)`  / `Forward=1`  | `"forward"`  | `forward_speed` |
-//! | `MoveBackward` | `backward(forward_speed)` / `Backward=2` | `"backward"` | `forward_speed` |
-//! | `TurnLeft`     | `spin_left(turn_speed)`   / `SpinLeft=5` | `"left"`     | `turn_speed` |
-//! | `TurnRight`    | `spin_right(turn_speed)`  / `SpinRight=6`| `"right"`    | `turn_speed` |
-//! | `Stop`         | `stop()`                  / `Stop=0`     | `"stop"`     | 恒 `0` |
+//! 现在这里只剩一件事（task_44 §1.2 #11/#12）：
 //!
-//! 两条不可动的结论（§六.2.2 / §六.2.3）：
+//! | 配置键 | 字段 | 单位 | 缺省 | 上限 |
+//! |---|---|---|---|---|
+//! | `[chassis] cruise_speed` | [`SpeedBinding::cruise_speed`] | **m/s** | 0.45 | 1.5 |
+//! | `[chassis] cruise_yaw_rate` | [`SpeedBinding::cruise_yaw_rate`] | **rad/s** | 0.5 | π/2 |
 //!
-//! 1. **符号不取反**：真机转向是 `SpinLeft`/`SpinRight`（原地偏航），世界的 `left`/`right`
-//!    在 `DiffDrive.gd` 里也是「`speed=0` + 纯 `yaw_target`」= 原地偏航；三方推导
-//!    （世界 `right` → `rotation.y` 减小 → 世界 `yaw` 增大 → 俯视顺时针 = 右转）与决策侧
-//!    `delta > TURN_ALIGN_RAD → TurnRight` 一致，所以 `TurnLeft ↔ "left"`、`TurnRight ↔ "right"`。
-//! 2. **单位直接透传**：真机 `speed` 是 `clamp(0,100)` 的 i16 百分比，世界 `speed` 是
-//!    0~100 百分比（世界侧 `clamp(0,100)/100 × max_speed`），同一量纲，**不做 m/s 换算**。
-
-use pleiades_base::robot::core::state::MotionAction;
+//! 三条不可动的口径：
+//!
+//! 1. **不做比例换算**：配置里写 0.45 就是 0.45 m/s，不乘任何系数、不读百分比
+//!    （百分比 → m/s 的换算在世界侧 `DiffDrive.gd` 早已删除）。
+//! 2. **上限只作二次兜底**：`MAX_CRUISE_SPEED = 1.5` 与 `MAX_CRUISE_YAW_RATE = π/2` 取世界
+//!    `DiffDrive.gd` 的两个缺省上限（`max_speed = 1.5` m/s、`max_turn_rate = 90 °/s`），
+//!    只为「配置写坏也不让仿真飞出去」，正常值 0.45 / 0.5 离上限还有 3 倍余量。
+//! 3. **负数 / 非有限一律回默认**（不是回 0）：与 `FlightCtrlConfig::Resolved`
+//!    （`config.rs`）同风格；`0.0` 是**合法值**（原地不动），保留 0。
 
 use crate::config::ChassisConfig;
 
-/// `clamp(0,100)` 之后的速度绑定（`forward` ≈ 真机 `forward_speed`，`turn` ≈ 真机 `turn_speed`）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 车栈速度绑定（两个**物理量**，不是百分比档位）
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpeedBinding {
-    /// 前进/后退档位（0~100）
-    pub forward: u8,
-    /// 转向档位（0~100）；UAV 的 `up`/`down` 也用它（§六.2.6 G3 的近似）
-    pub turn: u8,
+    /// 巡航线速度（**m/s**，缺省 0.45；0 = 不走）
+    pub cruise_speed: f32,
+    /// 巡航偏航角速度**绝对值**（**rad/s**，缺省 0.5，恒为正；方向由执行器定符号）
+    pub cruise_yaw_rate: f32,
 }
 
 impl SpeedBinding {
-    /// 缺省前进速度（与 pleiades-ugv 的 `[chassis].forward_speed` 默认一致）
-    pub const DEFAULT_FORWARD: u8 = 30;
-    /// 缺省转向速度（与 pleiades-ugv 的 `[chassis].turn_speed` 默认一致）
-    pub const DEFAULT_TURN: u8 = 10;
+    /// 缺省巡航线速度（task_44 §1.2 #11/#12 的定值）
+    pub const DEFAULT_CRUISE_SPEED: f32 = 0.45;
+    /// 缺省巡航角速度绝对值（task_44 §1.2 #11/#12 的定值）
+    pub const DEFAULT_CRUISE_YAW_RATE: f32 = 0.5;
+    /// 二次兜底上限 = 世界 `DiffDrive.gd` 的 `max_speed` 缺省（1.5 m/s）
+    pub const MAX_CRUISE_SPEED: f32 = 1.5;
+    /// 二次兜底上限 = 世界 `DiffDrive.gd` 的 `max_turn_rate` 缺省（90 °/s = π/2 rad/s）
+    pub const MAX_CRUISE_YAW_RATE: f32 = std::f32::consts::FRAC_PI_2;
 
-    /// 缺省 30/10；负值 → 0、>100 → 100（与真机 speed 的 `clamp(0,100)` 一致）
+    /// `[chassis]` → 绑定：缺键取默认；非有限 / 负数回默认；超过上限的夹到上限。
     pub fn From_Config(cfg: Option<&ChassisConfig>) -> Self {
-        let pick = |v: Option<i32>, default: u8| -> u8 {
+        let pick = |v: Option<f32>, default: f32, max: f32| -> f32 {
             match v {
-                Some(x) => x.clamp(0, 100) as u8,
-                None => default,
+                Some(x) if x.is_finite() && x >= 0.0 => x.min(max),
+                _ => default,
             }
         };
         match cfg {
             Some(c) => Self {
-                forward: pick(c.forward_speed, Self::DEFAULT_FORWARD),
-                turn: pick(c.turn_speed, Self::DEFAULT_TURN),
+                cruise_speed: pick(
+                    c.cruise_speed,
+                    Self::DEFAULT_CRUISE_SPEED,
+                    Self::MAX_CRUISE_SPEED,
+                ),
+                cruise_yaw_rate: pick(
+                    c.cruise_yaw_rate,
+                    Self::DEFAULT_CRUISE_YAW_RATE,
+                    Self::MAX_CRUISE_YAW_RATE,
+                ),
             },
-            None => Self { forward: Self::DEFAULT_FORWARD, turn: Self::DEFAULT_TURN },
+            None => Self {
+                cruise_speed: Self::DEFAULT_CRUISE_SPEED,
+                cruise_yaw_rate: Self::DEFAULT_CRUISE_YAW_RATE,
+            },
         }
     }
 }
 
 impl Default for SpeedBinding {
     fn default() -> Self {
-        Self { forward: Self::DEFAULT_FORWARD, turn: Self::DEFAULT_TURN }
+        Self {
+            cruise_speed: Self::DEFAULT_CRUISE_SPEED,
+            cruise_yaw_rate: Self::DEFAULT_CRUISE_YAW_RATE,
+        }
     }
 }
 
-/// 世界 wire 上的一个动作（`action` 只能取自本表的 4+1 个字面量，故是 `&'static str`）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MotionWire {
-    pub action: &'static str,
-    pub speed: u8,
-}
-
-/// 真机动作 → 世界 `motion_cmd` 的**唯一**翻译点（§六.2.1 的表格就是本函数的全部内容）
-pub fn Action_To_Wire(action: MotionAction, speed: &SpeedBinding) -> MotionWire {
-    match action {
-        MotionAction::MoveForward => MotionWire { action: "forward", speed: speed.forward },
-        MotionAction::MoveBackward => MotionWire { action: "backward", speed: speed.forward },
-        MotionAction::TurnLeft => MotionWire { action: "left", speed: speed.turn },
-        MotionAction::TurnRight => MotionWire { action: "right", speed: speed.turn },
-        // 停车恒 0：世界 `stop` 本身就是「speed=0 + yaw=0」，带档位没有意义
-        MotionAction::Stop => MotionWire { action: "stop", speed: 0 },
-    }
-}
-
-// ================================================================ 单测（硬验收 2：锁表）
+// ================================================================ 单测（锁 §1.2 #11/#12 的两个定值）
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 缺省绑定（30/10）
+    /// 缺省绑定（0.45 m/s / 0.5 rad/s）
     fn binding() -> SpeedBinding {
-        SpeedBinding { forward: 30, turn: 10 }
+        SpeedBinding { cruise_speed: 0.45, cruise_yaw_rate: 0.5 }
     }
 
     #[test]
-    fn test_action_to_wire_table() {
-        // §六.2.1 的五行逐项断言（动作 → (action, speed)）
-        let b = binding();
-        let expect = [
-            (MotionAction::MoveForward, MotionWire { action: "forward", speed: 30 }),
-            (MotionAction::MoveBackward, MotionWire { action: "backward", speed: 30 }),
-            (MotionAction::TurnLeft, MotionWire { action: "left", speed: 10 }),
-            (MotionAction::TurnRight, MotionWire { action: "right", speed: 10 }),
-            (MotionAction::Stop, MotionWire { action: "stop", speed: 0 }),
-        ];
-        for (action, want) in expect {
-            let got = Action_To_Wire(action, &b);
-            assert_eq!(got.action, want.action, "{action:?} 的 action 错");
-            assert_eq!(got.speed, want.speed, "{action:?} 的 speed 错");
-            assert_eq!(got, want);
-        }
-    }
-
-    #[test]
-    fn test_action_to_wire_uses_binding() {
-        // 速度必须来自绑定（配置改了就走配置值），不是写死 30/10
-        let b = SpeedBinding { forward: 77, turn: 5 };
-        assert_eq!(Action_To_Wire(MotionAction::MoveForward, &b), MotionWire { action: "forward", speed: 77 });
-        assert_eq!(Action_To_Wire(MotionAction::MoveBackward, &b), MotionWire { action: "backward", speed: 77 });
-        assert_eq!(Action_To_Wire(MotionAction::TurnLeft, &b), MotionWire { action: "left", speed: 5 });
-        assert_eq!(Action_To_Wire(MotionAction::TurnRight, &b), MotionWire { action: "right", speed: 5 });
-    }
-
-    #[test]
-    fn test_action_to_wire_stop_speed_always_zero() {
-        // Stop 的 speed 与绑定无关：恒 0（任何组合）
-        let combos = [
-            SpeedBinding { forward: 0, turn: 0 },
-            SpeedBinding { forward: 100, turn: 100 },
-            SpeedBinding { forward: 1, turn: 99 },
-            SpeedBinding { forward: 30, turn: 10 },
-        ];
-        for b in combos {
-            let w = Action_To_Wire(MotionAction::Stop, &b);
-            assert_eq!(w.action, "stop");
-            assert_eq!(w.speed, 0, "Stop 的 speed 必须恒 0（binding={b:?}）");
-        }
-    }
-
-    #[test]
-    fn test_speed_binding_from_config_defaults() {
-        // 无段 / 空段 → 30/10（与 pleiades-ugv 的 [chassis] 默认一致）
+    fn test_speed_binding_defaults() {
+        // 常量本身就是 §1.2 的定值（改常量必红）
+        assert_eq!(SpeedBinding::DEFAULT_CRUISE_SPEED, 0.45);
+        assert_eq!(SpeedBinding::DEFAULT_CRUISE_YAW_RATE, 0.5);
+        // 无段 / 空段 / Default → 同一组定值
         assert_eq!(SpeedBinding::From_Config(None), binding());
         assert_eq!(SpeedBinding::From_Config(Some(&ChassisConfig::default())), binding());
         assert_eq!(SpeedBinding::default(), binding());
-        // 只写一个键：另一个仍取默认
-        let one = ChassisConfig { enabled: None, forward_speed: Some(55), turn_speed: None };
-        assert_eq!(SpeedBinding::From_Config(Some(&one)), SpeedBinding { forward: 55, turn: 10 });
     }
 
     #[test]
     fn test_speed_binding_clamps() {
-        let mk = |f: Option<i32>, t: Option<i32>| {
-            SpeedBinding::From_Config(Some(&ChassisConfig { enabled: None, forward_speed: f, turn_speed: t }))
+        let mk = |v: Option<f32>, w: Option<f32>| {
+            SpeedBinding::From_Config(Some(&ChassisConfig {
+                enabled: None,
+                cruise_speed: v,
+                cruise_yaw_rate: w,
+            }))
         };
-        // 负值 → 0；>100 → 100；i32 两端也不 panic/溢出
-        assert_eq!(mk(Some(-1), Some(-1)), SpeedBinding { forward: 0, turn: 0 });
-        assert_eq!(mk(Some(101), Some(101)), SpeedBinding { forward: 100, turn: 100 });
-        assert_eq!(mk(Some(i32::MIN), Some(i32::MAX)), SpeedBinding { forward: 0, turn: 100 });
-        // 合法值原样保留（30/10 不能被 clamp 改掉）
-        assert_eq!(mk(Some(30), Some(10)), binding());
-        assert_eq!(mk(Some(0), Some(100)), SpeedBinding { forward: 0, turn: 100 });
+        // 负数 / 非有限 → 回**默认**（不是回 0：配置写坏不该让车不动）
+        assert_eq!(mk(Some(-1.0), Some(-1.0)), binding());
+        assert_eq!(mk(Some(f32::NAN), Some(f32::INFINITY)), binding());
+        assert_eq!(mk(Some(f32::NEG_INFINITY), Some(f32::NAN)), binding());
+        // 超过上限 → 夹到上限（1.5 m/s / π/2 rad/s）
+        assert_eq!(
+            mk(Some(99.0), Some(99.0)),
+            SpeedBinding {
+                cruise_speed: SpeedBinding::MAX_CRUISE_SPEED,
+                cruise_yaw_rate: SpeedBinding::MAX_CRUISE_YAW_RATE,
+            }
+        );
+        // 0.0 是合法值（原地不动），不许被当成"缺省"
+        assert_eq!(mk(Some(0.0), Some(0.0)), SpeedBinding { cruise_speed: 0.0, cruise_yaw_rate: 0.0 });
+        // 只写一个键：另一个仍取默认
+        assert_eq!(mk(Some(0.55), None), SpeedBinding { cruise_speed: 0.55, cruise_yaw_rate: 0.5 });
+    }
+
+    #[test]
+    fn test_speed_binding_no_percent() {
+        // §1.2 #11：执行器内**不做任何比例换算** —— 配置值原样进结构体
+        let c = ChassisConfig { enabled: Some(true), cruise_speed: Some(0.45), cruise_yaw_rate: Some(0.5) };
+        let b = SpeedBinding::From_Config(Some(&c));
+        assert_eq!(b.cruise_speed, 0.45, "0.45 传入后必须还是 0.45（不乘 100、不除 100）");
+        assert_eq!(b.cruise_yaw_rate, 0.5, "0.5 传入后必须还是 0.5");
     }
 }

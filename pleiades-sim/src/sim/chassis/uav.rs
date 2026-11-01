@@ -1,21 +1,18 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
-//! 四旋翼（世界零件 `quadrotor_uav`）—— task_31 §六.5.5
+//! 四旋翼（世界零件 `quadrotor_uav`）—— task_31 §六.5.5 / task_44 §1.3
 //!
-//! 与差速**共用**同一张翻译表（§六.5.5「同表」）：`MoveForward/Backward → forward/backward`、
-//! `TurnLeft/Right → left/right`（世界 `Quadrotor` 的 `left/right` 也是纯偏航）、`Stop → stop`。
+//! 机栈只走 [`Chassis::Apply_Velocity`] `(v, omega)` —— `action="velocity"` + `v` m/s /
+//! `omega` rad/s，世界 `Quadrotor.gd` 的 `"velocity"` 分支直接 `clampf` 收下（逐字同现状，
+//! 本 step 一行不改）。`ManualCmd::Motion { v, omega }` 与车栈一样**原值透传**。
 //!
-//! 唯一多出来的两行是**手动命令**：`Takeoff → "up"`、`Land → "down"`。
-//! 世界侧 `up/down` 用 `max_climb_rate · pct`，与 `left/right` 的 `max_yaw_rate · pct` 共用
-//! `SpeedPct`，所以爬升速度复用 `turn_speed`。
-//!
-//! **G3 已知差异**（§六.2.6）：真机 UAV 的速度是 m/s 常量（`vel_fwd` / `yaw_rate_deg`），
-//! 世界是 0~100 百分比 —— 这里只是「语义近似、非等价」的绑定：
-//! `vel_fwd ≈ forward_speed`、`yaw_rate_deg ≈ turn_speed`，**不给 UAV 增加新配置项**。
+//! 唯一还走**百分比档**的是手动起降：`Takeoff → "up"`、`Land → "down"`（世界 `up/down` 仍是
+//! `max_climb_rate · pct`，Step 5 不动世界）。档位取本文件的 [`CLIMB_PCT`] 常量
+//! （= 旧 `[chassis].turn_speed` 缺省值 10，配置键已删 → 常量；G3 语义近似保留）。
 //!
 //! `Beep` 与差速一致：世界无蜂鸣指令 → 不下发，`warn!` 一次（§六.5.5「忽略」= 不下发）。
 
@@ -26,12 +23,17 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::state::MotionAction;
 
 use crate::sim::chassis::pose_ingest::{PoseFields, SpawnFields};
 use crate::sim::chassis::{Chassis, ChassisBase};
 
-/// 四旋翼（`up`/`down` 用 `turn_speed` 档位；G3 近似）
+/// 起降档位（0~100 百分比，世界 `up/down` 的 `max_climb_rate · pct`）。
+///
+/// 取旧 `[chassis].turn_speed` 的缺省值 10（task_31 §六.2.6 G3 的「语义近似、非等价」）；
+/// 该配置键已随 task_44 §1.2 #12 删除，故改成本文件常量。
+const CLIMB_PCT: u8 = 10;
+
+/// 四旋翼（`up`/`down` 用 [`CLIMB_PCT`] 档位；G3 近似）
 pub struct QuadrotorChassis {
     base: ChassisBase,
 }
@@ -41,9 +43,9 @@ impl QuadrotorChassis {
         Self { base }
     }
 
-    /// `Takeoff` / `Land` 的世界指令：`up` / `down` + 爬升档位（复用 `turn`，G3）
+    /// `Takeoff` / `Land` 的世界指令：`up` / `down` + 爬升档位（G3 近似）
     fn Send_Climb(&self, action: &'static str) {
-        if let Err(e) = self.base.motion.Send(action, self.base.speed.turn) {
+        if let Err(e) = self.base.motion.Send(action, CLIMB_PCT) {
             debug!("[chassis] {} {action} 未投递：{e}", self.base.name);
         }
     }
@@ -55,28 +57,22 @@ impl Chassis for QuadrotorChassis {
         &self.base.name
     }
 
-    fn Apply_Action(&self, action: MotionAction) {
-        self.base.Dispatch(action);
-    }
-
-    /// 连续速度指令（task_39 §四.4）：档位原值直接送世界（`action="velocity"` + `v` / `omega`）。
+    /// 连续速度指令（task_39 §四.4）：`v` / `omega` 物理量直接送世界（`action="velocity"`）。
     ///
     /// 恒返回 `true`（= **支持**这路指令）：`Err` 只表示这一帧没进通道（未装配 / 通道满），
     /// 速度指令每 50 ms 重发一次，下一拍自愈，不需要在这里升级成错误。
     fn Apply_Velocity(&self, v: f32, omega: f32) -> bool {
-        if let Err(e) = self.base.motion.Send_Velocity(v, omega) {
-            debug!("[chassis] {} 速度指令未投递：{e}", self.base.name);
-        }
+        self.base.Send_Velocity(v, omega);
         true
     }
 
     fn Handle_Manual_Cmd(&self, cmd: &ManualCmd) {
-        // Forward / Backward / SpinLeft / SpinRight / Stop（与差速同一套运动分支）
-        if self.base.Send_Manual_Motion(cmd) {
+        // Motion / Stop（与差速同一套运动分支）
+        if self.base.Dispatch_Manual(cmd) {
             return;
         }
         match cmd {
-            // 四旋翼独有的两条：`up` / `down` + 爬升档位（= turn_speed，G3 的近似）
+            // 四旋翼独有的两条：`up` / `down` + 爬升档位（[`CLIMB_PCT`]，G3 的近似）
             ManualCmd::Takeoff => self.Send_Climb("up"),
             ManualCmd::Land => self.Send_Climb("down"),
             // 世界没有蜂鸣指令：不下发，只 warn 一次（§六.5.5 / 硬验收 3）
@@ -126,7 +122,7 @@ mod tests {
 
     type Rx = mpsc::Receiver<crate::world_link::protocol::MotionCmd>;
 
-    /// 已装配的四旋翼（默认 30/10）
+    /// 已装配的四旋翼（缺省 0.45 m/s / 0.5 rad/s）
     fn quad() -> (Arc<dyn Chassis>, Rx) {
         let (tx, rx) = MotionSender::Channel(MOTION_CHANNEL_CAP);
         tx.Set_Assembled(true);
@@ -149,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_uav_takeoff_land() {
-        // 四旋翼唯一多出来的两条：up / down + turn_speed（10）
+        // 四旋翼唯一还走百分比的两条：up / down + CLIMB_PCT（= 旧 turn_speed 缺省 10）
         let (ch, mut rx) = quad();
 
         ch.Handle_Manual_Cmd(&ManualCmd::Takeoff);
@@ -162,20 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn test_uav_forward_backward_spin() {
+    fn test_uav_manual_motion() {
+        // task_44 §1.3：手动运动统一走物理量（原值透传，不再有 forward/spin 分支）
         let (ch, mut rx) = quad();
 
-        ch.Handle_Manual_Cmd(&ManualCmd::Forward(500));
-        let m = rx.try_recv().expect("Forward 应下发");
-        assert_eq!((m.action, m.speed), ("forward", 30), "载荷忽略，用配置速度");
-
-        ch.Handle_Manual_Cmd(&ManualCmd::Backward(-1));
-        let m = rx.try_recv().expect("Backward 应下发");
-        assert_eq!((m.action, m.speed), ("backward", 30));
-
-        ch.Handle_Manual_Cmd(&ManualCmd::SpinRight(100));
-        let m = rx.try_recv().expect("SpinRight 应下发");
-        assert_eq!((m.action, m.speed), ("right", 10));
+        ch.Handle_Manual_Cmd(&ManualCmd::Motion { v: 0.45, omega: -0.5 });
+        let m = rx.try_recv().expect("Motion 应下发");
+        assert_eq!(m.action, "velocity");
+        assert_eq!((m.v, m.omega), (Some(0.45), Some(-0.5)), "原值透传，不取反");
 
         ch.Handle_Manual_Cmd(&ManualCmd::Stop);
         let m = rx.try_recv().expect("Stop 应下发");
@@ -188,24 +178,6 @@ mod tests {
         let (ch, mut rx) = quad();
         ch.Handle_Manual_Cmd(&ManualCmd::Beep(1));
         assert_empty(&mut rx);
-    }
-
-    #[test]
-    fn test_uav_apply_action_table() {
-        // §六.5.5「同表」：五个动作与差速完全一致（含 Stop 恒 0）
-        let (ch, mut rx) = quad();
-        let expect = [
-            (MotionAction::MoveForward, ("forward", 30)),
-            (MotionAction::MoveBackward, ("backward", 30)),
-            (MotionAction::TurnLeft, ("left", 10)),
-            (MotionAction::TurnRight, ("right", 10)),
-            (MotionAction::Stop, ("stop", 0)),
-        ];
-        for (action, want) in expect {
-            ch.Apply_Action(action);
-            let m = rx.try_recv().expect("每个动作都要下发一帧");
-            assert_eq!((m.action, m.speed), want, "{action:?} 的 wire 错");
-        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-31
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
@@ -24,6 +24,9 @@
 //! - 可判定逻辑全部抽成**纯函数**（[`Parse_Control`] / [`Stop_Command`] / [`Manual_Command`] /
 //!   [`Status_Data`] / [`Help_Data`] / `Ok_Reply*` / [`Err_Reply`] / [`Bind_Listener`]），
 //!   异步壳只做 IO —— `Arc<Robot>` 太重，不拖进单测
+//! - `manual` 是**两轴连续量**（task_44 §1.2 #6）：`{"cmd":"manual","v":…,"omega":…}`，
+//!   两轴各做范围校验（[`MANUAL_V_ABS_MAX`] / [`MANUAL_OMEGA_ABS_MAX`]），超范围**直接拒**
+//!   （不做静默夹 —— 夹具要能一眼看出参数写错了）
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +65,11 @@ const CONTROL_WORLD_MAX: f32 = 128.0;
 /// 一条控制口命令最多带多少条任务（防手抖灌爆队列；`TASK_SET` 的上限是 u8，这里取小值）
 const MAX_MISSIONS_PER_CMD: usize = 16;
 
+/// `manual.v` 的绝对值上限（m/s，= §1.4 的定值 `v = 0.45`；超范围直接拒）
+const MANUAL_V_ABS_MAX: f32 = 0.45;
+/// `manual.omega` 的绝对值上限（rad/s，= §1.4 的定值 `|omega| = 0.5`；超范围直接拒）
+const MANUAL_OMEGA_ABS_MAX: f32 = 0.5;
+
 // ================================================================ 请求模型
 
 /// 控制口的请求（[`Parse_Control`] 的产物）
@@ -79,7 +87,8 @@ pub enum ControlCmd {
     Preempt { missions: Vec<Mission> },
     Stop,
     Mode { auto: bool },
-    Manual { action: String },
+    /// 两轴连续量（m/s / rad/s）；`|v| ≤ 0.45`、`|omega| ≤ 0.5`（§1.4 定值）
+    Manual { v: f32, omega: f32 },
     Status,
     Help,
 }
@@ -261,22 +270,11 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
             Some(other) => Err(format!("mode.value 非法：'{other}'（只能是 auto 或 manual）")),
             None => Err("缺少 value 字段（应为 \"auto\" 或 \"manual\"）".to_string()),
         },
+        // task_44 §1.2 #6：manual 改成两轴连续量（旧的 action 字符串整张表已删）
         "manual" => {
-            let a = obj
-                .get("action")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    "缺少 action 字段（forward|backward|spin_left|spin_right|stop）".to_string()
-                })?
-                .trim();
-            match a {
-                "forward" | "backward" | "spin_left" | "spin_right" | "stop" => {
-                    Ok(ControlCmd::Manual { action: a.to_string() })
-                }
-                other => Err(format!(
-                    "manual.action 非法：'{other}'（forward|backward|spin_left|spin_right|stop）"
-                )),
-            }
+            let v = Param_Axis(obj, "v", "v", MANUAL_V_ABS_MAX)?;
+            let omega = Param_Axis(obj, "omega", "omega", MANUAL_OMEGA_ABS_MAX)?;
+            Ok(ControlCmd::Manual { v, omega })
         }
         "status" => Ok(ControlCmd::Status),
         "help" => Ok(ControlCmd::Help),
@@ -307,6 +305,30 @@ fn Param_F32_As(
     if !(CONTROL_WORLD_MIN..CONTROL_WORLD_MAX).contains(&f) {
         // 右开区间：`128.0` 必须拒绝
         return Err(format!("{label} 超范围 [{CONTROL_WORLD_MIN},{CONTROL_WORLD_MAX})"));
+    }
+    Ok(f)
+}
+
+/// 一条**带符号**的两轴参数：缺失 / 非数字 / 非有限 / `|x| > abs_max` 各一条错误文本。
+///
+/// 与 [`Param_F32_As`] 的区别只有两点：区间是**对称的**（`[-abs_max, abs_max]`，允许负值），
+/// 并且超范围**直接拒**、不夹（`manual` 是夹具入口，静默夹会让参数写错看不出来）。
+fn Param_Axis(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    label: &str,
+    abs_max: f32,
+) -> Result<f32, String> {
+    let v = obj.get(key).ok_or_else(|| {
+        format!("缺少 {label} 字段（两轴：v 与 omega，{{\"cmd\":\"manual\",\"v\":…,\"omega\":…}}）")
+    })?;
+    let f = v.as_f64().ok_or_else(|| format!("{label} 必须是数字"))? as f32;
+    if !f.is_finite() {
+        // `1e39` 反序列化成 f64 合法，但 as f32 变 inf → 必须当非法
+        return Err(format!("{label} 必须是有限数"));
+    }
+    if f.abs() > abs_max {
+        return Err(format!("{label} 超范围 [-{abs_max},{abs_max}]"));
     }
     Ok(f)
 }
@@ -345,21 +367,16 @@ fn Stop_Command(mode: OpMode) -> Command {
     }
 }
 
-/// 真机忽略载荷（`stm32/mod.rs:134-147`），一律传 0，实际速度由 `[chassis]` 配置决定。
+/// 两轴连续量**原值透传**（task_44 §1.4「手动就是同一张定值表」）：`(v, omega)` →
+/// `ManualCmd::Motion { v, omega }`。停车走 `ControlCmd::Stop`（`cmd = "stop"` 那条），
+/// 不再有 `stop` 这个 manual 子动作。
+///
 /// 模式不匹配 → `Err`（控制口据此**不发**，避免「静默无效」，§七.4）
-fn Manual_Command(mode: OpMode, action: &str) -> Result<Command, String> {
+fn Manual_Command(mode: OpMode, v: f32, omega: f32) -> Result<Command, String> {
     if mode != OpMode::Manual {
         return Err("当前为 Auto 模式，manual 命令不会生效".to_string());
     }
-    const P: i16 = 0;
-    Ok(Command::Manual(match action {
-        "forward" => ManualCmd::Forward(P),
-        "backward" => ManualCmd::Backward(P),
-        "spin_left" => ManualCmd::SpinLeft(P),
-        "spin_right" => ManualCmd::SpinRight(P),
-        "stop" => ManualCmd::Stop,
-        other => return Err(format!("manual.action 非法：'{other}'")),
-    }))
+    Ok(Command::Manual(ManualCmd::Motion { v, omega }))
 }
 
 /// 三种队列命令 → `AutoCmd`（纯函数：控制口只负责投递，语义映射必须可用单测卡住）
@@ -421,7 +438,7 @@ fn Help_Data() -> Value {
         {"cmd":"preempt", "args":["missions"], "note":"插队头（当前任务挂起、可恢复）"},
         {"cmd":"stop",    "args":[],           "note":"按当前模式停车（Auto→清空任务，Manual→Manual(Stop)）"},
         {"cmd":"mode",    "args":["value"],    "note":"value = auto | manual"},
-        {"cmd":"manual",  "args":["action"],   "note":"forward|backward|spin_left|spin_right|stop（仅 Manual 模式）"},
+        {"cmd":"manual",  "args":["v","omega"], "note":"两轴连续量（m/s / rad/s，|v|≤0.45, |omega|≤0.5；仅 Manual 模式）"},
         {"cmd":"status",  "args":[],           "note":"回状态 JSON（含 queue_len/task_id/task_ticks/nav_status）"},
         {"cmd":"help",    "args":[],           "note":"本列表"},
     ]})
@@ -653,13 +670,13 @@ async fn Handle_Cmd(
             }
             reply
         }
-        ControlCmd::Manual { action } => match Manual_Command(mode, &action) {
+        ControlCmd::Manual { v, omega } => match Manual_Command(mode, v, omega) {
             Err(e) => {
                 info!("[control] 拒绝 manual：{e}");
                 Err_Reply("manual", e)
             }
             Ok(c) => {
-                info!("[control] manual {action} → cmd_tx");
+                info!("[control] manual v={v} omega={omega} → cmd_tx");
                 Dispatch(robot, c, "manual").await
             }
         },
@@ -790,15 +807,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_valid_manual_all_actions() {
-        for a in ["forward", "backward", "spin_left", "spin_right", "stop"] {
-            let text = format!(r#"{{"cmd":"manual","action":"{a}"}}"#);
-            assert_eq!(
-                Parse_Control(&text),
-                Ok(ControlCmd::Manual { action: a.to_string() }),
-                "action='{a}' 必须被接受且原样保留"
-            );
-        }
+    fn test_parse_valid_manual_two_axis() {
+        // task_44 §1.4：W+A 就是 (0.45, +0.5)；全松就是 (0, 0)
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"manual","v":0.45,"omega":-0.5}"#),
+            Ok(ControlCmd::Manual { v: 0.45, omega: -0.5 })
+        );
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"manual","v":0,"omega":0}"#),
+            Ok(ControlCmd::Manual { v: 0.0, omega: 0.0 })
+        );
+        // 边界值（§1.4 的两个定值）必须放行
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"manual","v":-0.45,"omega":0.5}"#),
+            Ok(ControlCmd::Manual { v: -0.45, omega: 0.5 })
+        );
     }
 
     #[test]
@@ -906,11 +929,26 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_manual_bad_action() {
-        let e = Parse_Control(r#"{"cmd":"manual","action":"jump"}"#).expect_err("非法 action 必须报错");
-        assert!(e.contains("manual.action 非法：'jump'"), "错误文本：{e}");
-        let e = Parse_Control(r#"{"cmd":"manual"}"#).expect_err("缺 action 必须报错");
-        assert!(e.contains("缺少 action 字段"), "错误文本：{e}");
+    fn test_parse_manual_range_and_shape() {
+        // 两轴各做范围校验：越界**直接拒**（不静默夹）
+        let e = Parse_Control(r#"{"cmd":"manual","v":0.46,"omega":0}"#).expect_err("v 超界必须报错");
+        assert_eq!(e, "v 超范围 [-0.45,0.45]");
+        let e = Parse_Control(r#"{"cmd":"manual","v":-0.46,"omega":0}"#).expect_err("v 负向超界必须报错");
+        assert_eq!(e, "v 超范围 [-0.45,0.45]");
+        let e = Parse_Control(r#"{"cmd":"manual","v":0,"omega":-0.51}"#).expect_err("omega 超界必须报错");
+        assert_eq!(e, "omega 超范围 [-0.5,0.5]");
+        // 缺任一轴 / 非数字 / 非有限
+        let e = Parse_Control(r#"{"cmd":"manual","omega":0}"#).expect_err("缺 v 必须报错");
+        assert!(e.contains("缺少 v 字段"), "错误文本：{e}");
+        let e = Parse_Control(r#"{"cmd":"manual","v":0}"#).expect_err("缺 omega 必须报错");
+        assert!(e.contains("缺少 omega 字段"), "错误文本：{e}");
+        let e = Parse_Control(r#"{"cmd":"manual","v":"abc","omega":0}"#).expect_err("非数字必须报错");
+        assert_eq!(e, "v 必须是数字");
+        let e = Parse_Control(r#"{"cmd":"manual","v":1e39,"omega":0}"#).expect_err("非有限必须报错");
+        assert_eq!(e, "v 必须是有限数");
+        // 旧形状（一维 action 字符串，任意 action 值）必须被拒：它没有 v / omega 两轴
+        let e = Parse_Control(r#"{"cmd":"manual","action":"jump"}"#).expect_err("旧 action 形状必须被拒");
+        assert!(e.contains("缺少 v 字段"), "错误文本：{e}");
     }
 
     #[test]
@@ -1086,38 +1124,30 @@ mod tests {
 
     #[test]
     fn test_manual_command_requires_manual_mode() {
-        let e = Manual_Command(OpMode::Auto, "forward").expect_err("Auto 模式必须拒绝 manual");
+        let e = Manual_Command(OpMode::Auto, 0.45, 0.5).expect_err("Auto 模式必须拒绝 manual");
         assert_eq!(e, "当前为 Auto 模式，manual 命令不会生效");
         // 且绝不把命令包出来（返回的是 Err，调用方不发）
-        for a in ["forward", "backward", "spin_left", "spin_right", "stop"] {
-            assert!(Manual_Command(OpMode::Manual, a).is_ok(), "Manual 模式下 '{a}' 必须放行");
+        for (v, omega) in [(0.45_f32, 0.5_f32), (0.0, 0.0), (-0.45, -0.5)] {
+            assert!(
+                Manual_Command(OpMode::Manual, v, omega).is_ok(),
+                "Manual 模式下 ({v}, {omega}) 必须放行"
+            );
         }
-        // 兜底：未知 action 即使在 Manual 模式也是 Err
-        assert!(Manual_Command(OpMode::Manual, "jump").is_err());
     }
 
     #[test]
-    fn test_manual_command_payload_zero() {
-        // 真机忽略载荷（用 [chassis] 配置速度）→ 一律传 0
-        match Manual_Command(OpMode::Manual, "forward").expect("Manual 放行") {
-            Command::Manual(ManualCmd::Forward(v)) => assert_eq!(v, 0),
-            other => panic!("forward 应映射 Forward(0)，实际 {other:?}"),
+    fn test_manual_command_motion_passthrough() {
+        // task_44 §1.4：手动是同一张定值表 —— 两轴**原值透传**，不再"载荷一律 0"
+        match Manual_Command(OpMode::Manual, 0.45, 0.5).expect("Manual 放行") {
+            Command::Manual(ManualCmd::Motion { v, omega }) => {
+                assert_eq!((v, omega), (0.45, 0.5));
+            }
+            other => panic!("(0.45, +0.5) 应映射 Motion{{v:0.45, omega:0.5}}，实际 {other:?}"),
         }
-        match Manual_Command(OpMode::Manual, "backward").expect("Manual 放行") {
-            Command::Manual(ManualCmd::Backward(v)) => assert_eq!(v, 0),
-            other => panic!("backward 应映射 Backward(0)，实际 {other:?}"),
-        }
-        match Manual_Command(OpMode::Manual, "spin_left").expect("Manual 放行") {
-            Command::Manual(ManualCmd::SpinLeft(v)) => assert_eq!(v, 0),
-            other => panic!("spin_left 应映射 SpinLeft(0)，实际 {other:?}"),
-        }
-        match Manual_Command(OpMode::Manual, "spin_right").expect("Manual 放行") {
-            Command::Manual(ManualCmd::SpinRight(v)) => assert_eq!(v, 0),
-            other => panic!("spin_right 应映射 SpinRight(0)，实际 {other:?}"),
-        }
-        match Manual_Command(OpMode::Manual, "stop").expect("Manual 放行") {
-            Command::Manual(ManualCmd::Stop) => {}
-            other => panic!("stop 应映射 Manual(Stop)，实际 {other:?}"),
+        // 全松键（0, 0）也是 Motion（世界侧按 velocity 帧归零；stop 走 ControlCmd::Stop）
+        match Manual_Command(OpMode::Manual, 0.0, 0.0).expect("Manual 放行") {
+            Command::Manual(ManualCmd::Motion { v, omega }) => assert_eq!((v, omega), (0.0, 0.0)),
+            other => panic!("(0, 0) 应映射 Motion{{0,0}}，实际 {other:?}"),
         }
     }
 
@@ -1178,6 +1208,12 @@ mod tests {
         for c in arr {
             assert!(c["args"].is_array(), "每条命令都要有 args：{c:?}");
         }
+        // task_44 §1.2 #6：manual 是两轴（v / omega），不再是 action 字符串
+        let manual = arr
+            .iter()
+            .find(|c| c["cmd"] == json!("manual"))
+            .expect("help 必须列 manual");
+        assert_eq!(manual["args"], json!(["v", "omega"]), "manual 必须两轴：{manual:?}");
     }
 
     #[test]
