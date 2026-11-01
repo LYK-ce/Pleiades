@@ -62,3 +62,11 @@
 - 结果：PASS
 - 提交：ok c1424c4
 - 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（420 行，未改任何源码）。 **摘要（≤200 字）** Step 1 只在 base 协议层实施：`messages.rs` 把 `ManualControl` 换成 `ManualPayload`（8 B 运动、3 B 事件，其它长度直接拒绝）、action 重排为 1 到 5、增加 `MODE_*` 与 `msgid 8` 编解码、五条金标逐字节写进单测；`mod.rs` 加 `MSGID_MODE=8` 并重排导出；`command_decode.rs` 按长度分流，`msgid 8 → Command::Mode`（用 `matches!` 断言变体，并反向断言不是 Manual）；`command.rs` 删四个运动变体、加 `Motion{v,omega}`、留 `Stop`；文档改 §3 总览表、整写 §3.4、新增 §3.6 模式（RTCM 顺延 §3.7）、§5.2/§5.4 注明 `d(yaw)/dt=−ω`。 验收：`cargo check -p pleiades-base --lib` 与 `cargo test -p pleiades-base --lib protocol`，11 条新用例；`--all-targets` 存量 30 errors、`--lib` 存量 2 failed 只对照基线记数（V1~V10 已列）。风险：sim/ugv/uav 旧变体引用必红，属预期，交 Step 2/4/5；Pictor 一律不碰。上轮 issues 为(无)，首轮已预防 6 个失分点。
+
+## Step 2 — sim 车栈 + sim 机栈换 (v, omega)，删离散执行器与遗留文件（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 05:02:05Z → 2026-11-01 05:19:40Z
+- 范围：pleiades-sim 两栈执行器/底盘/控制口/world_link/config + 世界 DiffDrive；删除 sim/executor.rs
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 5747085
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（408 行，未改任何源码；`git status` 仍只有基线两项）。 **摘要（≤200 字）** Step 2 计划要点：`VelocityCmd`→`{v,omega}`（车 0.45 / ±0.5，五档顺序与三阈值不变，两栈各一份）；`SpeedBinding`→`cruise_speed 0.45` / `cruise_yaw_rate 0.5`，删旧百分比键；`Actuator` 三态收两态，删 `Discrete_Actuator`、`Apply_Velocity_Pct`、`sim/executor.rs`；车机统一 `Apply_Velocity`；`motion_cmd` 删 `turn` 键（`speed` 留给 up/down/stop）、velocity 帧只带 v/omega；控制口 `manual` 改 `{v,omega}` 带 ±0.45/±0.5 校验；`DiffDrive.gd` 直收物理量。三个既定决策：`Apply_Action` 留默认空实现（`emergency_stop.rs` 越界）；不改 world 的 `src/tests/`，其离散用例登记为已知红；不碰 docs/Architecture。验收：`cargo check --all-targets` 0 error、`--bins` 全绿、6 组 grep 为空、越界自检。
