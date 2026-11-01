@@ -15,27 +15,32 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use pleiades_base::event_bus::EventBus;
-use pleiades_base::network::NodeHandle;
+use pleiades_base::network::{NodeHandle, TOPIC_ROBOT_ASSIST_REQUEST};
 use pleiades_base::robot::core::behavior_tree::{Frame, MotionOut, Node, Status};
 use pleiades_base::robot::core::command::ManualCmd;
 use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
+use pleiades_base::robot::core::protocol::{
+    encode_assist_request, encode_frame, COMPID_ROBOT, MSGID_ASSIST_REQUEST,
+};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
 use crate::config::{DEFAULT_CRUISE_SPEED, DEFAULT_CRUISE_YAW_RATE, DEFAULT_PLAN_BUDGET_MS, UgvConfig};
 use crate::device::camera_ugv::Ugv_Camera;
+use crate::device::detector::{DetectorDevice, FrameSource};
 use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
 use crate::ugv::executor::UgvVelocityExecutor;
 use crate::ugv::lidar::LidarDevice;
+use crate::ugv::mission::containment::AssistPublisher;
 use crate::ugv::mission::{self, TaskDeps};
 use crate::ugv::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
 use crate::ugv::slam::SlamContext;
@@ -57,9 +62,13 @@ struct CarInner {
     lidar: Option<LidarDevice>,
     /// RTK 流动站（enabled=false 时为 None）
     lg290p: Option<Lg290pDevice>,
-    /// 车载相机（enabled=false 时为 None）。**本 step 不消费**：只把 `Arc` 挂在这里，
-    /// 留给将来的车端 detector 用 `latest_frame()` 取帧（task_43 §三）
+    /// 车载相机（enabled=false 时为 None）。同时是 detector 的帧源（task_44 Step 7）：
+    /// `start()` 里 `Arc<dyn FrameSource> = cam.clone()`，帧来自 `latest_frame()`
     camera: Option<Arc<Ugv_Camera>>,
+    /// detector（task_44 Step 7）：`enabled=false` / 无相机 / 权重缺失 → `None`
+    detector: Option<Arc<DetectorDevice>>,
+    /// 协助请求发布者（口径 #8：本 crate 自带一份；`None` = 树不发，只判条件）
+    assist: Option<Arc<dyn AssistPublisher>>,
     /// 导航器（原目标服务；**不再持队列、不再出队**）
     nav: Arc<Mutex<Navigator>>,
     executor: UgvVelocityExecutor,
@@ -223,11 +232,57 @@ impl DeviceHandler for CarDeviceHandler {
             None
         };
 
+        // detector（task_44 Step 7）：只读相机帧槽位 → 推理 → 覆盖自己的结果槽位。
+        // **必须在 lidar / lg290p 之后**：那两段失败会 `return Err` 而不 `inner.set`，
+        // detector 先起就会漏一个推理 task。
+        // **失败一律 warn + None，绝不把 Err 透给 start()**（否则会打断整个机器人启动）。
+        let detector = match (r.detector.as_ref(), self.camera.as_ref()) {
+            (None, _) => {
+                info!("[detector] 未配置 [detector] 段：不 spawn");
+                None
+            }
+            (Some(cfg), _) if !cfg.Enabled() => {
+                info!("[detector] enabled=false：不 spawn（零线程、不占 CPU）");
+                None
+            }
+            (Some(_), None) => {
+                warn!("[detector] 已启用但没有可用的 camera_ugv（未开 / 打开失败）：detector 不启动");
+                None
+            }
+            (Some(cfg), Some(cam)) => {
+                let source: Arc<dyn FrameSource> = cam.clone();
+                match DetectorDevice::spawn(cfg.clone(), source, self.robot.robot_state.clone()).await
+                {
+                    Ok(d) => {
+                        info!(
+                            "[detector] detector 设备已 spawn（model={} device={}）",
+                            cfg.Model(),
+                            cfg.Device()
+                        );
+                        Some(d)
+                    }
+                    Err(e) => {
+                        warn!("[detector] 未启动（只 warn，不影响其它设备）：{e}");
+                        None
+                    }
+                }
+            }
+        };
+
+        // 协助请求发布者（task_44 §二 Step 7）：**无条件构造**（与 sim 同：`None` 只是「树不发」，
+        // 不是「无网络」）。传输细节全在这里，`containment.rs` 仍不引 `tracing`。
+        let assist: Arc<dyn AssistPublisher> = Arc::new(NodeHandlePublisher {
+            node_handle: self.node_handle.clone(),
+            local_peer_id: self.node_handle.Get_Local_Peer_Id().to_bytes(),
+        });
+
         self.inner.set(CarInner {
             stm32,
             lidar,
             lg290p,
             camera: self.camera.clone(),
+            detector,
+            assist: Some(assist),
             nav,
             executor: UgvVelocityExecutor::new(cruise_speed, cruise_yaw_rate),
             trees: Mutex::new(TreeSet::default()),
@@ -291,7 +346,12 @@ impl DeviceHandler for CarDeviceHandler {
             info!("[Car] 任务 {:?} 已有树实例，只激活", task.id);
             return Ok(());
         }
-        let deps = TaskDeps { nav: d.nav.clone(), robot_state: self.robot.robot_state.clone() };
+        let deps = TaskDeps {
+            nav: d.nav.clone(),
+            robot_state: self.robot.robot_state.clone(),
+            detector: d.detector.clone(),
+            assist: d.assist.clone(),
+        };
         let tree = mission::build(&task.mission, &deps)?;
         ts.trees.insert(task.id, tree);
         ts.active = Some(task.id);
@@ -369,6 +429,10 @@ impl DeviceHandler for CarDeviceHandler {
 
     async fn shutdown(&self) {
         let Some(d) = self.inner.get() else { return; };
+        // detector 最先停：推理从相机槽位取帧，先停推理 task 再关相机（task_44 Step 7）
+        if let Some(det) = &d.detector {
+            det.shutdown();
+        }
         // 相机先关：独占 USB 的设备早一点释放，别等到进程退出（task_43）
         if let Some(c) = &d.camera {
             info!("正在关闭 camera_ugv...");
@@ -398,6 +462,74 @@ async fn tick_active_tree(
     let id = ts.active?;
     let tree = ts.trees.get_mut(&id)?;
     Some((id, tree.tick(frame).await))
+}
+
+// ---------------------------------------------------------------- 限流日志（口径 #8：本 crate 自带一份）
+
+/// 同 key 每 `period_ms` 最多一条（纯同步，不持锁跨 await）
+///
+/// 实现：`OnceLock<Mutex<HashMap<key, Instant>>>`；`Instant` 是进程内单调钟。
+/// 与 `pleiades-sim/src/sim/sensors/mod.rs:44-59` 逐字相同（sim 靠那个模块的
+/// `#![allow(non_snake_case)]`，本 crate 根没有该属性 → 按项放行）。
+#[allow(non_snake_case)]
+fn Should_Log(key: &'static str, period_ms: u64) -> bool {
+    static LAST: OnceLock<StdMutex<HashMap<&'static str, Instant>>> = OnceLock::new();
+    let table = LAST.get_or_init(|| StdMutex::new(HashMap::new()));
+    // 限流表只是日志节流，锁中毒也不该拖垮收包 / 控制链：直接取回内层数据
+    let mut g = match table.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let now = Instant::now();
+    match g.get(key) {
+        Some(last) if now.duration_since(*last).as_millis() < period_ms as u128 => false,
+        _ => {
+            g.insert(key, now);
+            true
+        }
+    }
+}
+
+/// 限流 warning：`Should_Log` 通过才求值 `msg`（闭包内的 `format!` 不进热路径）
+///
+/// 与 `pleiades-sim/src/sim/sensors/mod.rs:61-65` 逐字相同（`#[allow(non_snake_case)]` 原因同上）。
+#[allow(non_snake_case)]
+fn Warn_Throttled(key: &'static str, period_ms: u64, msg: impl FnOnce() -> String) {
+    if Should_Log(key, period_ms) {
+        warn!("{}", msg());
+    }
+}
+
+// ---------------------------------------------------------------- 协助请求（task_44 §二 Step 7）
+
+/// 协助请求帧（**纯函数**，便于单测钉死字节契约）：msgid 7 + sysid=本车 peer_id + compid=COMPID_ROBOT
+///
+/// 与 `pleiades-sim/src/sim/sim_handler.rs:391-396` 逐字相同（口径 #8：不进 base）。
+fn assist_frame(sysid: &[u8], x: f32, y: f32) -> Vec<u8> {
+    let payload = encode_assist_request(x, y);
+    encode_frame(MSGID_ASSIST_REQUEST, sysid, COMPID_ROBOT, &payload)
+}
+
+/// 协助请求的生产发布者（task_41 §5.5.7）：树 → gossipsub `TOPIC_ROBOT_ASSIST_REQUEST`
+///
+/// 为什么在这里而不在 `containment.rs`：发送是**传输层**的事（要 `tracing` 限流告警、要 `NodeHandle`），
+/// 而 `containment.rs` 有「不引 `tracing`」的纪律（10 Hz tick 防刷屏）。
+struct NodeHandlePublisher {
+    node_handle: Arc<NodeHandle>,
+    /// 本机 PeerId 字节（= 帧的 `sysid`，地面站侧据此知道请求者）
+    local_peer_id: Vec<u8>,
+}
+
+impl AssistPublisher for NodeHandlePublisher {
+    fn publish(&self, x: f32, y: f32) {
+        let frame = assist_frame(&self.local_peer_id, x, y);
+        if let Err(e) = self.node_handle.Gossipsub_Publish_Try(TOPIC_ROBOT_ASSIST_REQUEST, frame) {
+            // 失败只限流 warn（通道满 = 丢一帧，目标下次移动再发；不影响树）
+            Warn_Throttled("ugv.assist", 1000, || {
+                format!("[Ugv] 协助请求广播失败：{e}")
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -443,5 +575,23 @@ mod tests {
         ts.active = None;
         assert!(tick_active_tree(&mut ts, &mut frame, false).await.is_none());
         assert_eq!(ticks.load(Ordering::SeqCst), 1);
+    }
+
+    /// task_41 §5.3：字节契约 —— `assist_frame(34 B sysid, 1.0, 2.0)` → 54 B，msgid=7 / compid=1 / payload 8 B 金标
+    #[test]
+    fn test_assist_frame_contract() {
+        let sysid = vec![0x11u8; 34];
+        let frame = assist_frame(&sysid, 1.0, 2.0);
+        assert_eq!(frame.len(), 10 + 34 + 8 + 2, "10 头 + sysid + 8 payload + 2 checksum");
+        let dec = pleiades_base::robot::core::protocol::decode_frame(&frame).expect("帧可解");
+        assert_eq!(dec.msgid, MSGID_ASSIST_REQUEST);
+        assert_eq!(dec.msgid, 7, "msgid 恒 7");
+        assert_eq!(dec.compid, COMPID_ROBOT);
+        assert_eq!(dec.sysid, sysid, "sysid = 本机 PeerId（地面站据此认请求者）");
+        assert_eq!(
+            dec.payload,
+            vec![0x3F, 0x80, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00],
+            "x=1.0 / y=2.0 大端金标"
+        );
     }
 }

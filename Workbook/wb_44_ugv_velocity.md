@@ -126,3 +126,12 @@
 - D1~D5：驱动器落 `RobotSim_TestEnv/task44_step6/`（不是任务文档写的 `tmp/task44_tools/`，step.md 未允许）；手动两轴走控制口、Pictor 8 B 帧只作旁证；Containment/Follow 走 Pictor `TASK_SET`（`Mission::Containment` 无第二入口）；`cargo test --bins` 2 条 `mount.pitch` 存量红只判「新增红=0」。
 
 **收尾（干净）**：7 个端口（9999/9100/9123/9171/9172/9181/9182）全空、`pgrep pleiades-sim|godot` 无残留、`/tmp/.X*-lock` 前后都是 `[]`、根仓 `git status` 行集合 == 基线 7 行、`git -C Pictor status --short` 10 行与进场逐行相同。产物：`RobotSim_TestEnv/results/task44_s6_20261101T063711Z/`（副本 `tmp/task44/verdict.md`）。
+
+## Step 6 — 仿真世界验证（sim 车 + sim 机 + 手动两轴）（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 06:21:46Z → 2026-11-01 06:48:37Z
+- 范围：只验不改：1 台 sim ugv + 1 台 sim uav + 世界；产物落 RobotSim_TestEnv/results/task44_s6_<ts>/
+- 轮次：1 / 1
+- 结果：PASS
+- 提交：ok 5fbdd08
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（566 行，源码零改动，`git status` 与进场基线逐行一致）。 **摘要（≤200 字）** Step 6 只验不改：新建 `RobotSim_TestEnv/task44_step6/step6_driver.py`（照 task_43 骨架裁剪为 2 节点），起 xvfb 世界 + headless Pictor + 1 sim ugv（带相机/detector）+ 1 sim uav；先重建 release 二进制。顺序：车 `goto(64,70)` → 机 `goto(72,68)` → 控制口 Manual 六条 `(0.45,0)/(0,±0.5)/(0.45,±0.5)/(0,0)`（20 Hz 采 status）→ Pictor `containment(64,64,8)` 25 s → `follow` 15 s。判据 H1~H7 只判「行为是否出现」，半径/误差/耗时/频率进软观测不判 FAIL；收尾断言 7 端口空、无残留、git 基线行集合不变。附确定性降级梯子与 14 条风险预案。
+- 验证产物：/vepfs-mlp2/c20250205/240804016/Workspace/Orion/RobotSim_TestEnv/results/task44_s6_20261101T063711Z

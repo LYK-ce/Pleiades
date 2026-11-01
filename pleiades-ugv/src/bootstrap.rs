@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-31
+//Modified Date ： 2026-11-01
 
 //! UGV（车）设备装配（Task 23 C0：从 base 的 robot_bootstrap 拆出）
 //!
@@ -43,6 +43,10 @@ pub async fn ugv_bootstrap(
 
     // 1.5 sensor=camera_ugv（HP60C 厂商 SDK，**默认关**：相机独占 USB，与车上 ROS ascamera 互斥）
     //     失败只 warn + 跳过，不影响 stm32 / lidar / 主循环
+    //     task_44 Step 7：这个 `Arc<Ugv_Camera>` 同时是 detector 的帧源 —— `robot_handler::start()` 里
+    //     `Arc<dyn FrameSource> = cam.clone()`，帧来自 `latest_frame()`（覆盖式槽位，零拷贝）。
+    //     detector 的 `spawn` 是 `async` 且失败只能 `warn`，故启动点放在 handler 的 `start()`，
+    //     本文件只负责把相机 `Arc` 交过去。
     let mut camera: Option<Arc<Ugv_Camera>> = None;
     if let Some(cfg) = config.camera_ugv.as_ref().filter(|c| c.enabled.unwrap_or(false)) {
         let cam = Arc::new(Ugv_Camera::new(cfg.clone()));

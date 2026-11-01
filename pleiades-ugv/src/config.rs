@@ -39,6 +39,175 @@ pub const DEFAULT_CAMERA_UGV_STREAM_FPS: u32 = 25;
 /// 打开后等首帧的诊断上限（毫秒）；**配 0 = 不等**（逃生开关，bootstrap 立刻返回）
 pub const DEFAULT_CAMERA_UGV_TIMEOUT_MS: u64 = 3000;
 
+// ================================================================ [detector]（task_44 Step 7）
+//
+// 键名与缺省值**逐字复制** `pleiades-uav/src/config.rs:49-211`（口径 #8：各 crate 自带一份，
+// 不进 base）。这份 `DetectorCameraConfig` 的方法名/签名必须与 uav 完全一致 ——
+// `device/detector/projection.rs` 是**逐字节**复制的，它 `use crate::config::DetectorCameraConfig`。
+
+/// `[detector].enabled` 的默认值：**默认关**（权重不一定在场，且 detector 会吃满一个 CPU 核）
+pub const DEFAULT_DETECTOR_ENABLED: bool = false;
+/// `[detector].model` 的默认值：只写**文件名**，权重放 `<workspace_dir>/` 下
+pub const DEFAULT_DETECTOR_MODEL: &str = "yolov8n.safetensors";
+/// `[detector].device` 的默认值（`"cpu"` / `"cuda"` / `"cuda:N"`）
+pub const DEFAULT_DETECTOR_DEVICE: &str = "cpu";
+/// `[detector].conf_thres` 的默认值（置信度阈值）
+pub const DEFAULT_DETECTOR_CONF_THRES: f32 = 0.35;
+/// `[detector].nms_thres` 的默认值（NMS IoU 阈值）
+pub const DEFAULT_DETECTOR_NMS_THRES: f32 = 0.45;
+
+// ------------------------------------------------------------ [detector.camera]
+
+/// `[detector.camera].fov_deg` 的默认值（度，全视角；与 world 侧 `CameraSensor.DEFAULT_FOV_DEG` 同值）
+pub const DEFAULT_DETECTOR_FOV_DEG: f32 = 70.0;
+/// `[detector.camera].fov_axis` 的默认值：`fov_deg` 指的是**纵向**全视角
+pub const DEFAULT_DETECTOR_FOV_AXIS: &str = "vertical";
+/// `[detector.camera].mount_x` 的默认值（米，机体系 `x` 前）
+pub const DEFAULT_DETECTOR_MOUNT_X: f32 = 0.20;
+/// `[detector.camera].mount_y` 的默认值（米，机体系 `y` 右）
+pub const DEFAULT_DETECTOR_MOUNT_Y: f32 = 0.0;
+/// `[detector.camera].mount_z` 的默认值（米，机体系 `z` 高）
+pub const DEFAULT_DETECTOR_MOUNT_Z: f32 = 0.045;
+/// `[detector.camera].mount_yaw_deg` 的默认值（度；光轴 = 局部 −Z，**前视 = +90°**）
+pub const DEFAULT_DETECTOR_MOUNT_YAW_DEG: f32 = 90.0;
+/// `[detector.camera].mount_pitch_deg` 的默认值（度；**负 = 低头**）
+pub const DEFAULT_DETECTOR_MOUNT_PITCH_DEG: f32 = -15.0;
+/// `[detector.camera].ground_z` 的默认值（米，地面高度）
+pub const DEFAULT_DETECTOR_GROUND_Z: f32 = 0.0;
+/// `[detector.camera].max_range_m` 的默认值（米，超过就拒答）
+pub const DEFAULT_DETECTOR_MAX_RANGE_M: f32 = 12.0;
+
+/// detector 设备配置（`[detector]` 段，task_37 §三.4）；**uav 与 sim 键名一致**
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectorConfig {
+    pub enabled: Option<bool>,
+    pub model: Option<String>,
+    pub device: Option<String>,
+    pub conf_thres: Option<f32>,
+    pub nms_thres: Option<f32>,
+    /// `[detector.camera]` 子表（task_37 Step 3，§四.4）；缺段 = None = 全用默认值
+    pub camera: Option<DetectorCameraConfig>,
+}
+
+// ugv 的 `config.rs` 没有 uav 那份文件级 `#![allow(non_snake_case)]`（本文件既有
+// `Ensure_Ugv_Config` 就带着该告警），故在这两个 impl 上按项放行，保持「新增代码 0 新告警」。
+#[allow(non_snake_case)]
+impl DetectorConfig {
+    /// `enabled` 缺省 **false**（段存在但没写也按关处理）
+    pub fn Enabled(&self) -> bool {
+        self.enabled.unwrap_or(DEFAULT_DETECTOR_ENABLED)
+    }
+
+    /// 权重**文件名**（去空白；空串 → 默认 `yolov8n.safetensors`）
+    pub fn Model(&self) -> &str {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_MODEL)
+    }
+
+    /// 推理设备（`"cpu"` / `"cuda"` / `"cuda:N"`；空串 → 默认 `"cpu"`）
+    pub fn Device(&self) -> &str {
+        self.device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_DEVICE)
+    }
+
+    /// 置信度阈值（缺省 0.35；非法（<0 或 >1 或 NaN）→ 回默认，不 panic）
+    pub fn Conf_Thres(&self) -> f32 {
+        self.conf_thres
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_DETECTOR_CONF_THRES)
+    }
+
+    /// NMS IoU 阈值（缺省 0.45；非法 → 回默认，不 panic）
+    pub fn Nms_Thres(&self) -> f32 {
+        self.nms_thres
+            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_DETECTOR_NMS_THRES)
+    }
+}
+
+/// 相机内参 + 外参（`[detector.camera]` 子表，task_37 §四.4）；**uav 与 sim 键名一致**
+///
+/// 单位一律写进键名：角度键带 `_deg`、距离键是米。**故意**不同于 world 侧
+/// `Vehicle.AttachSensor`（那里 yaw 用弧度、pitch 用度混着写，见 `Vehicle.gd:183-184`）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DetectorCameraConfig {
+    pub fov_deg: Option<f32>,
+    pub fov_axis: Option<String>,
+    pub mount_x: Option<f32>,
+    pub mount_y: Option<f32>,
+    pub mount_z: Option<f32>,
+    pub mount_yaw_deg: Option<f32>,
+    pub mount_pitch_deg: Option<f32>,
+    pub ground_z: Option<f32>,
+    pub max_range_m: Option<f32>,
+}
+
+#[allow(non_snake_case)]
+impl DetectorCameraConfig {
+    /// 视场角（度；缺省 70；非有限 / <=1 / >=179 → 回默认，不 panic）
+    ///
+    /// `1 < v < 179` 与 world 侧 `CameraSensor.gd:66-67` 的 `MIN_FOV_DEG/MAX_FOV_DEG` 同界。
+    pub fn Fov_Deg(&self) -> f32 {
+        self.fov_deg
+            .filter(|v| v.is_finite() && *v > 1.0 && *v < 179.0)
+            .unwrap_or(DEFAULT_DETECTOR_FOV_DEG)
+    }
+
+    /// 视场角口径（`"vertical"` / `"horizontal"`；去空白，空 → 默认）
+    pub fn Fov_Axis(&self) -> &str {
+        self.fov_axis
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_FOV_AXIS)
+    }
+
+    /// 光心在机体系的 `x`（米；非有限 → 回默认）
+    pub fn Mount_X(&self) -> f32 {
+        self.mount_x.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_X)
+    }
+
+    /// 光心在机体系的 `y`（米；非有限 → 回默认）
+    pub fn Mount_Y(&self) -> f32 {
+        self.mount_y.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_Y)
+    }
+
+    /// 光心在机体系的 `z`（米；非有限 → 回默认）
+    pub fn Mount_Z(&self) -> f32 {
+        self.mount_z.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_Z)
+    }
+
+    /// 光轴偏航（度；前视 = +90；非有限 → 回默认）
+    pub fn Mount_Yaw_Deg(&self) -> f32 {
+        self.mount_yaw_deg.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_MOUNT_YAW_DEG)
+    }
+
+    /// 光轴俯仰（度；负 = 低头；非有限 → 回默认）
+    pub fn Mount_Pitch_Deg(&self) -> f32 {
+        self.mount_pitch_deg
+            .filter(|v| v.is_finite())
+            .unwrap_or(DEFAULT_DETECTOR_MOUNT_PITCH_DEG)
+    }
+
+    /// 地面高度（米，世界 `z`；非有限 → 回默认）
+    pub fn Ground_Z(&self) -> f32 {
+        self.ground_z.filter(|v| v.is_finite()).unwrap_or(DEFAULT_DETECTOR_GROUND_Z)
+    }
+
+    /// 最大距离（米；缺省 12；非有限 / <= 0 → 回默认）
+    pub fn Max_Range_M(&self) -> f32 {
+        self.max_range_m
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_DETECTOR_MAX_RANGE_M)
+    }
+}
+
 /// UGV 完整配置 = 共享段（flatten）+ 车独有设备段
 #[derive(Debug, Clone, Deserialize)]
 pub struct UgvConfig {
@@ -57,6 +226,8 @@ pub struct UgvConfig {
     pub lg290p: Option<Lg290pConfig>,
     /// 车载相机设备配置（HP60C 厂商 SDK；**默认关**：相机独占 USB，与车上 ROS ascamera 互斥）
     pub camera_ugv: Option<CameraUgvConfig>,
+    /// detector 设备（task_44 Step 7，`[detector]` 段）；无该段 = `None` = 不 spawn
+    pub detector: Option<DetectorConfig>,
 }
 
 /// 底盘设备配置（STM32 轮式底盘）
@@ -146,6 +317,7 @@ fn ensure_ugv_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     changed |= fill_lidar(&mut doc);
     changed |= fill_lg290p(&mut doc);
     changed |= fill_camera_ugv(&mut doc);
+    changed |= fill_detector(&mut doc);
 
     if changed {
         fs::write(path, doc.to_string())?;
@@ -250,6 +422,68 @@ fn fill_camera_ugv(doc: &mut DocumentMut) -> bool {
     for (k, v) in defaults {
         if !camera_ugv.contains_key(k) {
             camera_ugv.insert(k, v);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 补全 [detector] 段（task_44 Step 7；缺失才补，幂等；**不覆盖**用户已写的值）
+///
+/// 键名与缺省值逐字对齐 `pleiades-uav/src/config.rs:463-487`（口径 #8）。
+fn fill_detector(doc: &mut DocumentMut) -> bool {
+    if doc.get("detector").is_none() {
+        doc["detector"] = Item::Table(toml_edit::Table::new());
+    }
+    let Some(table) = doc["detector"].as_table_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    let defaults: [(&str, Item); 5] = [
+        // 默认关：权重不一定在场，且 detector 会吃满一个 CPU 核
+        ("enabled", toml_edit::value(DEFAULT_DETECTOR_ENABLED)),
+        ("model", toml_edit::value(DEFAULT_DETECTOR_MODEL)),
+        ("device", toml_edit::value(DEFAULT_DETECTOR_DEVICE)),
+        ("conf_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_CONF_THRES))),
+        ("nms_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_NMS_THRES))),
+    ];
+    for (k, v) in defaults {
+        if !table.contains_key(k) {
+            table.insert(k, v);
+            changed = true;
+        }
+    }
+    // `[detector.camera]` 子表（缺失才补、幂等、不覆盖用户值）
+    changed |= fill_detector_camera(table);
+    changed
+}
+
+/// 补全 `[detector.camera]` 子表（task_44 Step 7；缺失才补，幂等；**不覆盖**用户已写的值）
+///
+/// 数值一律用 **f64 字面量**：`f64::from(0.045_f32)` 会渲染成 `0.04500000178813934`
+/// （f32→f64 的尾数），落盘难看；解析回 f32 后两种写法是同一个数。
+fn fill_detector_camera(table: &mut toml_edit::Table) -> bool {
+    if !table.contains_key("camera") {
+        table.insert("camera", Item::Table(toml_edit::Table::new()));
+    }
+    let Some(cam) = table.get_mut("camera").and_then(|i| i.as_table_mut()) else {
+        return false;
+    };
+    let defaults: [(&str, Item); 9] = [
+        ("fov_deg", toml_edit::value(70.0_f64)),
+        ("fov_axis", toml_edit::value(DEFAULT_DETECTOR_FOV_AXIS)),
+        ("mount_x", toml_edit::value(0.20_f64)),
+        ("mount_y", toml_edit::value(0.0_f64)),
+        ("mount_z", toml_edit::value(0.045_f64)),
+        ("mount_yaw_deg", toml_edit::value(90.0_f64)),
+        ("mount_pitch_deg", toml_edit::value(-15.0_f64)),
+        ("ground_z", toml_edit::value(0.0_f64)),
+        ("max_range_m", toml_edit::value(12.0_f64)),
+    ];
+    let mut changed = false;
+    for (k, v) in defaults {
+        if !cam.contains_key(k) {
+            cam.insert(k, v);
             changed = true;
         }
     }
@@ -474,6 +708,79 @@ mod tests {
         assert_eq!(first, second, "第二次补全不得改动文件内容");
         let parsed: UgvConfig = toml::from_str(&second).unwrap();
         assert_eq!(parsed.plan_budget_ms, Some(50));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ============================================================ [detector]（task_44 Step 7）
+
+    /// `[detector]` 段被补成五个默认值、`enabled=false`、落盘只有一段；用户值不覆盖
+    #[test]
+    fn test_ensure_ugv_section_fills_detector() {
+        let dir = tmp_dir("ugv_cfg_detector_fill");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"car\"\n").unwrap();
+
+        ensure_ugv_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UgvConfig = toml::from_str(&content).unwrap();
+        let d = parsed.detector.expect("[detector] 段应被补全");
+        assert_eq!(d.enabled, Some(false), "enabled 缺省必须 false");
+        assert_eq!(d.model.as_deref(), Some("yolov8n.safetensors"));
+        assert_eq!(d.device.as_deref(), Some("cpu"));
+        assert_eq!(d.conf_thres, Some(0.35));
+        assert_eq!(d.nms_thres, Some(0.45));
+        assert!(content.contains("[detector]"), "{content}");
+        // 补段幂等：不得重复插入
+        assert_eq!(content.matches("[detector]").count(), 1, "{content}");
+
+        // 用户已写的值不被覆盖（`enabled=true` / 越界 `conf_thres=2.0` 原样保留）
+        let dir2 = tmp_dir("ugv_cfg_detector_keep");
+        let path2 = dir2.join("config.toml");
+        std::fs::write(&path2, "[detector]\nenabled = true\nconf_thres = 2.0\n").unwrap();
+        ensure_ugv_section(&path2).unwrap();
+        let content2 = std::fs::read_to_string(&path2).unwrap();
+        let parsed2: UgvConfig = toml::from_str(&content2).unwrap();
+        let d2 = parsed2.detector.expect("[detector] 段应仍在");
+        assert_eq!(d2.enabled, Some(true), "不得覆盖用户写的 enabled");
+        assert!(content2.contains("conf_thres = 2.0"), "不得覆盖用户写的值：\n{content2}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// `[detector.camera]` 子表被补成 9 个默认值，落盘是干净十进制、子表只 1 次
+    #[test]
+    fn test_ensure_ugv_section_fills_detector_camera() {
+        let dir = tmp_dir("ugv_cfg_detector_camera_fill");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"car\"\n").unwrap();
+
+        ensure_ugv_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: UgvConfig = toml::from_str(&content).unwrap();
+        let cam = parsed
+            .detector
+            .expect("[detector] 段应被补全")
+            .camera
+            .expect("[detector.camera] 子表应被补全");
+        assert_eq!(cam.fov_deg, Some(70.0));
+        assert_eq!(cam.fov_axis.as_deref(), Some("vertical"));
+        assert_eq!(cam.mount_x, Some(0.20));
+        assert_eq!(cam.mount_y, Some(0.0));
+        assert_eq!(cam.mount_z, Some(0.045));
+        assert_eq!(cam.mount_yaw_deg, Some(90.0));
+        assert_eq!(cam.mount_pitch_deg, Some(-15.0));
+        assert_eq!(cam.ground_z, Some(0.0));
+        assert_eq!(cam.max_range_m, Some(12.0));
+
+        // 落盘文本：子表头在、是干净的十进制（不是 f32 尾数长串）、不重复
+        assert!(content.contains("[detector.camera]"), "{content}");
+        assert!(content.contains("mount_z = 0.045"), "{content}");
+        assert_eq!(content.matches("[detector.camera]").count(), 1, "{content}");
+        assert_eq!(content.matches("[detector]").count(), 1, "{content}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
