@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-25
-//Modified Date ： 2026-08-25
+//Modified Date ： 2026-11-01
 
 //! MavlinkDevice 常量
 
@@ -9,12 +9,6 @@ pub const MODE_GUIDED: u32 = 4;
 
 /// takeoff 固定起飞高度 (m)
 pub const TARGET_ALT: f32 = 1.8;
-
-/// 前进/后退速度 (m/s，机体系 vx)
-pub const VEL_FWD: f32 = 0.3;
-
-/// 转向角速度 (°/s)
-pub const YAW_RATE_DEG: f32 = 15.0;
 
 /// 强制上锁魔法数字（保留备用；实飞由遥控器解锁，程序不主动 arm/disarm）
 pub const FORCE_DISARM_MAGIC: f32 = 21196.0;

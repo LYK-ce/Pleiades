@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-26
+//Modified Date ： 2026-11-01
 
 //! 机器人位姿状态（base 共享 schema）
 //!
@@ -87,7 +87,7 @@ pub struct RobotState {
 
 
 // ============================================================
-// 决策状态机 / 动作 / 决策结果（Task 22_3 单写者收敛）
+// 决策状态机 / 执行器状态（Task 22_3 单写者收敛）
 // ============================================================
 
 /// 状态机状态
@@ -97,25 +97,6 @@ pub enum DecisionState {
     Idle,
     Turning,
     Moving,
-}
-
-/// 动作（纯意图，无速度载荷——速度由设备层绑定，Task 22_5 D2）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MotionAction {
-    MoveForward,
-    MoveBackward,
-    TurnLeft,
-    TurnRight,
-    Stop,
-}
-
-/// 决策器 decide 的返回值（纯决策结果）
-#[derive(Debug, Clone)]
-pub struct DecisionResult {
-    pub state: DecisionState,
-    pub sub_target: Option<(i32, i32)>,
-    /// None = 保持、不发命令（命令去重）
-    pub action: Option<MotionAction>,
 }
 
 // ============================================================

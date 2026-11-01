@@ -78,3 +78,11 @@
 - 结果：PASS
 - 提交：ok da48700
 - 规划要点：计划已写入 `tmp/task44/plan.md`（420 行；未改任何源码，`git -C Pictor status` 仍为空）。 **摘要（≤200 字）** 计划写 tmp/task44/plan.md（420 行，未改源码）。10 个文件：protocol_def 删旧常量、action 重排 1..5、加 MSGID_MODE=8 与 V_MAX=0.45/OMEGA=0.5；orion_messages 改 8B 运动/3B 事件/1B 模式；builder 换 4 个新函数；input_handler 重写「按住集合→(v,ω)→变了才发」；ws_command_server 加 manual 门控、mode 走 msgid 8；测试入口必须改 `_initialize`（实测 `_init` 下 load 含 EventBus 的脚本必崩）→ 24 PASS；py 加 manual --dry-run。docs/ 与 check_ws 的 A9 在允许路径外，登记为已知陈旧。
+
+## Step 4 — 真车：M1 车型 + 0x12 通道 + 执行器替换 + 导航订阅建图增量（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 05:36:14Z → 2026-11-01 05:46:36Z
+- 范围：pleiades-ugv：types/config/stm32/executor/robot_handler/emergency_stop/nav 订阅
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 1ba17e7
+- 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（492 行），未改任何源码，`git status` 与进场基线一致（新增的 `tmp/task44/plan.md` 不在 git 视野内的跟踪路径中）。 **计划摘要（≤200 字）** Step 4 只在 pleiades-ugv 的 9 个文件内实施：`types.rs` 加 `M1=0x0A`（`from_u8`/`"m1"`/limits 0.7/0.7/3.2）；`config.rs` 删 `forward_speed`/`turn_speed`，换 `DEFAULT_CRUISE_SPEED=0.45`/`DEFAULT_CRUISE_YAW_RATE=0.5`，`fill_chassis` 与 handler 缺省都改 M1；`stm32/` 删 `pack_car_run`/`FUNC_CAR_RUN`/`MotionState`/六个离散动作/`set_motion`，加 `apply_velocity(v,omega)`（`vx=v`、`vy=0`、`vz=死区0.2+ω/0.70`，边走边转 `/1.96`，`|vz|≤3.2`，`ω=0` 必发 0）与 `stop()`=`0x12` 全零带原重试；`executor.rs` 整份照抄 sim 那份（`diff` 须零差异）；`robot_handler` ④ 改 `apply_velocity`、nav 补 `subscribe_map`。验收 V1~V11：0 error、0 新增 warning、`--bins` 全绿、7 组 grep、`diff`/越界自检；已登记 `device/camera_ugv/sdk.rs:1122` 的 `0x11` 属越界不可改。

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 //! 机设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.5 改成树驱动）
 //!
@@ -32,7 +32,7 @@ use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState}
 
 use crate::config::{DEFAULT_PLAN_BUDGET_MS, UavConfig};
 use crate::device::camera_uav::Uav_Camera;
-use crate::uav::executor::DecisionExecutor;
+use crate::uav::executor::UavExecutor;
 use crate::uav::mavlink::{MavlinkDevice, Telemetry};
 use crate::uav::mission::{self, TaskDeps};
 use crate::uav::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
@@ -59,7 +59,7 @@ struct UavInner {
     mavlink: Option<Arc<MavlinkDevice>>,
     /// 导航器（原目标服务；**不再持队列、不再出队**）
     nav: Arc<Mutex<Navigator>>,
-    executor: DecisionExecutor,
+    executor: UavExecutor,
     trees: Mutex<TreeSet>,
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
@@ -107,6 +107,16 @@ impl DeviceHandler for UavDeviceHandler {
         let plan_budget =
             Duration::from_millis(self.config.plan_budget_ms.unwrap_or(DEFAULT_PLAN_BUDGET_MS));
 
+        // 执行器量级（task_44 §1.4 机栈三档：定值，量级取自 `[flight_ctrl]`，缺省 0.3 m/s / 15 °/s）
+        // 读在 `enabled` 判断**之前**：`UavExecutor` 不是 `Option`（无飞控也照常构造，
+        // `on_tick` ① 门闩早退，用不到它）。
+        let vel_fwd = flight_ctrl.and_then(|f| f.vel_fwd).unwrap_or(0.3).max(0.0);
+        let yaw_rate_rps = flight_ctrl
+            .and_then(|f| f.yaw_rate_deg)
+            .unwrap_or(15.0)
+            .max(0.0)
+            .to_radians();
+
         // 飞控：enabled=false → 跳过（统一跳过语义）
         let mavlink = if flight_ctrl_enabled {
             let port = match flight_ctrl.and_then(|f| f.connection.clone()) {
@@ -117,8 +127,6 @@ impl DeviceHandler for UavDeviceHandler {
                 return Err("flight_ctrl.enabled=true 但 connection 未配置".to_string());
             };
             let baudrate = flight_ctrl.and_then(|f| f.baudrate).unwrap_or(921600);
-            let vel_fwd = flight_ctrl.and_then(|f| f.vel_fwd).unwrap_or(0.3).max(0.0);
-            let yaw_rate_deg = flight_ctrl.and_then(|f| f.yaw_rate_deg).unwrap_or(15.0).max(0.0);
 
             info!("启用飞控: port={port}, baud={baudrate}, infl_r={obstacle_inflation_radius}");
             let flight_state = Arc::new(RwLock::new(Telemetry::default()));
@@ -128,8 +136,6 @@ impl DeviceHandler for UavDeviceHandler {
                 flight_state,
                 Some(self.robot.robot_state.clone()),
                 self.origin,
-                vel_fwd,
-                yaw_rate_deg,
             )?))
         } else {
             info!("飞控未启用（enabled=false），跳过");
@@ -198,7 +204,7 @@ impl DeviceHandler for UavDeviceHandler {
         self.inner.set(UavInner {
             mavlink,
             nav,
-            executor: DecisionExecutor::new(),
+            executor: UavExecutor::new(vel_fwd, yaw_rate_rps),
             trees: Mutex::new(TreeSet::default()),
             tick_no: AtomicU64::new(0),
             detector,
@@ -216,7 +222,7 @@ impl DeviceHandler for UavDeviceHandler {
 
     async fn reset(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
-        if let Some(m) = &d.mavlink { let _ = m.stop(); }
+        if let Some(m) = &d.mavlink { m.stop(); }
         // 丢实例（§十一 #38：replace / 切模式 → 清实例表；抢占走 suspend，Step 8 引入）
         {
             let mut ts = d.trees.lock().await;
@@ -231,7 +237,7 @@ impl DeviceHandler for UavDeviceHandler {
     async fn suspend(&self, execute_state: &Arc<RwLock<ExecuteState>>) {
         let d = self.inner.get().expect("device not started");
         // §十一 #38：与 CarDeviceHandler::suspend 同构（机无 2D 急停，其余一致）
-        if let Some(m) = &d.mavlink { let _ = m.stop(); }
+        if let Some(m) = &d.mavlink { m.stop(); }
         d.nav.lock().await.clear_goal();
         *execute_state.write().await = ExecuteState { state: DecisionState::Idle, sub_target: None };
         info!("[Uav] suspend（停车 + 清 nav；树实例保留，等恢复）");
@@ -272,16 +278,18 @@ impl DeviceHandler for UavDeviceHandler {
             tick_active_tree(&mut ts, &mut frame).await
         };
 
-        // ③ 决策：叶子给的「下一格」→ ExecuteState（**唯一写点**）+ 动作
-        let current = execute_state.read().await.clone();
-        let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+        // ③ 决策（`ExecuteState` **唯一写点**）：叶子给的「下一格」+ 位姿 → 一拍的 `(v, omega)`
+        //    连续执行器无状态，只写 `sub_target`、`state` 留 `Idle`
+        //    （唯一的读点 `base/Robot/core/robot.rs` 只取 `sub_target`）
+        //    （编号对照：此处即任务文档 §二 Step 5 的「on_tick 第④步改 apply_velocity」；机端无 2D
+        //      急停、比车栈少一步，故本文件是 ③ 决策+执行 / ④ 终值，落点与 `pleiades-ugv` 的 ④ 一致）
+        let cmd = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
         *execute_state.write().await = ExecuteState {
-            state: result.state,
-            sub_target: result.sub_target,
+            state: DecisionState::Idle,
+            sub_target: out.next_cell,
         };
-        if let Some(action) = result.action {
-            mavlink.apply_action(action);
-        }
+        // 自动与手动同一条连续出口（§1.3 真机一行）：`v` m/s 与 `omega` rad/s 同帧下发
+        mavlink.apply_velocity(cmd.v, cmd.omega);
 
         // ④ 终值：halt + 丢实例 → 交给 base 出队（唯一出队口，§十一 #16）
         let Some((id, st)) = status else { return TickOutcome::Running; };
@@ -304,7 +312,7 @@ impl DeviceHandler for UavDeviceHandler {
 
     fn stop(&self) {
         if let Some(d) = self.inner.get() {
-            if let Some(m) = &d.mavlink { let _ = m.stop(); }
+            if let Some(m) = &d.mavlink { m.stop(); }
         }
     }
 

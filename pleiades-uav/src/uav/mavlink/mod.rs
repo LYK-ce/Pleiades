@@ -1,13 +1,13 @@
 //Presented by KeJi
 //Created Date ： 2026-08-25
-//Modified Date ： 2026-08-26
+//Modified Date ： 2026-11-01
 
 //! MAVLink 飞控设备驱动（Task 22_4）
 //!
 //! `MavlinkDevice` — 封装 MAVLink 协议 + 串口 TX/RX（Task 23 阶段 C：实现 base 的 `DeviceHandler`）。
 //!
-//! 自闭环：上层只发离散动作（`move_forward` / `stop`），设备内部用
-//! 「期望动作 + 10Hz 保持 loop」持续下发速度指令（GUIDED 速度指令约 2~3s 无新指令即回落悬停）。
+//! 自闭环：上层只发**连续速度 `(v, omega)`**（自动与手动同一条出口 `apply_velocity`），设备内部用
+//! 「期望速度 + 10Hz 保持 loop」持续下发速度指令（GUIDED 速度指令约 2~3s 无新指令即回落悬停）。
 
 pub mod constants;
 pub mod protocol;
@@ -25,7 +25,7 @@ use tracing::{info, warn};
 use constants::*;
 use pleiades_base::robot::util::serial::port::spawn_port;
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::state::{MotionAction, RobotState};
+use pleiades_base::robot::core::state::RobotState;
 
 // ============================================================
 // MavlinkDevice — 控制句柄
@@ -33,8 +33,8 @@ use pleiades_base::robot::core::state::{MotionAction, RobotState};
 
 pub struct MavlinkDevice {
     serial_cmd_tx: mpsc::Sender<Vec<u8>>,
-    /// 期望动作（std 锁：trait 方法同步、不可 await；临界区纳秒级）
-    desired: Arc<Mutex<MotionAction>>,
+    /// 期望速度（std 锁：trait 方法同步、不可 await；临界区纳秒级）
+    desired: Arc<Mutex<DesiredVelocity>>,
     state: Arc<RwLock<Telemetry>>,
     /// 本机（地面站/机载计算机）身份
     system_id: u8,
@@ -46,16 +46,40 @@ pub struct MavlinkDevice {
     cancel: CancellationToken,
 }
 
-/// 期望动作 → 速度四元组（速度由设备层绑定，Task 22_5 D2）
-fn action_to_velocity(a: MotionAction, vel_fwd: f32, yaw_rate_deg: f32) -> (f32, f32, f32, f32) {
-    let yaw_rate = yaw_rate_deg.to_radians();
-    match a {
-        MotionAction::MoveForward => (vel_fwd, 0.0, 0.0, 0.0),
-        MotionAction::MoveBackward => (-vel_fwd, 0.0, 0.0, 0.0),
-        // 机体系 NED：yaw_rate 正 = 顺时针/右转（与 UAV turn_degrees 一致）
-        MotionAction::TurnLeft => (0.0, 0.0, 0.0, -yaw_rate),
-        MotionAction::TurnRight => (0.0, 0.0, 0.0, yaw_rate),
-        MotionAction::Stop => (0.0, 0.0, 0.0, 0.0), // 停 = 悬停 = 零速度
+/// 期望速度（std 锁临界区纳秒级）：`v` **m/s**、`omega` **rad/s**（`omega > 0` = 左转）
+///
+/// `(0, 0)` = 停 / 悬停 —— 也是本设备构造时的初值（与旧实现的离散「停」动作同义）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct DesiredVelocity {
+    v: f32,
+    omega: f32,
+}
+
+/// 连续速度 → MAVLink 速度四元组（`vx`/`vy`/`vz` = 机体系 NED m/s，`yaw_rate` = **rad/s**）
+///
+/// - `vx = v`：执行器给的就是 m/s（task_44 §1.3 真机一行），机体系前向即 NED x，不做换算；
+/// - `vy = 0`、`vz = 0`：无横移、`VZ_IGNORE` 锁高度（与改动前一致）；
+/// - `yaw_rate = -omega`：MAVLink 的 `yaw_rate` 在 NED 下**正 = 顺时针/右转**，而口径
+///   task_44 §1.2 #2 是 **`omega > 0` = 逆时针/左转**，故取反。证据链与改动前的离散表一致
+///   （旧 `TurnLeft → -yaw_rate`、`TurnRight → +yaw_rate`）；单测 `test_velocity_to_mavlink_sign` 锁。
+///
+/// 前进与偏航**同帧下发**：两者在同一个 `SET_POSITION_TARGET_LOCAL_NED` 里（`type_mask` 只
+/// ignore 位置/加速度/`yaw`，不 ignore `yaw_rate`，见 `protocol::velocity_msg`）——
+/// 旧实现只是把翻译表拆成互斥 5 行，通道本身从来不是互斥的。
+fn velocity_to_mavlink(v: f32, omega: f32) -> (f32, f32, f32, f32) {
+    (v, 0.0, 0.0, -omega)
+}
+
+/// 手动命令 → 连续速度：只有 `Motion` / `Stop` 走速度出口（其余 = `None`，交给一次性命令）
+///
+/// 单独提成纯函数是为了能在没有串口的单测里断言「`Motion` 路径」（Step 5 实施步骤 5）。
+fn manual_cmd_velocity(cmd: &ManualCmd) -> Option<(f32, f32)> {
+    match cmd {
+        // §1.2 #6：两轴连续量，`(0, 0)` 由地面站松开全部键时发；设备端不再做超时/心跳
+        ManualCmd::Motion { v, omega } => Some((*v, *omega)),
+        // §1.2 #1：协议里已无 stop 动作，`Stop` 是内部命令 → 设备端解释为 `(0, 0)`
+        ManualCmd::Stop => Some((0.0, 0.0)),
+        _ => None,
     }
 }
 
@@ -99,13 +123,11 @@ impl MavlinkDevice {
         state: Arc<RwLock<Telemetry>>,
         robot_state: Option<Arc<RwLock<RobotState>>>,
         origin: (f32, f32, f32),
-        vel_fwd: f32,
-        yaw_rate_deg: f32,
     ) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let robot_state_clone = robot_state.clone();
-        let desired = Arc::new(Mutex::new(MotionAction::Stop));
+        let desired = Arc::new(Mutex::new(DesiredVelocity::default()));
         let desired_clone = desired.clone();
         let yaw_offset = Arc::new(Mutex::new(None::<f32>));
         let yaw_offset_clone = yaw_offset.clone();
@@ -219,12 +241,10 @@ impl MavlinkDevice {
             let _ = serial_cmd_tx.try_send(bytes);
         }
 
-        // 保持 loop（10Hz）：读期望动作 → 翻译 → 持续下发速度指令
+        // 保持 loop（10Hz）：读期望速度 → 翻译 → 持续下发速度指令
         let keep_tx = serial_cmd_tx.clone();
         let keep_desired = desired_clone.clone();
         let keep_cancel = cancel.clone();
-        let keep_vel_fwd = vel_fwd;
-        let keep_yaw_rate = yaw_rate_deg;
         let keep_takeoff_pending = takeoff_pending_clone.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -235,8 +255,8 @@ impl MavlinkDevice {
                         if keep_takeoff_pending.load(Ordering::SeqCst) {
                             continue;
                         }
-                        let action = keep_desired.lock().unwrap().clone();
-                        let (vx, vy, vz, yaw_rate) = action_to_velocity(action, keep_vel_fwd, keep_yaw_rate);
+                        let cmd = *keep_desired.lock().unwrap();
+                        let (vx, vy, vz, yaw_rate) = velocity_to_mavlink(cmd.v, cmd.omega);
                         let msg = protocol::velocity_msg(FC_SYSTEM_ID, FC_COMPONENT_ID, vx, vy, vz, yaw_rate);
                         let bytes = protocol::serialize_message(&msg, system_id, component_id);
                         if let Err(e) = keep_tx.try_send(bytes) {
@@ -305,32 +325,41 @@ impl MavlinkDevice {
         (*self.yaw_offset.lock().unwrap()).unwrap_or(0.0)
     }
 
-    // ─── 命令/动作解析（A6：下沉到设备，设备选择性响应）────────
+    // ─── 命令解析（A6：下沉到设备，设备选择性响应）────────
     pub fn handle_manual_cmd(&self, cmd: &ManualCmd) {
+        // 手动与自动**同一条出口**（§1.3：手动 = 同一张表，不再有离散分支）
+        if let Some((v, omega)) = manual_cmd_velocity(cmd) {
+            self.apply_velocity(v, omega);
+            return;
+        }
         match cmd {
-            ManualCmd::Forward(_) => { let _ = self.set_desired(MotionAction::MoveForward); }
-            ManualCmd::Backward(_) => { let _ = self.set_desired(MotionAction::MoveBackward); }
-            ManualCmd::SpinLeft(_) => { let _ = self.set_desired(MotionAction::TurnLeft); }
-            ManualCmd::SpinRight(_) => { let _ = self.set_desired(MotionAction::TurnRight); }
-            ManualCmd::Stop => { let _ = self.set_desired(MotionAction::Stop); }
             ManualCmd::Takeoff => { let _ = self.takeoff_send(); }
             ManualCmd::Land => { let _ = self.land_send(); }
             _ => {} // 机不支持 Beep/LiDAR 命令，忽略
         }
     }
 
-    pub fn apply_action(&self, action: MotionAction) {
-        let _ = self.set_desired(action);
+    /// 连续速度出口（自动 `on_tick` 与手动共用）：`v` m/s、`omega` rad/s（`omega > 0` = 左转）
+    ///
+    /// 只在**非零**速度时解除 `takeoff_pending`（起飞/降落抑制保持 loop 的开关），再写 `desired`。
+    /// 真正的发送由 10 Hz 保持 loop 负责（GUIDED 速度指令约 2~3 s 无新指令即回落悬停）。
+    /// 无条件解除是回归：旧实现在「无目标」时压根不发命令（`decide_idle → action: None`），抑制
+    /// 自然保持；连续栈 `on_tick` 每拍都调本方法，无任务时是 `(0, 0)`，若无条件解除则 10 Hz
+    /// 零速度会在起飞/降落期间打断爬升/降落（违反 §二 Step 5 验收 4）。
+    /// 无返回值：锁写不会失败；`try_send` 失败由保持 loop `warn!` 并在下一拍照常补发。
+    pub fn apply_velocity(&self, v: f32, omega: f32) {
+        if v != 0.0 || omega != 0.0 {
+            self.takeoff_pending.store(false, Ordering::SeqCst);
+        }
+        *self.desired.lock().unwrap() = DesiredVelocity { v, omega };
     }
 
-    pub fn stop(&self) -> Result<(), String> {
-        self.set_desired(MotionAction::Stop)
-    }
-
-    fn set_desired(&self, action: MotionAction) -> Result<(), String> {
+    /// 停车 / 悬停 = 连续量 `(0, 0)`，并**解除**起飞/降落抑制
+    /// （等价旧的离散「停车」设定语义；`reset` / `suspend` / `DeviceHandler::stop` 的唯一出口
+    /// —— 显式停车不该被上面「零速度不解除抑制」的保护挡住）
+    pub fn stop(&self) {
         self.takeoff_pending.store(false, Ordering::SeqCst);
-        *self.desired.lock().unwrap() = action;
-        Ok(())
+        *self.desired.lock().unwrap() = DesiredVelocity::default();
     }
 
     pub fn shutdown(&self) {
@@ -339,7 +368,7 @@ impl MavlinkDevice {
 }
 
 // ============================================================
-// 单测（纯函数：翻译表 / 坐标对齐 / 遥测解析）
+// 单测（纯函数：速度翻译 / 坐标对齐 / 遥测解析）
 // ============================================================
 
 #[cfg(test)]
@@ -350,32 +379,95 @@ mod tests {
     };
     use mavlink::MavHeader;
 
+    /// 测试用设备（不 spawn 串口：TX 通道用一对本地 channel 代替）
+    fn test_device() -> (MavlinkDevice, mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel(8);
+        let dev = MavlinkDevice {
+            serial_cmd_tx: tx,
+            desired: Arc::new(Mutex::new(DesiredVelocity::default())),
+            state: Arc::new(RwLock::new(Telemetry::default())),
+            system_id: GCS_SYSTEM_ID,
+            component_id: GCS_COMPONENT_ID,
+            yaw_offset: Arc::new(Mutex::new(None)),
+            takeoff_pending: Arc::new(AtomicBool::new(false)),
+            cancel: CancellationToken::new(),
+        };
+        (dev, rx)
+    }
+
     #[test]
-    fn test_action_to_velocity_translation() {
-        // 前进/后退：固定 VEL_FWD
+    fn test_velocity_to_mavlink_sign() {
+        // 前进：vx = v，偏航零
+        assert_eq!(velocity_to_mavlink(0.3, 0.0), (0.3, 0.0, 0.0, 0.0));
+        // 左转（omega > 0 = 逆时针）⇒ NED yaw_rate 必须取负（写反必红）
+        assert_eq!(velocity_to_mavlink(0.0, 0.5), (0.0, 0.0, 0.0, -0.5));
+        // 右转 ⇒ 正
+        assert_eq!(velocity_to_mavlink(0.0, -0.5), (0.0, 0.0, 0.0, 0.5));
+        // 停 = 全零
+        assert_eq!(velocity_to_mavlink(0.0, 0.0), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_velocity_and_yaw_simultaneous() {
+        // 边走边转：vx 与 yaw_rate 同帧非零（旧离散表做不到，连续量必须能 —— §1.4 弧线档）
+        let (vx, _, _, yaw) = velocity_to_mavlink(0.3, 0.2618);
+        assert_eq!((vx, yaw), (0.3, -0.2618));
+        assert!(vx != 0.0 && yaw != 0.0, "两轴必须同时非零");
+    }
+
+    #[test]
+    fn test_manual_cmd_velocity_path() {
+        // `Motion` 原值透传（不做量级换算、不做 clamp）
         assert_eq!(
-            action_to_velocity(MotionAction::MoveForward, VEL_FWD, YAW_RATE_DEG),
-            (VEL_FWD, 0.0, 0.0, 0.0)
+            manual_cmd_velocity(&ManualCmd::Motion { v: 0.3, omega: 0.2618 }),
+            Some((0.3, 0.2618))
         );
-        assert_eq!(
-            action_to_velocity(MotionAction::MoveBackward, VEL_FWD, YAW_RATE_DEG),
-            (-VEL_FWD, 0.0, 0.0, 0.0)
-        );
-        // 转向：固定 YAW_RATE
-        let yaw = YAW_RATE_DEG.to_radians();
-        assert_eq!(
-            action_to_velocity(MotionAction::TurnLeft, VEL_FWD, YAW_RATE_DEG),
-            (0.0, 0.0, 0.0, -yaw)
-        );
-        assert_eq!(
-            action_to_velocity(MotionAction::TurnRight, VEL_FWD, YAW_RATE_DEG),
-            (0.0, 0.0, 0.0, yaw)
-        );
-        // 停：零速度（悬停）
-        assert_eq!(
-            action_to_velocity(MotionAction::Stop, VEL_FWD, YAW_RATE_DEG),
-            (0.0, 0.0, 0.0, 0.0)
-        );
+        // 内部 `Stop` = `(0, 0)`
+        assert_eq!(manual_cmd_velocity(&ManualCmd::Stop), Some((0.0, 0.0)));
+        // Takeoff / Land / Beep / LiDAR 不走速度出口（保持原消息）
+        assert_eq!(manual_cmd_velocity(&ManualCmd::Takeoff), None);
+        assert_eq!(manual_cmd_velocity(&ManualCmd::Land), None);
+        assert_eq!(manual_cmd_velocity(&ManualCmd::Beep(100)), None);
+    }
+
+    #[test]
+    fn test_handle_manual_cmd_motion_and_takeoff() {
+        let (dev, _rx) = test_device();
+        // 初始 = 停（与旧的离散「停」动作同义）
+        assert_eq!(*dev.desired.lock().unwrap(), DesiredVelocity::default());
+        // Motion：两轴原值进 desired
+        dev.handle_manual_cmd(&ManualCmd::Motion { v: 0.3, omega: 0.2618 });
+        assert_eq!(*dev.desired.lock().unwrap(), DesiredVelocity { v: 0.3, omega: 0.2618 });
+        // 内部 Stop：清成 (0, 0)
+        dev.handle_manual_cmd(&ManualCmd::Stop);
+        assert_eq!(*dev.desired.lock().unwrap(), DesiredVelocity::default());
+        // Takeoff：不碰速度设定，只置 takeoff_pending（抑制保持 loop，起飞行为不变）
+        dev.handle_manual_cmd(&ManualCmd::Motion { v: 0.2, omega: 0.0 });
+        dev.handle_manual_cmd(&ManualCmd::Takeoff);
+        assert!(dev.takeoff_pending.load(Ordering::SeqCst));
+        assert_eq!(dev.desired.lock().unwrap().v, 0.2, "Takeoff 不得改写速度设定");
+    }
+
+    #[test]
+    fn test_takeoff_suppression_survives_zero_velocity() {
+        let (dev, _rx) = test_device();
+        // on_tick 无任务时每拍都发 (0,0) —— 不得打断爬升/降落（§二 Step 5 验收 4）
+        dev.takeoff_pending.store(true, Ordering::SeqCst);
+        dev.apply_velocity(0.0, 0.0);
+        assert!(dev.takeoff_pending.load(Ordering::SeqCst), "零速度不得解除起飞抑制");
+        assert_eq!(*dev.desired.lock().unwrap(), DesiredVelocity::default());
+        // 任何非零速度 = 导航/手动接管 → 解除抑制
+        dev.apply_velocity(0.0, 0.5);
+        assert!(!dev.takeoff_pending.load(Ordering::SeqCst), "非零角速度必须解除抑制");
+    }
+
+    #[test]
+    fn test_stop_clears_takeoff_suppression() {
+        let (dev, _rx) = test_device();
+        dev.takeoff_pending.store(true, Ordering::SeqCst);
+        dev.stop();
+        assert!(!dev.takeoff_pending.load(Ordering::SeqCst), "显式停车解除抑制（等价旧离散「停车」设定语义）");
+        assert_eq!(*dev.desired.lock().unwrap(), DesiredVelocity::default());
     }
 
     #[test]
