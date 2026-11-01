@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-20
+//Modified Date ： 2026-11-01
 
 //! STM32 协议层
 //!
@@ -27,11 +27,6 @@ pub fn build_host_frame(func: u8, data: &[u8]) -> Vec<u8> {
 // ============================================================
 // 命令打包
 // ============================================================
-
-pub fn pack_car_run(car_type: u8, state: u8, speed: i16) -> Vec<u8> {
-    let s = speed.to_le_bytes();
-    build_host_frame(FUNC_CAR_RUN, &[car_type, state, s[0], s[1]])
-}
 
 pub fn pack_motion(car_type: u8, vx: f32, vy: f32, vz: f32, limits: (f32, f32, f32)) -> Vec<u8> {
     let (vx_max, vy_max, vz_max) = limits;
@@ -196,13 +191,13 @@ mod tests {
 
     #[test]
     fn test_build_host_frame_structure() {
-        let frame = build_host_frame(0x11, &[0x02, 0x01, 0x64, 0x00]);
+        let frame = build_host_frame(FUNC_MOTION, &[0x02, 0x01, 0x64, 0x00]);
         // HEAD + DEV_ID_HOST + LEN + FUNC + data + CHKSUM
         assert_eq!(frame[0], HEAD);
         assert_eq!(frame[1], DEV_ID_HOST);
         // LEN = frame.len() - 1（build_host_frame 在 push CHKSUM 前计算）
         assert_eq!(frame[2] as usize, frame.len() - 2);
-        assert_eq!(frame[3], 0x11); // FUNC
+        assert_eq!(frame[3], FUNC_MOTION); // FUNC
         assert_eq!(&frame[4..8], &[0x02, 0x01, 0x64, 0x00]);
     }
 
@@ -217,15 +212,30 @@ mod tests {
     // 命令打包
     // ========================================================
 
+    // task_44 §1.2 #1/#5：`0x12 FUNC_MOTION` 是唯一的运动通道
+
     #[test]
-    fn test_pack_car_run() {
-        // X3Plus(0x02), Forward(1), speed=100
-        let f = pack_car_run(0x02, 1, 100);
-        assert_eq!(f[3], FUNC_CAR_RUN);
-        assert_eq!(f[4], 0x02); // car_type
-        assert_eq!(f[5], 0x01); // state=Forward
-        let speed = i16::from_le_bytes([f[6], f[7]]);
-        assert_eq!(speed, 100);
+    fn test_pack_motion_frame_layout() {
+        // M1(0x0A)：vx=0.45 m/s、vy=0、vz=0.9 → 12 B 帧（HEAD|DEV|LEN|FUNC|type|vx|vy|vz|CHK）
+        let f = pack_motion(0x0A, 0.45, 0.0, 0.9, (0.7, 0.7, 3.2));
+        assert_eq!(f.len(), 12, "运动帧固定 12 B");
+        assert_eq!(f[0], HEAD);
+        assert_eq!(f[1], DEV_ID_HOST);
+        assert_eq!(f[2], 10, "LEN = 3 + 7 B 载荷");
+        assert_eq!(f[3], FUNC_MOTION);
+        assert_eq!(f[4], 0x0A, "car_type = M1");
+        assert_eq!(i16::from_le_bytes([f[5], f[6]]), 450, "vx 单位 mm/s");
+        assert_eq!(i16::from_le_bytes([f[7], f[8]]), 0, "vy 恒 0（差速/麦轮不走横移）");
+        assert_eq!(i16::from_le_bytes([f[9], f[10]]), 900, "vz 单位 1e-3 单位");
+    }
+
+    #[test]
+    fn test_pack_motion_clamps() {
+        // 超限值按 `motion_limits` 逐轴夹死（9.0 / -9.0 / 99.0 都越界）
+        let f = pack_motion(0x0A, 9.0, -9.0, 99.0, (0.7, 0.7, 3.2));
+        assert_eq!(i16::from_le_bytes([f[5], f[6]]), 700, "vx 夹到 vx_max");
+        assert_eq!(i16::from_le_bytes([f[7], f[8]]), -700, "vy 夹到 -vy_max");
+        assert_eq!(i16::from_le_bytes([f[9], f[10]]), 3200, "vz 夹到 vz_max");
     }
 
     #[test]
@@ -347,7 +357,7 @@ mod tests {
     fn test_update_state_speed() {
         let mut s = RobotState::default();
         let vx = 100i16; // 0.100 m/s
-        let vy = (-50i16);
+        let vy = -50i16;
         let vz = 0i16;
         let bat: u8 = 115; // 11.5V
         let mut data = Vec::new();
@@ -408,15 +418,16 @@ mod tests {
     // ========================================================
 
     #[test]
-    fn test_roundtrip_car_run() {
-        // TX: 发送 Forward 100
-        let tx_frame = pack_car_run(0x02, MotionState::Forward as u8, 100);
+    fn test_roundtrip_motion() {
+        // TX: 下发 (v, omega) = (0.45, 0.5) → 0x12 帧
+        let tx_frame = pack_motion(0x0A, 0.45, 0.0, 0.9142857, (0.7, 0.7, 3.2));
 
-        // 模拟 STM32 收到后回传 SPEED 上报（实际硬件会回传，此处用逻辑验证）
-        // 验证：TX 帧可以构建且格式正确
+        // 验证：TX 帧可以构建且格式正确（载荷往返一致）
         assert_eq!(tx_frame[0], HEAD);
         assert_eq!(tx_frame[1], DEV_ID_HOST);
-        assert_eq!(tx_frame[3], FUNC_CAR_RUN);
+        assert_eq!(tx_frame[3], FUNC_MOTION);
+        assert_eq!(i16::from_le_bytes([tx_frame[5], tx_frame[6]]), 450);
+        assert_eq!(i16::from_le_bytes([tx_frame[9], tx_frame[10]]), 914);
     }
 
     #[test]

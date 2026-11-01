@@ -70,3 +70,11 @@
 - 结果：PASS
 - 提交：ok 5747085
 - 规划要点：计划已写入 [plan.md](tmp/task44/plan.md)（408 行，未改任何源码；`git status` 仍只有基线两项）。 **摘要（≤200 字）** Step 2 计划要点：`VelocityCmd`→`{v,omega}`（车 0.45 / ±0.5，五档顺序与三阈值不变，两栈各一份）；`SpeedBinding`→`cruise_speed 0.45` / `cruise_yaw_rate 0.5`，删旧百分比键；`Actuator` 三态收两态，删 `Discrete_Actuator`、`Apply_Velocity_Pct`、`sim/executor.rs`；车机统一 `Apply_Velocity`；`motion_cmd` 删 `turn` 键（`speed` 留给 up/down/stop）、velocity 帧只带 v/omega；控制口 `manual` 改 `{v,omega}` 带 ±0.45/±0.5 校验；`DiffDrive.gd` 直收物理量。三个既定决策：`Apply_Action` 留默认空实现（`emergency_stop.rs` 越界）；不改 world 的 `src/tests/`，其离散用例登记为已知红；不碰 docs/Architecture。验收：`cargo check --all-targets` 0 error、`--bins` 全绿、6 组 grep 为空、越界自检。
+
+## Step 3 — Pictor：WASD 两轴 + 模式切换走 msgid 8（task_44 首轮（Step 1~8））
+- 起止：2026-11-01 05:19:40Z → 2026-11-01 05:36:14Z
+- 范围：Pictor 独立仓（分支 godot-rust）：input_handler / protocol_def / message_builder / orion_messages / kernel_bridge / ws_command_server / 协议测试 / CLI
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok da48700
+- 规划要点：计划已写入 `tmp/task44/plan.md`（420 行；未改任何源码，`git -C Pictor status` 仍为空）。 **摘要（≤200 字）** 计划写 tmp/task44/plan.md（420 行，未改源码）。10 个文件：protocol_def 删旧常量、action 重排 1..5、加 MSGID_MODE=8 与 V_MAX=0.45/OMEGA=0.5；orion_messages 改 8B 运动/3B 事件/1B 模式；builder 换 4 个新函数；input_handler 重写「按住集合→(v,ω)→变了才发」；ws_command_server 加 manual 门控、mode 走 msgid 8；测试入口必须改 `_initialize`（实测 `_init` 下 load 含 EventBus 的脚本必崩）→ 24 PASS；py 加 manual --dry-run。docs/ 与 check_ws 的 A9 在允许路径外，登记为已知陈旧。

@@ -1,25 +1,10 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-10-19
+//Modified Date ： 2026-11-01
 
 //! STM32 协议常量
 //!
 //! 对齐 docs/ros_stm32_protocol.md 中定义的帧格式和功能码。
-
-// ─── 运动状态（FUNC_CAR_RUN） ──────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum MotionState {
-    Stop = 0,
-    Forward = 1,
-    Backward = 2,
-    Left = 3,
-    Right = 4,
-    SpinLeft = 5,
-    SpinRight = 6,
-    Park = 7,
-}
 
 // ─── 帧常量 ──────────────────────────────────────────
 
@@ -35,7 +20,6 @@ pub const FUNC_PWM_SERVO: u8 = 0x03;
 pub const FUNC_RGB: u8 = 0x05;
 pub const FUNC_RGB_EFFECT: u8 = 0x06;
 pub const FUNC_MOTOR: u8 = 0x10;
-pub const FUNC_CAR_RUN: u8 = 0x11;
 pub const FUNC_MOTION: u8 = 0x12;
 pub const FUNC_RESET_STATE: u8 = 0x0F;
 
@@ -46,7 +30,3 @@ pub const RPT_MPU_RAW: u8 = 0x0B;
 pub const RPT_IMU_ATT: u8 = 0x0C;
 pub const RPT_ENCODER: u8 = 0x0D;
 pub const RPT_ICM_RAW: u8 = 0x0E;
-
-// ─── 速度常量（Task 22_5 D2：速度由设备层绑定，Lua/决策器只给意图）──────
-pub const FORWARD_SPEED: i16 = 30; // 前进/后退档位（原 car.lua MOVE_SPEED）
-pub const TURN_SPEED: i16 = 10;    // 原地转向档位（原 car.lua TURN_SPEED）

@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-20
-//Modified Date ： 2026-10-29
+//Modified Date ： 2026-11-01
 
 //! 导航器（Task 36 §12.4.5）：目标 → 下一格，并维护「到达 / 被堵 / 无路」状态
 //!
@@ -122,7 +122,7 @@ pub struct Navigator {
     grid: Arc<RwLock<OccupancyGrid>>,
     cluster_table: Arc<ClusterInfoTable>,
     obstacle_mode: ObstacleMode,
-    /// 建图增量订阅：`None` = 不接建图（ugv / uav），`Some` = sim（Step 6）
+    /// 建图增量订阅：`None` = 不接建图（uav），`Some` = 真车（`robot_handler::start`）与 sim
     map_rx: Option<broadcast::Receiver<Vec<MapDelta>>>,
     obstacle_inflation_radius: f32,
     arrival_threshold_m: f32,
@@ -179,9 +179,9 @@ impl Navigator {
         self.not_ready_ticks = 0;
     }
 
-    /// 订阅建图增量（sim 用；ugv / uav 不调用 → `map_rx` 保持 `None`）
-    // Step 4 的 ugv 不订阅；Step 6（sim）在 `start()` 里调用
-    #[allow(dead_code)]
+    /// 订阅建图增量（真车 / sim 都调用；uav 不调用 → `map_rx` 保持 `None`）
+    ///
+    /// 必须在 LiDAR / SLAM spawn **之前**调用：`broadcast` 只投给已存在的 receiver。
     pub fn subscribe_map(&mut self, map_tx: &broadcast::Sender<Vec<MapDelta>>) {
         self.map_rx = Some(map_tx.subscribe());
     }

@@ -1,11 +1,14 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-11-01
 
 //! 急停检查（Task 23 决策 D1：从 robot.rs 拆出，车端独有）
 //!
 //! 前方 LiDAR 扇形（±45°）最近点距离 < 阈值 → 立即停车 + 标记障碍到 D*。
 //! 返回 true = 已触发急停（跳过本 tick 的决策）。
+//!
+//! 停车走 `stm32.stop()` = `0x12 FUNC_MOTION` 全零帧 = `apply_velocity(0, 0)`，
+//! 但**保留 10×10 ms 有界重试**（TX 拥塞时安全关键帧不静默丢弃，task_44 §1.2 #1）。
 
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -45,6 +48,7 @@ pub async fn check_emergency_stop(
 
     if p.range < OBSTACLE_THRESHOLD_M {
         warn!("[Robot] 前方障碍 {:.2}m < {:.2}m，急停", p.range, OBSTACLE_THRESHOLD_M);
+        // `stop()` = `0x12` 全零（等价 `apply_velocity(0, 0)`）+ 有界重试
         if let Err(e) = stm32.stop() {
             warn!("[Robot] 急停失败: {e}");
         }

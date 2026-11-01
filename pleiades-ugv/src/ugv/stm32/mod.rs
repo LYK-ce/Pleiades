@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-07
-//Modified Date ： 2026-08-26
+//Modified Date ： 2026-11-01
 
 //! STM32 控制板设备驱动
 //!
@@ -18,15 +18,15 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use constants::{MotionState, RPT_SPEED};
+use constants::RPT_SPEED;
 use protocol::{
-    feed_state_machine, pack_beep, pack_car_run, pack_motion, pack_motor,
+    feed_state_machine, pack_beep, pack_motion, pack_motor,
     pack_reset, pack_rgb, pack_rgb_effect, pack_servo, update_state, RxState,
 };
 use pleiades_base::robot::util::serial::port;
 use crate::ugv::types::CarType;
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::state::{MotionAction, RobotState};
+use pleiades_base::robot::core::state::RobotState;
 use crate::ugv::slam::odometry;
 
 // ============================================================
@@ -37,8 +37,6 @@ pub struct STM32Device {
     serial_cmd_tx: mpsc::Sender<Vec<u8>>,
     state: Arc<RwLock<RobotState>>,
     car_type: CarType,
-    forward_speed: i16,
-    turn_speed: i16,
     /// 四轮编码器计数（Task 23 B1：从 RobotState 摘出，设备内部维护）
     encoders: Arc<Mutex<[i32; 4]>>,
     cancel: CancellationToken,
@@ -47,7 +45,7 @@ pub struct STM32Device {
 impl STM32Device {
     /// 启动 STM32 设备。（Task 24：origin 已由 Robot::new 注入共享 RobotState，
     /// 本处 `_origin` 保留仅对齐签名，不再注入 local_state）
-    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, _origin: (f32, f32, f32), forward_speed: i16, turn_speed: i16) -> Result<Self, String> {
+    pub fn spawn(port: &str, baudrate: u32, car_type: CarType, state: Arc<RwLock<RobotState>>, _origin: (f32, f32, f32)) -> Result<Self, String> {
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
         let encoders = Arc::new(Mutex::new([0i32; 4]));
@@ -115,18 +113,26 @@ impl STM32Device {
             cancel.clone(),
         )?;
 
-        Ok(Self { serial_cmd_tx, state, car_type, forward_speed, turn_speed, encoders, cancel })
+        Ok(Self { serial_cmd_tx, state, car_type, encoders, cancel })
     }
 
     pub fn shutdown(&self) { self.cancel.cancel(); }
 
     // ─── 运动控制（同步，try_send 入队到 TX task）────────
 
-    pub fn forward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Forward, speed) }
-    pub fn backward(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Backward, speed) }
-    /// 停车（安全关键）：TX 通道短暂拥塞时有界重试，不静默丢弃（Task 23 review 修复）
+    /// 连续速度下发（task_44 §1.3）：`v` m/s、`omega` rad/s（`omega > 0` = 左转/逆时针）
+    ///
+    /// → `0x12 FUNC_MOTION`：`vx = v`（本来就是 m/s）、`vy = 0`、`vz = omega_to_vz(v, omega)`。
+    /// 非有限值（NaN/∞）经 `pack_motion` 的 `clamp` 后按 0 处理（`as i16` 饱和），不 panic。
+    pub fn apply_velocity(&self, v: f32, omega: f32) -> Result<(), String> {
+        let bytes = self.motion_bytes(v, omega);
+        self.serial_cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
+    }
+
+    /// 停车（安全关键）：`0x12` 全零运动帧（task_44 §1.2 #1：停车也走这条通道，
+    /// 旧的离散动作通道已整体删除），TX 通道短暂拥塞时有界重试，不静默丢弃（Task 23 review 修复）
     pub fn stop(&self) -> Result<(), String> {
-        let bytes = pack_car_run(self.car_type as u8, MotionState::Stop as u8, 0);
+        let bytes = self.motion_bytes(0.0, 0.0);
         for _ in 0..10 {
             match self.serial_cmd_tx.try_send(bytes.clone()) {
                 Ok(()) => return Ok(()),
@@ -140,18 +146,12 @@ impl STM32Device {
         }
         Err("TX 通道持续拥塞，Stop 送达失败".to_string())
     }
-    pub fn left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Left, speed) }
-    pub fn right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::Right, speed) }
-    pub fn spin_left(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinLeft, speed) }
-    pub fn spin_right(&self, speed: i16) -> Result<(), String> { self.send_car_run(MotionState::SpinRight, speed) }
 
     // ─── 命令/动作解析（A6：下沉到设备，设备选择性响应）────────
     pub fn handle_manual_cmd(&self, cmd: &ManualCmd) {
         let result = match cmd {
-            ManualCmd::Forward(_) => self.forward(self.forward_speed),
-            ManualCmd::Backward(_) => self.backward(self.forward_speed),
-            ManualCmd::SpinLeft(_) => self.spin_left(self.turn_speed),
-            ManualCmd::SpinRight(_) => self.spin_right(self.turn_speed),
+            ManualCmd::Motion { v, omega } => self.apply_velocity(*v, *omega),
+            // §1.2 #6：协议里已无 stop 动作，`Stop` 是内部命令 → 按 `(0, 0)` 执行
             ManualCmd::Stop => self.stop(),
             ManualCmd::Beep(ms) => self.beep(*ms),
             _ => return, // 车不支持 Takeoff/Land/LiDAR 命令，忽略
@@ -161,28 +161,11 @@ impl STM32Device {
         }
     }
 
-    pub fn apply_action(&self, action: MotionAction) {
-        let result = match action {
-            MotionAction::MoveForward => self.forward(self.forward_speed),
-            MotionAction::MoveBackward => self.backward(self.forward_speed),
-            MotionAction::TurnLeft => self.spin_left(self.turn_speed),
-            MotionAction::TurnRight => self.spin_right(self.turn_speed),
-            MotionAction::Stop => self.stop(),
-        };
-        if let Err(e) = result {
-            warn!("[STM32] 动作下发失败: {e}");
-        }
-    }
-
-    fn send_car_run(&self, state: MotionState, speed: i16) -> Result<(), String> {
-        let bytes = pack_car_run(self.car_type as u8, state as u8, speed);
-        self.serial_cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
-    }
-
-    pub fn set_motion(&self, vx: f32, vy: f32, vz: f32) -> Result<(), String> {
+    /// `(v, omega)` → `0x12` 帧字节（`pack_motion` 内部还会按 `motion_limits` 再夹一次）
+    fn motion_bytes(&self, v: f32, omega: f32) -> Vec<u8> {
         let limits = self.car_type.motion_limits();
-        let bytes = pack_motion(self.car_type as u8, vx, vy, vz, limits);
-        self.serial_cmd_tx.try_send(bytes).map_err(|e| format!("TX 通道满: {e}"))
+        let vz = omega_to_vz(v, omega);
+        pack_motion(self.car_type as u8, v, 0.0, vz, limits)
     }
 
     pub fn set_motor(&self, m1: i8, m2: i8, m3: i8, m4: i8) -> Result<(), String> {
@@ -216,6 +199,39 @@ impl STM32Device {
 }
 
 // ============================================================
+// `vz` 反解标定（task_44 §二 Step 4 实施步骤 2：2026-11-01 实测）
+//
+// `0x12` 的 `vz` **不是角速度**：原地转死区 `|vz| ≤ 0.2`、`ω ≈ 40 °/s × (vz − 0.2)`
+// ⇒ 每单位 `vz` 对应 `40 °/s ≈ 0.70 rad/s`；边走边转的 ω 约为原地转的 2.8 倍
+// ⇒ 按 `v == 0` 选两套系数（不分段会让弧线转过头）。
+// ============================================================
+
+/// 原地转死区：`|vz| ≤ 0.2` 车不动（实测）。
+/// **`omega = 0` 时必须发 0，不能发 0.2，否则车会一直转**
+const VZ_DEADBAND: f32 = 0.2;
+/// 原地转：每单位 `vz` 对应 40 °/s ≈ 0.70 rad/s。← 待上车标定
+const OMEGA_PER_VZ_INPLACE_RAD_S: f32 = 0.70;
+/// 边走边转：同一 `vz` 下 ω 约为原地转的 2.8 倍 ⇒ 单位增益 ×2.8。← 待上车标定
+const VZ_MOVING_GAIN: f32 = 2.8;
+/// `vz` 单轴上限（= `motion_limits().2`，`pack_motion` 还会再夹一次）≈120 °/s 原地。← 待上车标定
+const VZ_MAX: f32 = 3.2;
+
+/// `(v, omega)` → `0x12` 的 `vz`（**同号**：`vz > 0` = 左转 = 逆时针 = `omega > 0`）
+fn omega_to_vz(v: f32, omega: f32) -> f32 {
+    if omega == 0.0 {
+        return 0.0; // 硬条件：不转就必须发 0（不能发死区 0.2）
+    }
+    // §1.4 的档位里 `v` 只有 `0` 与 `0.45` 两种取值，故按 `v == 0` 分段即可
+    let per_unit = if v == 0.0 {
+        OMEGA_PER_VZ_INPLACE_RAD_S
+    } else {
+        OMEGA_PER_VZ_INPLACE_RAD_S * VZ_MOVING_GAIN // = 1.96 rad/s 每单位
+    };
+    let mag = (VZ_DEADBAND + omega.abs() / per_unit).min(VZ_MAX);
+    if omega > 0.0 { mag } else { -mag }
+}
+
+// ============================================================
 // Mock spawn（测试用）
 // ============================================================
 
@@ -237,7 +253,6 @@ impl STM32Device {
         _origin: (f32, f32, f32),
     ) -> (Self, tokio::task::JoinHandle<()>) {
         use protocol::{feed_state_machine, update_state, RxState};
-        use constants::{FORWARD_SPEED, TURN_SPEED};
 
         let cancel = CancellationToken::new();
         let state_clone = state.clone();
@@ -312,7 +327,7 @@ impl STM32Device {
             }
         });
 
-        (Self { serial_cmd_tx, state, car_type, forward_speed: FORWARD_SPEED, turn_speed: TURN_SPEED, encoders, cancel }, handle)
+        (Self { serial_cmd_tx, state, car_type, encoders, cancel }, handle)
     }
 }
 
@@ -321,20 +336,59 @@ mod mock_tests {
     use super::*;
     use crate::ugv::stm32::protocol::stm32_report_frame;
 
+    /// task_44 §1.2 #1：运动只走 `0x12`；(v, omega) → (vx, vy=0, vz 反解)
     #[tokio::test]
-    async fn test_mock_forward_command() {
+    async fn test_mock_apply_velocity_command() {
         let state = Arc::new(RwLock::new(RobotState::default()));
         let (tx_sink, mut tx_rx) = mpsc::channel::<Vec<u8>>(32);
-        let (rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
+        let (_rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
 
         let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::X3Plus, state, (64.0, 64.0, 0.0));
-        dev.forward(50).unwrap();
+        dev.apply_velocity(0.45, 0.5).unwrap();
 
         // 验证 TX 发出了正确的命令帧
         let sent = tx_rx.recv().await.unwrap();
-        assert_eq!(sent[3], constants::FUNC_CAR_RUN); // 功能码
-        let speed = i16::from_le_bytes([sent[6], sent[7]]);
-        assert_eq!(speed, 50);
+        assert_eq!(sent[3], constants::FUNC_MOTION); // 功能码 = 0x12
+        assert_eq!(sent[4], CarType::X3Plus as u8);
+        assert_eq!(i16::from_le_bytes([sent[5], sent[6]]), 450, "vx = v（m/s → mm/s）");
+        assert_eq!(i16::from_le_bytes([sent[7], sent[8]]), 0, "vy 恒 0");
+        let vz = i16::from_le_bytes([sent[9], sent[10]]);
+        // v ≠ 0 ⇒ 「边走边转」那套系数：vz = 0.2 + 0.5/1.96 ≈ 0.4551 ⇒ 455
+        // （原地转的 0.9143 ⇒ 914 由 `calib_tests::test_in_place_gold` 单独锁）
+        assert!((vz - 455).abs() <= 1, "边走边转 0.5 rad/s 的 vz ≈ 455，实际 {vz}");
+    }
+
+    /// §1.2 #1：停车也走 `0x12` 全零（不走旧离散动作通道）—— 急停 / reset / suspend 共用这条路径
+    #[tokio::test]
+    async fn test_mock_stop_is_zero_motion() {
+        let state = Arc::new(RwLock::new(RobotState::default()));
+        let (tx_sink, mut tx_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (_rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
+
+        let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::M1, state, (64.0, 64.0, 0.0));
+        dev.stop().unwrap();
+
+        let sent = tx_rx.recv().await.unwrap();
+        assert_eq!(sent[3], constants::FUNC_MOTION);
+        assert_eq!(sent[4], CarType::M1 as u8);
+        assert_eq!(i16::from_le_bytes([sent[5], sent[6]]), 0, "vx = 0");
+        assert_eq!(i16::from_le_bytes([sent[7], sent[8]]), 0, "vy = 0");
+        assert_eq!(i16::from_le_bytes([sent[9], sent[10]]), 0, "vz = 0（不是死区 200）");
+    }
+
+    /// §1.2 硬条件：`omega = 0` 就必须 `vz = 0`，否则车会一直原地转
+    #[tokio::test]
+    async fn test_mock_apply_velocity_zero_omega_zero_vz() {
+        let state = Arc::new(RwLock::new(RobotState::default()));
+        let (tx_sink, mut tx_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (_rx_tx, rx_feed) = mpsc::channel::<Vec<u8>>(32);
+
+        let (dev, _handle) = STM32Device::spawn_mock(rx_feed, tx_sink, CarType::M1, state, (64.0, 64.0, 0.0));
+        dev.apply_velocity(0.45, 0.0).unwrap();
+
+        let sent = tx_rx.recv().await.unwrap();
+        assert_eq!(i16::from_le_bytes([sent[5], sent[6]]), 450, "vx = 450");
+        assert_eq!(i16::from_le_bytes([sent[9], sent[10]]), 0, "vz 必须是 0，不能是 200");
     }
 
     #[tokio::test]
@@ -417,5 +471,67 @@ mod mock_tests {
         assert!((s.x - 66.5).abs() < 1e-3, "共享态 x 应保持 origin: {}", s.x);
         assert!((s.y - 63.25).abs() < 1e-3, "共享态 y 应保持 origin: {}", s.y);
         assert!((s.z - 0.0).abs() < 1e-3, "共享态 z 应为 0: {}", s.z);
+    }
+}
+
+// ============================================================
+// `vz` 反解标定（task_44 §二 Step 4 实施步骤 2；数值全部「待上车标定」）
+// ============================================================
+
+#[cfg(test)]
+mod calib_tests {
+    use super::*;
+
+    /// §1.2 硬条件：`omega = 0` ⇒ `vz = 0`（**精确相等**，不能是死区 0.2）
+    #[test]
+    fn test_zero_omega_is_zero_vz() {
+        assert_eq!(omega_to_vz(0.0, 0.0), 0.0);
+        assert_eq!(omega_to_vz(0.45, 0.0), 0.0);
+    }
+
+    /// 原地转金标：`vz = 0.2 + 0.5/0.70 = 0.9142857`（≈ +914 线上单位）
+    #[test]
+    fn test_in_place_gold() {
+        let vz = omega_to_vz(0.0, 0.5);
+        assert!((vz - 0.9142857).abs() < 1e-5, "实际 {vz}");
+        assert_eq!((vz * 1000.0) as i16, 914);
+    }
+
+    /// 边走边转金标：同一 omega 下 `vz = 0.2 + 0.5/1.96 = 0.4551020`（≈ +455），
+    /// 且**必须小于**原地转的 vz（两套系数确实生效）
+    #[test]
+    fn test_moving_gold_differs() {
+        let vz = omega_to_vz(0.45, 0.5);
+        assert!((vz - 0.4551020).abs() < 1e-5, "实际 {vz}");
+        assert_eq!((vz * 1000.0) as i16, 455);
+        assert!(vz < omega_to_vz(0.0, 0.5), "边走边转的 vz 必须小于原地转（分两套系数）");
+    }
+
+    /// 符号：`vz` 与 `omega` 同号（`vz > 0` = 左转 = 逆时针），且左右对称
+    #[test]
+    fn test_sign_matches_omega() {
+        assert!(omega_to_vz(0.0, 0.5) > 0.0);
+        assert!(omega_to_vz(0.0, -0.5) < 0.0);
+        assert_eq!(omega_to_vz(0.0, -0.5), -omega_to_vz(0.0, 0.5));
+        assert_eq!(omega_to_vz(0.45, -0.5), -omega_to_vz(0.45, 0.5));
+    }
+
+    /// 上限：`|vz| ≤ 3.2`（≈120 °/s 原地），夹死不溢出
+    #[test]
+    fn test_cap_at_vz_max() {
+        assert_eq!(omega_to_vz(0.0, 3.0), VZ_MAX);
+        assert_eq!(omega_to_vz(0.0, -3.0), -VZ_MAX);
+    }
+
+    /// 全域扫描：两档 `v` × 一串 `omega` → 全部有限且不越界
+    #[test]
+    fn test_sweep_within_protocol_limit() {
+        for v in [0.0_f32, 0.45] {
+            for omega in [0.0_f32, 0.1, -0.1, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, 10.0, -10.0] {
+                let vz = omega_to_vz(v, omega);
+                assert!(vz.is_finite(), "v={v} omega={omega} 产出了非有限值");
+                assert!(vz.abs() <= VZ_MAX, "v={v} omega={omega} → vz={vz} 越界");
+            }
+        }
     }
 }

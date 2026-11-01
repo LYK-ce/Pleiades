@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-31
+//Modified Date ： 2026-11-01
 
 //! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.4.7 改成树驱动）
 //!
@@ -30,11 +30,11 @@ use pleiades_base::robot::core::mission_queue::{QueuedTask, TaskId};
 use pleiades_base::robot::core::robot::{DeviceHandler, Robot, TickOutcome, AUTO_TICK_MS};
 use pleiades_base::robot::core::state::{DecisionState, ExecuteState, RobotState};
 
-use crate::config::{DEFAULT_PLAN_BUDGET_MS, UgvConfig};
+use crate::config::{DEFAULT_CRUISE_SPEED, DEFAULT_CRUISE_YAW_RATE, DEFAULT_PLAN_BUDGET_MS, UgvConfig};
 use crate::device::camera_ugv::Ugv_Camera;
 use crate::device::lg290p::Lg290pDevice;
 use crate::ugv::emergency_stop::check_emergency_stop;
-use crate::ugv::executor::DecisionExecutor;
+use crate::ugv::executor::UgvVelocityExecutor;
 use crate::ugv::lidar::LidarDevice;
 use crate::ugv::mission::{self, TaskDeps};
 use crate::ugv::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
@@ -62,7 +62,7 @@ struct CarInner {
     camera: Option<Arc<Ugv_Camera>>,
     /// 导航器（原目标服务；**不再持队列、不再出队**）
     nav: Arc<Mutex<Navigator>>,
-    executor: DecisionExecutor,
+    executor: UgvVelocityExecutor,
     trees: Mutex<TreeSet>,
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
@@ -103,6 +103,9 @@ impl DeviceHandler for CarDeviceHandler {
         // 底盘配置
         let chassis = r.chassis.as_ref();
         let chassis_enabled = chassis.and_then(|c| c.enabled).unwrap_or(true);
+        // task_44 §1.2 #11：执行器量级是定值，直接取 m/s / rad/s（不做百分比换算）
+        let cruise_speed = chassis.and_then(|c| c.cruise_speed).unwrap_or(DEFAULT_CRUISE_SPEED);
+        let cruise_yaw_rate = chassis.and_then(|c| c.cruise_yaw_rate).unwrap_or(DEFAULT_CRUISE_YAW_RATE);
 
         // 雷达配置
         let lidar = r.lidar.as_ref();
@@ -125,16 +128,14 @@ impl DeviceHandler for CarDeviceHandler {
         let stm32 = if chassis_enabled {
             let serial_port = chassis.and_then(|c| c.port.clone()).unwrap_or_else(|| "/dev/myserial".to_string());
             let baudrate = chassis.and_then(|c| c.baudrate).unwrap_or(115200);
+            // task_44 §1.2 #9：本车是麦克纳姆 M1，缺省与回退都用 M1（不再是 X3Plus）
             let car_type = match chassis.and_then(|c| c.car_type.as_deref()).map(CarType::from_str) {
                 Some(Some(t)) => t,
-                Some(None) => { warn!("car_type 解析失败，回退 X3Plus"); CarType::X3Plus }
-                None => CarType::X3Plus,
+                Some(None) => { warn!("car_type 解析失败，回退 M1"); CarType::M1 }
+                None => CarType::M1,
             };
-            let forward_speed = chassis.and_then(|c| c.forward_speed).unwrap_or(30).clamp(0, 100);
-            let turn_speed = chassis.and_then(|c| c.turn_speed).unwrap_or(10).clamp(0, 100);
-
-            info!("启用底盘: port={serial_port} baud={baudrate} car={car_type:?}");
-            Some(Arc::new(STM32Device::spawn(&serial_port, baudrate, car_type, self.robot.robot_state.clone(), self.origin, forward_speed, turn_speed)?))
+            info!("启用底盘: port={serial_port} baud={baudrate} car={car_type:?} cruise={cruise_speed}m/s yaw={cruise_yaw_rate}rad/s");
+            Some(Arc::new(STM32Device::spawn(&serial_port, baudrate, car_type, self.robot.robot_state.clone(), self.origin)?))
         } else {
             info!("底盘未启用（enabled=false），跳过");
             None
@@ -146,12 +147,16 @@ impl DeviceHandler for CarDeviceHandler {
             self.robot.grid.clone(),
             self.robot.cluster_table.clone(),
             ObstacleMode::Respect,
-            None, // 建图增量：真机不订阅（sim 才订，Step 6）
+            None, // 建图增量：建好导航器后由下方订阅接上（`map_rx` 由它填）
             obstacle_inflation_radius,
             ARRIVAL_THRESHOLD_M,
         );
         // 预算来自 config（不是硬编码；`Navigator::new` 的缺省只是兜底）
         nav.set_plan_budget(plan_budget);
+        // task_44 Step 4：接上建图增量（`map_tx` 是 SLAM 的唯一发布口）。
+        // **必须早于 `LidarDevice::spawn`** —— `broadcast` 只投给已存在的 receiver，
+        // 晚订阅会让首批 delta 丢掉。
+        nav.subscribe_map(&self.robot.map_tx);
         let nav = Arc::new(Mutex::new(nav));
 
         // 雷达（含 SLAM）：enabled=false / 未配置 → 跳过
@@ -224,7 +229,7 @@ impl DeviceHandler for CarDeviceHandler {
             lg290p,
             camera: self.camera.clone(),
             nav,
-            executor: DecisionExecutor::new(),
+            executor: UgvVelocityExecutor::new(cruise_speed, cruise_yaw_rate),
             trees: Mutex::new(TreeSet::default()),
             tick_no: AtomicU64::new(0),
         })
@@ -325,15 +330,16 @@ impl DeviceHandler for CarDeviceHandler {
             return TickOutcome::Running; // ④⑤ 跳过：本拍不决策、不判终值
         }
 
-        // ④ 决策：叶子给的「下一格」→ ExecuteState（**唯一写点**）+ 动作
-        let current = execute_state.read().await.clone();
-        let result = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw, &current);
+        // ④ 决策（`ExecuteState` **唯一写点**）：叶子给的「下一格」+ 位姿 → (v, omega)
+        //    连续执行器无状态，只写 `sub_target`、`state` 留 `Idle`
+        //    （唯一的读点 `base/Robot/core/robot.rs` 只取 `sub_target`）
+        let cmd = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
         *execute_state.write().await = ExecuteState {
-            state: result.state,
-            sub_target: result.sub_target,
+            state: DecisionState::Idle,
+            sub_target: out.next_cell,
         };
-        if let Some(action) = result.action {
-            stm32.apply_action(action);
+        if let Err(e) = stm32.apply_velocity(cmd.v, cmd.omega) {
+            warn!("[Car] 速度下发失败: {e}");
         }
 
         // ⑤ 终值：halt + 丢实例 → 交给 base 出队（唯一出队口，§十一 #16）

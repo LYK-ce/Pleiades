@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-10-31
+//Modified Date ： 2026-11-01
 
 //! UGV（车）设备配置（Task 23 C0：设备段从 base 拆出，`#[serde(flatten)]` 复用共享段）
 //!
@@ -17,6 +17,11 @@ use pleiades_base::config::{config_file_path, BaseConfig};
 
 /// 顶层键 `plan_budget_ms` 的缺省值（毫秒）：D* 单拍规划时间预算（Task 39 §二）
 pub const DEFAULT_PLAN_BUDGET_MS: u64 = 20;
+
+/// `[chassis] cruise_speed` 缺省：巡航线速度（m/s，task_44 §1.2 #11 定值 0.45）
+pub const DEFAULT_CRUISE_SPEED: f32 = 0.45;
+/// `[chassis] cruise_yaw_rate` 缺省：巡航偏航角速度绝对值（rad/s，task_44 §1.2 #11 定值 0.5）
+pub const DEFAULT_CRUISE_YAW_RATE: f32 = 0.5;
 
 // ─── [camera_ugv] 缺省值（task_43 §三；设备路径与加密配置来自实机验证材料）───
 
@@ -60,11 +65,12 @@ pub struct ChassisConfig {
     pub enabled: Option<bool>,
     pub port: Option<String>,
     pub baudrate: Option<u32>,
+    /// 车型（缺省 `M1`，task_44 §1.2 #9：本车是麦克纳姆 M1）
     pub car_type: Option<String>,
-    /// 前进/后退速度档位（缺省 30，Task 22_5 D2：速度由设备层绑定）
-    pub forward_speed: Option<i16>,
-    /// 原地转向速度档位（缺省 10）
-    pub turn_speed: Option<i16>,
+    /// 巡航线速度（m/s，缺省 `DEFAULT_CRUISE_SPEED` = 0.45；task_44 §1.2 #11/#12）
+    pub cruise_speed: Option<f32>,
+    /// 巡航偏航角速度绝对值（rad/s，缺省 `DEFAULT_CRUISE_YAW_RATE` = 0.5；方向由执行器定符号）
+    pub cruise_yaw_rate: Option<f32>,
 }
 
 /// 雷达设备配置（YDLIDAR，含 SLAM 建图）
@@ -147,6 +153,15 @@ fn ensure_ugv_section(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 把 `f32` 定值写成 toml 里的十进制字面量。
+///
+/// 不能直接 `DEFAULT_CRUISE_SPEED as f64`：`0.45f32` 的 f64 展开是
+/// `0.44999998807907104`，写进 config.toml 会变成一串尾巴（人读 / 手改都不友好）。
+/// `f32::to_string()` 给的是最短往返十进制（`0.45`），再解析回 f64 即是干净字面量。
+fn toml_f32(v: f32) -> Item {
+    toml_edit::value(v.to_string().parse::<f64>().expect("f32 定值应为合法十进制"))
+}
+
 /// 补全 [chassis] 段（缺失才补，幂等）
 fn fill_chassis(doc: &mut DocumentMut) -> bool {
     if doc.get("chassis").is_none() {
@@ -158,9 +173,9 @@ fn fill_chassis(doc: &mut DocumentMut) -> bool {
         ("enabled", toml_edit::value(true)),
         ("port", toml_edit::value("/dev/ttyUSB0")),
         ("baudrate", toml_edit::value(115200_i64)),
-        ("car_type", toml_edit::value("X3Plus")),
-        ("forward_speed", toml_edit::value(30_i64)),
-        ("turn_speed", toml_edit::value(10_i64)),
+        ("car_type", toml_edit::value("M1")),
+        ("cruise_speed", toml_f32(DEFAULT_CRUISE_SPEED)),
+        ("cruise_yaw_rate", toml_f32(DEFAULT_CRUISE_YAW_RATE)),
     ];
     for (k, v) in defaults {
         if !chassis.contains_key(k) {
@@ -271,9 +286,9 @@ mod tests {
         assert_eq!(c.enabled, Some(true));
         assert_eq!(c.port.as_deref(), Some("/dev/ttyUSB0"));
         assert_eq!(c.baudrate, Some(115200));
-        assert_eq!(c.car_type.as_deref(), Some("X3Plus"));
-        assert_eq!(c.forward_speed, Some(30));
-        assert_eq!(c.turn_speed, Some(10));
+        assert_eq!(c.car_type.as_deref(), Some("M1"));
+        assert_eq!(c.cruise_speed, Some(0.45));
+        assert_eq!(c.cruise_yaw_rate, Some(0.5));
         let l = parsed.lidar.expect("lidar 段应被补全");
         assert_eq!(l.enabled, Some(true));
         assert_eq!(l.port.as_deref(), Some("/dev/ttyUSB1"));
@@ -289,6 +304,40 @@ mod tests {
         assert_eq!((cam.width, cam.height), (Some(640), Some(480)));
         assert_eq!(cam.stream_fps, Some(25));
         assert_eq!(cam.timeout_ms, Some(3000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── [chassis] 巡航量（task_44 §1.2 #11/#12：0.45 m/s / 0.5 rad/s，百分比档位删除）───
+
+    #[test]
+    fn test_chassis_cruise_defaults_are_spec_values() {
+        // §1.2 #11 的定值只在这两个常量里出现一次
+        assert_eq!(DEFAULT_CRUISE_SPEED, 0.45);
+        assert_eq!(DEFAULT_CRUISE_YAW_RATE, 0.5);
+
+        let dir = tmp_dir("ugv_cfg_cruise");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"car\"\n").unwrap();
+        ensure_ugv_section(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // 定值以干净十进制落盘（不是 `0.44999998807907104` 这种 f32→f64 尾巴）
+        assert!(content.contains("cruise_speed = 0.45"), "{content}");
+        assert!(content.contains("cruise_yaw_rate = 0.5"), "{content}");
+        // §1.2 #12：百分比档位键必须整体消失 —— 比对 [chassis] 的键集合（不多也不少）
+        let doc: DocumentMut = content.parse().unwrap();
+        let keys: Vec<&str> = doc["chassis"]
+            .as_table()
+            .expect("chassis 应为 table")
+            .iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            keys,
+            ["enabled", "port", "baudrate", "car_type", "cruise_speed", "cruise_yaw_rate"],
+            "百分比档位键（{content}）必须换成两项巡航量"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
