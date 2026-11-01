@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-11-01
 
 #![allow(non_snake_case)]
 
@@ -167,7 +167,6 @@ mod tests {
     use pleiades_base::robot::core::cluster::ClusterInfoTable;
     use pleiades_base::robot::core::command::ManualCmd;
     use pleiades_base::robot::core::grid::{world_to_grid, CellState, OccupancyGrid};
-    use pleiades_base::robot::core::state::MotionAction;
 
     use crate::sim::chassis::{PoseFields, SpawnFields};
     use crate::sim::ugv_sim::nav::{ARRIVAL_THRESHOLD_M, ObstacleMode};
@@ -193,7 +192,6 @@ mod tests {
         fn Name(&self) -> &str {
             "mock_chassis"
         }
-        fn Apply_Action(&self, _action: MotionAction) {}
         fn Handle_Manual_Cmd(&self, _cmd: &ManualCmd) {}
         async fn On_Pose(&self, _p: &PoseFields) {}
         async fn On_Spawn(&self, _s: &SpawnFields) {}

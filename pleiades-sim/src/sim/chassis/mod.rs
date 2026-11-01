@@ -22,8 +22,7 @@
 //! - [`Build`]：按 `[sim_world].chassis`（世界零件名）构造，未知名字 → `Err`
 //!
 //! 硬约束：**禁止引用 pleiades-ugv / pleiades-uav**（§六.3-1）。速度绑定、位姿写回
-//! 全部在本模块内自带；允许 `pleiades-base`（`ManualCmd` / `RobotState`；`MotionAction` 只剩
-//! [`Chassis::Apply_Action`] 这个过渡签名用，Step 5 删）。
+//! 全部在本模块内自带；允许 `pleiades-base`（`ManualCmd` / `RobotState`）。
 //!
 //! 位置更新的单写者纪律（§六.2.5）：`RobotState` 只被 [`pose_ingest::PoseIngest`] 写，
 //! 而 `PoseIngest` **归底盘持有**；`world_link` 只调 `Chassis::On_Pose` / `Chassis::On_Spawn`。
@@ -41,7 +40,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use pleiades_base::robot::core::command::ManualCmd;
-use pleiades_base::robot::core::state::{MotionAction, RobotState};
+use pleiades_base::robot::core::state::RobotState;
 
 use crate::config::ChassisConfig;
 // 对外 re-export：`world_link` 只关心 `Chassis` + 两个字段载体，不必知道内部模块路径
@@ -62,15 +61,6 @@ pub use ugv::DiffDriveChassis;
 pub trait Chassis: Send + Sync {
     /// 世界零件名（`diff_drive_ugv` / `quadrotor_uav`）
     fn Name(&self) -> &str;
-
-    /// 离散动作总线（task_31 §六.5.3 的遗留签名）：`0x11 FUNC_CAR_RUN` 已彻底不用
-    /// （task_44 §1.2 #1），车与机都改走 [`Self::Apply_Velocity`]。
-    ///
-    /// **保留成默认空实现**的唯一原因是 `sim/emergency_stop.rs::MockChassis` 还 override 它
-    /// （那个文件不在本 step 允许路径内）；Step 5 删 `MotionAction` 时连同本方法整体移除。
-    /// 本 step 起**没有任何调用点**（车/机都走 `Apply_Velocity`），故显式 `allow(dead_code)`。
-    #[allow(dead_code)]
-    fn Apply_Action(&self, _action: MotionAction) {}
 
     /// 连续速度指令（task_39 §四.4，task_44 §1.3 起**车机统一**）：`v` 单位 **m/s**、
     /// `omega` 单位 **rad/s**（物理量，`omega > 0` = 左转）。
