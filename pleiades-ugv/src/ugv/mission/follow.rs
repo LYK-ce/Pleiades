@@ -63,9 +63,9 @@ use crate::ugv::nav::{cluster_to_obstacle_cells, NavPort};
 // ---------------------------------------------------------------- 参数初值（§六.4）
 
 /// `d > D_FAR_M` 才前进（米）
-pub const D_FAR_M: f32 = 4.0;
+pub const D_FAR_M: f32 = 2.2;
 /// `d <= D_NEAR_M` 停下（米）
-pub const D_NEAR_M: f32 = 2.5;
+pub const D_NEAR_M: f32 = 1.2;
 /// 目标过期时间（毫秒）：`age > STALE_MS` → 视为丢失（§六.4）
 pub const STALE_MS: u64 = 800;
 /// 人作为障碍的圆盘膨胀半径（米）：1 格（0.5 m），与 `cluster_obstacle_cells` 同口径

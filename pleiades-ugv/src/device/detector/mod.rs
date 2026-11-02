@@ -257,6 +257,8 @@ struct Loop_Ctx {
     poll_ms: u64,
     /// 位置估计器（`[detector.camera]` 解析结果；mount 基向量在 spawn 时算好）
     projector: projection::Projector,
+    /// 推理前是否把 JPEG 垂直翻转（`[detector].flip_vertical`）
+    flip_vertical: bool,
 }
 
 /// detector 设备（`Send + Sync`，可整份塞进 `Option<Arc<...>>`）
@@ -355,6 +357,7 @@ impl DetectorDevice {
             nms: device.nms,
             poll_ms,
             projector,
+            flip_vertical: cfg.Flip_Vertical(),
         }));
         Ok(device)
     }
@@ -401,9 +404,35 @@ impl DetectorDevice {
     }
 }
 
+/// 把 JPEG 垂直翻转（上下颠倒的相机用）。
+///
+/// 解码 → `flip_vertical` → 以质量 92 重新编码。只在
+/// `[detector].flip_vertical = true` 时调用，关掉时零开销。
+fn Flip_Jpeg_Vertical(jpeg: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(jpeg).map_err(|e| format!("解码失败: {e}"))?;
+    let flipped = image::imageops::flip_vertical(&img);
+    let mut out: Vec<u8> = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92);
+    enc.encode_image(&flipped)
+        .map_err(|e| format!("编码失败: {e}"))?;
+    Ok(out)
+}
+
 /// 推理循环：看一眼槽位 → 有新帧就 `spawn_blocking` 推理 → 覆盖结果 + 打一行日志
 async fn Run_Loop(ctx: Loop_Ctx) {
-    let Loop_Ctx { source, robot_state, engine, latest, counters, cancel, conf, nms, poll_ms, projector } =
+    let Loop_Ctx {
+        source,
+        robot_state,
+        engine,
+        latest,
+        counters,
+        cancel,
+        conf,
+        nms,
+        poll_ms,
+        projector,
+        flip_vertical,
+    } =
         ctx;
     // 上一帧的槽位帧号：同一帧不重复推理（相机 10 Hz、推理可能更慢，靠这条去重）
     let mut last_seq: Option<u64> = None;
@@ -434,7 +463,23 @@ async fn Run_Loop(ctx: Loop_Ctx) {
         counters.frames_seen.fetch_add(1, Ordering::Relaxed);
 
         // ② 推理：candle 的 CPU 计算是纯同步阻塞 → 必须逃出 tokio 的协作调度
-        let jpeg = frame.jpeg.clone();
+        // 相机装反时（`[detector].flip_vertical = true`）在这里翻正一次：
+        // 检测框坐标因此落在「翻正后的图」上，与 projection.rs 里
+        // `v 自画面顶部往下数` 的约定一致。
+        // 放在这里而不是 SDK 回调里：回调跑在厂商采集线程上，阻塞多久采集就停多久，
+        // 而这里本来就在 spawn_blocking 中处理一份 JPEG 副本。
+        let jpeg = if flip_vertical {
+            match Flip_Jpeg_Vertical(frame.jpeg.as_ref()) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    counters.infer_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!("[detector] 垂直翻转失败（seq={}）：{e}", frame.seq);
+                    continue;
+                }
+            }
+        } else {
+            frame.jpeg.to_vec()
+        };
         let engine_for_task = engine.clone();
         let started = Instant::now();
         let outcome =

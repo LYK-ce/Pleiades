@@ -56,22 +56,30 @@ pub const DEFAULT_DETECTOR_CONF_THRES: f32 = 0.35;
 /// `[detector].nms_thres` 的默认值（NMS IoU 阈值）
 pub const DEFAULT_DETECTOR_NMS_THRES: f32 = 0.45;
 
+/// `[detector].flip_vertical` 的默认值（false = 不翻转，行为与原版一致）
+pub const DEFAULT_DETECTOR_FLIP_VERTICAL: bool = false;
+
 // ------------------------------------------------------------ [detector.camera]
 
-/// `[detector.camera].fov_deg` 的默认值（度，全视角；与 world 侧 `CameraSensor.DEFAULT_FOV_DEG` 同值）
-pub const DEFAULT_DETECTOR_FOV_DEG: f32 = 70.0;
+/// `[detector.camera].fov_deg` 的默认值（度，全视角）
+///
+/// **真车实测值**（2026-11-02，地上 1/2/4 m 三点拟合，残差 1.63 px）：
+/// 厂商标称的 70° 是**对角线**视角，纵向只有 47.8°。
+pub const DEFAULT_DETECTOR_FOV_DEG: f32 = 47.8;
 /// `[detector.camera].fov_axis` 的默认值：`fov_deg` 指的是**纵向**全视角
 pub const DEFAULT_DETECTOR_FOV_AXIS: &str = "vertical";
 /// `[detector.camera].mount_x` 的默认值（米，机体系 `x` 前）
-pub const DEFAULT_DETECTOR_MOUNT_X: f32 = 0.20;
+pub const DEFAULT_DETECTOR_MOUNT_X: f32 = 0.10;
 /// `[detector.camera].mount_y` 的默认值（米，机体系 `y` 右）
 pub const DEFAULT_DETECTOR_MOUNT_Y: f32 = 0.0;
 /// `[detector.camera].mount_z` 的默认值（米，机体系 `z` 高）
-pub const DEFAULT_DETECTOR_MOUNT_Z: f32 = 0.045;
+pub const DEFAULT_DETECTOR_MOUNT_Z: f32 = 0.135;
 /// `[detector.camera].mount_yaw_deg` 的默认值（度；光轴 = 局部 −Z，**前视 = +90°**）
 pub const DEFAULT_DETECTOR_MOUNT_YAW_DEG: f32 = 90.0;
-/// `[detector.camera].mount_pitch_deg` 的默认值（度；**负 = 低头**）
-pub const DEFAULT_DETECTOR_MOUNT_PITCH_DEG: f32 = -15.0;
+/// `[detector.camera].mount_pitch_deg` 的默认值（度；**负 = 低头，正 = 抬头**）
+///
+/// 真车实测为 **+1.7°（略微抬头）**；相机装反时配合 `[detector].flip_vertical` 使用。
+pub const DEFAULT_DETECTOR_MOUNT_PITCH_DEG: f32 = 1.7;
 /// `[detector.camera].ground_z` 的默认值（米，地面高度）
 pub const DEFAULT_DETECTOR_GROUND_Z: f32 = 0.0;
 /// `[detector.camera].max_range_m` 的默认值（米，超过就拒答）
@@ -85,6 +93,8 @@ pub struct DetectorConfig {
     pub device: Option<String>,
     pub conf_thres: Option<f32>,
     pub nms_thres: Option<f32>,
+    /// 画面上下颠倒时置 true：推理前把图像垂直翻转一次（相机装反用）
+    pub flip_vertical: Option<bool>,
     /// `[detector.camera]` 子表（task_37 Step 3，§四.4）；缺段 = None = 全用默认值
     pub camera: Option<DetectorCameraConfig>,
 }
@@ -128,6 +138,11 @@ impl DetectorConfig {
         self.nms_thres
             .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
             .unwrap_or(DEFAULT_DETECTOR_NMS_THRES)
+    }
+
+    /// `flip_vertical` 缺省 **false**（不翻转）
+    pub fn Flip_Vertical(&self) -> bool {
+        self.flip_vertical.unwrap_or(DEFAULT_DETECTOR_FLIP_VERTICAL)
     }
 }
 
@@ -439,13 +454,14 @@ fn fill_detector(doc: &mut DocumentMut) -> bool {
         return false;
     };
     let mut changed = false;
-    let defaults: [(&str, Item); 5] = [
+    let defaults: [(&str, Item); 6] = [
         // 默认关：权重不一定在场，且 detector 会吃满一个 CPU 核
         ("enabled", toml_edit::value(DEFAULT_DETECTOR_ENABLED)),
         ("model", toml_edit::value(DEFAULT_DETECTOR_MODEL)),
         ("device", toml_edit::value(DEFAULT_DETECTOR_DEVICE)),
         ("conf_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_CONF_THRES))),
         ("nms_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_NMS_THRES))),
+        ("flip_vertical", toml_edit::value(DEFAULT_DETECTOR_FLIP_VERTICAL)),
     ];
     for (k, v) in defaults {
         if !table.contains_key(k) {
@@ -470,13 +486,13 @@ fn fill_detector_camera(table: &mut toml_edit::Table) -> bool {
         return false;
     };
     let defaults: [(&str, Item); 9] = [
-        ("fov_deg", toml_edit::value(70.0_f64)),
+        ("fov_deg", toml_edit::value(47.8_f64)),
         ("fov_axis", toml_edit::value(DEFAULT_DETECTOR_FOV_AXIS)),
-        ("mount_x", toml_edit::value(0.20_f64)),
+        ("mount_x", toml_edit::value(0.10_f64)),
         ("mount_y", toml_edit::value(0.0_f64)),
-        ("mount_z", toml_edit::value(0.045_f64)),
+        ("mount_z", toml_edit::value(0.135_f64)),
         ("mount_yaw_deg", toml_edit::value(90.0_f64)),
-        ("mount_pitch_deg", toml_edit::value(-15.0_f64)),
+        ("mount_pitch_deg", toml_edit::value(1.7_f64)),
         ("ground_z", toml_edit::value(0.0_f64)),
         ("max_range_m", toml_edit::value(12.0_f64)),
     ];
@@ -731,6 +747,7 @@ mod tests {
         assert_eq!(d.device.as_deref(), Some("cpu"));
         assert_eq!(d.conf_thres, Some(0.35));
         assert_eq!(d.nms_thres, Some(0.45));
+        assert_eq!(d.flip_vertical, Some(false));
         assert!(content.contains("[detector]"), "{content}");
         // 补段幂等：不得重复插入
         assert_eq!(content.matches("[detector]").count(), 1, "{content}");
@@ -766,13 +783,13 @@ mod tests {
             .expect("[detector] 段应被补全")
             .camera
             .expect("[detector.camera] 子表应被补全");
-        assert_eq!(cam.fov_deg, Some(70.0));
+        assert_eq!(cam.fov_deg, Some(47.8));
         assert_eq!(cam.fov_axis.as_deref(), Some("vertical"));
-        assert_eq!(cam.mount_x, Some(0.20));
+        assert_eq!(cam.mount_x, Some(0.10));
         assert_eq!(cam.mount_y, Some(0.0));
-        assert_eq!(cam.mount_z, Some(0.045));
+        assert_eq!(cam.mount_z, Some(0.135));
         assert_eq!(cam.mount_yaw_deg, Some(90.0));
-        assert_eq!(cam.mount_pitch_deg, Some(-15.0));
+        assert_eq!(cam.mount_pitch_deg, Some(1.7));
         assert_eq!(cam.ground_z, Some(0.0));
         assert_eq!(cam.max_range_m, Some(12.0));
 
