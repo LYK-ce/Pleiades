@@ -1,6 +1,6 @@
 #Presented by KeJi
 #Created Date ： 2026-08-30
-#Modified Date ： 2026-08-30
+#Modified Date ： 2026-11-03
 
 [package]
 name = "pleiades-ugv"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 # JPEG 解码/编码：`[detector].flip_vertical` 翻转画面用（与 pleiades-base 同版本）
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # 共享底座（协议/集群/状态/世界/网络/事件总线）
-pleiades-base = { path = "../pleiades-base", default-features = false, features = ["cuda"] }
+pleiades-base = { path = "../pleiades-base", default-features = false }
 
 # 异步运行时 + 同步原语
 tokio = { version = "1", features = ["full"] }
