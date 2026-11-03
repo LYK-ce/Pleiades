@@ -1,7 +1,11 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-11-01（task_44 Step 8：四端统一连续速度定稿 —— `0x11 FUNC_CAR_RUN` 彻底删除、运动只走 `0x12`（停车也走全零 `0x12`）、`CarType::M1 = 0x0A` 为缺省车型、真车 `Follow`/`Containment` 已是真树、真车 `subscribe_map` 已接建图增量；§1.1 目录树 / §1.2 结构表 / §1.3 连续速度执行器 / §8.11 改写 / 新增 §8.14 / 常量速查与 config 样例同步。Task 41 Step 3：协助请求 topic（`TOPIC_ROBOT_ASSIST_REQUEST` = `pleiades/robot/assist_request`，`MSGID_ASSIST_REQUEST = 7`，payload 8 B）+ sim 机栈树 v2（`InsideSquare` 内发请求，1 m 阈值/离开重置）+ Pictor `CoopController`（3 m 环 N 点 / 最近一对一 / 逐车下发），§8.13 与 D-S11。Task 41 Step 1：`Mission` 加第三变体 `Containment { x, y, half_side }`（`type=3`），`TASK_SET` 记录改为**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`；未知 type / 长度不符 / 非法 `half_side` → **整帧拒**），sim 机栈新增封控树 `uav_sim/mission/containment.rs`（正方形巡逻 + 界内跟随 + 出界回巡逻），真车/真机/sim 车栈 naive 一拍 `Success`，Pictor 变长编解码 + 未知 type 报错不发帧 + `containment` 子命令，§8.12 与 D-S10。Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更新日期：2026-11-03（task_45：`Follow` 改成**直接跟人** —— 叶子写 `MotionOut.target_point`（世界坐标），
+> `step_cell` / `guard_cell` / `person_cells` 删除、Follow 不再持 nav；执行器加 `MotionTarget` 按点决策（五档不变）；
+> 真机补上真 `Follow` 树；机栈 `D_FAR_M/D_NEAR_M` 独立为 `3.6/2.6`（车栈仍 `2.2/1.2`）；**新增 §8.15**，
+> 并给 §8.9 / §8.10 / D-S7 打「已被取代」标记）
+> 上一版：2026-11-01（task_44 Step 8：四端统一连续速度定稿 —— `0x11 FUNC_CAR_RUN` 彻底删除、运动只走 `0x12`（停车也走全零 `0x12`）、`CarType::M1 = 0x0A` 为缺省车型、真车 `Follow`/`Containment` 已是真树、真车 `subscribe_map` 已接建图增量；§1.1 目录树 / §1.2 结构表 / §1.3 连续速度执行器 / §8.11 改写 / 新增 §8.14 / 常量速查与 config 样例同步。Task 41 Step 3：协助请求 topic（`TOPIC_ROBOT_ASSIST_REQUEST` = `pleiades/robot/assist_request`，`MSGID_ASSIST_REQUEST = 7`，payload 8 B）+ sim 机栈树 v2（`InsideSquare` 内发请求，1 m 阈值/离开重置）+ Pictor `CoopController`（3 m 环 N 点 / 最近一对一 / 逐车下发），§8.13 与 D-S11。Task 41 Step 1：`Mission` 加第三变体 `Containment { x, y, half_side }`（`type=3`），`TASK_SET` 记录改为**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`；未知 type / 长度不符 / 非法 `half_side` → **整帧拒**），sim 机栈新增封控树 `uav_sim/mission/containment.rs`（正方形巡逻 + 界内跟随 + 出界回巡逻），真车/真机/sim 车栈 naive 一拍 `Success`，Pictor 变长编解码 + 未知 type 报错不发帧 + `containment` 子命令，§8.12 与 D-S10。Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -155,7 +159,7 @@ pleiades-sim/                     # 🟪 bin 仿真节点（无硬件，独有�
 | D-S5 | `Chassis` 判型走世界零件名（`Kind_Of_World("diff_drive_ugv"｜"quadrotor_uav")`），不加 `Chassis::Kind()` | `pleiades-sim/src/sim/sim_handler.rs` | §12.6.5 的两个选项中选了第 2 个（「按 `world_name` 判断，省一次 trait 改动」），因为 §12.6.2 要求「不动 `chassis/`」 |
 | D-S6 | **跟随只在机栈**：`Follow` → `ReactiveFallback` 持续树（`follow.rs`）；车栈/真机 → 平凡 `Success` 树。人作为动态障碍**无法真注入 D-star**（机栈 Ignore 读空图，`mark_obstacle` 当拍即失效），只否决落在人格的 `next_cell`；外层用 `ReactiveFallback`（记忆式 `Fallback` + `Running` 型 Hold = 死锁在兜底分支） | `sim/uav_sim/mission/follow.rs`、`sim/uav_sim/mission/mod.rs`、`sim/ugv_sim/mission/mod.rs`、`uav/mission/mod.rs`、`ugv/mission/mod.rs` | task_37 Step 4。机栈 `Navigator` 是 `ObstacleMode::Ignore`（喂空栅格 + `dynamic_obstacles` 恒空），`mark_obstacle()` 的标记会被同拍重算抹掉 → 真注入需给 `Navigator` 加 `set_extra_obstacles()` 并让机栈用 `Respect`（`nav/` 不在允许清单，另开 task）；车栈没有相机/detector，Hold 会永远占队首 → 用平凡 `Success` |
 
-| D-S7 | **`Follow` 叶子不经 D\***：`Follow` → `ReactiveFallback[ ReactiveSequence[ TargetGate(有目标且未过期), Condition(未太近), StepLeaf ], HoldLeaf ]`；`StepLeaf` **不调 `nav.set_goal` / `nav.step`**，`next_cell = world_to_grid(me + 0.5·unit(target−me))`；`d > 4.0` 前进、`d ≤ 2.5` 停、带内沿用上拍（迟滞）；`nav` 只用于 Hold 时 `clear_goal()` | `sim/uav_sim/mission/follow.rs`（`-p` 无需改调用方：`build` 签名不变） | task_37 Step 5。Step 4 的 `nav.set_goal → D*` 跟随被 4 连通「下一格」带偏（executor 追格心 + `Turning` 不反向修正），人类指定**不改行动逻辑**（`executor.rs` / `nav/` 只读）→ 把修正收进叶子；代价是不转向、不绕障、不修正横向偏差（§六.6 另开任务）。上一轮误加的直线跟随任务类型已在本步全部撤销 |
+| D-S7 | **`Follow` 叶子不经 D\***：`Follow` → `ReactiveFallback[ ReactiveSequence[ TargetGate(有目标且未过期), Condition(未太近), StepLeaf ], HoldLeaf ]`；`StepLeaf` **不调 `nav.set_goal` / `nav.step`**，`next_cell = world_to_grid(me + 0.5·unit(target−me))`；`d > 4.0` 前进、`d ≤ 2.5` 停、带内沿用上拍（迟滞）；`nav` 只用于 Hold 时 `clear_goal()` | `sim/uav_sim/mission/follow.rs`（`-p` 无需改调用方：`build` 签名不变） | task_37 Step 5。Step 4 的 `nav.set_goal → D*` 跟随被 4 连通「下一格」带偏（executor 追格心 + `Turning` 不反向修正），人类指定**不改行动逻辑**（`executor.rs` / `nav/` 只读）→ 把修正收进叶子；代价是不转向、不绕障、不修正横向偏差（§六.6 另开任务）。上一轮误加的直线跟随任务类型已在本步全部撤销。**task_45 起本行已被取代**：叶子改写 `target_point`、删 `step_cell`/`guard_cell`/`person_cells`、Follow 不再持 nav，机栈 `D_FAR/D_NEAR` 独立为 3.6/2.6 —— 见 §8.15 |
 | D-S8 | **执行器分家**：`sim/executor.rs` 保留车栈离散三状态机（一行不改）；`sim/uav_sim/executor.rs` 新增机栈连续速度（`DEADBAND_DEG=5` / `SPIN_DEG=20`，输出 `VelocityCmd{v,omega}`，`omega` 取负 = 右转） | `pleiades-sim/src/sim/{executor.rs, uav_sim/executor.rs, chassis/mod.rs, chassis/uav.rs}` | task_39 §四。真机本来就是两份（车 `executor` / 机 `uav/`），sim 只是历史上共用一份；下发侧新增 `Chassis::Apply_Velocity`（默认 false）+ `motion_cmd{action:"velocity", v, omega}`（世界 `Quadrotor.SetCommand` 认 `"velocity"`，与 6 个离散 action 并存）；`omega` 取负的符号推导见 `action_map.rs:21-24`。**task_40 Step 1 之后 `sim/executor.rs` 仍是一行不改的原件**（与 `pleiades-ugv/src/ugv/executor.rs` 逐字相同），但它**不再是 sim 车栈的活动路径** —— 活动路径见 D-S9。**task_44 Step 2 已删除 `sim/executor.rs` 与 `Actuator::UgvDiscrete`**，本行仅作历史记录 |
 | D-S9 | **车栈连续速度（task_44 定稿口径）**：`UgvVelocityExecutor`（`decide(next_cell,x,y,yaw) -> VelocityCmd{v: f32 (m/s), omega: f32 (rad/s)}`，`DEADBAND_DEG=8` / `ARC_MAX_DEG=12` / `PASS_THROUGH_M=0.5`；`Δθ>0 ⇒ ω<0`）+ `Chassis::Apply_Velocity`（**唯一**设备接口，车/机统一，原名 `Apply_Velocity_Pct`）+ `MotionSender::Send_Velocity` + `motion_cmd{action:"velocity", v, omega}`；`sim_handler` 用两态 `Actuator{Ugv, Uav}` 分派 | `pleiades-sim/src/sim/{ugv_sim/executor.rs, ugv_sim/mod.rs, sim_handler.rs, chassis/mod.rs, chassis/ugv.rs}`、`pleiades-sim/src/world_link/{mod.rs, protocol.rs}`、`orion-simulation-world/src/chassis/DiffDrive.gd` | task_40 §二 + **task_44 §1.2/§1.3 改写**（本节描述已被 task_44 取代，保留作决策史）。task_44 定稿：执行器输出**直接是物理量** `(v m/s, ω rad/s)`，量级为定值 `0.45 / ±0.5`（§1.2 #11），**无百分比换算**、`Chassis::Apply_Velocity(v, omega)` 原值透传给世界；旧口径（`speed:u8`/`turn:i16` + `Apply_Velocity_Pct` + `Send_Velocity_Pct` + `Actuator::UgvDiscrete` A/B 回退点 + 只在世界侧换算）已在 task_44 Step 2 整体删除；**task_40 Step 6（§七.3）把死区 5°→8°、弧线档 10°→12°**：过冲 ≈ ω × 0.15 s ≈ 4.0°（尖峰 4.8°）< 8°，余量约 2 倍 |
 
@@ -737,7 +741,7 @@ survey_seconds = 180
   `FollowLeaf` 读 detector 的 `latest_targets()` → `goal = P - dir * follow_dist` → 目标点挪 > 0.5 m 才
   `nav.set_goal` → `nav.step` → `Frame.out.next_cell`；`HoldLeaf` 清 nav 目标 + `next_cell = None`，返回 **`Running`**。
   ——**Step 5 已把叶子改为不经 D\*，见 §8.10**。
-- 参数：Step 5 起改为 `D_FAR_M = 4.0` / `D_NEAR_M = 2.5` / `STALE_MS = 800` / `PERSON_INFLATE_M = 0.5`（见 §8.10）。
+- 参数（**task_45 起按栈分开，见 §8.15**）：车栈 `D_FAR_M = 2.2` / `D_NEAR_M = 1.2`、机栈 `D_FAR_M = 3.6` / `D_NEAR_M = 2.6` / `STALE_MS = 800` / `PERSON_INFLATE_M = 0.5`（下表为 task_37 的历史值）。
 - 目标丢失（无目标 / `age > stale`）→ Hold，**不追最后一个点**。`age` 用**本地单调 `Instant`** 记
   「首次见到该 `frame_seq`」的时刻：sim 的 `frame_ts_ms` 是世界时间，没有「当前世界时间」可比，绝不可相减。
 - 人作为动态障碍（**已实施的替代**）：机栈 `Navigator` 是 `ObstacleMode::Ignore`，`mark_obstacle` 的标记会被
@@ -750,7 +754,11 @@ survey_seconds = 180
 - 边界：不进 `on_tick`（`follow` 只经 `Frame.out.next_cell` 影响决策链）、不改 Lua 契约、`nav/` 与 `detector/`
   零改动、不新增依赖；端到端（跟人 10 s / 人停不抖 / 丢失停住）由人类在仿真里验。
 
-### 8.10 sim 跟随叶子修正：不经 D*（task_37 Step 5）
+### 8.10 sim 跟随叶子修正：不经 D*（task_37 Step 5）⚠️ **已被 task_45 取代，见 §8.15**
+
+> 本节记的是 task_37 的历史结论（叶子给「一格」、由执行器追格心）。**task_45 起叶子直接写
+> `target_point`（人的世界坐标），格与格心不再进入转向环**；`step_cell` / `guard_cell` / `person_cells`
+> 已删除，Follow 也不再持 nav。下面保留原文仅作决策追溯。
 
 - 协议：**不改**。`Mission` 保持两变体（`Goto` / `Follow`），`TASK_SET` 仍只解 `type = 0 / 2`；
   `type = 3` 从未被解码，删掉上一轮那个任务类型后它继续走「未知 `type` → `warn` 丢弃」分支
@@ -1060,6 +1068,37 @@ robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Requ
 
 ---
 
+### 8.15 Follow 直接跟人：不再走格子（task_45）
+
+**病根**：Follow 原来不让车/机朝人开，而是朝**格心**开 —— 叶子 `next_cell = world_to_grid(me + 0.5·unit)`，
+执行器再取 `cell_center`。格内任意点到格心最多偏 0.354 m，而格心只在 0.5 m 外 ⇒ **方位误差上界 ≈ 35°**；
+执行器 `\|Δθ\| > 12°` 进「原地转」档 ⇒ 车头摆；车每穿过一条格线，「往前 0.5 m」落到的格子就换一个、
+格心跳到另一侧 ⇒ 误差换号 ⇒ **左右摆动**。真车实测摆幅大到把人甩出画面，人一出框就丢目标、停车。
+
+**改法（四端一致）**
+
+| 层 | 改动 |
+|---|---|
+| base `behavior_tree/frame.rs` | 新增 `enum MotionTarget { Cell((i32,i32)), Point((f32,f32)) }`；`MotionOut` 加 `target_point: Option<(f32,f32)>`；`MotionOut::target()` = **点优先 → 格 → None** |
+| 执行器 ×4 | `decide(&self, target: Option<MotionTarget>, x, y, yaw)`：进门 `match` 出 `(tx,ty)`（Cell → `cell_center`；Point → 原值），**其后五档 / 三个阈值 / ω 符号链一行未改** |
+| `on_tick` ×4 | `decide(out.next_cell, …)` → `decide(out.target(), …)` |
+| Follow 树 ×4 | `Advance` 分支写 `target_point = Some((人.x, 人.y))` + `next_cell = None`；删 `step_cell` / `guard_cell` / `person_cells`；删 `FollowNav` 与树里的 nav 字段（Hold 不再 `clear_goal`）；`build()` 不再收 nav |
+| 真机 | `uav/mission/follow.rs` 新建（与车同构）；`Follow` 由「一拍 `Success` 平凡树」变真树，**无 detector → 原地 Hold**（不 `Success`、不 `Err`） |
+
+**距离常数按栈分开**（机栈不能沿用车的 1.2 m）：
+
+| 栈 | `D_FAR_M` | `D_NEAR_M` | 依据 |
+|---|---|---|---|
+| 车（真车 / sim 车） | 2.2 | 1.2 | 小场地实测 |
+| 机（真机 / sim 机） | 3.6 | 2.6 | UAV 2.5 m 巡航高度 + 相机下压 15° + 垂直 70° ⇒ 画面下边缘只够到地面 `2.5/tan(50°) ≈ 2.10 m`，人再近就整体出画；`2.6 = 2.10 + 0.5 余量`，`3.6` 保持同宽 1.0 m 迟滞带 |
+
+**不变的部分**：`Goto` / 巡逻照旧走格 + D\*；`nav/` 一行未改；协议、急停、`apply_velocity`、`0x12`、Pictor 全不碰。
+**已知副作用**：走点时 `ExecuteState.sub_target` 为 `None`（地面站「子目标」空着，属于接受的行为）。
+**已知限制**：Follow 期间**不看地图、不绕障**（`mark_obstacle` 对 Follow 无效，因为 Follow 不查 D\*），
+唯一保护是急停（±45°、0.3 m）—— 前面有墙就停在墙前，不会绕；人绕到车正后方 → 出框 → 丢目标 → 停车。
+
+---
+
 ## 附：关键常量速查
 
 | 常量 | 值 | 含义 |
@@ -1079,6 +1118,8 @@ robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Requ
 | `VZ_MAX` | 3.2 | `vz` 单轴上限（= `motion_limits().2`，≈120 °/s 原地）；**待上车标定**（`stm32/mod.rs:217`） |
 | 对角步长 | √2 格 ≈ 0.707 m（SQRT_2 × CELL_RESOLUTION） | 8 连通对角边代价（Task 39 §三；禁切角） |
 | `ASSIST_MOVE_M` | 1.0 m | 协助请求重发阈值（目标相对上次发送点；`containment.rs`，task_41 §二.9） |
+| `D_FAR_M` / `D_NEAR_M`（车栈） | 2.2 / 1.2 m | Follow 距离带：`d > D_FAR` 前进、`d <= D_NEAR` 停、带内沿用上拍（真车 / sim 车，§8.15） |
+| `D_FAR_M` / `D_NEAR_M`（机栈） | 3.6 / 2.6 m | 同上，但按 UAV 视场几何抬高（2.10 m 是画面下边缘的地面极限，§8.15） |
 | `RING_RADIUS_M` | 3.0 m | Pictor 协同包围环半径（`coop_controller.gd`，task_41 §二.10） |
 | `auto_tick` | 50 ms | 决策主 tick |
 | `state_notifier` | 100 ms | 位姿广播周期 |
