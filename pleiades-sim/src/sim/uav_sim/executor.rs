@@ -33,8 +33,9 @@
 //! ## 目标类型（task_45 §一 #1/#2）
 //!
 //! 唯一入口 [`decide`] 收 `Option<`[`MotionTarget`]`>`：`Cell` → 取格心（Goto / 巡逻），
-//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化）。进门消解一次，
-//! 其后 `delta` / 三档判断 / `omega` 符号链**一行不改**。
+//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化），
+//! `Face` → 原值直接用且 **`rotate_only`**（Follow 停住时朝人：只转不走，task_46 §一 #2）。
+//! 进门消解一次，其后 `delta` / 三档判断 / `omega` 符号链**一行不改**。
 
 use std::f32::consts::PI;
 
@@ -69,19 +70,30 @@ impl UavExecutor {
 
     /// 纯决策：读本拍目标 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
     ///
-    /// - `target`：叶子给的目标（格或点），`None` = 无任务/到达 → `v = omega = 0`
+    /// - `target`：叶子给的目标（格 / 点 / **朝向**），`None` = 无任务/到达 → `v = omega = 0`
     /// - `x`/`y`/`yaw`：当前位置（世界坐标）与航向（弧度）
     pub fn decide(&self, target: Option<MotionTarget>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
-        // 进门只做一次类型消解：格 → 格心，点 → 原值
-        let Some((tx, ty)) = target.map(|t| match t {
-            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy)),
-            MotionTarget::Point((px, py)) => (px, py),
+        // 进门只做一次类型消解：格 → 格心，点 → 原值，朝向 → 原值 + `rotate_only`
+        let Some((tx, ty, rotate_only)) = target.map(|t| match t {
+            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy), false),
+            MotionTarget::Point((px, py)) => (px, py, false),
+            MotionTarget::Face((px, py)) => (px, py, true),
         }) else {
             // 无目标 = 停
             return VelocityCmd { v: 0.0, omega: 0.0 };
         };
         let delta = angle_to_target(tx, ty, x, y, yaw);
         let deg = delta.to_degrees().abs();
+        // `Face` = 只转不走（task_46 §一 #2/#4）：机栈本就无「身后直行」档（#3 无适用对象），
+        // 死区内 `(0, 0)` 不抖，其余原地转 —— `omega` 仍走同一条符号链
+        if rotate_only {
+            if deg <= DEADBAND_DEG {
+                return VelocityCmd { v: 0.0, omega: 0.0 };
+            }
+            let omega = if delta > 0.0 { -self.yaw_rate_rps } else { self.yaw_rate_rps };
+            return VelocityCmd { v: 0.0, omega };
+        }
+        // ↓↓↓ 以下是 `Cell` / `Point` 的路径：**逐字不动** ↓↓↓
         if deg <= DEADBAND_DEG {
             // 直行
             VelocityCmd { v: self.vel_fwd, omega: 0.0 }
@@ -114,7 +126,7 @@ fn normalize_angle(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
 }
 
-// ================================================================ 单测（三档 + 无目标 + 常量 + 物理量透传）
+// ================================================================ 单测（三档 + 无目标 + 常量 + 物理量透传 + Face）
 
 #[cfg(test)]
 mod tests {
@@ -217,5 +229,43 @@ mod tests {
             VelocityCmd { v: 0.0, omega: -0.5236 },
             "|Δθ| = 90° > 20° ⇒ 原地转，ω 符号见文件头证据链"
         );
+    }
+
+    // ------------------------------------------------------------ Face：只转不走（task_46 §一 #1/#2/#4）
+
+    /// `Face` 目标：与 `decide_at_yaw` 同一几何 —— 目标在 +x 方向、距离 `r` ⇒ `Δθ = −yaw`
+    fn face_at_yaw(ex: &UavExecutor, yaw_deg: f32, r: f32) -> VelocityCmd {
+        let (x, y) = (center(0), center(0));
+        ex.decide(Some(MotionTarget::Face((x + r, y))), x, y, yaw_deg.to_radians())
+    }
+
+    /// §一 #3：身后且很近 ⇒ 仍 `v == 0`。机栈**没有**「身后直行」档（#3 无适用对象），
+    /// 此条锁的是「很近距离下 `Face` 也绝不前进」这一更强的不变量
+    #[test]
+    fn test_face_behind_and_near_does_not_advance() {
+        let ex = UavExecutor::new(0.8, 0.5236);
+        let (x, y) = (center(0), center(0));
+        let c = ex.decide(Some(MotionTarget::Face((x - 0.2, y))), x, y, 0.0);
+        assert_eq!(c, VelocityCmd { v: 0.0, omega: 0.5236 }, "身后 0.2 m ⇒ 只转不走，Δθ = −π ⇒ ω > 0");
+    }
+
+    /// §一 #4：弧线档（`DEADBAND_DEG`~`SPIN_DEG`）因 `v = 0` 退化为原地转
+    #[test]
+    fn test_face_arc_band_degrades_to_spin() {
+        let ex = UavExecutor::new(0.8, 0.5236);
+        let mid = (DEADBAND_DEG + SPIN_DEG) / 2.0; // 12.5°，由常量推导
+        assert_eq!(face_at_yaw(&ex, -mid, 1.0), VelocityCmd { v: 0.0, omega: -0.5236 });
+        assert_eq!(face_at_yaw(&ex, mid, 1.0), VelocityCmd { v: 0.0, omega: 0.5236 });
+    }
+
+    /// §一 #4：死区内 `(0, 0)`。**机栈 `DEADBAND_DEG = 5°`，8° 已跨出死区**，
+    /// 故本 crate 用 `DEADBAND_DEG - 1.0`（= 4°）；车栈同一条用 7°。四份自洽（口径 #10）
+    #[test]
+    fn test_face_deadband_is_stop() {
+        let ex = UavExecutor::new(0.8, 0.5236);
+        let inside = DEADBAND_DEG - 1.0; // 4°
+        assert_eq!(face_at_yaw(&ex, -inside, 1.0), VelocityCmd { v: 0.0, omega: 0.0 });
+        assert_eq!(face_at_yaw(&ex, inside, 1.0), VelocityCmd { v: 0.0, omega: 0.0 });
+        assert_eq!(face_at_yaw(&ex, 0.0, 1.0), VelocityCmd { v: 0.0, omega: 0.0 }, "正对 ⇒ 完全停");
     }
 }

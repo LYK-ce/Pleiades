@@ -10,8 +10,9 @@
 //! ├─ ReactiveSequence
 //! │  ├─ TargetGate         有目标（age ≤ stale）→ 写本拍快照
 //! │  ├─ Condition          未太近（d > d_near）
-//! │  └─ StepLeaf           d > d_far（或带内且上拍在走）→ 直接给人的世界坐标（点）
-//! └─ HoldLeaf              丢掉 / 太近 → 两者都 None（不追旧点）
+//! │  └─ StepLeaf           d > d_far（或带内且上拍在走）→ 给人的世界坐标（点）
+//! │                         带内停（上拍 Hold）→ 只给人的**朝向**（`face_point`，只转不走）
+//! └─ HoldLeaf              太近 → 只给朝向；丢掉 / 过期 → 三个都 None（不追旧点、不乱转）
 //! ```
 //!
 //! **本叶子不经 D\***（task_45 §一 #1/#6）：不调用 `nav.set_goal`、不调用 `nav.step`，也不再有
@@ -217,6 +218,8 @@ pub fn build(
 ) -> Box<dyn Node> {
     let slot: Arc<StdMutex<Option<Sample>>> = Arc::new(StdMutex::new(None));
     let slot_for_cond = slot.clone();
+    // `HoldLeaf` 也要读同一份快照（task_46 §一 #6）：必须在 `slot` 移进 `StepLeaf` 之前 clone
+    let slot_for_hold = slot.clone();
     let p2 = params;
     Box::new(ReactiveFallback::new(vec![
         // 主路：有目标 → 未太近 → 直接给人的世界坐标（点）
@@ -229,8 +232,8 @@ pub fn build(
             })),
             Box::new(StepLeaf::new(slot, params)),
         ])),
-        // 兜底：丢掉 / 太近 → 停（两个字段都 `None`）
-        Box::new(HoldLeaf::new()),
+        // 兜底：太近 → 只给朝向（只转不走）；丢掉 / 过期 → 三个字段都 `None`
+        Box::new(HoldLeaf::new(slot_for_hold, params)),
     ]))
 }
 
@@ -301,8 +304,16 @@ impl Node for StepLeaf {
                 // 直接给**人的世界坐标**：转向环里没有格心（task_45 §一 #1）
                 f.out.target_point = Some((s.x, s.y));
                 f.out.next_cell = None;
+                // 前进这拍不给朝向：`target()` 里 face > point，残留的朝向会顶掉点
+                f.out.face_point = None;
             }
             _ => {
+                // 带内停（`d_near < d <= d_far` 且上拍 `Hold`）：只给朝向，执行器原地转
+                // （task_46 §一 #2/#5）。丢失 / 过期不算「带内停」→ 三个都 `None`
+                f.out.face_point = match snap.as_ref() {
+                    Some(s) if !lost(Some(s), &self.params) => Some((s.x, s.y)),
+                    _ => None,
+                };
                 f.out.next_cell = None;
                 f.out.target_point = None;
             }
@@ -317,27 +328,38 @@ impl Node for StepLeaf {
     }
 }
 
-/// 兜底叶子：丢掉 / 太近 → 本拍不动（两个字段都 `None`）
-pub struct HoldLeaf;
+/// 兜底叶子：太近 → 只给朝向（只转不走）；丢掉 / 过期 → 本拍什么都不给
+pub struct HoldLeaf {
+    /// 与 `TargetGate` / `Condition` 共用的本拍快照（本叶子**只读**，本拍唯一写点仍在 `TargetGate`）
+    slot: Arc<StdMutex<Option<Sample>>>,
+    params: FollowParams,
+}
 
 impl HoldLeaf {
-    fn new() -> Self {
-        Self
+    fn new(slot: Arc<StdMutex<Option<Sample>>>, params: FollowParams) -> Self {
+        Self { slot, params }
     }
 }
 
 #[async_trait]
 impl Node for HoldLeaf {
     async fn tick(&mut self, f: &mut Frame<'_>) -> Status {
-        // 丢掉/太近：本拍不动（**不追最后一个点**）。
+        // 走到这里只有两种可能：`TargetGate` 失败（丢失 / 过期）或 `Condition` 为假（太近）。
+        // 「快照存在且未过期」⇒ 必然是「太近」⇒ 把人的世界坐标作为**朝向**交出去（只转不走）。
+        // 丢失 / 过期 ⇒ 三个字段都 `None`：机头不乱转（task_46 §一 #5）。
         // 返回 **`Running`**（不是 `Success`）：`Follow` 是持续任务，只有 TASK_SET 替换 /
         // `mission_count = 0` 才结束；`Success` 会让队列提前弹走这条任务。
+        let snap = *lock(&self.slot);
+        f.out.face_point = match snap.as_ref() {
+            Some(s) if !lost(Some(s), &self.params) => Some((s.x, s.y)),
+            _ => None,
+        };
         f.out.next_cell = None;
         f.out.target_point = None;
         Status::Running
     }
 
-    fn halt(&mut self) {} // 无状态
+    fn halt(&mut self) {} // 无状态（快照归 `TargetGate` 管）
 }
 
 #[cfg(test)]
@@ -345,6 +367,10 @@ mod tests {
     use super::*;
 
     use pleiades_base::robot::core::behavior_tree::MotionOut;
+
+    /// 带内中点（**由常量推导**，不写死 1.7 / 1.95）：车 1.7 m / 机 3.1 m。
+    /// 四份 `follow.rs` 因此保持逐字一致（口径 #8），且与本 crate 的 `D_NEAR_M/D_FAR_M` 自洽
+    const MID_BAND: f32 = (D_FAR_M + D_NEAR_M) / 2.0;
 
     // ------------------------------------------------------------ 夹具
 
@@ -461,9 +487,10 @@ mod tests {
             Outcome::Hold,
             "d < d_near（人已贴脸）→ Hold"
         );
-        // 带内两向都验（迟滞是真的沿用，不是写死）
-        assert_eq!(decide(Some(&sample(1.7, 0)), &p, Outcome::Hold), Outcome::Hold);
-        assert_eq!(decide(Some(&sample(1.7, 0)), &p, Outcome::Advance), Outcome::Advance);
+        // 带内两向都验（迟滞是真的沿用，不是写死）；值由 `D_FAR_M`/`D_NEAR_M` 推导，
+        // 车 1.7 m、机 3.1 m，四份用例与各自常量自洽（task_46 §一 #10）
+        assert_eq!(decide(Some(&sample(MID_BAND, 0)), &p, Outcome::Hold), Outcome::Hold);
+        assert_eq!(decide(Some(&sample(MID_BAND, 0)), &p, Outcome::Advance), Outcome::Advance);
     }
 
     /// `lost` / `too_close` 两个谓词（`TargetGate` / `Condition` 的唯一判据）
@@ -544,19 +571,24 @@ mod tests {
         assert_eq!(out.next_cell, None);
     }
 
-    /// 目标近（`d == d_near`）→ 两个字段都 `None`
+    /// task_46 §一 #5：目标近（`d == d_near`）→ **只给朝向**（人的世界坐标），不给点、不给格
     #[tokio::test]
-    async fn test_tree_near_holds() {
-        let mut r = rig(FakeFeed::new(vec![target(0.25, 1.45, 1)]), (0.25, 0.25)).await; // d = 1.2
+    async fn test_tree_near_gives_face() {
+        let mut r = rig(FakeFeed::new(vec![target(0.25, 0.25 + D_NEAR_M, 1)]), (0.25, 0.25)).await; // d = d_near
         let mut out = MotionOut::default();
         for i in 0..2 {
             assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "第 {i} 拍不得终值");
             assert_eq!(out.target_point, None, "d <= d_near → 不给点");
             assert_eq!(out.next_cell, None, "d <= d_near → 也不给格");
+            assert_eq!(
+                out.face_point,
+                Some((0.25, 0.25 + D_NEAR_M)),
+                "第 {i} 拍：太近 ⇒ 给人的朝向（只转不走）"
+            );
         }
     }
 
-    /// 无目标 / 过期 → 两者都 `None` 且不终值；目标回来且远 → **立刻**给点
+    /// 无目标 / 过期 → 三个字段都 `None` 且不终值；目标回来且远 → **立刻**给点
     /// （专门卡「记忆式 `Fallback` + `Running` 型 Hold = 死锁」那条坑）
     #[tokio::test]
     async fn test_tree_lost_holds_and_resumes() {
@@ -567,11 +599,13 @@ mod tests {
             assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "第 {i} 拍必须 Running");
             assert_eq!(out.next_cell, None, "无目标不得给下一格");
             assert_eq!(out.target_point, None, "无目标不得给目标点");
+            assert_eq!(out.face_point, None, "无目标不得给朝向（机头不乱转）");
         }
         feed.set(vec![target(0.25, 9.25, 2)]);
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
         assert_eq!(out.target_point, Some((0.25, 9.25)), "人回来必须重新跟");
         assert_eq!(out.next_cell, None);
+        assert_eq!(out.face_point, None, "前进这拍不得同时给朝向（face > point 会顶掉点）");
     }
 
     /// task_45 §一 #1/#6 的核心断言：**给点不给格**（转向环里没有格心，也不再有 nav）
@@ -586,7 +620,9 @@ mod tests {
         }
     }
 
-    /// 带内（`1.2 < d <= 2.2`）沿用上拍；`halt` 把迟滞归零（切分支 / 抢占恢复后不继承旧结论）
+    /// 带内（`D_NEAR_M < d <= D_FAR_M`）沿用上拍；`halt` 把迟滞归零（切分支 / 抢占恢复后不继承旧结论）
+    ///
+    /// task_46 §一 #5：带内**停**（`halt` 后按 Hold 起算）⇒ 只给朝向，不给点、不给格
     #[tokio::test]
     async fn test_tree_band_hysteresis_and_halt() {
         let feed = FakeFeed::new(vec![target(0.25, 9.25, 1)]); // d = 9 → Advance
@@ -595,18 +631,38 @@ mod tests {
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
         assert_eq!(out.target_point, Some((0.25, 9.25)), "先跑起来");
 
-        // 人走近到 d = 1.7（带内）：沿用上拍 Advance → 仍给点
-        feed.set(vec![target(0.25, 1.95, 2)]);
+        // 人走近到带内中点：沿用上拍 Advance → 仍给点，且**不给朝向**（face > point 会顶掉点）
+        feed.set(vec![target(0.25, 0.25 + MID_BAND, 2)]);
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.target_point, Some((0.25, 1.95)), "带内沿用上拍 Advance");
+        assert_eq!(out.target_point, Some((0.25, 0.25 + MID_BAND)), "带内沿用上拍 Advance");
+        assert_eq!(out.face_point, None, "前进这拍不得给朝向");
 
-        // halt（切分支 / 抢占恢复）：迟滞清零 → 同一份输入改判 Hold
+        // halt（切分支 / 抢占恢复）：迟滞清零 → 同一份输入改判 Hold → 只给朝向
         r.tree.halt();
         r.tree.halt(); // 幂等
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.target_point, None, "halt 后带内按 Hold 起算");
+        assert_eq!(out.target_point, None, "halt 后带内按 Hold 起算：不再给点");
         assert_eq!(out.next_cell, None);
+        assert_eq!(
+            out.face_point,
+            Some((0.25, 0.25 + MID_BAND)),
+            "halt 后带内停 ⇒ 只给朝向（只转不走）"
+        );
         // 位姿句柄仍在（`Rig` 的字段被读过 → 不留 dead_code）
         assert_eq!(r.state.read().await.x, 0.25);
+    }
+
+    /// task_46 §一 #5：过期（`age > STALE_MS`）时 `HoldLeaf` 三个字段全 `None`
+    /// （不追旧点、也不追旧朝向 —— 机头不乱转）
+    #[tokio::test]
+    async fn test_hold_leaf_stale_writes_nothing() {
+        let p = FollowParams::default();
+        let stale = Sample { x: 7.0, y: 8.0, ..sample(1.0, STALE_MS + 1) };
+        let mut leaf = HoldLeaf::new(Arc::new(StdMutex::new(Some(stale))), p);
+        let mut out = MotionOut::default();
+        assert_eq!(leaf.tick(&mut frame(&mut out)).await, Status::Running, "兜底叶子不得终值");
+        assert_eq!(out.face_point, None, "过期不得给朝向");
+        assert_eq!(out.target_point, None);
+        assert_eq!(out.next_cell, None);
     }
 }

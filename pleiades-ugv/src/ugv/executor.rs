@@ -46,8 +46,9 @@
 //! ## 目标类型（task_45 §一 #1/#2）
 //!
 //! 唯一入口 [`decide`] 收 `Option<`[`MotionTarget`]`>`：`Cell` → 取格心（Goto / 巡逻），
-//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化）。进门消解一次，
-//! 其后 `d` / `delta` / 五档判断 / `omega` 符号链**一行不改**。
+//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化），
+//! `Face` → 原值直接用且 **`rotate_only`**（Follow 停住时朝人：只转不走，task_46 §一 #2）。
+//! 进门消解一次，其后 `d` / `delta` / 五档判断 / `omega` 符号链**一行不改**。
 
 use std::f32::consts::PI;
 
@@ -93,13 +94,14 @@ impl UgvVelocityExecutor {
 
     /// 纯决策：读本拍目标 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
     ///
-    /// - `target`：叶子给的目标（格或点），`None` = 无任务/到达 → `v = omega = 0`
+    /// - `target`：叶子给的目标（格 / 点 / **朝向**），`None` = 无任务/到达 → `v = omega = 0`
     /// - `x`/`y`/`yaw`：当前位置（世界坐标）与航向（弧度）
     pub fn decide(&self, target: Option<MotionTarget>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
-        // 进门只做一次类型消解：格 → 格心，点 → 原值
-        let Some((tx, ty)) = target.map(|t| match t {
-            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy)),
-            MotionTarget::Point((px, py)) => (px, py),
+        // 进门只做一次类型消解：格 → 格心，点 → 原值，朝向 → 原值 + `rotate_only`
+        let Some((tx, ty, rotate_only)) = target.map(|t| match t {
+            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy), false),
+            MotionTarget::Point((px, py)) => (px, py, false),
+            MotionTarget::Face((px, py)) => (px, py, true),
         }) else {
             // 无目标 = 停（`v`/`omega` 同时 0 即停车，不必另发 `stop`）
             return VelocityCmd { v: 0.0, omega: 0.0 };
@@ -107,6 +109,16 @@ impl UgvVelocityExecutor {
         let d = ((tx - x).powi(2) + (ty - y).powi(2)).sqrt();
         let delta = normalize_angle((ty - y).atan2(tx - x) - yaw);
         let deg = delta.to_degrees().abs();
+        // `Face` = 只转不走（task_46 §一 #2/#4）：**先跳过**下面那档「身后直行」（#3，它必然 `v > 0`），
+        // 死区内 `(0, 0)` 不抖，其余原地转 —— `omega` 仍走同一条符号链（`Δθ > 0` ⇒ `ω < 0`）
+        if rotate_only {
+            if deg <= DEADBAND_DEG {
+                return VelocityCmd { v: 0.0, omega: 0.0 };
+            }
+            let omega = if delta > 0.0 { -self.cruise_yaw_rate } else { self.cruise_yaw_rate };
+            return VelocityCmd { v: 0.0, omega };
+        }
+        // ↓↓↓ 以下是 `Cell` / `Point` 的路径：**逐字不动** ↓↓↓
         // 车版独有的一档：目标格心在身后且很近 → 直行穿过，等 nav 换格（不掉头 180°）
         if d < PASS_THROUGH_M && deg > 90.0 {
             return VelocityCmd { v: self.cruise_speed, omega: 0.0 };
@@ -137,7 +149,7 @@ fn normalize_angle(a: f32) -> f32 {
     (a + PI).rem_euclid(2.0 * PI) - PI
 }
 
-// ================================================================ 单测（常量 + 五档 + 身后直行 + 符号 + ±π）
+// ================================================================ 单测（常量 + 五档 + 身后直行 + 符号 + ±π + Face）
 
 #[cfg(test)]
 mod tests {
@@ -334,5 +346,47 @@ mod tests {
             VelocityCmd { v: 0.0, omega: -0.5 },
             "d = 1.0 > PASS_THROUGH_M 且 |Δθ| = 90° > 12° ⇒ 原地转，Δθ > 0 ⇒ omega < 0"
         );
+    }
+
+    // ------------------------------------------------------------ Face：只转不走（task_46 §一 #1/#2/#3/#4）
+
+    /// `Face` 目标：与 `decide_at_yaw` 同一几何 —— 目标在 +x 方向、距离 `r` ⇒ `Δθ = −yaw`
+    fn face_at_yaw(ex: &UgvVelocityExecutor, yaw_deg: f32, r: f32) -> VelocityCmd {
+        let (x, y) = (center(0), center(0));
+        ex.decide(Some(MotionTarget::Face((x + r, y))), x, y, yaw_deg.to_radians())
+    }
+
+    /// §一 #3：目标在身后且很近（`d < PASS_THROUGH_M`，`|Δθ| > 90°`）⇒ 仍 `v == 0`、只转；
+    /// 「身后直行」档被 `rotate_only` 抢在前面跳过（不跳过就会 0.45 m/s 前冲）
+    #[test]
+    fn test_face_behind_and_near_does_not_advance() {
+        let ex = ex();
+        let (x, y) = (center(0), center(0));
+        let behind = x - (PASS_THROUGH_M - 0.05); // 正后方 0.45 m
+        let face = ex.decide(Some(MotionTarget::Face((behind, y))), x, y, 0.0);
+        assert_eq!(face.v, 0.0, "Face 永不前进：身后直行档必须被跳过");
+        assert_eq!(face.omega, 0.5, "Δθ = −π（左）⇒ omega 为正（符号链未变）");
+        // 对照：同一位置给 `Point` ⇒ 命中「直行穿过」档（证明分支确有先后之分）
+        let point = ex.decide(Some(MotionTarget::Point((behind, y))), x, y, 0.0);
+        assert_eq!(point, VelocityCmd { v: 0.45, omega: 0.0 }, "对照：Point 仍走身后的直行档");
+    }
+
+    /// §一 #4：弧线档（`DEADBAND_DEG`~`ARC_MAX_DEG`）因 `v = 0` 退化为原地转
+    #[test]
+    fn test_face_arc_band_degrades_to_spin() {
+        let ex = ex();
+        let mid = (DEADBAND_DEG + ARC_MAX_DEG) / 2.0; // 10°，由常量推导
+        assert_eq!(face_at_yaw(&ex, -mid, 1.0), VelocityCmd { v: 0.0, omega: -0.5 }, "右 10°：只转不走");
+        assert_eq!(face_at_yaw(&ex, mid, 1.0), VelocityCmd { v: 0.0, omega: 0.5 }, "左 10°：只转不走");
+    }
+
+    /// §一 #2/#4：死区内 `(0, 0)`（不抖，也**不因对齐而前冲**）
+    #[test]
+    fn test_face_deadband_is_stop() {
+        let ex = ex();
+        let inside = DEADBAND_DEG - 1.0; // 7°，避开 f32 压线（同本文件 8.5° 那套写法）
+        assert_eq!(face_at_yaw(&ex, -inside, 1.0), VelocityCmd { v: 0.0, omega: 0.0 });
+        assert_eq!(face_at_yaw(&ex, inside, 1.0), VelocityCmd { v: 0.0, omega: 0.0 });
+        assert_eq!(face_at_yaw(&ex, 0.0, 1.0), VelocityCmd { v: 0.0, omega: 0.0 }, "正对 ⇒ 完全停");
     }
 }
