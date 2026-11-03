@@ -29,13 +29,26 @@
 | 1 | 点优先，格其次，都没有 = 停；`MotionOut` 保留 `next_cell`，新增 `target_point` |
 | 2 | 执行器只有一个入口 `decide(Option<MotionTarget>, …)`，不再有第二个函数 |
 | 3 | 四份执行器两两保持「只差文件头」：真车 ≡ sim 车、真机 ≡ sim 机 |
-| 4 | 四份 Follow 树统一切到点，并统一 `D_FAR_M = 2.2` / `D_NEAR_M = 1.2` |
+| 4 | 四份 Follow 树统一切到点；距离常数**按栈分开**：车栈 `D_FAR_M = 2.2` / `D_NEAR_M = 1.2`，机栈 `D_FAR_M = 3.6` / `D_NEAR_M = 2.6`（2026-11-03 修订，理由见下方「口径 4 补充」） |
 | 5 | `step_cell` / `guard_cell` / `person_cells` 删除（永远不触发） |
 | 6 | Follow 不再持 nav（`FollowNav` / `clear_goal` 一并删）；巡逻分支仍用 `goto::build(nav)` |
 | 7 | 丢目标就丢：不做搜索、不做记忆转圈、不加滤波 |
 | 8 | 真机无 detector / 无相机 → **原地 Hold**（`Running` + 不动），不得一拍 `Success` |
 | 9 | 不改协议、不改急停、不改 `0x12`、不改 Pictor、不新增阈值 |
 | 10 | 单测不作验收判据；用例与口径冲突时改用例，禁止为迁就用例改生产代码 |
+
+> **口径 4 补充（机栈为什么不能沿用车的 1.2 m）**
+>
+> UAV 在 **2.5 m 巡航高度**、相机**下压 15°**、垂直视场 **70°**。画面下边缘的俯角 = 15° + 35° = 50°，
+> 对应地面水平距离 `2.5 / tan(50°) ≈ 2.10 m` —— **人再近就整体掉出画面**（detector 直接 `dets=0`）。
+> 因此车的 `D_NEAR = 1.2 m` 对机栈**物理不可达**：实测旧值时 UAV 会一路飞到水平 0.49 m、
+> 人完全出画才被迫停住（不是按判据停的）。现机栈取 `D_NEAR = 2.6 m`（2.10 m 几何边界 + 0.5 m 余量），
+> `D_FAR = 3.6 m` 以保持与车栈同宽的 1.0 m 迟滞带。
+>
+> 实测（sim4，人静立）：停住时水平距 **2.25 m**，同拍 `dets=1 conf=0.94 判定=采纳`（人仍在画面内）；
+> 人挪到 8.25 m 后 UAV 重新追到 **2.16 m** 再停，迟滞正常。
+>
+> 机栈两份（`pleiades-uav` 与 `sim/uav_sim`）仍**只差文件头与 `use`**，符合口径 3。
 
 ---
 
@@ -76,7 +89,7 @@
    - 其余分支两者都 `None`（现在是 `next_cell = None`）。
    - 删 `step_cell` / `guard_cell` / `person_cells` 及其引用。
    - Follow 不再持 nav：删 `FollowNav` trait、树里的 `nav` 字段、`clear_goal()` 调用；`build()` 不再收 `nav` 参数。
-   - `D_FAR_M` / `D_NEAR_M` 三份统一为 `2.2` / `1.2`。
+   - `D_FAR_M` / `D_NEAR_M`：车栈三份统一为 `2.2` / `1.2`；机栈在 Step 2 按视场几何改为 `3.6` / `2.6`（见口径 4 补充）。
 
 5. 树的分派 ×3
    - `mission/mod.rs` 的 `Follow` 分支改调新签名。
@@ -107,7 +120,7 @@
 
 1. 新建 `uav/mission/follow.rs`
    - 从 `pleiades-ugv/src/ugv/mission/follow.rs` 复制，只改 `use` 路径与文件头。
-   - 依赖：`TargetFeed` / `TargetSource` / `Target` / `Sample` 全部照搬；`decide` 的五档与 `D_FAR_M` / `D_NEAR_M` 与车完全一致。
+   - 依赖：`TargetFeed` / `TargetSource` / `Target` / `Sample` 全部照搬；`decide` 的五档与车完全一致，**但 `D_FAR_M` / `D_NEAR_M` 机栈取 `3.6` / `2.6`**（口径 4 补充：2.5 m 巡航高度下 2.10 m 是画面下边缘的几何极限，车的 1.2 m 物理不可达）；改完机栈两份仍只差文件头与 `use`。
    - 因为 Step 1 已经删掉 nav 依赖，真机这份天然不需要 nav。
 
 2. `uav/mission/mod.rs`
@@ -147,7 +160,9 @@
    - 出现方形巡逻（四个角顺时针）；
    - 人进入方框后切到跟随；
    - 人离开方框后回到巡逻。
-5. **sim uav**：重复 3、4（同一套判据）。
+5. **sim uav**：重复 3、4，判据同上；**唯一差别是停止距离**：机栈 `D_NEAR = 2.6 m`，
+   观测点应为「水平距人 **2.2~2.6 m** 停住，且同一拍 detector 仍 `dets=1 判定=采纳`（人还在画面里）」，
+   不要按车的 `1.2 m` 判（见口径 4 补充）。
 6. 记录：每个 case 一段日志摘录（`[Sim] UGV/UAV 位置=…`、`[Nav] 新目标 …`、`[Robot] 开始任务 …`）+ 一句话结论。
 
 **判据（重要）**
