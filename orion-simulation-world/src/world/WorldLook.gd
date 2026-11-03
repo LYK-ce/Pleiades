@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-28
-# Modified Date ： 2026-10-28
+# Modified Date ： 2026-11-03
 #
 # 世界观感（材质 + 天空 + 太阳）唯一入口（COMPONENTS.md §4.1.1 / task_38 §二.3）。
 #   - 地面 = 混凝土铺装（三贴图 PBR，世界空间 triplanar，6 m 一循环）
@@ -37,7 +37,7 @@ const FALLBACK_COLORS := {
 }
 ## Sun 能量（task_38 §二.1「约 0.7」）。
 const SUN_ENERGY := 0.7
-## 天空能量（HDRI 直出会过曝：实测 check_camera_shots 的 R3 近白像素占比 0.523 / 0.531 > 0.50）。
+## 天空能量（HDRI 直出会过曝：task_38 实测近白像素占比 0.523 / 0.531 > 0.50）。
 ## 这一个旋钮同时压「背景天空」与「来自天空的环境光」（ambient 由 sky 的 radiance 立方图产生），
 ## 于是 ground/体素不再被冲到 0.95 以上；背景模式与环境光来源都不动（仍 BG_SKY / AMBIENT_SOURCE_SKY）。
 ## 调值记录见 tmp/task38/impl.md「亮度调参」一节。

@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-25
-# Modified Date ： 2026-10-25
+# Modified Date ： 2026-11-03
 #
 # 行人底盘 pedestrian（task_35 Step 1 / COMPONENTS.md §4.11）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED + "线速度 + 世界朝向角" 的平面运动学。
@@ -179,7 +179,7 @@ func _physics_process(delta: float) -> void:
 
 ## 位姿 {x, y, z, yaw}：世界坐标（Z-up，米），yaw 归一化到 [-PI, PI)。口径与 Vehicle.GetPose() 相同。
 func GetPose() -> Dictionary:
-	# 树外读 global_transform 会 ERROR（与 check_models.gd 头注释 P8 同款）
+	# 树外读 global_transform 会 ERROR（没有父变换可算）；调用方须先 is_inside_tree() 兜底
 	return WorldTransform.PoseFromTransform(global_transform if is_inside_tree() else transform)
 
 

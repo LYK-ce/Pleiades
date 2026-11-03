@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-28
-# Modified Date ： 2026-10-28
+# Modified Date ： 2026-11-03
 #
 # 建筑立面（COMPONENTS.md §4.1.2 / task_38 §三.3）：窗 / 基座 / 屋顶压顶，全用 StandardMaterial3D
 # + SurfaceTool 合并 mesh，**不写 shader**、不进 .tscn、不加任何碰撞。
@@ -186,7 +186,7 @@ static func _Cap_Quad(x0: float, y0: float, x1: float, y1: float, h: float, inde
 # ================================================================ 输入 / 四边形 / 网格工具
 
 ## 只读拿 World.OBSTACLES：const 不在属性表里，只能走 get_script_constant_map()
-## （check_world_look.gd 读 LOOK_ENABLED 用的同一招）。缺常量返回空表（不报错）。
+## （`WorldLook` 读 `LOOK_ENABLED` 用的同一招）。缺常量返回空表（不报错）。
 static func _Obstacles_Of(world: Node3D) -> Array:
 	if world == null or world.get_script() == null:
 		return []

@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-25
+# Modified Date ： 2026-11-03
 #
 # WebSocketManager 组件（task_30 §5.1 / COMPONENTS.md §4.5）：世界侧 WS 服务端的唯一实例。
 #   监听一个端口 -> accept N 条连接 -> 每条连接记住「我是谁的、我是什么组件」
@@ -454,7 +454,7 @@ func _Apply_Pedestrian_Command(link: Variant, ped: Node3D, msg: Dictionary) -> v
 
 ## 行人超时停车（task_35 Step 2）：超过 PEDESTRIAN_CMD_TIMEOUT_MS 没有新指令 -> 下发 v=0。
 ## **只停**：不断连、不改朝向（不带 dir）、不刷日志（_ped_idle 边沿触发，每段"动->停"只一行）。
-## 只遍历 `_pedestrians`：**车没有超时**（既有 D1/D2、check_pose C 组行为一字不变）。
+## 只遍历 `_pedestrians`：**车没有超时**（车侧行为一字不变）。
 func _Tick_Pedestrian_Timeouts() -> void:
 	if _pedestrians.is_empty():
 		return
@@ -1142,7 +1142,7 @@ func _PickSpawn(chassis_name: String) -> Dictionary:
 # ================================================================ 内部工具：行人容器 / spawn 校验（task_35 Step 2）
 
 ## 行人容器：与 `Vehicles` 平级、同父（World 根）。
-## 每次调用都 `is_instance_valid` 复检：Step 3 的 `World.gd::BuildPedestrians()` 可能重建这个容器，
+## 每次调用都 `is_instance_valid` 复检（容器也由本函数惰性创建，指针可能被外部摘掉），
 ## 那时缓存的指针会悬空 —— 复检 + 按名字重新解析，绝不留一个死指针。
 func _Pedestrians_Root() -> Node3D:
 	if pedestrians_root != null and is_instance_valid(pedestrians_root):

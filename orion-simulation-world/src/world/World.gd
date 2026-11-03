@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-28
+# Modified Date ： 2026-11-03
 #
 # 世界根脚本（COMPONENTS.md §4.1）：启动世界时钟、按 [sim_world] 程序化生成体素世界、
 # 提供尺度/坐标/容器访问。D4 程序化生成，布局确定性、无 RNG。
@@ -10,8 +10,7 @@
 #
 # 尺度唯一来源是 project.godot 的 [sim_world]（COMPONENTS.md §0.2-5），本文件不写字面量尺度。
 # 例外（task_32 §三.2 明令"写死，不得自行发挥"）：不可见空气墙 / 顶盖的 5 个 box 用字面量几何表
-# AIR_WALL_BOXES，与现有设置数值一致（256×0.5=128 m、64×0.5=32 m），一致性由 check_bounds.gd 的
-# B1b/B1c 数值断言兜住；改世界尺度必须同步改该表 + E24 + check_bounds 常量（三处一起）。
+# AIR_WALL_BOXES，与现有设置数值一致（256×0.5=128 m、64×0.5=32 m）；改世界尺度必须同步改该表 + E24（两处一起）。
 # 坐标换轴只经 WorldTransform（task_30 §7.3）：WorldToCell 内部即 PosToGodot，本文件无换轴字面量。
 
 extends Node3D
@@ -33,7 +32,7 @@ const VOXEL_ITEM := 0
 const VOXEL_COLOR := Color(0.55, 0.58, 0.62, 1.0)
 
 ## 观感总开关（task_38 §二.3）：false = 不换地面材质 / 不换天空 / 不动太阳，世界回到 task_37 的单色观感。
-## 缺资产时**不用**改它：WorldLook 自己降级（只 warn）。check_world_look 直接断言它为 true。
+## 缺资产时**不用**改它：WorldLook 自己降级（只 warn）。
 const LOOK_ENABLED := true
 
 ## 出生点（世界坐标，米），与 pleiades-sim 的 DEFAULT_ORIGIN (64, 64, 0) 一致。
@@ -91,47 +90,14 @@ const AIR_WALL_BOXES := [
 	[Vector3(64.0, 32.5, 64.0), Vector3(128.0, 1.0, 128.0)],
 ]
 
-# ---------------------------------------------------------------- 外部驱动的行人（task_35 Step 3）
-## 行人底盘场景：与 `ChassisCatalog.SCENES["pedestrian"]` 同一路径。
-## 用 load() 而非 preload()（与 PERSON_SCENE 同一取舍）：glb/场景尚未 import 时只 warn，
-## 不让整个世界脚本解析失败（COMPONENTS.md §9.1 E8 的反面）。
-const PEDESTRIAN_SCENE := "res://src/scenes/props/Pedestrian.tscn"
-## 容器名**必须**与 `WebSocketManager.PEDESTRIANS_NODE` 逐字一致（"Pedestrians"）：
-## 同一个容器既装世界预置的人（本表），也装 `chassis_hello{kind:"pedestrian"}` 动态装配的人。
+# ---------------------------------------------------------------- 行人容器名（与 manager 共用）
+## 容器名**必须**与 `WebSocketManager.PEDESTRIANS_NODE` 逐字一致（"Pedestrians"）。
+## 世界**不建**这个容器、也不预置任何人：容器由 `WebSocketManager._Pedestrians_Root()` 在首个
+## `chassis_hello{kind:"pedestrian"}` 到达时惰性创建（无人连入 = 节点树零变化）。
 const PEDESTRIANS_NODE := "Pedestrians"
-## 街道 / 立面容器名（task_38 §三.4，自检 Get_Street_Root() / Get_Facade_Root() 用）。
+## 街道 / 立面容器名（task_38 §三.4）。
 const STREET_NODE := "Street"
 const FACADE_NODE := "Facade"
-
-## 行人布局表：**只有**出生点（世界坐标 Z-up，米）+ 初始朝向 + 数量。
-## **没有**路径 / 巡逻 / 计时 / 速度 —— 世界不再自己让人走（task_35 Step 3）：
-## 人由外部（Python / 自检 / Step 5 的车撞人）通过 Pedestrian.SetCommand 驱动；
-## **没有外部连接时人就站着不动，这是预期行为，不是故障**。
-## yaw_deg：0 = 朝 +X（东），180 = 朝 −X（西）。入树后由 Configure() 把 _yaw_target 对齐到该朝向。
-##
-## 选点依据（逐条按 OBSTACLES 实算；比的是**度**不是"看起来空"）：
-##   ① 无障碍：pedestrian_01 最近的障碍是 wall_c（y∈[92,93]、x∈[36,66]）→ 3.000 m；
-##      pedestrian_02 最近的是 block_1（x∈[60,61]、y∈[100,101]）→ 8.062 m。
-##      判据 > PED_CLEAR_M(0.5) = 胶囊半径 0.25 + 0.25 余量。
-##   ② 离世界边界：min(44, 96, 128−44, 128−96) = 32 m / min(52,102,76,26) = 26 m，判据 ≥ 1.0 m。
-##   ③ 离出生点 SPAWN_WORLD(64,64)：37.736 / 39.850 m，判据 > SPAWN_CLEAR_RADIUS_M(3.0)
-##      （也就远于 manager 的 8 方位 × 2 m/环 avatar 排位）。
-##   ⑤ 两人互相 10.000 m ≥ 1.0 m（镜像 manager 的 PEDESTRIAN_SPAWN_MIN_GAP_M）。
-##   ⑥ 离雷达热区：check_lidar 的真墙热区 (60,90) 17.088 / 14.422 m、空场热区 (100,60) 66.573 / 63.781 m、
-##      check_camera_shots 的停车点 (60,84) 20.000 / 19.698 m —— 全部 > 12 m 的 radar range。
-##      行人 collision_layer=2 会被 `Lidar2D`（scan_mask=1|2|4）扫到，这是刻意保留的（"雷达看得见人"），
-##      但**绝不能**落进既有雷达/拍照自检的 12 m 热区，否则 F7/F8 的 2.000 m / 152 命中会红。
-##   ⑦ 离协议 spawn 点：默认 (64,56) 44.7/47.5 m、check_ws_manager K1 (70,70) 36.8/36.7 m、
-##      K14 (72,74) / K16 (72,78) 均 > 30 m —— 动态行人与世界行人**不会叠人**。
-##   ⑧ 离车辆路径：距 (64,64) 37.7/39.8 m、距 (126.5,64) > 70 m；人**有碰撞**（Step 1 取舍，
-##      Vehicle.mask=7 含 layer 2），落在车道上会挡车 —— 这几个点不在任何既有自检的行车路线上。
-##   x∈[44,56] × y∈[96,106] 这块 12×10 m 空地是 walking_person 时期就用 1.0 m 臂展余量对 15 个
-##   OBSTACLES 全量断言过的区域，现在正好"站在广场上、离长墙 3 m"。yaw 一东一西，
-##   用来证明初始朝向按表落地（yaw=180° 那个也是 Configure() 对齐逻辑的活体证据）。
-const PEDESTRIANS := [
-	{"name": "pedestrian_01", "pos": Vector3(44.0, 96.0, 0.0), "yaw_deg": 0.0},
-	{"name": "pedestrian_02", "pos": Vector3(52.0, 102.0, 0.0), "yaw_deg": 180.0},
-]
 
 var _voxel_size: float = 0.5
 var _cells_x: int = 256
@@ -141,7 +107,6 @@ var _built_cells: int = 0
 
 @onready var _voxel_world: GridMap = $VoxelWorld
 @onready var _vehicles_root: Node3D = $Vehicles
-var _pedestrians_root: Node3D = null
 
 
 func _ready() -> void:
@@ -152,7 +117,6 @@ func _ready() -> void:
 	if LOOK_ENABLED:
 		Apply_World_Look()
 	_Build_Bounds()
-	BuildPedestrians()
 	# 街道几何 / 立面（task_38 §三.4 的末尾两行）：只建渲染 mesh、零碰撞、可幂等重建。
 	StreetLayout.Build_All(self)
 	Facade.Build_All(self)
@@ -191,7 +155,7 @@ func BuildVoxelWorld() -> void:
 ## 代码构建不可见硬边界：1 个 StaticBody3D(Bounds) + 5 个 CollisionShape3D。
 ## 不写进 .tscn（避开 COMPONENTS.md §9.1 E16 的 node_paths 坑）；**不建任何 Mesh 渲染节点**
 ## （必须不可见，§9.1 E24）。
-## 幂等：重复调用先摘掉旧的 Bounds 再重建，不会累积重复形状（check_bounds.gd 的 B1e 直接断言）。
+## 幂等：重复调用先摘掉旧的 Bounds 再重建，不会累积重复形状。
 func _Build_Bounds() -> void:
 	var old: Node = get_node_or_null("Bounds")
 	if old != null:
@@ -217,67 +181,7 @@ func _Build_Bounds() -> void:
 		", mask=0, height=", AIR_WALL_HEIGHT_M, " m, thickness=", AIR_WALL_THICKNESS_M, " m")
 
 
-## 程序化摆放静态人物（纯视觉、无碰撞、无 RNG）：先摘掉同名旧容器再重建（幂等）。
-## 容器由代码建、不写进 World.tscn —— 与 Bounds 同策略（代码建、幂等重建），
-## 这样 check_bounds.gd 的 B1d（读 .tscn 文本数节点）不受影响。
-## 缺资产/缺场景只 push_warning（绝不 push_error：否则 --quit 的 "0 ERROR" 验收假红）。
-## 程序化摆放"外部驱动的行人"（task_35 Step 3）——
-## 先摘掉同名旧容器再重建（幂等，与 Bounds 同策略）。
-## **不内置任何行为**：不调 SetCommand、不设速度、不建路径；人站着等外部驱动
-## （无 Python 连接时站住不动 = 预期）。容器代码建、不写进 World.tscn。
-## 缺场景/缺资产只 push_warning（**绝不 push_error**：--quit 的 0 ERROR 验收靠这条）。
-##
-## 注意：运行期重建会**连带移除**已装配的网络行人（manager 的缓存指针会因
-## is_instance_valid()==false 自动重解析，不会悬空，但那个 peer 的 avatar 就没了）。
-## 因此本函数只应在 `_ready()` 与自检里调用（COMPONENTS.md §4.11）。
-func BuildPedestrians() -> void:
-	var old: Node = get_node_or_null(PEDESTRIANS_NODE)
-	if old != null:
-		remove_child(old)
-		old.queue_free()
-
-	_pedestrians_root = Node3D.new()
-	_pedestrians_root.name = PEDESTRIANS_NODE
-	add_child(_pedestrians_root)
-
-	# 前置判断：glb / 场景没 import 时 load() 会打 ERROR；exists() 先探一次，缺了只 warn
-	# （既有自检也会载入 World，不能因为它们没 import 就红）。
-	if not ResourceLoader.exists(PEDESTRIAN_SCENE):
-		push_warning("[world] 行人场景缺失（未 import？）：%s" % PEDESTRIAN_SCENE)
-		return
-	var packed: PackedScene = load(PEDESTRIAN_SCENE) as PackedScene
-	if packed == null:
-		push_warning("[world] 行人场景不可加载：%s" % PEDESTRIAN_SCENE)
-		return
-
-	for spec: Dictionary in PEDESTRIANS:
-		var ped: Node3D = packed.instantiate() as Node3D
-		if ped == null:
-			push_warning("[world] 行人实例化失败：%s" % spec.get("name", "?"))
-			continue
-		ped.name = String(spec["name"])
-		# 先入树再写 global_transform：树外写 global_* 会 ERROR（check_models.gd P8）。
-		_pedestrians_root.add_child(ped)
-		ped.global_transform = WorldTransform.MakeTransform(
-			spec["pos"], deg_to_rad(float(spec.get("yaw_deg", 0.0))))
-		# **必须**在写完 transform 之后 Configure：Pedestrian.Configure() 末尾把
-		# `_yaw_target = rotation.y`；不调它的话 yaw_deg≠0 的人第一帧会被 Step() 拧回 yaw=0
-		# （plan.md §7 R1）。参数用 `{}`：目录默认值（max_speed 1.26 / max_turn_rate 180 °/s）。
-		ped.call("Configure", ped, {})
-
-	print("[world] pedestrians built: ", _pedestrians_root.get_child_count(),
-		" (", PEDESTRIANS.size(), " specs, idle until driven)")
-
-
-## 行人容器（自检 / Step 4/5 / manager 用；与 GetVehiclesRoot 同风格）。
-## 每次调用都复检 is_instance_valid：容器可能被 BuildPedestrians() 重建。
-func GetPedestriansRoot() -> Node3D:
-	if _pedestrians_root == null or not is_instance_valid(_pedestrians_root):
-		_pedestrians_root = get_node_or_null(PEDESTRIANS_NODE) as Node3D
-	return _pedestrians_root
-
-
-## 街道容器（自检 / 后续任务用；与 GetPedestriansRoot 同风格，每次重新解析）。
+## 街道容器（后续任务用；每次调用重新解析，不缓存）。
 func Get_Street_Root() -> Node3D:
 	return StreetLayout.Get_Root(self)
 
