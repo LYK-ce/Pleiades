@@ -2,7 +2,7 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-25
-> Modified Date ： 2026-10-25
+> Modified Date ： 2026-11-03
 >
 > 对应 `Task/task_35_pedestrian.md` §二 Step 4、`orion-simulation-world/COMPONENTS.md` §8.1。
 > 这三条 `.py` 是**世界外**的驱动脚本：Python 只发控制、只读位姿，不读地图、不连 P2P、
@@ -20,6 +20,7 @@
 |---|---|
 | `pedestrian_client.py` | `PedestrianClient`：hello → ready → 20~50 Hz 持续 `motion_cmd{v, dir}` → `pose()` → 退出发 `v=0`；本身也能当冒烟工具跑 |
 | `patrol.py` | 示例行为：路点 → 方位角 → 恒定 `v` 的折线/矩形巡逻；`--csv` 采样、`--linger` 验证 300 ms 超时停车 |
+| `ped_console.py` | 常驻行人控制台：一个进程一个行人，30 Hz 持续发；本机 9101 收 JSON-lines（`goto` / `face` / `walk` / `stop` / `pos` / `status` / `quit`），进程即生命 |
 | `ws_min.py` | 标准库 RFC6455 最小客户端（文本帧 + 掩码 + Ping→Pong + Close + 分片），`websockets` 未安装时的兜底 |
 | `README.md` | 本文件 |
 
@@ -50,6 +51,17 @@ python3 orion-simulation-world/tool/pedestrian/patrol.py --duration 10 --speed 1
 python3 orion-simulation-world/tool/pedestrian/pedestrian_client.py \
   --v 1.0 --dir 1.5707963 --duration 3 --peer-id human-01 --spawn "70,60"
 # 期望：y 增大、yaw 在 ~0.3 s 内收敛到 90.0°，退出码 0
+```
+
+常驻行人控制台（一个进程 = 一个行人，实验期间不退它）：
+
+```bash
+# 1) 起 console（先起它，再注入 Follow；世界没起也能起，所有指令回 not_ready）
+python3 orion-simulation-world/tool/pedestrian/ped_console.py --peer-id human-01 --spawn 64,56,0,90
+# 2) 另一个终端随时指挥他（JSON-lines，一问一答）
+echo '{"id":1,"cmd":"goto","x":70,"y":66}' | socat - TCP:127.0.0.1:9101
+# 3) 收工：先 drive(0) 再关连接，世界日志出现一次 pedestrian removed
+echo '{"id":9,"cmd":"quit"}'               | socat - TCP:127.0.0.1:9101
 ```
 
 ---
