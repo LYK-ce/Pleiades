@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 //! 机设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.5 改成树驱动）
 //!
@@ -278,12 +278,12 @@ impl DeviceHandler for UavDeviceHandler {
             tick_active_tree(&mut ts, &mut frame).await
         };
 
-        // ③ 决策（`ExecuteState` **唯一写点**）：叶子给的「下一格」+ 位姿 → 一拍的 `(v, omega)`
+        // ③ 决策（`ExecuteState` **唯一写点**）：叶子给的目标（格或点）+ 位姿 → 一拍的 `(v, omega)`
         //    连续执行器无状态，只写 `sub_target`、`state` 留 `Idle`
         //    （唯一的读点 `base/Robot/core/robot.rs` 只取 `sub_target`）
         //    （编号对照：此处即任务文档 §二 Step 5 的「on_tick 第④步改 apply_velocity」；机端无 2D
         //      急停、比车栈少一步，故本文件是 ③ 决策+执行 / ④ 终值，落点与 `pleiades-ugv` 的 ④ 一致）
-        let cmd = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+        let cmd = d.executor.decide(out.target(), rs.x, rs.y, rs.attitude.yaw);
         *execute_state.write().await = ExecuteState {
             state: DecisionState::Idle,
             sub_target: out.next_cell,

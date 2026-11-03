@@ -1,10 +1,10 @@
 //Presented by KeJi
 //Created Date ： 2026-10-29
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 //! 车栈连续速度执行器（task_44 §1.4）
 //!
-//! **与 `crate::sim::uav_sim::executor` 同形**：无状态、纯决策，`decide(next_cell, x, y, yaw)`
+//! **与 `crate::sim::ugv_sim::executor` 同形**：无状态、纯决策，`decide(target, x, y, yaw)`
 //! 只返回一拍的 `VelocityCmd { v, omega }`；**不写 `ExecuteState`、不发命令**
 //! （`ExecuteState` 的写点仍由 `sim_handler` 单点负责）。与机栈的差别只有「档位数」与「阈值」：
 //! 车五档（含身后直行）、机三档。
@@ -20,7 +20,7 @@
 //!
 //! | 条件 | `v` | `omega` |
 //! |---|---|---|
-//! | `next_cell = None` | `0` | `0` |
+//! | `target = None` | `0` | `0` |
 //! | `d < PASS_THROUGH_M` 且 \|Δθ\| > 90° | `cruise_speed` | `0` |
 //! | \|Δθ\| ≤ [`DEADBAND_DEG`]（8°） | `cruise_speed` | `0` |
 //! | 8° < \|Δθ\| ≤ [`ARC_MAX_DEG`]（12°） | `cruise_speed` | ∓`cruise_yaw_rate` |
@@ -42,9 +42,16 @@
 //! [`tests::test_symbol_right_turn_is_negative`] 锁住。
 //!
 //! 到达不归执行器管：nav 判到达 → 叶子写 `None` → `v = omega = 0`。
+//!
+//! ## 目标类型（task_45 §一 #1/#2）
+//!
+//! 唯一入口 [`decide`] 收 `Option<`[`MotionTarget`]`>`：`Cell` → 取格心（Goto / 巡逻），
+//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化）。进门消解一次，
+//! 其后 `d` / `delta` / 五档判断 / `omega` 符号链**一行不改**。
 
 use std::f32::consts::PI;
 
+use pleiades_base::robot::core::behavior_tree::MotionTarget;
 use pleiades_base::robot::core::grid::CELL_RESOLUTION;
 
 /// 死区（度）：`|Δθ| ≤ 8°` 只直行，不纠偏（task_31 §七.3 / §九 #8）。
@@ -84,17 +91,19 @@ impl UgvVelocityExecutor {
         }
     }
 
-    /// 纯决策：读下一格 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
+    /// 纯决策：读本拍目标 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
     ///
-    /// - `next_cell`：叶子给的下一格（网格坐标），`None` = 无任务/到达 → `v = omega = 0`
+    /// - `target`：叶子给的目标（格或点），`None` = 无任务/到达 → `v = omega = 0`
     /// - `x`/`y`/`yaw`：当前位置（世界坐标）与航向（弧度）
-    pub fn decide(&self, next_cell: Option<(i32, i32)>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
-        let Some((gx, gy)) = next_cell else {
+    pub fn decide(&self, target: Option<MotionTarget>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
+        // 进门只做一次类型消解：格 → 格心，点 → 原值
+        let Some((tx, ty)) = target.map(|t| match t {
+            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy)),
+            MotionTarget::Point((px, py)) => (px, py),
+        }) else {
             // 无目标 = 停（`v`/`omega` 同时 0 即停车，不必另发 `stop`）
             return VelocityCmd { v: 0.0, omega: 0.0 };
         };
-        let tx = cell_center(gx);
-        let ty = cell_center(gy);
         let d = ((tx - x).powi(2) + (ty - y).powi(2)).sqrt();
         let delta = normalize_angle((ty - y).atan2(tx - x) - yaw);
         let deg = delta.to_degrees().abs();
@@ -146,7 +155,7 @@ mod tests {
 
     /// 位姿取 (0,0) 格心、目标格 (1,0) ⇒ 目标方位恰为 +x ⇒ Δθ = −yaw
     fn decide_at_yaw(ex: &UgvVelocityExecutor, yaw_deg: f32) -> VelocityCmd {
-        ex.decide(Some((1, 0)), center(0), center(0), yaw_deg.to_radians())
+        ex.decide(Some(MotionTarget::Cell((1, 0))), center(0), center(0), yaw_deg.to_radians())
     }
 
     #[test]
@@ -236,10 +245,12 @@ mod tests {
         let ex = ex();
         let y = center(0);
         // d = 0.45 < PASS_THROUGH_M ⇒ 直行穿过（不掉头）
-        let near = ex.decide(Some((0, 0)), center(0) + (PASS_THROUGH_M - 0.05), y, 0.0);
+        let near =
+            ex.decide(Some(MotionTarget::Cell((0, 0))), center(0) + (PASS_THROUGH_M - 0.05), y, 0.0);
         assert_eq!(near, VelocityCmd { v: 0.45, omega: 0.0 }, "身后且很近 ⇒ 直行穿过");
         // d = 0.80 > PASS_THROUGH_M ⇒ 不再直行，按「原地转」处理
-        let far = ex.decide(Some((0, 0)), center(0) + (PASS_THROUGH_M + 0.30), y, 0.0);
+        let far =
+            ex.decide(Some(MotionTarget::Cell((0, 0))), center(0) + (PASS_THROUGH_M + 0.30), y, 0.0);
         assert_eq!(far, VelocityCmd { v: 0.0, omega: 0.5 }, "身后但够远 ⇒ 正常掉头（原地转）");
     }
 
@@ -247,7 +258,7 @@ mod tests {
     fn test_delta_pi_is_normalized() {
         // 目标恰在正后方 ⇒ atan2(0, −0.60) = π，`normalize_angle` 必须归一成 **−π**
         // （不是 +π、不是 0）：|Δθ| = 180 > 90 且 d > PASS_THROUGH_M ⇒ 原地转，omega 取正
-        let c = ex().decide(Some((0, 0)), center(0) + 0.60, center(0), 0.0);
+        let c = ex().decide(Some(MotionTarget::Cell((0, 0))), center(0) + 0.60, center(0), 0.0);
         assert_eq!(c, VelocityCmd { v: 0.0, omega: 0.5 });
         assert_eq!(normalize_angle(PI), -PI, "±π 归一化必须落到 −π");
         assert!(c.omega.abs() <= MAX_CRUISE_YAW_RATE, "归一化后角速度必须有限（非 NaN）");
@@ -300,5 +311,28 @@ mod tests {
         assert!(right.omega < 0.0, "Δθ > 0（右）⇒ omega 必须为负，实际 {}", right.omega);
         let left = decide_at_yaw(&ex, 20.0);
         assert!(left.omega > 0.0, "Δθ < 0（左）⇒ omega 必须为正，实际 {}", left.omega);
+    }
+
+    /// task_45 §一 #1/#2：`Point` 走**世界坐标原值**，不经格心（Follow 的核心诉求）
+    ///
+    /// 目标点 `(0.25, 1.25)` 取的是**格角**（不是任何格心）——若被当成格心处理，
+    /// 目标会跑到 `(0.75, 0.75)`，下面两条断言必红。
+    #[test]
+    fn test_point_target_uses_raw_coords() {
+        let ex = ex();
+        let me = (0.25, 0.25);
+        let pt = MotionTarget::Point((0.25, 1.25));
+        // 目标在正前方（+y）且 yaw = +90° ⇒ Δθ = 0 ⇒ 死区直行
+        assert_eq!(
+            ex.decide(Some(pt), me.0, me.1, PI / 2.0),
+            VelocityCmd { v: 0.45, omega: 0.0 },
+            "点必须原值直接用：yaw 对齐目标方向就直行（格心化会让 Δθ 偏 45°）"
+        );
+        // 同一点、yaw = 0 ⇒ Δθ = +90°（atan2 为正 ⇒ 目标在右）⇒ 原地转、omega 取负
+        assert_eq!(
+            ex.decide(Some(pt), me.0, me.1, 0.0),
+            VelocityCmd { v: 0.0, omega: -0.5 },
+            "d = 1.0 > PASS_THROUGH_M 且 |Δθ| = 90° > 12° ⇒ 原地转，Δθ > 0 ⇒ omega < 0"
+        );
     }
 }

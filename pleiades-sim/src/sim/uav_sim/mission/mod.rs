@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-30
+//Modified Date ： 2026-11-03
 
 //! 任务层（Task 36 §12.4.4）：任务 → 树的**编译期穷尽**分派 + 树依赖包
 //!
@@ -41,7 +41,6 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
         // （持续任务，**不终值**：`Success` 会让队列把 Follow 弹走，人就再也跟不上了）
         Mission::Follow { .. } => match deps.detector.as_ref() {
             Some(dev) => Ok(follow::build(
-                deps.nav.clone(),
                 deps.robot_state.clone(),
                 Arc::new(follow::TargetSource::new(Some(dev.clone()))),
                 follow::FollowParams::default(),
@@ -52,6 +51,7 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 );
                 Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
                     f.out.next_cell = None;
+                    f.out.target_point = None;
                     Status::Running
                 })))
             }
@@ -75,6 +75,7 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 );
                 Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
                     f.out.next_cell = None;
+                    f.out.target_point = None;
                     Status::Running
                 })))
             }

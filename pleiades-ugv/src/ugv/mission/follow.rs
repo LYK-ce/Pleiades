@@ -1,29 +1,28 @@
 //Presented by KeJi
 //Created Date ： 2026-11-01
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
-//! 跟随树（task_37 §六）：本文件由 `pleiades-sim/src/sim/ugv_sim/mission/follow.rs` **逐字复制**
-//! （task_44 §二 Step 7，口径 #8 各 crate 自带一份），差异只有 `use` 路径与文件头；
-//! 真车 `Follow` 由此文件建**真树**。
+//! 跟随树（task_37 §六 / task_45 §二 Step 1）：**真车版**，sim 的 `ugv_sim` / `uav_sim` 由本文件逐字复制
+//! （口径 #8 各 crate 自带一份），差异只有 `use` 路径与文件头；真车 `Follow` 由此文件建**真树**。
 //!
 //! ```text
 //! ReactiveFallback                          ← 不是记忆式 Fallback（见下）
 //! ├─ ReactiveSequence
 //! │  ├─ TargetGate         有目标（age ≤ stale）→ 写本拍快照
 //! │  ├─ Condition          未太近（d > d_near）
-//! │  └─ StepLeaf           d > d_far（或带内且上拍在走）→ 沿「me → target」方向给一格
-//! └─ HoldLeaf              丢掉 / 太近 → nav.clear_goal() + next_cell = None（不追旧点）
+//! │  └─ StepLeaf           d > d_far（或带内且上拍在走）→ 直接给人的世界坐标（点）
+//! └─ HoldLeaf              丢掉 / 太近 → 两者都 None（不追旧点）
 //! ```
 //!
-//! **本叶子不经 D\***（§六.2 / §六.3，相对 §五 的修正）：不调用 `nav.set_goal`、不调用 `nav.step`。
-//! §五 走 `nav.set_goal → D*`，而 D* 是 **4 连通**：近距离时「下一格」常落在侧向格，`executor` 追格心
-//! → 原地打转 → 人从画面边缘出画（§六.2 实测）。改为**直接朝目标方向给一格**：
-//! `next_cell = world_to_grid(me + 0.5 m · unit(target − me))`（[`step_cell`]），一拍算完、无路径记忆。
-//! 人类已明确**不改行动逻辑**（`executor.rs` / `nav/` 只读），所以修正只能落在叶子上。
+//! **本叶子不经 D\***（task_45 §一 #1/#6）：不调用 `nav.set_goal`、不调用 `nav.step`，也不再有
+//! 「算一格」这一步 —— `Advance` 直接把人的**世界坐标**写进 `Frame.out.target_point`，执行器拿原值
+//! 算方位（不经格心、不量化）。格与格心从此不进转向环：一个 0.5 m 的格最坏带来 35° 方位误差，
+//! 会把人顶出 12° 弧线档、逼进「原地转」→ 车头左右摆、人从画面边缘出画（task_45 §一 的病根）。
 //!
-//! 仍持有 `nav` 的唯一用途：Hold 时 `clear_goal()`。本树从不 `set_goal`（nav 本就 `Idle`），但
-//! 「Hold ⇒ nav 目标被清」这条观测口径要保住 —— `ugv/mission/mod.rs::tests::test_follow_without_detector_is_hold_tree`
-//! 按 `next_cell == None` + 连 3 拍 `Running` 断言。`nav/` 一行不改。
+//! **本树不持 `nav`**（task_45 §一 #6）：mission 层那份「给 Follow 加一个清目标方法」的薄 trait、
+//! 清目标调用、`build(nav, …)` 全部删除；旧口径「Hold ⇒ nav 目标被清」随 nav 一起消失
+//! （本树从不 `set_goal`，nav 本就 `Idle`）。
+//! `nav/` 一行不改：巡逻 / Goto 仍走格 + D\*（`containment.rs` 的 `goto::build(nav)`）。
 //!
 //! **为什么外层用 `ReactiveFallback` 而不是 §五.4 画字面的 `Fallback`**：本仓 `Fallback` 是
 //! **记忆式**（`composite.rs`），子节点 `Running` 时记住下标、下拍不回头。`HoldLeaf` 必须返回
@@ -31,33 +30,24 @@
 //! **永久锁在 Hold 分支**——人回来也不再跟。`ReactiveFallback` 每拍从第 0 个子重判，并在切分支时
 //! `halt` 上一拍的分支，`StepLeaf::halt` 借此把迟滞状态清回 `Hold`。
 //!
-//! **`age` 的时钟口径**：`Target.frame_ts_ms` 在真车是**本机单调毫秒**（`slot::Monotonic_Ms`），没有「当前时刻」可比，
-//! 所以这里用本地单调 `Instant` 记「首次见到该 `frame_seq`」的时刻，之后算 `now - last_seen`。
-//! 相机停帧 / 人出画（`latest_targets()` 空）→ 直接 `Lost`。
-//!
-//! **人作为动态障碍**：机栈的 `Navigator` 是 `ObstacleMode::Ignore`（喂空栅格、`dynamic_obstacles`
-//! 恒空），`mark_obstacle()` 的标记会被同一拍重算抹掉 → **无法真的注入 D\***。本文件复用
-//! `nav/cluster_obstacles.rs` 的圆盘膨胀算出人的膨胀格，把「下一步落在人格里」的 `next_cell`
-//! 否决掉（[`guard_cell`]）。`nav/` 一行不改。注意 `Advance` 只在 `d > d_far`（≥ 4 m）时给格，
-//! 而 `next_cell` 只在 0.5 m 处 → 护栏实际不会触发；保留它是因为它是「人不能被撞」的不变量表达。
+//! **`age` 的时钟口径**：`Target.frame_ts_ms` 是**设备侧时钟**（真车 = 本机单调毫秒 / sim = 世界时间），
+//! 都没有「当前时刻」可比，所以这里用本地单调 `Instant` 记「首次见到该 `frame_seq`」的时刻，之后算
+//! `now - last_seen`。相机停帧 / 人出画（`latest_targets()` 空）→ 直接 `Lost`。
 
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use pleiades_base::robot::core::behavior_tree::{
     Condition, FailCode, Frame, Node, ReactiveFallback, ReactiveSequence, Status,
 };
-use pleiades_base::robot::core::cluster::ClusterInfo;
-use pleiades_base::robot::core::grid::{world_to_grid, CELL_RESOLUTION};
 use pleiades_base::robot::core::state::RobotState;
 
 use crate::device::detector::{DetectorDevice, Target};
-use crate::ugv::nav::{cluster_to_obstacle_cells, NavPort};
 
-// 本文件**不引 `tracing`**：动作日志由 `robot_handler.rs` 的 `[Car]` 行负责，10 Hz tick
+// 本文件**不引 `tracing`**：日志由驱动层 `robot_handler.rs` / `sim_handler.rs` 负责，10 Hz tick
 // 再加日志只会刷屏。
 
 // ---------------------------------------------------------------- 参数初值（§六.4）
@@ -68,8 +58,6 @@ pub const D_FAR_M: f32 = 2.2;
 pub const D_NEAR_M: f32 = 1.2;
 /// 目标过期时间（毫秒）：`age > STALE_MS` → 视为丢失（§六.4）
 pub const STALE_MS: u64 = 800;
-/// 人作为障碍的圆盘膨胀半径（米）：1 格（0.5 m），与 `cluster_obstacle_cells` 同口径
-pub const PERSON_INFLATE_M: f32 = 0.5;
 
 /// 跟随参数（纯值 + `Default`；生产用默认值，单测可改小/改大）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,17 +65,11 @@ pub struct FollowParams {
     pub d_far: f32,
     pub d_near: f32,
     pub stale_ms: u64,
-    pub person_inflate_m: f32,
 }
 
 impl Default for FollowParams {
     fn default() -> Self {
-        Self {
-            d_far: D_FAR_M,
-            d_near: D_NEAR_M,
-            stale_ms: STALE_MS,
-            person_inflate_m: PERSON_INFLATE_M,
-        }
+        Self { d_far: D_FAR_M, d_near: D_NEAR_M, stale_ms: STALE_MS }
     }
 }
 
@@ -111,7 +93,7 @@ pub struct Sample {
 pub enum Outcome {
     /// 无目标 / 过期 / `d <= d_near`（或带内且上拍也没走）→ 不动
     Hold,
-    /// `d > d_far`（或带内且上拍在走）→ 朝目标方向给一格
+    /// `d > d_far`（或带内且上拍在走）→ 给人的世界坐标（点）
     Advance,
 }
 
@@ -125,7 +107,7 @@ pub fn lost(t: Option<&Sample>, p: &FollowParams) -> bool {
     }
 }
 
-/// 「太近」：`d <= d_near`（含等号，与 §六.3 的 `d <= 2.5` 一致）。`Condition` 的唯一判据。
+/// 「太近」：`d <= d_near`（含等号，与 §六.3 的 `d <= 1.2` 一致）。`Condition` 的唯一判据。
 pub fn too_close(t: Option<&Sample>, p: &FollowParams) -> bool {
     match t {
         None => false, // 无目标不谈远近（丢失由 `lost` 管）
@@ -137,9 +119,9 @@ pub fn too_close(t: Option<&Sample>, p: &FollowParams) -> bool {
 ///
 /// 三档 + 迟滞（§六.3 的两条阈值 + §六.4 的三个参数）：
 /// - 无目标 / `age > stale` → `Hold`（丢掉，不追旧点；优先级最高）
-/// - `d > d_far` → `Advance`（人走远了，朝人飞）
+/// - `d > d_far` → `Advance`（人走远了，朝人开）
 /// - `d <= d_near` → `Hold`（到站，停）
-/// - 带内（`d_near < d <= d_far`）→ **沿用上拍** `prev`（迟滞：不在 4.0 m 边界上抖）
+/// - 带内（`d_near < d <= d_far`）→ **沿用上拍** `prev`（迟滞：不在 2.2 m 边界上抖）
 pub fn decide(target: Option<&Sample>, p: &FollowParams, prev: Outcome) -> Outcome {
     match target {
         None => Outcome::Hold,
@@ -148,55 +130,6 @@ pub fn decide(target: Option<&Sample>, p: &FollowParams, prev: Outcome) -> Outco
         Some(s) if s.d <= p.d_near => Outcome::Hold,
         Some(_) => prev,
     }
-}
-
-/// 沿「me → target」单位向量前进 `CELL_RESOLUTION`（0.5 m）后所落的**格**（§六.3）
-///
-/// 两点重合（`d < 1e-3`）→ `None`：方向无定义，不给出下一格、不产生 `NaN`。
-/// 取格用 `grid::world_to_grid`（floor 语义），与 `executor::cell_center`（`(g+0.5)×0.5`）同口径。
-pub fn step_cell(me: (f32, f32), target: (f32, f32)) -> Option<(i32, i32)> {
-    let (dx, dy) = (target.0 - me.0, target.1 - me.1);
-    let d = (dx * dx + dy * dy).sqrt();
-    if d < 1e-3 {
-        return None;
-    }
-    Some(world_to_grid(
-        me.0 + dx / d * CELL_RESOLUTION,
-        me.1 + dy / d * CELL_RESOLUTION,
-    ))
-}
-
-/// 人 → 动态障碍格：**复用** `nav/cluster_obstacles.rs` 的圆盘膨胀（不改 `nav/`）
-pub fn person_cells(person: (f32, f32), radius_m: f32) -> Vec<(i32, i32)> {
-    let info = ClusterInfo {
-        peer_id: Vec::new(),
-        x: person.0,
-        y: person.1,
-        z: 0.0,
-        yaw: 0.0,
-        vx: 0.0,
-        vy: 0.0,
-        time_boot_ms: 0,
-        last_seen: Instant::now(),
-        sub_target: None,
-    };
-    let mut cells: Vec<(i32, i32)> =
-        cluster_to_obstacle_cells(std::slice::from_ref(&info), radius_m).into_iter().collect();
-    cells.sort_unstable(); // 确定性（`HashSet` 迭代序不定 → 单测断言要排序）
-    cells
-}
-
-/// 下一步落在人的膨胀格里 → 本拍不动（`None`）；否则原样返回
-pub fn guard_cell(
-    cell: Option<(i32, i32)>,
-    person: (f32, f32),
-    radius_m: f32,
-) -> Option<(i32, i32)> {
-    let cell = cell?;
-    if person_cells(person, radius_m).contains(&cell) {
-        return None;
-    }
-    Some(cell)
 }
 
 /// 取锁，毒化时恢复内部数据而不是二次 panic（与 `detector/mod.rs` 同法）
@@ -270,24 +203,8 @@ impl TargetSource {
 
 // ---------------------------------------------------------------- 节点
 
-/// 跟随需要的导航端口：`NavPort` + 一个「清目标」
-///
-/// 为什么不直接用 `NavPort`：`nav/mod.rs` 的 `NavPort` 只有 `set_goal` / `step` / `status`，
-/// 而 `Hold` 必须把目标清掉（「Hold ⇒ nav 目标被清」的观测口径）；
-/// `pleiades-ugv/src/ugv/nav/` 不在允许改动路径，故在 mission 层加这个薄 trait。
-pub trait FollowNav: NavPort {
-    fn clear_goal(&mut self);
-}
-
-impl FollowNav for crate::ugv::nav::Navigator {
-    fn clear_goal(&mut self) {
-        crate::ugv::nav::Navigator::clear_goal(self)
-    }
-}
-
 /// 建树（每次入队新建实例，§十一 #12）
-pub fn build<P: FollowNav + 'static>(
-    nav: Arc<Mutex<P>>,
+pub fn build(
     robot_state: Arc<RwLock<RobotState>>,
     source: Arc<TargetSource>,
     params: FollowParams,
@@ -296,18 +213,18 @@ pub fn build<P: FollowNav + 'static>(
     let slot_for_cond = slot.clone();
     let p2 = params;
     Box::new(ReactiveFallback::new(vec![
-        // 主路：有目标 → 未太近 → 朝人给一格
+        // 主路：有目标 → 未太近 → 直接给人的世界坐标（点）
         Box::new(ReactiveSequence::new(vec![
-            Box::new(TargetGate::new(robot_state.clone(), source, slot.clone(), params)),
+            Box::new(TargetGate::new(robot_state, source, slot.clone(), params)),
             Box::new(Condition::new(move || {
                 // 与 `TargetGate` 共用同一份槽位快照 → 两个条件不会各算一次、不会互相矛盾
                 let snap = *lock(&slot_for_cond);
                 !lost(snap.as_ref(), &p2) && !too_close(snap.as_ref(), &p2)
             })),
-            Box::new(StepLeaf::new(nav.clone(), robot_state, slot, params)),
+            Box::new(StepLeaf::new(slot, params)),
         ])),
-        // 兜底：丢掉 / 太近 → 停（清 nav 目标，`next_cell=None`）
-        Box::new(HoldLeaf::new(nav)),
+        // 兜底：丢掉 / 太近 → 停（两个字段都 `None`）
+        Box::new(HoldLeaf::new()),
     ]))
 }
 
@@ -352,49 +269,36 @@ impl Node for TargetGate {
     }
 }
 
-/// 叶子：**不经 D\***，沿「me → target」方向给一格
-pub struct StepLeaf<P: FollowNav> {
-    nav: Arc<Mutex<P>>,
-    robot_state: Arc<RwLock<RobotState>>,
+/// 叶子：**不经 D\***，`Advance` 直接把人的世界坐标写进 `target_point`
+pub struct StepLeaf {
     slot: Arc<StdMutex<Option<Sample>>>,
     params: FollowParams,
     /// 上拍结论（距离带内沿用 → 迟滞状态；`halt` 归零）
     last: Outcome,
 }
 
-impl<P: FollowNav> StepLeaf<P> {
-    fn new(
-        nav: Arc<Mutex<P>>,
-        robot_state: Arc<RwLock<RobotState>>,
-        slot: Arc<StdMutex<Option<Sample>>>,
-        params: FollowParams,
-    ) -> Self {
-        Self { nav, robot_state, slot, params, last: Outcome::Hold }
+impl StepLeaf {
+    fn new(slot: Arc<StdMutex<Option<Sample>>>, params: FollowParams) -> Self {
+        Self { slot, params, last: Outcome::Hold }
     }
 }
 
 #[async_trait]
-impl<P: FollowNav + 'static> Node for StepLeaf<P> {
+impl Node for StepLeaf {
     async fn tick(&mut self, f: &mut Frame<'_>) -> Status {
-        // 位姿先读完再放锁（同 goto.rs 的纪律：持锁跨 await 会挤设备端 RX）
-        let me = {
-            let rs = self.robot_state.read().await;
-            (rs.x, rs.y)
-        };
         let snap = *lock(&self.slot);
         let out = decide(snap.as_ref(), &self.params, self.last);
         self.last = out; // 带内停（Hold）时下拍仍从 Hold 起算
 
         match snap {
             Some(s) if out == Outcome::Advance => {
-                // 人作为动态障碍：下一步落在人的膨胀格里 → 本拍否决。
-                // **不设目标、不取下一步**：格由几何算出（`step_cell`），nav 全程不参与。
-                f.out.next_cell =
-                    guard_cell(step_cell(me, (s.x, s.y)), (s.x, s.y), self.params.person_inflate_m);
+                // 直接给**人的世界坐标**：转向环里没有格心（task_45 §一 #1）
+                f.out.target_point = Some((s.x, s.y));
+                f.out.next_cell = None;
             }
             _ => {
-                self.nav.lock().await.clear_goal();
                 f.out.next_cell = None;
+                f.out.target_point = None;
             }
         }
         // 持续任务：**不终值**（`Success` 会让队列把这条弹走，人就再也跟不上了）
@@ -407,25 +311,23 @@ impl<P: FollowNav + 'static> Node for StepLeaf<P> {
     }
 }
 
-/// 兜底叶子：丢掉 / 太近 → 清导航目标 + 本拍不动
-pub struct HoldLeaf<P: FollowNav> {
-    nav: Arc<Mutex<P>>,
-}
+/// 兜底叶子：丢掉 / 太近 → 本拍不动（两个字段都 `None`）
+pub struct HoldLeaf;
 
-impl<P: FollowNav> HoldLeaf<P> {
-    fn new(nav: Arc<Mutex<P>>) -> Self {
-        Self { nav }
+impl HoldLeaf {
+    fn new() -> Self {
+        Self
     }
 }
 
 #[async_trait]
-impl<P: FollowNav + 'static> Node for HoldLeaf<P> {
+impl Node for HoldLeaf {
     async fn tick(&mut self, f: &mut Frame<'_>) -> Status {
-        // 丢掉/太近：清 nav 目标（**不追最后一个点**），本拍不动。
+        // 丢掉/太近：本拍不动（**不追最后一个点**）。
         // 返回 **`Running`**（不是 `Success`）：`Follow` 是持续任务，只有 TASK_SET 替换 /
         // `mission_count = 0` 才结束；`Success` 会让队列提前弹走这条任务。
-        self.nav.lock().await.clear_goal();
         f.out.next_cell = None;
+        f.out.target_point = None;
         Status::Running
     }
 
@@ -436,14 +338,7 @@ impl<P: FollowNav + 'static> Node for HoldLeaf<P> {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     use pleiades_base::robot::core::behavior_tree::MotionOut;
-
-    use crate::ugv::nav::NavStatus;
-
-    /// 假导航端口给的哨兵格：若叶子敢用 `nav.step()` 的返回值，`next_cell` 会变成它 → 测试立刻红
-    const SENTINEL: (i32, i32) = (99, 99);
 
     // ------------------------------------------------------------ 夹具
 
@@ -490,78 +385,24 @@ mod tests {
         }
     }
 
-    /// 假导航端口：**只用来验「有没有被打扰」**——本 step 要求 `set_goal` / `step` 一次都不许调
-    struct FakeNav {
-        status: NavStatus,
-        set_goal_calls: Arc<AtomicU32>,
-        step_calls: Arc<AtomicU32>,
-        clear_goal_calls: Arc<AtomicU32>,
-    }
-
-    impl FakeNav {
-        fn new() -> Arc<Mutex<Self>> {
-            Arc::new(Mutex::new(Self {
-                status: NavStatus::Idle,
-                set_goal_calls: Arc::new(AtomicU32::new(0)),
-                step_calls: Arc::new(AtomicU32::new(0)),
-                clear_goal_calls: Arc::new(AtomicU32::new(0)),
-            }))
-        }
-    }
-
-    #[async_trait]
-    impl NavPort for FakeNav {
-        fn set_goal(&mut self, _x: f32, _y: f32) {
-            self.set_goal_calls.fetch_add(1, Ordering::SeqCst);
-            self.status = NavStatus::Navigating;
-        }
-
-        async fn step(&mut self, _rs: &RobotState) -> Option<(i32, i32)> {
-            self.step_calls.fetch_add(1, Ordering::SeqCst);
-            match self.status {
-                NavStatus::Navigating => Some(SENTINEL),
-                _ => None,
-            }
-        }
-
-        fn status(&self) -> NavStatus {
-            self.status
-        }
-    }
-
-    impl FollowNav for FakeNav {
-        fn clear_goal(&mut self) {
-            self.clear_goal_calls.fetch_add(1, Ordering::SeqCst);
-            self.status = NavStatus::Idle;
-        }
-    }
-
     async fn set_pose(state: &Arc<RwLock<RobotState>>, x: f32, y: f32) {
         let mut rs = state.write().await;
         rs.x = x;
         rs.y = y;
     }
 
-    /// 一套树 + 三个计数器 + 位姿句柄
+    /// 一套树 + 位姿句柄（本树**不持 nav**，没有导航计数器可断言）
     struct Rig {
         tree: Box<dyn Node>,
         state: Arc<RwLock<RobotState>>,
-        set_goal: Arc<AtomicU32>,
-        step: Arc<AtomicU32>,
-        clear_goal: Arc<AtomicU32>,
     }
 
     async fn rig(feed: Arc<FakeFeed>, me: (f32, f32)) -> Rig {
         let state = Arc::new(RwLock::new(RobotState::default()));
         set_pose(&state, me.0, me.1).await;
         let source = Arc::new(TargetSource::new(Some(feed as Arc<dyn TargetFeed>)));
-        let nav = FakeNav::new();
-        let (set_goal, step, clear_goal) = {
-            let n = nav.lock().await;
-            (n.set_goal_calls.clone(), n.step_calls.clone(), n.clear_goal_calls.clone())
-        };
-        let tree = build(nav, state.clone(), source, FollowParams::default());
-        Rig { tree, state, set_goal, step, clear_goal }
+        let tree = build(state.clone(), source, FollowParams::default());
+        Rig { tree, state }
     }
 
     fn frame(out: &mut MotionOut) -> Frame<'_> {
@@ -580,14 +421,14 @@ mod tests {
         assert_eq!(
             decide(Some(&sample(9.0, STALE_MS)), &p, Outcome::Hold),
             Outcome::Advance,
-            "age == stale 不过期，d=9 > 4 → Advance"
+            "age == stale 不过期，d=9 > 2.2 → Advance"
         );
         assert_eq!(
             decide(Some(&sample(9.0, STALE_MS + 1)), &p, Outcome::Advance),
             Outcome::Hold,
             "age == stale+1 → Hold（即使上拍在走）"
         );
-        // d_far 边界：> 4.0 才走；== 4.0 落在带内 → 沿用上拍
+        // d_far 边界：> 2.2 才走；== 2.2 落在带内 → 沿用上拍
         assert_eq!(
             decide(Some(&sample(D_FAR_M, 0)), &p, Outcome::Hold),
             Outcome::Hold,
@@ -603,7 +444,7 @@ mod tests {
             Outcome::Advance,
             "d > d_far → Advance（与上拍无关）"
         );
-        // d_near 边界：<= 2.5 停（与上拍无关）
+        // d_near 边界：<= 1.2 停（与上拍无关）
         assert_eq!(
             decide(Some(&sample(D_NEAR_M, 0)), &p, Outcome::Advance),
             Outcome::Hold,
@@ -615,8 +456,8 @@ mod tests {
             "d < d_near（人已贴脸）→ Hold"
         );
         // 带内两向都验（迟滞是真的沿用，不是写死）
-        assert_eq!(decide(Some(&sample(3.0, 0)), &p, Outcome::Hold), Outcome::Hold);
-        assert_eq!(decide(Some(&sample(3.0, 0)), &p, Outcome::Advance), Outcome::Advance);
+        assert_eq!(decide(Some(&sample(1.7, 0)), &p, Outcome::Hold), Outcome::Hold);
+        assert_eq!(decide(Some(&sample(1.7, 0)), &p, Outcome::Advance), Outcome::Advance);
     }
 
     /// `lost` / `too_close` 两个谓词（`TargetGate` / `Condition` 的唯一判据）
@@ -630,38 +471,6 @@ mod tests {
         assert!(too_close(Some(&sample(D_NEAR_M, 0)), &p), "d == d_near 太近");
         assert!(too_close(Some(&sample(D_NEAR_M - 0.1, 0)), &p));
         assert!(!too_close(Some(&sample(D_NEAR_M + 0.1, 0)), &p));
-    }
-
-    /// §六.5-3：目标在前方 / 在侧面 → **方向随方位变化**（4 轴向 + 45°）
-    #[test]
-    fn test_step_cell_follows_bearing() {
-        let me = (0.25, 0.25); // 格 (0,0) 的格心
-        assert_eq!(step_cell(me, (0.25, 9.25)), Some((0, 1)), "正前方 +y → 上方一格");
-        assert_eq!(step_cell(me, (9.25, 0.25)), Some((1, 0)), "侧面 +x → 右方一格");
-        assert_eq!(step_cell(me, (0.25, -8.75)), Some((0, -1)), "-y → 下方一格");
-        assert_eq!(step_cell(me, (-8.75, 0.25)), Some((-1, 0)), "-x → 左方一格");
-        // 45°：unit = (0.7071, 0.7071) × 0.5 = 0.3536 → (0.6036, 0.6036) → 格 (1,1)
-        assert_eq!(step_cell(me, (9.25, 9.25)), Some((1, 1)), "45° → 对角一格");
-        // **方向真的随方位变**，不是恒给同一格
-        assert_ne!(step_cell(me, (0.25, 9.25)), step_cell(me, (9.25, 0.25)));
-    }
-
-    /// `step_cell` 退化（两点重合）→ `None`，不 `NaN`、不 panic
-    #[test]
-    fn test_step_cell_degenerate_returns_none() {
-        assert_eq!(step_cell((3.0, 3.0), (3.0, 3.0)), None, "两点重合 → 方向无定义");
-        assert_eq!(step_cell((3.0, 3.0), (3.0, 3.0005)), None, "d < 1 mm 也按重合处理");
-    }
-
-    /// 人的膨胀格 + `guard_cell` 否决（护栏保留）
-    #[test]
-    fn test_person_cells_and_guard() {
-        let cells = person_cells((2.0, 3.0), PERSON_INFLATE_M);
-        assert!(cells.contains(&(4, 6)), "人所在格 (4,6) 必在集合里：{cells:?}");
-        assert!(cells.windows(2).all(|w| w[0] < w[1]), "必须排序（确定性）");
-        assert_eq!(guard_cell(Some((4, 6)), (2.0, 3.0), PERSON_INFLATE_M), None);
-        assert_eq!(guard_cell(Some((20, 20)), (2.0, 3.0), PERSON_INFLATE_M), Some((20, 20)));
-        assert_eq!(guard_cell(None, (2.0, 3.0), PERSON_INFLATE_M), None);
     }
 
     // ------------------------------------------------------------ 目标来源
@@ -705,41 +514,43 @@ mod tests {
 
     // ------------------------------------------------------------ 树级
 
-    /// §六.5-3：目标在前方 → `next_cell` 落在「me → target」方向的一格；连拍不抖
+    /// task_45 §一 #1：目标在远处 → `target_point` 是**人的世界坐标原值**、`next_cell = None`；连拍不抖
     #[tokio::test]
-    async fn test_tree_far_gives_step_cell() {
+    async fn test_tree_far_gives_point() {
         let mut r = rig(FakeFeed::new(vec![target(0.25, 9.25, 1)]), (0.25, 0.25)).await;
         let mut out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "跟随不得终值");
-        assert_eq!(out.next_cell, Some((0, 1)), "d=9 > 4 → 朝人方向一格");
-        // 第二拍：位姿与人没变 → 同一格（不抖）
+        assert_eq!(out.target_point, Some((0.25, 9.25)), "d=9 > 2.2 → 直接给人的世界坐标");
+        assert_eq!(out.next_cell, None, "给点时不得同时给格");
+        // 第二拍：位姿与人没变 → 同一个点（不抖）
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, Some((0, 1)));
+        assert_eq!(out.target_point, Some((0.25, 9.25)));
+        assert_eq!(out.next_cell, None);
     }
 
-    /// §六.5-3：目标在侧面 → 方向随方位变化（同一台机、同一距离，只改方位）
+    /// task_45 §一 #1：目标在侧面 → 给的点随方位变化（同一台机、同一距离，只改方位）
     #[tokio::test]
     async fn test_tree_side_target_changes_direction() {
         let mut r = rig(FakeFeed::new(vec![target(9.25, 0.25, 1)]), (0.25, 0.25)).await;
         let mut out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, Some((1, 0)), "人转到 +x → 下一格跟着转到 +x");
+        assert_eq!(out.target_point, Some((9.25, 0.25)), "人转到 +x → 目标点跟着转到 +x");
+        assert_eq!(out.next_cell, None);
     }
 
-    /// §六.5-3：目标近（`d == d_near`）→ `next_cell = None`
+    /// 目标近（`d == d_near`）→ 两个字段都 `None`
     #[tokio::test]
     async fn test_tree_near_holds() {
-        let mut r = rig(FakeFeed::new(vec![target(0.25, 2.75, 1)]), (0.25, 0.25)).await; // d = 2.5
+        let mut r = rig(FakeFeed::new(vec![target(0.25, 1.45, 1)]), (0.25, 0.25)).await; // d = 1.2
         let mut out = MotionOut::default();
         for i in 0..2 {
             assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "第 {i} 拍不得终值");
-            assert_eq!(out.next_cell, None, "d <= d_near → 停");
+            assert_eq!(out.target_point, None, "d <= d_near → 不给点");
+            assert_eq!(out.next_cell, None, "d <= d_near → 也不给格");
         }
-        assert_eq!(r.set_goal.load(Ordering::SeqCst), 0, "太近不得设目标");
-        assert!(r.clear_goal.load(Ordering::SeqCst) >= 1, "Hold 必须把 nav 目标清干净");
     }
 
-    /// §六.5-3：无目标 / 过期 → `None` 且不终值；目标回来且远 → **立刻**给格
+    /// 无目标 / 过期 → 两者都 `None` 且不终值；目标回来且远 → **立刻**给点
     /// （专门卡「记忆式 `Fallback` + `Running` 型 Hold = 死锁」那条坑）
     #[tokio::test]
     async fn test_tree_lost_holds_and_resumes() {
@@ -749,46 +560,46 @@ mod tests {
         for i in 0..3 {
             assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "第 {i} 拍必须 Running");
             assert_eq!(out.next_cell, None, "无目标不得给下一格");
+            assert_eq!(out.target_point, None, "无目标不得给目标点");
         }
-        assert_eq!(r.clear_goal.load(Ordering::SeqCst), 3, "每拍都清目标（不追旧点）");
         feed.set(vec![target(0.25, 9.25, 2)]);
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, Some((0, 1)), "人回来必须重新跟");
+        assert_eq!(out.target_point, Some((0.25, 9.25)), "人回来必须重新跟");
+        assert_eq!(out.next_cell, None);
     }
 
-    /// §六.3 的核心断言：**跟随链路里没有 D\***（`set_goal` / `step` 一次都不许调）
+    /// task_45 §一 #1/#6 的核心断言：**给点不给格**（转向环里没有格心，也不再有 nav）
     #[tokio::test]
-    async fn test_tree_never_touches_nav() {
+    async fn test_tree_writes_point_not_cell() {
         let mut r = rig(FakeFeed::new(vec![target(0.25, 9.25, 1)]), (0.25, 0.25)).await;
         let mut out = MotionOut::default();
         for i in 0..5 {
             assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-            assert_eq!(out.next_cell, Some((0, 1)), "第 {i} 拍：格由几何算出，不是 nav 给的");
+            assert_eq!(out.target_point, Some((0.25, 9.25)), "第 {i} 拍：给的是人的坐标原值");
+            assert_eq!(out.next_cell, None, "第 {i} 拍：绝不写格（写了就会走格心）");
         }
-        assert_eq!(r.set_goal.load(Ordering::SeqCst), 0, "不得 nav.set_goal");
-        assert_eq!(r.step.load(Ordering::SeqCst), 0, "不得 nav.step");
-        assert_ne!(out.next_cell, Some(SENTINEL), "绝不能用 nav.step() 的返回值");
     }
 
-    /// 带内（`2.5 < d <= 4.0`）沿用上拍；`halt` 把迟滞归零（切分支 / 抢占恢复后不继承旧结论）
+    /// 带内（`1.2 < d <= 2.2`）沿用上拍；`halt` 把迟滞归零（切分支 / 抢占恢复后不继承旧结论）
     #[tokio::test]
     async fn test_tree_band_hysteresis_and_halt() {
         let feed = FakeFeed::new(vec![target(0.25, 9.25, 1)]); // d = 9 → Advance
         let mut r = rig(feed.clone(), (0.25, 0.25)).await;
         let mut out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, Some((0, 1)), "先跑起来");
+        assert_eq!(out.target_point, Some((0.25, 9.25)), "先跑起来");
 
-        // 人走近到 d = 3.0（带内）：沿用上拍 Advance → 仍给格
-        feed.set(vec![target(0.25, 3.25, 2)]);
+        // 人走近到 d = 1.7（带内）：沿用上拍 Advance → 仍给点
+        feed.set(vec![target(0.25, 1.95, 2)]);
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, Some((0, 1)), "带内沿用上拍 Advance");
+        assert_eq!(out.target_point, Some((0.25, 1.95)), "带内沿用上拍 Advance");
 
         // halt（切分支 / 抢占恢复）：迟滞清零 → 同一份输入改判 Hold
         r.tree.halt();
         r.tree.halt(); // 幂等
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, None, "halt 后带内按 Hold 起算");
+        assert_eq!(out.target_point, None, "halt 后带内按 Hold 起算");
+        assert_eq!(out.next_cell, None);
         // 位姿句柄仍在（`Rig` 的字段被读过 → 不留 dead_code）
         assert_eq!(r.state.read().await.x, 0.25);
     }

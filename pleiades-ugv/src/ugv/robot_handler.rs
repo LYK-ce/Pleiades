@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 //! 车设备处理器（Task 23 阶段 C：实现 base 的 DeviceHandler；Task 36 §12.4.7 改成树驱动）
 //!
@@ -8,7 +8,7 @@
 //! `enabled=false` → 跳过该设备（统一跳过语义，节点照常跑；无运动设备时 on_tick 保持 Idle）。
 //!
 //! Task 36 起本文件只做**驱动**（§12.4.7 五步）：
-//! ① 门闩 → ② 急停（保留 goal，这一拍树不 tick）→ ③ 树 tick（叶子写 `Frame.out.next_cell`）
+//! ① 门闩 → ② 急停（保留 goal，这一拍树不 tick）→ ③ 树 tick（叶子写 `Frame.out.target_point` 或 `next_cell`）
 //! → ④ 决策（`ExecuteState` **唯一写点**）→ ⑤ 终值（halt + 丢实例 + 返回 `Terminated`）。
 //!
 //! **出队只在 base `main_loop`**：本文件不碰 `MissionQueue`，也**不做出队**（§十一 #16）。
@@ -390,10 +390,10 @@ impl DeviceHandler for CarDeviceHandler {
             return TickOutcome::Running; // ④⑤ 跳过：本拍不决策、不判终值
         }
 
-        // ④ 决策（`ExecuteState` **唯一写点**）：叶子给的「下一格」+ 位姿 → (v, omega)
+        // ④ 决策（`ExecuteState` **唯一写点**）：叶子给的目标（格或点）+ 位姿 → (v, omega)
         //    连续执行器无状态，只写 `sub_target`、`state` 留 `Idle`
         //    （唯一的读点 `base/Robot/core/robot.rs` 只取 `sub_target`）
-        let cmd = d.executor.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+        let cmd = d.executor.decide(out.target(), rs.x, rs.y, rs.attitude.yaw);
         *execute_state.write().await = ExecuteState {
             state: DecisionState::Idle,
             sub_target: out.next_cell,

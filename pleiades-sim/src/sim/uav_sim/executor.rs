@@ -1,11 +1,11 @@
 //Presented by KeJi
 //Created Date ： 2026-10-29
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 //! 机栈连续速度执行器（task_39 §四.2a，task_44 §1.3 起与车栈同形）
 //!
 //! **与车栈 `crate::sim::ugv_sim::executor` 同形**：同一个 `VelocityCmd { v, omega }`、
-//! 同一套 `decide(next_cell, x, y, yaw)` 签名；差异只在**档位数**（机三档 / 车五档）与**阈值**
+//! 同一套 `decide(target, x, y, yaw)` 签名；差异只在**档位数**（机三档 / 车五档）与**阈值**
 //! （机 5°/20° / 车 8°/12°）。真机本来就是「车一套、机一套」，sim 侧保持两份独立文件。
 //!
 //! **口径与真机 UAV 一致**（task_39 §四 修订，2026-10-29）：输出的是**物理量**
@@ -29,9 +29,16 @@
 //! 车栈是同一套证据链（四步逐条写在 `ugv_sim/executor.rs` 文件头），两个底盘脚本各写一条符号单测。
 //!
 //! 到达不归执行器管：nav 判到达 → 叶子写 `None` → `v = omega = 0`。
+//!
+//! ## 目标类型（task_45 §一 #1/#2）
+//!
+//! 唯一入口 [`decide`] 收 `Option<`[`MotionTarget`]`>`：`Cell` → 取格心（Goto / 巡逻），
+//! `Point` → **原值直接用**（Follow 给的人的世界坐标，不经格心、不量化）。进门消解一次，
+//! 其后 `delta` / 三档判断 / `omega` 符号链**一行不改**。
 
 use std::f32::consts::PI;
 
+use pleiades_base::robot::core::behavior_tree::MotionTarget;
 use pleiades_base::robot::core::grid::CELL_RESOLUTION;
 
 /// 死区（度）：`|Δθ| ≤ 5°` 只直行，不纠偏。
@@ -60,16 +67,20 @@ impl UavExecutor {
         Self { vel_fwd, yaw_rate_rps }
     }
 
-    /// 纯决策：读下一格 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
+    /// 纯决策：读本拍目标 + 位姿 → 返回一拍的 `(v, omega)`（零副作用，不发命令不写状态）
     ///
-    /// - `next_cell`：叶子给的下一格（网格坐标），`None` = 无任务/到达 → `v = omega = 0`
+    /// - `target`：叶子给的目标（格或点），`None` = 无任务/到达 → `v = omega = 0`
     /// - `x`/`y`/`yaw`：当前位置（世界坐标）与航向（弧度）
-    pub fn decide(&self, next_cell: Option<(i32, i32)>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
-        let Some((gx, gy)) = next_cell else {
+    pub fn decide(&self, target: Option<MotionTarget>, x: f32, y: f32, yaw: f32) -> VelocityCmd {
+        // 进门只做一次类型消解：格 → 格心，点 → 原值
+        let Some((tx, ty)) = target.map(|t| match t {
+            MotionTarget::Cell((gx, gy)) => (cell_center(gx), cell_center(gy)),
+            MotionTarget::Point((px, py)) => (px, py),
+        }) else {
             // 无目标 = 停
             return VelocityCmd { v: 0.0, omega: 0.0 };
         };
-        let delta = angle_to_target(gx, gy, x, y, yaw);
+        let delta = angle_to_target(tx, ty, x, y, yaw);
         let deg = delta.to_degrees().abs();
         if deg <= DEADBAND_DEG {
             // 直行
@@ -93,10 +104,8 @@ fn cell_center(coord: i32) -> f32 {
     (coord as f32 + 0.5) * CELL_RESOLUTION
 }
 
-/// 目标方向角差（归一化到 [-π, π]）
-fn angle_to_target(gx: i32, gy: i32, x: f32, y: f32, yaw: f32) -> f32 {
-    let tx = cell_center(gx);
-    let ty = cell_center(gy);
+/// 目标方向角差（归一化到 [-π, π]）：入参是**世界坐标**（格已在上游消解成格心）
+fn angle_to_target(tx: f32, ty: f32, x: f32, y: f32, yaw: f32) -> f32 {
     normalize_angle((ty - y).atan2(tx - x) - yaw)
 }
 
@@ -118,7 +127,7 @@ mod tests {
 
     /// 位姿取 (0,0) 格心、目标格 (1,0) ⇒ 目标方位恰为 +x ⇒ Δθ = −yaw
     fn decide_at_yaw(ex: &UavExecutor, yaw_deg: f32) -> VelocityCmd {
-        ex.decide(Some((1, 0)), center(0), center(0), yaw_deg.to_radians())
+        ex.decide(Some(MotionTarget::Cell((1, 0))), center(0), center(0), yaw_deg.to_radians())
     }
 
     #[test]
@@ -184,6 +193,29 @@ mod tests {
         assert_eq!(
             ex.decide(None, center(0), center(0), 1.234_f32.to_radians()),
             VelocityCmd { v: 0.0, omega: 0.0 }
+        );
+    }
+
+    /// task_45 §一 #1/#2：`Point` 走**世界坐标原值**，不经格心（Follow 的核心诉求）
+    ///
+    /// 目标点 `(0.25, 1.25)` 取的是**格角**（不是任何格心）——若被当成格心处理，
+    /// 目标会跑到 `(0.75, 0.75)`，下面两条断言必红。
+    #[test]
+    fn test_point_target_uses_raw_coords() {
+        let ex = UavExecutor::new(0.8, 0.5236);
+        let me = (0.25, 0.25);
+        let pt = MotionTarget::Point((0.25, 1.25));
+        // 目标在正前方（+y）且 yaw = +90° ⇒ Δθ = 0 ⇒ 死区直行
+        assert_eq!(
+            ex.decide(Some(pt), me.0, me.1, PI / 2.0),
+            VelocityCmd { v: 0.8, omega: 0.0 },
+            "点必须原值直接用：yaw 对齐目标方向就直行（格心化会让 Δθ 偏 45°）"
+        );
+        // 同一点、yaw = 0 ⇒ Δθ = +90° > SPIN_DEG（20°）⇒ 原地转，Δθ > 0 ⇒ omega 取负
+        assert_eq!(
+            ex.decide(Some(pt), me.0, me.1, 0.0),
+            VelocityCmd { v: 0.0, omega: -0.5236 },
+            "|Δθ| = 90° > 20° ⇒ 原地转，ω 符号见文件头证据链"
         );
     }
 }

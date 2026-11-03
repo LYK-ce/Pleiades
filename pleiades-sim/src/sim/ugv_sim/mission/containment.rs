@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-31
-//Modified Date ： 2026-10-31
+//Modified Date ： 2026-11-03
 
 //! 封控树 v2（task_43 §七）：sim **车栈**版——与 `uav_sim/mission/containment.rs` 同形（逐字照抄，仅 `uav_sim`→`ugv_sim` 与文件头），真机与机端各持一份、不跨栈 `use`（口径 #1）。
 //!
@@ -52,6 +52,7 @@ use pleiades_base::robot::core::behavior_tree::{
 use pleiades_base::robot::core::state::RobotState;
 
 use crate::sim::ugv_sim::mission::{follow, goto};
+use crate::sim::ugv_sim::nav::NavPort;
 
 // ---------------------------------------------------------------- 协助请求（task_41 §5.5.6）
 
@@ -102,7 +103,7 @@ pub fn intruder(
 /// 建封控树（每次入队**新建实例**，不复用节点对象，§十一 #12）
 ///
 /// `publisher = None` → 只判条件、不发协助请求（单测 / 无网络时）。
-pub fn build<P: follow::FollowNav + 'static>(
+pub fn build<P: NavPort + 'static>(
     nav: Arc<Mutex<P>>,
     robot_state: Arc<RwLock<RobotState>>,
     source: Arc<follow::TargetSource>,
@@ -112,8 +113,7 @@ pub fn build<P: follow::FollowNav + 'static>(
 ) -> Box<dyn Node> {
     let params = follow::FollowParams::default(); // stale_ms = follow::STALE_MS
     // 与 `InsideSquare` 共用 `source`（同一份 age 追踪，两处快照不矛盾）
-    let follow_tree =
-        follow::build(nav.clone(), robot_state.clone(), source.clone(), params);
+    let follow_tree = follow::build(robot_state.clone(), source.clone(), params);
     let inside = Box::new(InsideSquare {
         robot_state: robot_state.clone(),
         source,
@@ -204,10 +204,8 @@ mod tests {
     use pleiades_base::robot::core::behavior_tree::MotionOut;
 
     use crate::sim::detector::Target;
-    use crate::sim::ugv_sim::mission::follow::{
-        FollowNav, TargetFeed, TargetSource, STALE_MS,
-    };
-    use crate::sim::ugv_sim::nav::{NavPort, NavStatus};
+    use crate::sim::ugv_sim::mission::follow::{TargetFeed, TargetSource, STALE_MS};
+    use crate::sim::ugv_sim::nav::NavStatus;
 
     /// 假导航端口给的哨兵格：巡逻分支若无路可走才会用到它
     const SENTINEL: (i32, i32) = (99, 99);
@@ -277,7 +275,6 @@ mod tests {
         arrived: bool,
         status: NavStatus,
         set_goal_calls: Arc<AtomicU32>,
-        clear_goal_calls: Arc<AtomicU32>,
     }
 
     impl FakeNav {
@@ -287,7 +284,6 @@ mod tests {
                 arrived,
                 status: NavStatus::Idle,
                 set_goal_calls: Arc::new(AtomicU32::new(0)),
-                clear_goal_calls: Arc::new(AtomicU32::new(0)),
             }))
         }
     }
@@ -311,13 +307,6 @@ mod tests {
 
         fn status(&self) -> NavStatus {
             self.status
-        }
-    }
-
-    impl FollowNav for FakeNav {
-        fn clear_goal(&mut self) {
-            self.clear_goal_calls.fetch_add(1, Ordering::SeqCst);
-            self.status = NavStatus::Idle;
         }
     }
 
@@ -430,18 +419,15 @@ mod tests {
 
     // ------------------------------------------------------------ 树级
 
-    /// 目标在正方形内 → 走 **Follow**：`next_cell` 来自几何步，`set_goal` 一次都不许调
+    /// 目标在正方形内 → 走 **Follow**：给的是人的世界坐标（点），`set_goal` 一次都不许调
     #[tokio::test]
     async fn test_target_inside_runs_follow() {
         let me = (56.0, 56.0);
         let mut r = rig(FakeFeed::new(vec![target(64.0, 64.0, 1)]), me, false, None).await;
         let mut out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "封控不得终值");
-        assert_eq!(
-            out.next_cell,
-            follow::step_cell(me, (64.0, 64.0)),
-            "跟随时下一格由几何算出（me → 人方向一格）"
-        );
+        assert_eq!(out.target_point, Some((64.0, 64.0)), "跟随给的是人的世界坐标（点）");
+        assert_eq!(out.next_cell, None, "点目标那拍不得同时给格");
         let nav = r.nav.lock().await;
         assert!(nav.goals.is_empty(), "跟随分支不得调用 nav.set_goal：{:?}", nav.goals);
         assert_eq!(nav.set_goal_calls.load(Ordering::SeqCst), 0, "跟随分支不得碰 D*");
@@ -663,25 +649,31 @@ mod tests {
         let mut r = rig(feed.clone(), me, false, None).await;
         let mut out = MotionOut::default();
 
-        // ① 界内 → 走跟随分支：几何给格、不进 D*
+        // ① 界内 → 走跟随分支：给点不给格、不进 D*
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
-        assert_eq!(out.next_cell, follow::step_cell(me, (64.0, 64.0)), "界内必须走 Follow");
+        assert_eq!(out.target_point, Some((64.0, 64.0)), "界内必须走 Follow（给人的世界坐标）");
+        assert_eq!(out.next_cell, None, "跟随那拍不得给格");
         assert_eq!(r.nav.lock().await.set_goal_calls.load(Ordering::SeqCst), 0, "跟随分支不得进 D*");
 
         // ② 出界 → **同一拍**切到巡逻（记忆式 Fallback 会从这一拍起永远停在巡逻分支）
+        //    生产里驱动**每拍新建** `MotionOut`，这里同构新建，否则跟随分支的 `target_point` 会残留
         feed.set(vec![target(64.0, 90.0, 2)]);
+        out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
         assert_eq!(r.nav.lock().await.goals, vec![(56.0, 56.0)], "出界 → 从角 1 起巡逻");
         assert_eq!(out.next_cell, Some(SENTINEL), "这一拍走的是巡逻分支（假 nav 的哨兵格）");
+        assert_eq!(out.target_point, None, "巡逻分支只给格，不给点");
 
         // ③ 回界内 → **同一拍**切回跟随（记忆式会停在巡逻分支 → 本断言必红）
         feed.set(vec![target(64.0, 64.0, 3)]);
+        out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
         assert_eq!(
-            out.next_cell,
-            follow::step_cell(me, (64.0, 64.0)),
+            out.target_point,
+            Some((64.0, 64.0)),
             "外层必须是 ReactiveFallback：每拍重判第 0 分支（记忆式 Fallback 会锁死在巡逻上）"
         );
+        assert_eq!(out.next_cell, None, "切回跟随不得残留上一拍巡逻的格");
         assert_eq!(
             r.nav.lock().await.set_goal_calls.load(Ordering::SeqCst),
             1,

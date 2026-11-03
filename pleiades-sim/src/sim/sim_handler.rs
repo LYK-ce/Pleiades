@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 #![allow(non_snake_case)]
 
@@ -802,7 +802,7 @@ impl DeviceHandler for SimDeviceHandler {
             return TickOutcome::Running;
         }
 
-        // ④ 树：推进当前任务的树（叶子写 `Frame.out.next_cell`）
+        // ④ 树：推进当前任务的树（叶子写 `Frame.out.target_point` 或 `next_cell`）
         let mut out = MotionOut::default();
         let tick_no = d.stack.next_tick_no();
         let mut frame = Frame { dt_ms: AUTO_TICK_MS as u32, tick_no, out: &mut out };
@@ -821,7 +821,7 @@ impl DeviceHandler for SimDeviceHandler {
         //    `base/Robot/core/robot.rs:250-253` 只取 `sub_target`）。
         match &d.actuator {
             Actuator::Ugv(ex) => {
-                let cmd = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+                let cmd = ex.decide(out.target(), rs.x, rs.y, rs.attitude.yaw);
                 *execute_state.write().await =
                     ExecuteState { state: DecisionState::Idle, sub_target: out.next_cell };
                 // 20 Hz 全程有输出 → Should_Log 压到 5 Hz；**字段名固定**
@@ -849,7 +849,7 @@ impl DeviceHandler for SimDeviceHandler {
                 }
             }
             Actuator::Uav(ex) => {
-                let cmd = ex.decide(out.next_cell, rs.x, rs.y, rs.attitude.yaw);
+                let cmd = ex.decide(out.target(), rs.x, rs.y, rs.attitude.yaw);
                 *execute_state.write().await =
                     ExecuteState { state: DecisionState::Idle, sub_target: out.next_cell };
                 // 20 Hz 全程有输出，用 Should_Log 压到 5 Hz（日志仍够查"有没有 100~200 ms 抖动"）
@@ -941,6 +941,7 @@ mod tests {
     /// task_44 §1.3：车的选型只能是连续速度（离散路径已删），机的选型只能是连续速度
     #[test]
     fn test_actuator_select_by_stack_kind() {
+        use pleiades_base::robot::core::behavior_tree::MotionTarget;
         let binding = SpeedBinding { cruise_speed: 0.45, cruise_yaw_rate: 0.5 };
         let ugv = Actuator_For(StackKind::Ugv, binding, 0.3, 0.26);
         assert!(matches!(ugv, Actuator::Ugv(_)), "车栈必须选连续速度执行器（离散路径已删）");
@@ -952,7 +953,7 @@ mod tests {
             );
             // 装配层就钉住 §1.4 的定值：yaw = 0、目标格 (1,0) 在正前方 ⇒ (0.45, 0)
             assert_eq!(
-                ex.decide(Some((1, 0)), 0.25, 0.25, 0.0),
+                ex.decide(Some(MotionTarget::Cell((1, 0))), 0.25, 0.25, 0.0),
                 crate::sim::ugv_sim::executor::VelocityCmd { v: 0.45, omega: 0.0 }
             );
         }

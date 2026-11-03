@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-03
 
 //! 任务层（Task 36 §12.4.4）：任务 → 树的**编译期穷尽**分派 + 树依赖包
 //!
@@ -8,7 +8,10 @@
 //!
 //! task_44 §二 Step 7：真车 `Follow` / `Containment` 都是**真树**（`follow.rs` / `containment.rs`，
 //! 照抄 sim 车栈那两份，口径 #8 各 crate 自带一份）；无 detector 两者退化为**原地 Hold**
-//! （恒 `Running` + `next_cell = None`，**绝不一拍 `Success`**，**绝不** `Err`）。
+//! （恒 `Running` + `next_cell` / `target_point` 都 `None`，**绝不一拍 `Success`**，**绝不** `Err`）。
+//!
+//! task_45 §二 Step 1：`Follow` 的叶子改给**人的世界坐标**（`target_point`），`build()` 不再收 `nav`
+//! （「清目标」的薄 trait 与其清目标方法一并删，§一 #6）；`Containment` 的巡逻分支仍 `goto::build(nav)`。
 
 use std::sync::Arc;
 
@@ -38,13 +41,12 @@ pub struct TaskDeps {
 pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String> {
     match mission {
         Mission::Goto { x, y } => Ok(goto::build(*x, *y, deps.nav.clone(), deps.robot_state.clone())),
-        // task_44 §二 Step 7：真车 Follow 与 sim 车栈**同构**（照抄叶子，不经 D*）。
-        // 无 detector 时退化为「原地 Hold」：`Action` 恒 `Running` + `next_cell = None` + 一条 warn。
+        // task_44 §二 Step 7 + task_45 §二 Step 1：真车 Follow 与 sim 车栈**同构**（照抄叶子，不经 D*）。
+        // 无 detector 时退化为「原地 Hold」：`Action` 恒 `Running` + `next_cell` / `target_point` 都 `None` + 一条 warn。
         // **不得**一拍 `Success`（那会让队列把持续任务弹走，人就再也跟不上了），**不得**返回 `Err`
         // （Task 36 约定：建树失败 = 清队列 + 停车）。
         Mission::Follow { .. } => match deps.detector.as_ref() {
             Some(dev) => Ok(follow::build(
-                deps.nav.clone(),
                 deps.robot_state.clone(),
                 Arc::new(follow::TargetSource::new(Some(dev.clone()))),
                 follow::FollowParams::default(),
@@ -55,6 +57,7 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 );
                 Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
                     f.out.next_cell = None;
+                    f.out.target_point = None;
                     Status::Running
                 })))
             }
@@ -77,6 +80,7 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 );
                 Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
                     f.out.next_cell = None;
+                    f.out.target_point = None;
                     Status::Running
                 })))
             }

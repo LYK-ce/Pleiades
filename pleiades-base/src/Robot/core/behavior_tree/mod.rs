@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-10-27
+//Modified Date ： 2026-11-03
 
 //! 行为树引擎（Task 36 §12.2）
 //!
@@ -23,7 +23,7 @@ pub mod status;
 
 pub use composite::{Fallback, ReactiveFallback, ReactiveSequence, Sequence};
 pub use decorator::{Guard, Inverter, Repeat, RepeatForever, Retry, Timeout};
-pub use frame::{Frame, MotionOut};
+pub use frame::{Frame, MotionOut, MotionTarget};
 pub use leaf::{Action, Condition, Wait};
 pub use node::Node;
 pub use status::{FailCode, Status};
