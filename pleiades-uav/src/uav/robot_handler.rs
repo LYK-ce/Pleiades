@@ -42,6 +42,8 @@ use crate::uav::nav::{Navigator, ObstacleMode, ARRIVAL_THRESHOLD_M};
 // （与 `sim_handler.rs:51-58` 声明 `device_cap` 同款解法）。`#[path]` 相对**本文件所在目录**
 // （`src/uav/`）解析 → `src/device/detector/mod.rs`。
 // 规范路径因此是 `crate::uav::robot_handler::detector`。
+// task_45 §二 Step 2 起，任务层（`uav/mission/mod.rs` / `uav/mission/follow.rs`）也经**本模块路径**取
+// `DetectorDevice` —— 因为 `device/mod.rs` 不在白名单，不能把声明搬过去（全 crate 只此一处 `#[path]`）。
 #[path = "../device/detector/mod.rs"]
 pub mod detector;
 
@@ -64,7 +66,8 @@ struct UavInner {
     /// 拍号（`Frame.tick_no`）
     tick_no: AtomicU64,
     /// detector 设备（task_37 Step 2）：`enabled=false` / 无相机 / 权重缺失 → `None`
-    /// **只被 `shutdown()` 用**，决策链一行不碰它
+    /// `shutdown()` 停推理 + 任务层（`TaskDeps.detector`）作 Follow 的目标源；
+    /// `on_tick` 决策链仍不碰它（只经 `TargetSource` 读结果槽位）
     detector: Option<Arc<detector::DetectorDevice>>,
 }
 
@@ -252,7 +255,11 @@ impl DeviceHandler for UavDeviceHandler {
             info!("[Uav] 任务 {:?} 已有树实例，只激活", task.id);
             return Ok(());
         }
-        let deps = TaskDeps { nav: d.nav.clone(), robot_state: self.robot.robot_state.clone() };
+        let deps = TaskDeps {
+            nav: d.nav.clone(),
+            robot_state: self.robot.robot_state.clone(),
+            detector: d.detector.clone(),
+        };
         let tree = mission::build(&task.mission, &deps)?;
         ts.trees.insert(task.id, tree);
         ts.active = Some(task.id);
