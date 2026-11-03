@@ -151,6 +151,8 @@
 **实施步骤**
 
 1. 起环境：世界（`RobotSim_TestEnv/world_fast` 或现成副本）+ Pictor（headless）+ 1 台 sim ugv（带 `camera_front` + `[detector].enabled = true`）+ 1 台 sim uav（同）。
+   - **起之前先按 §三.4 核对两台实例的 `pitch` 与 `mount_pitch_deg` 是否同值**（机栈尤其重要：
+     写错段时 `params` 里的 `pitch` 会被世界静默忽略，实测 5.00 m 会被算成 2.90 m）。
 2. 目标人：世界侧放 1 个行人，摆在设备前方 3~5 m。
 3. **sim ugv — Follow**：注入 Follow，观察
    - 车朝人靠近（而不是朝某个格子中心）；
@@ -172,3 +174,85 @@
 - 出现「车完全不动」「任务不进队」「日志报错」才算 FAIL。
 
 **收尾**：关世界与所有进程，端口/test 进程无残留；`git status` 与进场一致（本步不改代码）。
+
+---
+
+## 三、夹具修正记录：`[sim_world.sensor.mount].pitch` 写错了段
+
+> 记录时间 2026-11-03。**归属**：`RobotSim_TestEnv`（不在 git 仓库内），重建夹具时必须照做，
+> 否则机栈 Follow/Containment 的**所有**目标位置都会偏。
+
+### 3.1 现象
+
+`sim4/.config/config.toml` 原先把俯仰角写在了传感器 **`params`** 里：
+
+```toml
+[[sim_world.sensor]]
+slot = "camera_nose"
+sensor = "camera"
+
+[sim_world.sensor.mount]
+x = 0.22 ; y = 0.0 ; z = 0.06 ; yaw = 1.5708      # ← 缺 pitch
+
+[sim_world.sensor.params]
+width = 640 ; height = 480 ; fov_deg = 70.0 ; quality = 0.8 ; rate_hz = 5.0
+pitch = -15.0                                     # ← 写在这里，世界不读
+
+[detector.camera]
+mount_pitch_deg = -15.0                           # ← 投影按 -15° 算
+```
+
+而世界侧 `Vehicle.AttachSensor` **只从 `mount` 读 `pitch`**；`CameraSensor.Configure` 只认
+`width / height / fov_deg / quality / rate_hz` 五个键，`params` 里的 `pitch` 被**静默忽略**。
+
+结果：**物理相机光轴 0°，投影数学按 −15° 算**，相差 15°。
+
+### 3.2 实测偏差（UAV 悬停 2.5 m，人静立在正前方）
+
+| 项 | 值 |
+|---|---|
+| 真值（世界坐标） | 人 (69.00, 64.00)，UAV (64.00, 64.00, 2.50) → 水平 **5.00 m** |
+| detector 估算 | `→ 世界=(66.90, 64.01) 距离=**2.90 m**` |
+| 误差 | **−2.10 m（−42%）** |
+
+手算复核：脚部真实俯角 `atan(2.5/5.0) = 26.6°`；若投影以为光轴已下压 15°，则等效俯角
+`26.6° + 15° = 41.6°`，落地距离 `2.5 / tan(41.6°) = 2.81 m` —— 与实测 2.90 m 吻合。
+
+### 3.3 修正
+
+把 `pitch` 从 `params` 移到 `mount`（**两个键的单位都是「度」，负 = 低头**）：
+
+```toml
+[sim_world.sensor.mount]
+x = 0.22 ; y = 0.0 ; z = 0.06 ; yaw = 1.5708
+pitch = -15.0                                     # ← 移到这里，世界才采纳
+
+[sim_world.sensor.params]
+width = 640 ; height = 480 ; fov_deg = 70.0 ; quality = 0.8 ; rate_hz = 5.0
+```
+
+`[detector.camera].mount_pitch_deg` **保持 −15.0 不变** —— 改完后物理与数学自洽。
+
+| | 真值 | detector 估算 | 误差 |
+|---|---|---|---|
+| 修正前 | 5.00 m | 2.90 m | −2.10 m（−42%） |
+| **修正后** | 5.00 m | **4.88 m** | **−0.12 m（−2.4%）** |
+
+### 3.4 判据（重建/新增任何实例时逐条核对）
+
+1. `[sim_world.sensor.mount].pitch` 与 `[detector.camera].mount_pitch_deg` **必须同值**；
+   单位都是**度**、**负 = 低头**。`params` 里**不允许**出现 `pitch`（会被静默吞掉）。
+2. 传感器 `mount` 里没有 `pitch` 键时，物理光轴 = **0°**，则 `mount_pitch_deg` 必须写 `0.0`。
+   - 对照：`sim1`（UGV）相机无 `pitch` ⇒ 0°；其 `[detector.camera].mount_pitch_deg = 0.0` ✅
+   - 反例：`sim4` 修正前 `mount` 无 `pitch`（0°）但 `mount_pitch_deg = -15.0` ❌
+3. 验证方法：把一个人放在**已知距离**处静立，读日志
+   `[detector] ... → 世界=(x,y) 距离=…`，与真值比对；误差应在 **0.2 m 量级**，
+   若出现 1~2 m 的系统性偏差，先查这条。日志里 `投影参数：… pitch=…°` 会打印实际生效值，
+   可据此确认世界到底采纳了哪个数。
+
+### 3.5 与机栈 `D_NEAR` 的关系
+
+这条偏差会让 UAV **以为**自己离人更近，进而比预期飞得更近（修正前实测一路飞到水平 0.49 m）。
+它和「口径 4 补充」里的 `D_NEAR = 2.6 m` 是**两个独立问题**，只修其中一个都不够：
+- 只改 `D_NEAR` 不改 pitch → 判据按错误距离触发，仍会过冲；
+- 只改 pitch 不改 `D_NEAR` → 距离对了，但 1.2 m 仍在画面之外，照样「没到判据先丢目标」。
