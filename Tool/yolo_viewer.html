@@ -1,3 +1,6 @@
+<!-- Presented by KeJi -->
+<!-- Created Date ： 2026-11-04 -->
+<!-- Modified Date ： 2026-11-04 -->
 <!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -11,7 +14,7 @@
   #panels { display: flex; gap: 12px; flex-wrap: wrap; }
   .panel { flex: 1; min-width: 320px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; }
   .panel .head { padding: 6px 10px; background: #222; display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; }
-  .panel .fps { color: #4ade80; font-weight: bold; }
+  .panel .status { color: #9ca3af; }
   .panel .close { cursor: pointer; background: #b91c1c; color: #fff; border: none; border-radius: 4px; padding: 2px 8px; }
   .panel canvas { width: 100%; display: block; }
 </style>
@@ -21,14 +24,11 @@
   <input id="ip" placeholder="车 IP（如 127.0.0.1）">
   <input id="port" placeholder="端口" value="9010">
   <button onclick="connect()">连接</button>
-  <span id="totalFps" style="color:#4ade80; font-weight:bold; font-size:14px;">- FPS（总）</span>
 </div>
 <div id="panels"></div>
 <script>
 const socks = {};
 let nextId = 1;
-let totalFrames = 0;      // 所有车收到的帧数合计
-let totalStart = 0;       // 第一帧到达时刻（performance.now）
 
 function connect() {
   const ip = document.getElementById("ip").value.trim();
@@ -41,7 +41,7 @@ function connect() {
   panel.innerHTML = `
     <div class="head">
       <span>车 ${idx}（${ip}:${port}）</span>
-      <span class="fps" id="fps${idx}">-</span>
+      <span class="status" id="st${idx}">连接中…</span>
       <button class="close" onclick="disconnect(${idx})">断开</button>
     </div>
     <canvas id="cv${idx}"></canvas>
@@ -50,20 +50,17 @@ function connect() {
 
   const cv = document.getElementById("cv" + idx);
   const ctx = cv.getContext("2d");
-  const fpsEl = document.getElementById("fps" + idx);
-  let last = 0;
+  const stEl = document.getElementById("st" + idx);
 
   const ws = new WebSocket("ws://" + ip + ":" + port + "/ws");
   ws.binaryType = "arraybuffer";
   socks[idx] = ws;
 
-  ws.onopen = () => { console.log("车" + idx + " 已连接"); };
-  ws.onerror = () => { fpsEl.textContent = "连接失败"; };
-  ws.onclose = () => { if (socks[idx] === ws) fpsEl.textContent = "断开"; };
+  ws.onopen = () => { console.log("车" + idx + " 已连接"); stEl.textContent = "已连接"; };
+  ws.onerror = () => { stEl.textContent = "连接失败"; };
+  ws.onclose = () => { if (socks[idx] === ws) stEl.textContent = "断开"; };
 
   ws.onmessage = async (ev) => {
-    if (totalStart === 0) totalStart = performance.now();
-    totalFrames++;
     // 拆包
     const buf = ev.data;
     const view = new DataView(buf);
@@ -88,12 +85,6 @@ function connect() {
         ctx.strokeRect(d.xmin, d.ymin, d.xmax - d.xmin, d.ymax - d.ymin);
         ctx.fillText(d.class_name, d.xmin, Math.max(14, d.ymin - 4));
       }
-      // FPS（浏览器端差分）
-      const now = performance.now();
-      if (last > 0) {
-        fpsEl.textContent = (1000 / (now - last)).toFixed(1) + " FPS";
-      }
-      last = now;
     };
     img.src = url;
   };
@@ -104,16 +95,6 @@ function disconnect(idx) {
   const cv = document.getElementById("cv" + idx);
   if (cv) { const p = cv.closest(".panel"); if (p) p.remove(); }
 }
-
-// 总 FPS：所有车帧数合计 / 时间（轮询发图下反映系统总检测吞吐）
-setInterval(() => {
-  if (totalStart === 0) return;
-  const elapsed = (performance.now() - totalStart) / 1000;
-  const el = document.getElementById("totalFps");
-  if (el && elapsed > 0) {
-    el.textContent = (totalFrames / elapsed).toFixed(1) + " FPS（总）";
-  }
-}, 1000);
 </script>
 </body>
 </html>

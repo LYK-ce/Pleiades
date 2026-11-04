@@ -26,3 +26,11 @@
 - 结果：PASS
 - 提交：ok a022158
 - 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（334 行，源码零改动，`git diff` 仍只有 workbook）。 **计划摘要**：涉及 5 个文件，删除 TUI `:561-574` 的解析块、`command.rs:69-72` 的 `Webui` 变体、`branch_user.rs:508-529` 的分支（保留 `:505-507` 的横幅）以及 `webui.rs` 中 `spawn_webui_server` 包装和 `L29` 的 `import`，并把 `mod.rs` 的 re-export 合并为一行。一次改完再编译：`--lib` 0 error、warning 行数不超过 25、三串 grep 均 0 命中、`webui` 只剩服务本体和 `caps` 注册链（4 个文件、21 行，`register_webui_caps` 按 #15 保留）；`--all-targets` 按 `step.md` 改用 `--lib`。
+
+## Step 3 — 三份 detector：配置 + 启动 + 每帧推（task_47 首轮）
+- 起止：2026-11-04 10:51:26Z → 2026-11-04 11:07:03Z
+- 范围：ugv / uav / sim 的 config.rs + detector/mod.rs
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 7868a34
+- 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（620 行），源码零改动（`git diff` 为空，与 `tmp/task47/git_baseline.txt` 一致）。 **计划摘要（200 字内）**：改 6 文件（三份 config.rs + 三份 detector/mod.rs）。config 加 3 常量/字段/访问器，ugv/uav `fill_detector` 补 3 键，修 sim `:680` 穷举字面量；detector 加 `Parse_Stream_Addr`（非法回退本机）与 `to_stream_dets`（类名搬指针），spawn 在 `Spawn_Tuned` 成功后才起流（失败只 warn），`Loop_Ctx.stream`，`jpeg` 统一 `Arc<[u8]>`（ugv 翻转分支 `Arc::from`），快照写入后用预存 `stream_dets` 推帧（无 `is_empty`、不 await）。4 个新用例覆盖映射、0 框仍推、`stream=false` 零 bind，`PUBLISH_LOCK` 串行防全局计数污染，不起真 WS。check 0 error、警告不超基线、`--bins detector` 全绿、两两 diff 只剩文件头/别名/`FRAME_TS_SOURCE`/`flip_vertical`。
