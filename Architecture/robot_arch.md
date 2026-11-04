@@ -1,11 +1,12 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-11-03（task_45：`Follow` 改成**直接跟人** —— 叶子写 `MotionOut.target_point`（世界坐标），
+> 更新日期：2026-11-04（task_47：detector 画面流 —— `[detector]` 加 `stream` / `stream_port` / `stream_bind`（默认 `false` / `9010` / `"127.0.0.1"`）；detector `spawn` 成功后才起 base 的 WS 服务（进程内单例，`stream=false` 零 bind），每帧推理结果（含 0 框）按 `[4B header_len LE][JSON][JPEG]` 推给 `Tool/yolo_viewer.html`；TUI `webui` 命令整体移除；查看器去掉全部 FPS、改显示连接状态；新增 §8.7「画面流」小节，§8.5 展示行、常量速查同步。
+> 上一版：2026-11-03（task_45：`Follow` 改成**直接跟人** —— 叶子写 `MotionOut.target_point`（世界坐标），
 > `step_cell` / `guard_cell` / `person_cells` 删除、Follow 不再持 nav；执行器加 `MotionTarget` 按点决策（五档不变）；
 > 真机补上真 `Follow` 树；机栈 `D_FAR_M/D_NEAR_M` 独立为 `3.6/2.6`（车栈仍 `2.2/1.2`）；**新增 §8.15**，
 > 并给 §8.9 / §8.10 / D-S7 打「已被取代」标记）
-> 上一版：2026-11-01（task_44 Step 8：四端统一连续速度定稿 —— `0x11 FUNC_CAR_RUN` 彻底删除、运动只走 `0x12`（停车也走全零 `0x12`）、`CarType::M1 = 0x0A` 为缺省车型、真车 `Follow`/`Containment` 已是真树、真车 `subscribe_map` 已接建图增量；§1.1 目录树 / §1.2 结构表 / §1.3 连续速度执行器 / §8.11 改写 / 新增 §8.14 / 常量速查与 config 样例同步。Task 41 Step 3：协助请求 topic（`TOPIC_ROBOT_ASSIST_REQUEST` = `pleiades/robot/assist_request`，`MSGID_ASSIST_REQUEST = 7`，payload 8 B）+ sim 机栈树 v2（`InsideSquare` 内发请求，1 m 阈值/离开重置）+ Pictor `CoopController`（3 m 环 N 点 / 最近一对一 / 逐车下发），§8.13 与 D-S11。Task 41 Step 1：`Mission` 加第三变体 `Containment { x, y, half_side }`（`type=3`），`TASK_SET` 记录改为**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`；未知 type / 长度不符 / 非法 `half_side` → **整帧拒**），sim 机栈新增封控树 `uav_sim/mission/containment.rs`（正方形巡逻 + 界内跟随 + 出界回巡逻），真车/真机/sim 车栈 naive 一拍 `Success`，Pictor 变长编解码 + 未知 type 报错不发帧 + `containment` 子命令，§8.12 与 D-S10。Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
+> 更早：2026-11-01（task_44 Step 8：四端统一连续速度定稿 —— `0x11 FUNC_CAR_RUN` 彻底删除、运动只走 `0x12`（停车也走全零 `0x12`）、`CarType::M1 = 0x0A` 为缺省车型、真车 `Follow`/`Containment` 已是真树、真车 `subscribe_map` 已接建图增量；§1.1 目录树 / §1.2 结构表 / §1.3 连续速度执行器 / §8.11 改写 / 新增 §8.14 / 常量速查与 config 样例同步。Task 41 Step 3：协助请求 topic（`TOPIC_ROBOT_ASSIST_REQUEST` = `pleiades/robot/assist_request`，`MSGID_ASSIST_REQUEST = 7`，payload 8 B）+ sim 机栈树 v2（`InsideSquare` 内发请求，1 m 阈值/离开重置）+ Pictor `CoopController`（3 m 环 N 点 / 最近一对一 / 逐车下发），§8.13 与 D-S11。Task 41 Step 1：`Mission` 加第三变体 `Containment { x, y, half_side }`（`type=3`），`TASK_SET` 记录改为**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`；未知 type / 长度不符 / 非法 `half_side` → **整帧拒**），sim 机栈新增封控树 `uav_sim/mission/containment.rs`（正方形巡逻 + 界内跟随 + 出界回巡逻），真车/真机/sim 车栈 naive 一拍 `Success`，Pictor 变长编解码 + 未知 type 报错不发帧 + `containment` 子命令，§8.12 与 D-S10。Task 40 Step 6：车栈死区 `DEADBAND_DEG` 5°→8°、弧线档 `ARC_MAX_DEG` 10°→12°（§七.3），D-S9 与常量速查同步；Task 40 Step 1：sim **车栈**执行器连续化 —— 新增 `sim/ugv_sim/executor.rs`（三档 + 身后直行，输出 `speed`/`turn` 百分比档位），`sim/executor.rs` 原件保留但不再是 sim 车栈的活动路径；`motion_cmd` 加可选 `turn`；世界 `DiffDrive.gd` 加 `"velocity"` 分支（前进 / 转向**同时生效**），§8.11 与 D-S9。Task 39 §三：D\* 改 **8 连通（禁切角）** + octile 启发，sim 的可通行判据回退为与真机同口径；§2.1 与常量速查。Task 39 §二：D\* 规划改**三态返回**（`Step` / `NoPath` / `NotReady`）+ **时间预算** `plan_budget_ms`（三端 config 顶层键，缺省 20 ms）；"算不完"不再当"没有路"，§2.1 与 §1.3。Task 37 Step 5：`Follow` 叶子改为**不经 D\***、朝目标方向给一格（`uav_sim/mission/follow.rs`，`next_cell = world_to_grid(me + 0.5 m·unit(target−me))`，`d>4.0` 前进 / `d≤2.5` 停 / 带内沿用上拍），并**撤销**上一轮误加的直线跟随任务类型（`Mission` 回两变体，`TASK_SET` 仍只解 type 0/2），§8.10。Task 37 Step 4：sim 无人机跟随 —— `Mission::Follow`（type=2）+ `uav_sim/mission/follow.rs`（距离带 + 迟滞 + 丢失停），真机/车栈建平凡树，§8.9。Task 37 Step 3：像素 → 世界 (x,y) 的地面平面投影（`[detector.camera]` 内参/外参 + 纯函数 + 5 条拒答保护），§8.8。Task 37 Step 2：uav/sim 各一份 detector 设备（`[detector]` 段 + 帧源 + 覆盖式结果槽位），§8.7。Task 37 Step 1：三处相机统一为「生产者写槽位 + 消费者同步读最新帧」，新增 `stream` / `stream_fps` 与 `latest_frame()`，§8.6。Task 36 Step 4：base 接线 `TickOutcome` / `build_task` / 自动出队；ugv `goal.rs` + `planning/` → `nav/`，新增 `mission/` Goto 树。Step 3：删协同 —— 三份 `planning/assignment.rs` 移除；`Mission` 收敛为单变体 `Goto { x, y }`；TASK_SET 载荷去群发段）
 > 范围：Robot 子系统（workspace 五 crate + 相关 Network 数据面）
 > 对应任务：Task 14（群发 Goto）/ Task 15（多车路径规划）/ Task 17（循路改善）/ Task 18（Circle 命令）/ Task 19（mDNS 发现）/ Task 23（crate 拆分：底座共享 + 设备端独有）/ Task 24（RTK 定位）/ Task 25（node_type 广播）/ Task 26（Godot 命令通道）/ Task 27（UAV 寻路忽略地面障碍）/ Task 28（CameraDevice）/ Task 29（YOLO-v8 目标检测）
 
@@ -697,7 +698,7 @@ survey_seconds = 180
 - `pleiades-base/src/ML_Engine/Yolo/`（`model.rs` + `detector.rs` + `coco_names.rs`），safetensors 全量加载，与 GGUF/LLM 管线**平行隔离、互不侵入**。
 - Lua cap：`ml.yolo_new(model_file, device)` + `det:detect(image_bytes, conf, nms)`（走 `exec program` 体系，与 `session inference` 同构）；权重放 `Pleiades_Workspace/`，型号从文件名推断。
 - 图传输：`ML_Engine/lua_tensor.rs` 加 U8 dtype + `ml.tensor_from_u8_bytes` / `ml.tensor_to_u8_bytes`，走 tensor stream（UAV 抓图 → 车 detect）。
-- 展示：`pleiades-base/src/API/webui.rs`（WebSocket 广播，端口自动分配）+ `Tool/yolo_viewer.html`（画框 + 浏览器算 FPS）。
+- 展示：`pleiades-base/src/API/webui.rs`（WebSocket 广播；task_47 起端口由 `[detector].stream_port` 定、默认 `9010`，见 §8.7「画面流」）+ `Tool/yolo_viewer.html`（画框 + 连接状态，task_47 起不算 FPS）。
 
 ### 8.6 相机统一：常驻抓取 + 共享帧槽位（task_37 Step 1）
 
@@ -709,13 +710,35 @@ survey_seconds = 180
 
 ### 8.7 detector 设备（task_37 Step 2）
 
-- 位置：`pleiades-uav/src/device/detector/`、`pleiades-sim/src/sim/detector/`（两份**只差 4 处**：帧来源、`Frame` 别名、`FrameSource` 实现、`frame_ts` 语义）。uav 侧因允许清单不含 `device/mod.rs`，用 `#[path]` 从 `uav/robot_handler.rs` 声明（规范路径 `crate::uav::robot_handler::detector`）；sim 侧走 `sim/mod.rs` 的正规 `pub mod detector;`。
+- 位置：`pleiades-uav/src/device/detector/`、`pleiades-sim/src/sim/detector/`（两份**只差 4 处**：帧来源、`Frame` 别名、`FrameSource` 实现、`frame_ts` 语义）。uav 侧因允许清单不含 `device/mod.rs`，用 `#[path]` 从 `uav/robot_handler.rs` 声明（规范路径 `crate::uav::robot_handler::detector`）；sim 侧走 `sim/mod.rs` 的正规 `pub mod detector;`。（task_44 Step 7 起 ugv 也有第三份 `pleiades-ugv/src/device/detector/`：三份两两 `diff` 只剩**文件头注释 / 相机类型 / `FRAME_TS_SOURCE` / `flip_vertical`** 四类差异。）
 - 形态：`DetectorDevice::spawn(cfg, source, rs)` 起一个 tokio task → 每 100 ms 读一次相机帧槽位 → 新帧（`seq` 变了）才 `spawn_blocking` 跑推理 → **覆盖** `Mutex<Option<Detections>>`；对外只读 `latest_dets()` / `latest()` / `stats()`，`shutdown()` 只 `cancel()`（同步、可重复、不 `join`）。
 - 帧源：自定义 `FrameSource`（同步、非阻塞 `Latest_Frame()`），uav/sim 各实现**薄适配**到已有 `latest_frame()`（**不改相机**）。
 - 算法：**不迁移** base 的 `ML_Engine/Yolo`，直接 `Yolo_Detector::new(model_file, device)` / `detect(jpeg, conf, nms)`；权重 `<workspace_dir>/<model_file>`（文件名须为 `yolov8<size>.safetensors`），加载一次常驻；缺失只 `warn`，设备不启动。
-- `[detector]`：`enabled`（默认 false）/ `model` / `device` / `conf_thres` / `nms_thres`，uav 与 sim 键名一致；`enabled=false` → **零线程**（不 spawn、不读帧）。uav 侧首次启动会补全该段（`fill_detector`，缺才补）。
+- `[detector]`：`enabled`（默认 false）/ `model` / `device` / `conf_thres` / `nms_thres` / `stream` / `stream_port` / `stream_bind`（后三键 task_47，见下「画面流」），ugv / uav / sim 三端键名一致；`enabled=false` → **零线程**（不 spawn、不读帧）。ugv 与 uav 侧首次启动会补全该段（`fill_detector`，缺才补、幂等、不覆盖已有值），sim 无 `fill_detector`（配置由夹具生成）。
 - 边界：不进 `on_tick`、不写 `RobotState` / `ExecuteState`、不接树、不做定位与跟踪（Step 3/4）；观测只有每帧一行 `info`（`frame_ts` + 每条检测 `class_name conf bbox`）。
 
+
+#### 画面流（task_47）
+
+- **配置三键**（`[detector]` 段；ugv / uav / sim 键名一致，一律 `Option<T>` + 访问器 + 默认常量，**缺段 = 关闭**）：`stream` 默认 `false`、`stream_port` 默认 `9010`、`stream_bind` 默认 `"127.0.0.1"`。ugv / uav 的 `fill_detector` 会把三键补进已有 `[detector]` 段（缺才补、幂等、不覆盖已有值）；sim 无 `fill_detector`（配置由夹具生成，只吃默认值）。`stream_port = 0` ⇒ 交内核分配端口，用 `listener.local_addr()` 回填并打真实端口；`stream_bind` 非法或空串 ⇒ `warn` + 回退 `127.0.0.1`（device 口径：不 panic）。
+
+```toml
+[detector]
+enabled = true
+stream = true               # 画面流总开关（默认 false：连 bind 都不做）
+stream_port = 9010          # 默认 9010；0 = 由内核分配
+stream_bind = "127.0.0.1"   # 默认只本机；"0.0.0.0" 才让同网段看到画面
+```
+
+- **只有 detector `spawn` 成功才起服务**（口径 #3 / #4）：`DetectorDevice::spawn` 在引擎加载与 `Spawn_Tuned` 都成功之后才 `ensure_webui_server(addr).await`；起不来只 `warn`（`[detector] 画面流启动失败（推理照跑）：…`），**不向上返回 Err**，推理照跑。成功日志 `[detector] 画面流已开 ws://127.0.0.1:9010/ws`。`stream = false` ⇒ **不 bind、零线程**（不是"起了不推"）。服务在 base 侧是**进程内单例**（`OnceLock` + 启动锁）：同进程起第二份 detector 不会 bind 第二个端口，只 `warn` 后复用。
+
+- **消息格式不变**（口径 #7 / #8）：一条二进制消息 = 一帧，`[4B header_len LE][header JSON][JPEG 原始字节]`（header_len 是 **LE** 小端 4 字节；`pack_frame` 用 `(n as u32).to_le_bytes()`）。header = `{seq, frame_ts_ms, infer_ms, width, height, dets:[{class_name, conf, xmin, ymin, xmax, ymax}]}`（键名是 `conf`，Lua 路径的 `confidence` 不在这条链上；查看器只读 `dets[]` 这五个键，未知字段自动忽略）。`xmin/ymin/xmax/ymax` 是**原图像素坐标**；服务端**不画框**（口径 #11）、不缩放不重编（口径 #12）。推的 JPEG 就是送进 `Detect` 的那一份（ugv `flip_vertical = true` 时是翻转后的局部 `jpeg`，口径 #10）。
+
+- **每帧都推**（口径 #9 / #18）：每完成一次推理就推一帧，`dets` 为空也照发（没有 `only_dets` 之类开关，也没有心跳；"有帧到达"本身就说明链路活着）。代价是**带宽恒定**：1280×720 JPEG q80 ≈ 100–200 KB/帧，10 Hz ≈ 1–2 MB/s/节点，**画面里没人也照占**；4 车同看 ≈ 32–64 Mbps，WiFi 上会开始丢帧（丢帧安全，只是花屏）。广播 `broadcast::channel(16)`，消费侧 `Lagged → continue`（慢客户端丢帧，**不反压**推理）。
+
+- **推送失败不影响推理**（口径 #14）：`publish_detection(jpeg, width, height, seq, frame_ts_ms, infer_ms, dets)` **同步、非阻塞、返回 `()`、不 `await`**；服务未启动 / 无订阅者 ⇒ 静默丢弃（`let _ = tx.send(...)`）。detector 循环里只有 `if stream { publish_detection(...) }` 一处，返回值从不检查，所以推送永远不会改变推理行为。
+
+- **查看器**（`Tool/yolo_viewer.html`，task_47 起**不含任何帧率**）：填 IP + 端口（端口框默认 `9010`）→ `ws://<ip>:<port>/ws`；面板头右侧只显示连接状态 `连接中… / 已连接 / 连接失败 / 断开`。多面板 = 多节点（一个节点一个端口，查看器自己开面板）；广播不重放，新连接要等**下一帧**（约 100 ms~1 s）才出画面。已知限制：无鉴权（`stream_bind = "0.0.0.0"` 时同网段可看）、header 不带位姿。
 
 ### 8.8 位置估计：像素 → 世界 (x,y)（task_37 Step 3）
 
@@ -1125,3 +1148,5 @@ robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Requ
 | `state_notifier` | 100 ms | 位姿广播周期 |
 | `slam_task` | 200 ms（节流 1s） | 建图 + 增量广播周期 |
 | mDNS `query_interval` / `ttl` | 20s / 60s | 局域网发现调参（Task 19） |
+| `[detector].stream_port` | 9010（默认；`0` = 内核分配） | detector 画面流 WS 端口（task_47；`DEFAULT_DETECTOR_STREAM_PORT`，三端 config 各写各的，**不自动挑端口**） |
+| `[detector].stream_bind` | `"127.0.0.1"`（默认） | detector 画面流绑定地址（task_47；`DEFAULT_DETECTOR_STREAM_BIND`；非法值 warn + 回退本机；写 `"0.0.0.0"` 才让同网段可看） |

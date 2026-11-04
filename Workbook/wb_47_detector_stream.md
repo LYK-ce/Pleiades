@@ -34,3 +34,11 @@
 - 结果：PASS
 - 提交：ok 7868a34
 - 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（620 行），源码零改动（`git diff` 为空，与 `tmp/task47/git_baseline.txt` 一致）。 **计划摘要（200 字内）**：改 6 文件（三份 config.rs + 三份 detector/mod.rs）。config 加 3 常量/字段/访问器，ugv/uav `fill_detector` 补 3 键，修 sim `:680` 穷举字面量；detector 加 `Parse_Stream_Addr`（非法回退本机）与 `to_stream_dets`（类名搬指针），spawn 在 `Spawn_Tuned` 成功后才起流（失败只 warn），`Loop_Ctx.stream`，`jpeg` 统一 `Arc<[u8]>`（ugv 翻转分支 `Arc::from`），快照写入后用预存 `stream_dets` 推帧（无 `is_empty`、不 await）。4 个新用例覆盖映射、0 框仍推、`stream=false` 零 bind，`PUBLISH_LOCK` 串行防全局计数污染，不起真 WS。check 0 error、警告不超基线、`--bins detector` 全绿、两两 diff 只剩文件头/别名/`FRAME_TS_SOURCE`/`flip_vertical`。
+
+## Step 4 — 前端：yolo_viewer 去掉 FPS（task_47 首轮）
+- 起止：2026-11-04 11:07:03Z → 2026-11-04 11:16:33Z
+- 范围：Tool/yolo_viewer.html（只删 FPS + 加连接状态）
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok bd3e037
+- 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（319 行），源码零改动（`git status` 仍只有基线里的 workbook 与 `Tool/investigation/`）。 **计划摘要（约 175 字）** 只改 `Tool/yolo_viewer.html`（119→100 行，+9−28，10 hunk）。删 `.fps` CSS、总 FPS 文本、两计数器、`last`、计数两行、差分 FPS、整块 `setInterval`；`:44` 改 `class="status" id="st${idx}"` 初值「连接中…」，`:53` 取 `stEl`，`:60-62` 写 已连接/连接失败/断开（保留 `socks[idx]===ws` 守卫）；文件头加 3 行。拆包画框零改动、端口 9010 不变。已在 `tmp/task47/preview_yolo_viewer.html` 预演：fps grep 0 命中、`<script>` 1、`node --check` 通过、100 行、10 hunk。15 条静态判据，不跑 cargo/浏览器。 配套产物：`tmp/task47/preview_yolo_viewer.html`（已逐字节验证的目标文件，可 `cp` 落地）、`tmp/task47/make_preview_step4.py`（生成脚本，含行号断言）。计划里另登记了 Step 5 必改项：`Architecture/robot_arch.md:700` 仍写「浏览器算 FPS」——本步不得动。
