@@ -13,6 +13,4 @@ pub mod server;
 pub mod webui;
 
 pub use server::spawn_api_server;
-pub use webui::{
-    ensure_webui_server, publish_detection, spawn_webui_server, webui_publish, StreamDet,
-};
+pub use webui::{ensure_webui_server, publish_detection, webui_publish, StreamDet};

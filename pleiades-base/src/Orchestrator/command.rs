@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-04-29
+//Created Date ： 2026-04-29
+//Modified Date ： 2026-11-04
 
 use super::job::JobId;
 use tokio::sync::oneshot;
@@ -66,10 +67,6 @@ pub enum UserCommand {
     },
     /// 启动 OpenAI 兼容 API Server，绑定到指定 Session
     Api { session_id: u64 },
-    /// 启动 WebSocket 展示服务（YOLO 检测结果 → 浏览器画框）
-    ///
-    /// `port` 为 None 时用默认端口 9010。
-    Webui { port: Option<u16> },
     /// 在远程节点执行 Lua 脚本
     ///
     /// `peer` 为目标节点名称（通过 PeerManager 解析为 PeerId），

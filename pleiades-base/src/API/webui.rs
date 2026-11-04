@@ -26,8 +26,6 @@ use axum::{
 };
 use tokio::sync::broadcast;
 
-use super::server::find_available_port;
-
 /// 全局广播通道（服务未启动时为 None，发布口静默丢弃）
 static FRAME_TX: OnceLock<broadcast::Sender<Vec<u8>>> = OnceLock::new();
 
@@ -88,17 +86,6 @@ pub async fn ensure_webui_server(bind: SocketAddr) -> Result<u16, String> {
 
     let _ = SERVER.set(local);
     Ok(local.port())
-}
-
-/// 旧入口（TUI `webui [port]` 仍在用），内部转 `ensure_webui_server`。
-///
-/// `None` = 从 9010 起找可用端口，绑 `0.0.0.0`。
-pub async fn spawn_webui_server(port: Option<u16>) -> Result<u16, String> {
-    let port = match port {
-        Some(p) => p,
-        None => find_available_port(9010)?,
-    };
-    ensure_webui_server(SocketAddr::from(([0, 0, 0, 0], port))).await
 }
 
 /// 组 header JSON（纯函数，便于单测）。`dets[]` 键名与 `Tool/yolo_viewer.html` 一致。
