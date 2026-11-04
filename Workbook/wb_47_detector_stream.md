@@ -42,3 +42,50 @@
 - 结果：PASS
 - 提交：ok bd3e037
 - 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（319 行），源码零改动（`git status` 仍只有基线里的 workbook 与 `Tool/investigation/`）。 **计划摘要（约 175 字）** 只改 `Tool/yolo_viewer.html`（119→100 行，+9−28，10 hunk）。删 `.fps` CSS、总 FPS 文本、两计数器、`last`、计数两行、差分 FPS、整块 `setInterval`；`:44` 改 `class="status" id="st${idx}"` 初值「连接中…」，`:53` 取 `stEl`，`:60-62` 写 已连接/连接失败/断开（保留 `socks[idx]===ws` 守卫）；文件头加 3 行。拆包画框零改动、端口 9010 不变。已在 `tmp/task47/preview_yolo_viewer.html` 预演：fps grep 0 命中、`<script>` 1、`node --check` 通过、100 行、10 hunk。15 条静态判据，不跑 cargo/浏览器。 配套产物：`tmp/task47/preview_yolo_viewer.html`（已逐字节验证的目标文件，可 `cp` 落地）、`tmp/task47/make_preview_step4.py`（生成脚本，含行号断言）。计划里另登记了 Step 5 必改项：`Architecture/robot_arch.md:700` 仍写「浏览器算 FPS」——本步不得动。
+
+## Step 5 — 文档 + 全仓静态终检（task_47 首轮）
+- 起止：2026-11-04 11:16:33Z → 2026-11-04 11:28:43Z
+- 范围：Architecture/robot_arch.md 的 detector 节 + 跨 crate 静态核对
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 916dd0f
+- 规划要点：计划已写入 `tmp/task47/plan.md`（433 行）；全程只读源码、未改任何仓内文件（`git status` 仍只有进场时的 workbook 与 `Tool/investigation/`）。 **计划摘要（200 字内）** 只改 `Architecture/robot_arch.md`，6 处编辑：文件头更新日期 2026-11-04（旧的降为上一版/更早）、`:700` 去掉「端口自动分配 + 浏览器算 FPS」、`:712` 补 ugv 第三份 detector、`:716` 补三新键与 `fill_detector` 归属、`:717` 后新增「#### 画面流（task_47）」6 条要点 + toml 示例（三键默认值、仅 spawn 成功才起服务/`stream=false` 零 bind 零线程、`[4B LE][JSON][JPEG]` 与 header 六字段、每帧都推与 100–200KB@10Hz 带宽、静默丢弃不影响推理、查看器无 FPS 只显示连接状态）、常量速查表尾补 `stream_port` 9010 / `stream_bind` 127.0.0.1。终检 8 项只读：4 条 cargo check（base 仅 `--lib`）、4 条测试（base `--lib webui`、设备 `--bins detector`）、publish_detection 恰 5 文件、TUI webui 0 命中、viewer fps 0 命中、三份 detector diff 13/13/6 hunk 归四类、保护路径 `git diff --stat 16df4a5` 空、ugv/uav 无 axum/serde_json；问题只记 impl.md。上轮 issues：(无)，首轮。
+
+## Step 6 — 邮件通知（引擎执行）（task_47 首轮）
+- 起止：2026-11-04 11:28:43Z → 2026-11-04 11:28:45Z
+- 结果：邮件已发送
+- 摘要：状态 ALL_STEPS_DONE；无失败步
+
+## 引擎结束
+- 结束时间：2026-11-04 11:28:45Z
+- 状态：ALL_STEPS_DONE
+- 需人类亲验：浏览器 + 带相机的 detector 节点（画面持续刷新 / 框正确 / 无 FPS / 连接状态）
+- 邮件：已发送
+- git status（结束时）：
+```
+M Workbook/wb_47_detector_stream.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
+
+## 主 agent 独立复核（2026-11-04，引擎结束后）
+
+### 编译 / 测试（亲自跑，不采信评审转述）
+- `cargo check -p pleiades-base --lib` + 三个设备 crate `--all-targets` → **全部 0 error**（exit 0）。
+- 新增测试全绿：`base --lib webui` 4 passed；`ugv --bins stream` 4 passed；`uav --bins stream` 10 passed；`sim --bins stream` 3 passed。
+- **存量红（非本任务引入，未修）**：`cargo test -p pleiades-ugv --bins detector` → `test_ensure_ugv_section_fills_detector_camera`（断言 `mount_z = 0.045` 与 `Some(0.135)` 自相矛盾，`config.rs:834`）与 `projection::tests::test_from_config_defaults_and_illegal`（`projection.rs:633`）。已在 `16df4a5` 版本核对：两处断言当时就在，`git diff 16df4a5..HEAD` 未触碰这两行 → 属全项目梳理里记的「ugv detector 默认值」组存量问题，本任务按口径不修。
+
+### 关键实现抽查
+- `publish_detection` 只在 5 个文件出现（base webui/mod + 三份 detector），device crate 无 axum/serde_json。
+- 循环里 `if stream { publish_detection(&jpeg, ...) }`，**无 `!dets.is_empty()`**；ugv 用翻转后的局部 `jpeg`。
+- `ensure_webui_server`：`ENSURE_LOCK` 串行 + `OnceLock<SocketAddr>`；已启动返回原端口；`port=0` 用 `local_addr()` 回填；bind 成功后才建广播通道。
+- `Parse_Stream_Addr`：空串 / 非法 → `warn` + `127.0.0.1`。
+- `Tool/yolo_viewer.html`：`grep -in 'fps\|totalFrames\|totalStart'` **0 命中**；状态文本四态齐；拆包/画框未动。
+- `grep -rn 'UserCommand::Webui\|spawn_webui_server' pleiades-base/src` **0 命中**。
+
+### 已知偏差（不影响功能）
+- 评审称 Step 3「`--bins detector` 全绿」不准确：实际含 2 条上述存量红（filter 把 config/projection 用例也匹配进来了）。
+- detector 循环里注释编号出现 ⑦→⑥→⑦ 的顺序错位（纯注释）。
+
+### 待人类
+浏览器 + 带相机的 detector 节点验收（画面持续刷新 / 框正确 / 框消失后仍在动 / 无 FPS / 连接状态）。
