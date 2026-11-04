@@ -1,5 +1,6 @@
 //Presented by KeJi
-//Date ： 2026-05-27
+//Created Date ： 2026-05-27
+//Modified Date ： 2026-11-04
 
 //! OpenAI 兼容 HTTP API 模块
 //!
@@ -12,4 +13,6 @@ pub mod server;
 pub mod webui;
 
 pub use server::spawn_api_server;
-pub use webui::{spawn_webui_server, webui_publish};
+pub use webui::{
+    ensure_webui_server, publish_detection, spawn_webui_server, webui_publish, StreamDet,
+};
