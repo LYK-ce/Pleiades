@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-28
-//Modified Date ： 2026-10-28
+//Modified Date ： 2026-11-04
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -46,6 +46,7 @@
 //! 两者最多差一拍。按 `tmp/task37/prev_issues.md` 的约定，**不为此改 chassis / pose_ingest**
 //! （sim 侧已有 `PoseHistory`，留给 Step 4 再做帧时刻对齐）。
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -55,6 +56,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use pleiades_base::api::{ensure_webui_server, publish_detection, StreamDet};
 use pleiades_base::config::Ensure_Config;
 use pleiades_base::ml_engine::yolo::Yolo_Detector;
 use pleiades_base::robot::core::state::RobotState;
@@ -254,6 +256,8 @@ struct Loop_Ctx {
     poll_ms: u64,
     /// 位置估计器（`[detector.camera]` 解析结果；mount 基向量在 spawn 时算好）
     projector: projection::Projector,
+    /// 检测流开关（`[detector].stream`）：true = **每帧推理结果都推**（口径 #9；0 框也推）
+    stream: bool,
 }
 
 /// detector 设备（`Send + Sync`，可整份塞进 `Option<Arc<...>>`）
@@ -293,7 +297,20 @@ impl DetectorDevice {
         })
         .await
         .map_err(|e| format!("推理引擎加载 task 异常结束: {e}"))??;
-        Self::Spawn_Tuned(cfg, source, robot_state, engine, POLL_INTERVAL_MS)
+        // 口径 #2/#6：`cfg` 马上被 move 进 `Spawn_Tuned`，先把流参数取出来
+        let stream = cfg.Stream();
+        let stream_bind = cfg.Stream_Bind().to_string();
+        let stream_port = cfg.Stream_Port();
+        let device = Self::Spawn_Tuned(cfg, source, robot_state, engine, POLL_INTERVAL_MS)?;
+        // 口径 #3：只有 spawn 成功之后才起服务；起不来只 warn，**绝不向上返回 Err**
+        if stream {
+            let addr = Parse_Stream_Addr(&stream_bind, stream_port);
+            match ensure_webui_server(addr).await {
+                Ok(p) => info!("[detector] 画面流已开 ws://{}:{p}/ws", addr.ip()),
+                Err(e) => warn!("[detector] 画面流启动失败（推理照跑）：{e}"),
+            }
+        }
+        Ok(device)
     }
 
     /// 内部构造口：引擎已就绪、轮询间隔可指定（生产走 [`POLL_INTERVAL_MS`]，单测走 5 ms）
@@ -352,6 +369,7 @@ impl DetectorDevice {
             nms: device.nms,
             poll_ms,
             projector,
+            stream: cfg.Stream(),
         }));
         Ok(device)
     }
@@ -398,10 +416,48 @@ impl DetectorDevice {
     }
 }
 
+/// `[detector].stream_bind` + `stream_port` → `SocketAddr`。
+///
+/// 口径 #6：非法 IP → `warn` + 回退 `127.0.0.1`（**不 panic**）；空串是缺省值，静默回退。
+/// 端口原样保留（0 = 交内核分配，口径 #5）。
+fn Parse_Stream_Addr(bind: &str, port: u16) -> SocketAddr {
+    let raw = bind.trim();
+    let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    if raw.is_empty() {
+        return loopback;
+    }
+    match raw.parse::<IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port),
+        Err(_) => {
+            warn!("[detector] stream_bind=\"{raw}\" 不是合法 IP：回退 127.0.0.1:{port}（推理照跑）");
+            loopback
+        }
+    }
+}
+
+/// `Detection` → `StreamDet` 的**纯映射**（已定口径 #10/#11：只发坐标 + 类名，服务端不画框）。
+///
+/// `class_name` 是 `&'static str`（`coco_names` 本身就是 `'static`）⇒ **不复制字符串**，只搬指针；
+/// 顺序与 `dets` 一致。空输入 → 空 `Vec`（**跳不跳过由调用方决定**，这里不得过滤）。
+fn to_stream_dets(dets: &[Detection]) -> Vec<StreamDet> {
+    dets.iter()
+        .map(|d| StreamDet {
+            class_name: d.class_name,
+            conf: d.conf,
+            xmin: d.xmin,
+            ymin: d.ymin,
+            xmax: d.xmax,
+            ymax: d.ymax,
+        })
+        .collect()
+}
+
 /// 推理循环：看一眼槽位 → 有新帧就 `spawn_blocking` 推理 → 覆盖结果 + 打一行日志
 async fn Run_Loop(ctx: Loop_Ctx) {
-    let Loop_Ctx { source, robot_state, engine, latest, counters, cancel, conf, nms, poll_ms, projector } =
-        ctx;
+    let Loop_Ctx {
+        source, robot_state, engine, latest, counters, cancel, conf, nms, poll_ms, projector,
+        stream,
+    } = ctx;
     // 上一帧的槽位帧号：同一帧不重复推理（相机 10 Hz、推理可能更慢，靠这条去重）
     let mut last_seq: Option<u64> = None;
     // 无帧 warn 的限流（`Instant` 单调，系统时钟回拨不影响）
@@ -431,11 +487,12 @@ async fn Run_Loop(ctx: Loop_Ctx) {
         counters.frames_seen.fetch_add(1, Ordering::Relaxed);
 
         // ② 推理：candle 的 CPU 计算是纯同步阻塞 → 必须逃出 tokio 的协作调度
-        let jpeg = frame.jpeg.clone();
+        let jpeg = frame.jpeg.clone(); // Arc<[u8]>：O(1)
+        let jpeg_for_infer = jpeg.clone(); // 同一份字节的第二个引用，推帧用原引用
         let engine_for_task = engine.clone();
         let started = Instant::now();
         let outcome =
-            tokio::task::spawn_blocking(move || engine_for_task.Detect(jpeg.as_ref(), conf, nms)).await;
+            tokio::task::spawn_blocking(move || engine_for_task.Detect(jpeg_for_infer.as_ref(), conf, nms)).await;
         let infer_ms = started.elapsed().as_millis() as u64;
         let dets = match outcome {
             Ok(Ok(dets)) => dets,
@@ -561,6 +618,10 @@ async fn Run_Loop(ctx: Loop_Ctx) {
         }
         info!("{line}");
 
+        // ⑦ 画面流（口径 #9）：先按纯函数组好「本帧的框」——
+        //    ⑥ 会把 `dets` move 进 `Snapshot`，所以在这里算，之后（快照写入后）再推。
+        let stream_dets: Vec<StreamDet> = if stream { to_stream_dets(&dets) } else { Vec::new() };
+
         // ⑥ 覆盖结果（**只有这一个写者**）：检测框与世界坐标目标同一次覆盖
         counters.frames_inferred.fetch_add(1, Ordering::Relaxed);
         counters.dets.fetch_add(dets.len() as u64, Ordering::Relaxed);
@@ -570,6 +631,21 @@ async fn Run_Loop(ctx: Loop_Ctx) {
             dets: Detections { frame_ts_ms: ts, frame_seq: frame.seq, infer_ms, dets },
             targets,
         });
+
+        // ⑦ 推一帧（口径 #9/#14）：**每帧都推**（`stream_dets` 为空也推）；
+        //    同步、非阻塞、返回 `()`、**不 await**；服务没起 / 没人看 = 静默丢弃，绝不影响推理。
+        //    图是**送进 `Detect` 的那一份**（`jpeg`，ugv 翻转时就是翻转后的图，口径 #10）。
+        if stream {
+            publish_detection(
+                jpeg.as_ref(),
+                frame.width,
+                frame.height,
+                frame.seq,
+                frame.captured_at_ms,
+                infer_ms,
+                &stream_dets,
+            );
+        }
     }
 
     info!("[detector] 推理 task 已停（cancel）");
@@ -586,6 +662,8 @@ fn Lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use pleiades_base::api::webui::{is_server_started, publish_count};
 
     // ---------------- 假件（不碰模型、不碰配置、零 I/O）
 
@@ -936,5 +1014,159 @@ mod tests {
         assert_eq!(device.latest_dets().len(), 1, "框必须照旧输出（Step 2 判据不回归）");
         assert!(device.latest_targets().is_empty(), "上半部的框必须被拒答，不得写目标");
         device.shutdown();
+    }
+
+    // ---------------- 画面流（task_47 Step 3，口径 #9/#10/#14）
+
+    /// 推帧计数的串行锁：`publish_count()` 是 base 的**进程级**全局量，②③ 必须串行
+    static PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 可运行时投喂的假帧源（`Fake_Source` 是预置表，喂不了「第二帧」）
+    struct Feed_Source {
+        queued: Mutex<Vec<Frame>>,
+        last: Mutex<Option<Frame>>,
+    }
+
+    impl Feed_Source {
+        fn New() -> Arc<Self> {
+            Arc::new(Self { queued: Mutex::new(Vec::new()), last: Mutex::new(None) })
+        }
+
+        /// 投喂一帧：推理循环下一次轮询取走；取走之后反复返回同一帧（同一 `seq` 不重复推理）
+        fn Push(&self, frame: Frame) {
+            Lock(&self.queued).push(frame);
+        }
+    }
+
+    impl FrameSource for Feed_Source {
+        fn Latest_Frame(&self) -> Option<Frame> {
+            let mut queued = Lock(&self.queued);
+            if !queued.is_empty() {
+                let frame = queued.remove(0);
+                *Lock(&self.last) = Some(frame.clone());
+                return Some(frame);
+            }
+            Lock(&self.last).clone()
+        }
+    }
+
+    /// 等 base 的推帧计数涨到 `want`（最多 ~2 s；不用 unwrap/expect，只 assert）
+    async fn Wait_For_Publish(want: u64, why: &str) {
+        for _ in 0..1_000 {
+            if publish_count() >= want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(publish_count() >= want, "等待超时：{why}");
+    }
+
+    /// 判据①：`to_stream_dets` 的字段映射与顺序（`class_name` 是 `&'static str`，**不复制字符串**）
+    #[test]
+    fn test_to_stream_dets_maps_fields_in_order() {
+        let dets = vec![
+            Det_Of("person", 0.87, 10.0, 20.0, 30.0, 40.0),
+            Det_Of("dog", 0.42, 1.0, 2.0, 3.0, 4.0),
+        ];
+        let stream = to_stream_dets(&dets);
+        assert_eq!(stream.len(), 2, "一框一条，不多不少");
+        assert_eq!(stream[0].class_name, "person", "顺序必须与 dets 一致");
+        assert_eq!(stream[1].class_name, "dog", "顺序必须与 dets 一致");
+        assert_eq!(
+            (stream[0].conf, stream[0].xmin, stream[0].ymin, stream[0].xmax, stream[0].ymax),
+            (0.87, 10.0, 20.0, 30.0, 40.0)
+        );
+        assert_eq!(
+            stream[0].class_name.as_ptr(),
+            dets[0].class_name.as_ptr(),
+            "`&'static str` 只搬指针，不得复制字符串"
+        );
+        assert!(to_stream_dets(&[]).is_empty(), "空输入 → 空输出（跳不跳过由调用方决定）");
+    }
+
+    /// 判据②（口径 #9）：**每帧都推**——2 个框推 1 次，**再喂一帧 0 个框仍推 1 次**
+    #[tokio::test]
+    async fn test_every_frame_published_even_without_dets() {
+        let _serial = PUBLISH_LOCK.lock().await; // 与判据③ 串行（全局计数）
+        let before = publish_count();
+        let source = Feed_Source::New();
+        let engine = Arc::new(Fake_Engine::default());
+        let cfg =
+            DetectorConfig { enabled: Some(true), stream: Some(true), ..DetectorConfig::default() };
+        assert!(cfg.Stream(), "本用例必须开着 stream");
+        let device = match DetectorDevice::Spawn_Tuned(
+            cfg,
+            source.clone(),
+            Robot_State_For_Test(),
+            engine.clone(),
+            5,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                assert!(false, "Spawn_Tuned 应成功：{e}");
+                return;
+            }
+        };
+
+        // 第一帧：假引擎对首字节 `b'B'` 给 person + dog（2 个框）
+        source.Push(Frame_Of(b'B', 1, 1_000));
+        Wait_For_Publish(before + 1, "第一帧（2 个框）要推一次").await;
+        assert_eq!(device.latest_dets().len(), 2, "这一帧确实是 2 个框");
+        assert_eq!(to_stream_dets(&device.latest_dets()).len(), 2, "推出去的 dets 也是 2 条");
+
+        // 第二帧：首字节 `b'C'` → 0 个框；**仍要推**（不得加 `!dets.is_empty()` 之类的跳过）
+        source.Push(Frame_Of(b'C', 2, 2_000));
+        Wait_For_Publish(before + 2, "0 框帧也必须推一次（口径 #9）").await;
+        assert!(device.latest_dets().is_empty(), "这一帧确实没有框");
+        tokio::time::sleep(Duration::from_millis(40)).await; // 同一 seq 不重复推
+        assert_eq!(publish_count(), before + 2, "两帧共推 2 次，多一次都算错");
+        device.shutdown();
+    }
+
+    /// 判据③（口径 #4）：`stream = false` → **不 bind、不推帧**（计数与 server 状态都不变）
+    #[tokio::test]
+    async fn test_stream_false_publishes_nothing() {
+        let _serial = PUBLISH_LOCK.lock().await; // 与判据② 串行（全局计数）
+        let before = publish_count();
+        let cfg = Enabled_Cfg();
+        assert!(!cfg.Stream(), "[detector].stream 缺省必须是 false");
+        let source = Fake_Source::New(vec![Frame_Of(b'B', 1, 1_000)]); // 有框也不许推
+        let engine = Arc::new(Fake_Engine::default());
+        let device = match DetectorDevice::Spawn_Tuned(
+            cfg,
+            source,
+            Robot_State_For_Test(),
+            engine.clone(),
+            5,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                assert!(false, "Spawn_Tuned 应成功：{e}");
+                return;
+            }
+        };
+        Wait_For(&engine.calls, 1, "一帧要推理").await;
+        tokio::time::sleep(Duration::from_millis(40)).await; // 给循环足够机会去「乱推」
+        assert_eq!(publish_count(), before, "stream=false 不得推任何帧");
+        assert!(!is_server_started(), "stream=false 不得启动 WS 服务（零 bind，口径 #4）");
+        device.shutdown();
+    }
+
+    /// 口径 #6：`stream_bind` 非法 / 空串 → 回退 `127.0.0.1`（不 panic），端口原样（0 交内核）
+    #[test]
+    fn test_parse_stream_addr_falls_back() {
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9010);
+        assert_eq!(
+            Parse_Stream_Addr("127.0.0.1", 9010),
+            loopback,
+            "合法 IP 必须原样保留（端口不动）"
+        );
+        assert_eq!(
+            Parse_Stream_Addr("0.0.0.0", 0),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            "0 端口必须原样交给内核分配"
+        );
+        assert_eq!(Parse_Stream_Addr("not-an-ip", 9010), loopback, "非法值必须回退 127.0.0.1");
+        assert_eq!(Parse_Stream_Addr("   ", 9010), loopback, "空白必须回退 127.0.0.1");
     }
 }

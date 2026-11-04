@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-04
 
 #![allow(non_snake_case)]
 
@@ -54,6 +54,12 @@ pub const DEFAULT_DETECTOR_DEVICE: &str = "cpu";
 pub const DEFAULT_DETECTOR_CONF_THRES: f32 = 0.35;
 /// `[detector].nms_thres` 的默认值（NMS IoU 阈值）
 pub const DEFAULT_DETECTOR_NMS_THRES: f32 = 0.45;
+/// `[detector].stream` 的默认值：**默认关**（关 = 连 bind 都不做，零线程）
+pub const DEFAULT_DETECTOR_STREAM: bool = false;
+/// `[detector].stream_port` 的默认值（各节点自己配；0 = 由内核分配端口）
+pub const DEFAULT_DETECTOR_STREAM_PORT: u16 = 9010;
+/// `[detector].stream_bind` 的默认值（只本机可看；想让别的机器看写 `"0.0.0.0"`）
+pub const DEFAULT_DETECTOR_STREAM_BIND: &str = "127.0.0.1";
 
 // ============================================================ [detector.camera]（task_37 Step 3）
 
@@ -84,6 +90,12 @@ pub struct DetectorConfig {
     pub device: Option<String>,
     pub conf_thres: Option<f32>,
     pub nms_thres: Option<f32>,
+    /// 检测流：true = detector 起来后自动开 WS（false = 连 bind 都不做）
+    pub stream: Option<bool>,
+    /// 检测流端口（各节点自己配；0 = 内核分配）
+    pub stream_port: Option<u16>,
+    /// 检测流绑定地址（默认只本机；想让别的机器看写 "0.0.0.0"）
+    pub stream_bind: Option<String>,
     /// `[detector.camera]` 子表（task_37 Step 3，§四.4）；缺段 = None = 全用默认值
     pub camera: Option<DetectorCameraConfig>,
 }
@@ -124,6 +136,25 @@ impl DetectorConfig {
         self.nms_thres
             .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
             .unwrap_or(DEFAULT_DETECTOR_NMS_THRES)
+    }
+
+    /// 检测流开关（缺省 **false**：不 bind、零线程）
+    pub fn Stream(&self) -> bool {
+        self.stream.unwrap_or(DEFAULT_DETECTOR_STREAM)
+    }
+
+    /// 检测流端口（缺省 9010；0 = 让内核分配，日志打回填后的真实端口）
+    pub fn Stream_Port(&self) -> u16 {
+        self.stream_port.unwrap_or(DEFAULT_DETECTOR_STREAM_PORT)
+    }
+
+    /// 检测流绑定地址（去空白；空串 → 默认 `127.0.0.1`；非法 IP 由 detector 侧 `warn` + 回退）
+    pub fn Stream_Bind(&self) -> &str {
+        self.stream_bind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_STREAM_BIND)
     }
 }
 
@@ -656,6 +687,10 @@ conf_thres = 0.5
         assert_eq!(d.Device(), "cuda:1");
         assert_eq!(d.Conf_Thres(), 0.5);
         assert_eq!(d.Nms_Thres(), DEFAULT_DETECTOR_NMS_THRES, "缺失的 nms_thres 回默认");
+        // task_47 Step 3：检测流三键（sim 无 fill_detector，配置由夹具生成，只验默认值）
+        assert!(!d.Stream(), "stream 缺省 false（不 bind、零线程）");
+        assert_eq!(d.Stream_Port(), DEFAULT_DETECTOR_STREAM_PORT);
+        assert_eq!(d.Stream_Bind(), DEFAULT_DETECTOR_STREAM_BIND);
 
         // 常量与 §三.4 的示例值一致
         assert_eq!(DEFAULT_DETECTOR_MODEL, "yolov8n.safetensors");
@@ -683,6 +718,10 @@ conf_thres = 0.5
             device: Some(String::new()),
             conf_thres: Some(2.0),
             nms_thres: Some(f32::NAN),
+            // task_47 Step 3：新增 3 个字段（穷举字面量必须补）
+            stream: None,
+            stream_port: None,
+            stream_bind: None,
             camera: None, // task_37 Step 3：新增字段（穷举字面量必须补）
         };
         assert_eq!(bad.Model(), DEFAULT_DETECTOR_MODEL, "空白 model 回默认");

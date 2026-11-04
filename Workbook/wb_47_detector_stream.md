@@ -18,3 +18,11 @@
 - 结果：PASS
 - 提交：ok 2d570c9
 - 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（294 行）。源码未改，git diff 为空，与基线一致。 **计划摘要（200 字内）** Step 1 只动两个文件。`API/webui.rs`：新增 `StreamDet`（7 字段，`&'static str` class_name）；拆 `build_header_json`、`pack_frame`（`[4B LE][JSON][JPEG]`）两个纯函数，`webui_publish` 改为复用 `pack_frame`（Lua 契约不变）；`publish_detection` 同步返回 `()`、`let _ = tx.send`、每帧都推、计数先行；`ensure_webui_server(SocketAddr)` 用 `ENSURE_LOCK` 串行 + `OnceLock<SocketAddr>` 缓存，bind 成功后才建广播通道并回填 `local_addr` 端口；`spawn_webui_server(Option<u16>)` 留 3 行薄包装供 `branch_user.rs:514` 编译。另加 `#[doc(hidden)] publish_count/is_server_started`（必须恒编译，下游测试才可见）。`mod.rs:15` 换 re-export。4 个单测覆盖 LE 布局、header 键名（`conf` 而非 Lua 的 `confidence`，查看器不读、口径 #7 成立）、幂等同端口、未启动不 panic。验收：`--lib` check 0 error/0 warning、`--lib webui` 4 passed、`git diff --name-only` 仅两文件。
+
+## Step 2 — base：移除 TUI webui 命令（task_47 首轮）
+- 起止：2026-11-04 10:43:22Z → 2026-11-04 10:51:26Z
+- 范围：TUI 命令解析 + UserCommand + Core 分支 + Step 1 的临时包装
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok a022158
+- 规划要点：计划已写入 [plan.md](tmp/task47/plan.md)（334 行，源码零改动，`git diff` 仍只有 workbook）。 **计划摘要**：涉及 5 个文件，删除 TUI `:561-574` 的解析块、`command.rs:69-72` 的 `Webui` 变体、`branch_user.rs:508-529` 的分支（保留 `:505-507` 的横幅）以及 `webui.rs` 中 `spawn_webui_server` 包装和 `L29` 的 `import`，并把 `mod.rs` 的 re-export 合并为一行。一次改完再编译：`--lib` 0 error、warning 行数不超过 25、三串 grep 均 0 命中、`webui` 只剩服务本体和 `caps` 注册链（4 个文件、21 行，`register_webui_caps` 按 #15 保留）；`--all-targets` 按 `step.md` 改用 `--lib`。

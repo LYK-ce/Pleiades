@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-08-30
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-04
 
 //! UGV（车）设备配置（Task 23 C0：设备段从 base 拆出，`#[serde(flatten)]` 复用共享段）
 //!
@@ -56,6 +56,13 @@ pub const DEFAULT_DETECTOR_CONF_THRES: f32 = 0.35;
 /// `[detector].nms_thres` 的默认值（NMS IoU 阈值）
 pub const DEFAULT_DETECTOR_NMS_THRES: f32 = 0.45;
 
+/// `[detector].stream` 的默认值：**默认关**（关 = 连 bind 都不做，零线程）
+pub const DEFAULT_DETECTOR_STREAM: bool = false;
+/// `[detector].stream_port` 的默认值（各节点自己配；0 = 由内核分配端口）
+pub const DEFAULT_DETECTOR_STREAM_PORT: u16 = 9010;
+/// `[detector].stream_bind` 的默认值（只本机可看；想让别的机器看写 `"0.0.0.0"`）
+pub const DEFAULT_DETECTOR_STREAM_BIND: &str = "127.0.0.1";
+
 /// `[detector].flip_vertical` 的默认值（false = 不翻转，行为与原版一致）
 pub const DEFAULT_DETECTOR_FLIP_VERTICAL: bool = false;
 
@@ -93,6 +100,12 @@ pub struct DetectorConfig {
     pub device: Option<String>,
     pub conf_thres: Option<f32>,
     pub nms_thres: Option<f32>,
+    /// 检测流：true = detector 起来后自动开 WS（false = 连 bind 都不做）
+    pub stream: Option<bool>,
+    /// 检测流端口（各节点自己配；0 = 内核分配）
+    pub stream_port: Option<u16>,
+    /// 检测流绑定地址（默认只本机；想让别的机器看写 "0.0.0.0"）
+    pub stream_bind: Option<String>,
     /// 画面上下颠倒时置 true：推理前把图像垂直翻转一次（相机装反用）
     pub flip_vertical: Option<bool>,
     /// `[detector.camera]` 子表（task_37 Step 3，§四.4）；缺段 = None = 全用默认值
@@ -143,6 +156,25 @@ impl DetectorConfig {
     /// `flip_vertical` 缺省 **false**（不翻转）
     pub fn Flip_Vertical(&self) -> bool {
         self.flip_vertical.unwrap_or(DEFAULT_DETECTOR_FLIP_VERTICAL)
+    }
+
+    /// 检测流开关（缺省 **false**：不 bind、零线程）
+    pub fn Stream(&self) -> bool {
+        self.stream.unwrap_or(DEFAULT_DETECTOR_STREAM)
+    }
+
+    /// 检测流端口（缺省 9010；0 = 让内核分配，日志打回填后的真实端口）
+    pub fn Stream_Port(&self) -> u16 {
+        self.stream_port.unwrap_or(DEFAULT_DETECTOR_STREAM_PORT)
+    }
+
+    /// 检测流绑定地址（去空白；空串 → 默认 `127.0.0.1`；非法 IP 由 detector 侧 `warn` + 回退）
+    pub fn Stream_Bind(&self) -> &str {
+        self.stream_bind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_DETECTOR_STREAM_BIND)
     }
 }
 
@@ -454,7 +486,7 @@ fn fill_detector(doc: &mut DocumentMut) -> bool {
         return false;
     };
     let mut changed = false;
-    let defaults: [(&str, Item); 6] = [
+    let defaults: [(&str, Item); 9] = [
         // 默认关：权重不一定在场，且 detector 会吃满一个 CPU 核
         ("enabled", toml_edit::value(DEFAULT_DETECTOR_ENABLED)),
         ("model", toml_edit::value(DEFAULT_DETECTOR_MODEL)),
@@ -462,6 +494,10 @@ fn fill_detector(doc: &mut DocumentMut) -> bool {
         ("conf_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_CONF_THRES))),
         ("nms_thres", toml_edit::value(f64::from(DEFAULT_DETECTOR_NMS_THRES))),
         ("flip_vertical", toml_edit::value(DEFAULT_DETECTOR_FLIP_VERTICAL)),
+        // task_47 Step 3：检测流三键（缺失才补，幂等，不覆盖用户已写的值）
+        ("stream", toml_edit::value(DEFAULT_DETECTOR_STREAM)),
+        ("stream_port", toml_edit::value(DEFAULT_DETECTOR_STREAM_PORT as i64)),
+        ("stream_bind", toml_edit::value(DEFAULT_DETECTOR_STREAM_BIND)),
     ];
     for (k, v) in defaults {
         if !table.contains_key(k) {
@@ -799,6 +835,32 @@ mod tests {
         assert_eq!(content.matches("[detector.camera]").count(), 1, "{content}");
         assert_eq!(content.matches("[detector]").count(), 1, "{content}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ============================================================ [detector] 检测流（task_47 Step 3）
+
+    /// `[detector]` 被补成 9 个默认值（task_47 Step 3 补 stream 三键），其余行不变、幂等
+    #[test]
+    fn test_detector_section_fills_stream_defaults() {
+        let dir = tmp_dir("ugv_cfg_detector_stream");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[Identity]\npeer_name = \"t\"\nnode_type = \"car\"\n").unwrap();
+        ensure_ugv_section(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let d = toml::from_str::<UgvConfig>(&first)
+            .unwrap()
+            .detector
+            .expect("[detector] 段应被补全");
+        assert_eq!(d.stream, Some(DEFAULT_DETECTOR_STREAM), "stream 默认 false 且要写进文件");
+        assert_eq!(d.stream_port, Some(DEFAULT_DETECTOR_STREAM_PORT));
+        assert_eq!(d.stream_bind.as_deref(), Some(DEFAULT_DETECTOR_STREAM_BIND));
+        assert_eq!(d.Stream(), DEFAULT_DETECTOR_STREAM);
+        assert_eq!(d.Stream_Port(), 9010);
+        assert_eq!(d.Stream_Bind(), "127.0.0.1");
+        // 幂等：再跑一次，落盘文本一字不变（其余行也不动）
+        ensure_ugv_section(&path).unwrap();
+        assert_eq!(first, std::fs::read_to_string(&path).unwrap(), "补段必须幂等");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
