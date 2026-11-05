@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-28
-//Modified Date ： 2026-11-03
+//Modified Date ： 2026-11-05
 
 //! 跟随树（task_37 §六 / task_45 §二 Step 1）：sim 车栈 `Follow` 由此文件建真树；本文件由
 //! `pleiades-ugv/src/ugv/mission/follow.rs` **逐字复制**（口径 #8），差异只有 `use` 路径与文件头。
@@ -53,14 +53,18 @@ use crate::sim::detector::{DetectorDevice, Target};
 
 // ---------------------------------------------------------------- 参数初值（§六.4）
 
-/// `d > D_FAR_M` 才前进（米）
-pub const D_FAR_M: f32 = 2.2;
-/// `d <= D_NEAR_M` 停下（米）
-pub const D_NEAR_M: f32 = 1.2;
+/// Follow 的 `d > D_FAR_M` 才前进（米；task_48 §五 Step 3 **放宽** 2.2 → 2.4）
+pub const D_FAR_M: f32 = 2.4;
+/// Follow 的 `d <= D_NEAR_M` 停下（米；同上**放宽** 1.2 → 1.4）
+pub const D_NEAR_M: f32 = 1.4;
+/// Containment（围控）的 `d > CONTAINMENT_D_FAR_M` 才前进（米；同上**收紧** 2.2 → 2.0，围控车靠得更近）
+pub const CONTAINMENT_D_FAR_M: f32 = 2.0;
+/// Containment 的 `d <= CONTAINMENT_D_NEAR_M` 停下（米；同上**收紧** 1.2 → 1.0）
+pub const CONTAINMENT_D_NEAR_M: f32 = 1.0;
 /// 目标过期时间（毫秒）：`age > STALE_MS` → 视为丢失（§六.4）
 pub const STALE_MS: u64 = 800;
 
-/// 跟随参数（纯值 + `Default`；生产用默认值，单测可改小/改大）
+/// 跟随参数（纯值 + `Default`）：`Default` = **Follow** 那一组（2.4 / 1.4）；Containment 用 `CONTAINMENT_*`、Guard 用 `guard::GUARD_D_*`，三处建树各自**显式传参**（口径 #19/#20），只有单测才走 `Default`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FollowParams {
     pub d_far: f32,
@@ -108,7 +112,7 @@ pub fn lost(t: Option<&Sample>, p: &FollowParams) -> bool {
     }
 }
 
-/// 「太近」：`d <= d_near`（含等号，与 §六.3 的 `d <= 1.2` 一致）。`Condition` 的唯一判据。
+/// 「太近」：`d <= d_near`（含等号，与 §六.3 的 `d <= 1.4` 一致）。`Condition` 的唯一判据。
 pub fn too_close(t: Option<&Sample>, p: &FollowParams) -> bool {
     match t {
         None => false, // 无目标不谈远近（丢失由 `lost` 管）
@@ -122,7 +126,7 @@ pub fn too_close(t: Option<&Sample>, p: &FollowParams) -> bool {
 /// - 无目标 / `age > stale` → `Hold`（丢掉，不追旧点；优先级最高）
 /// - `d > d_far` → `Advance`（人走远了，朝人开）
 /// - `d <= d_near` → `Hold`（到站，停）
-/// - 带内（`d_near < d <= d_far`）→ **沿用上拍** `prev`（迟滞：不在 2.2 m 边界上抖）
+/// - 带内（`d_near < d <= d_far`）→ **沿用上拍** `prev`（迟滞：不在 2.4 m 边界上抖）
 pub fn decide(target: Option<&Sample>, p: &FollowParams, prev: Outcome) -> Outcome {
     match target {
         None => Outcome::Hold,
@@ -362,7 +366,7 @@ mod tests {
 
     use pleiades_base::robot::core::behavior_tree::MotionOut;
 
-    /// 带内中点（**由常量推导**，不写死 1.7 / 1.95）：车 1.7 m / 机 3.1 m。
+    /// 带内中点（**由常量推导**，不写死具体数值）：车 1.9 m / 机 3.1 m。
     /// 四份 `follow.rs` 因此保持逐字一致（口径 #8），且与本 crate 的 `D_NEAR_M/D_FAR_M` 自洽
     const MID_BAND: f32 = (D_FAR_M + D_NEAR_M) / 2.0;
 
@@ -447,14 +451,14 @@ mod tests {
         assert_eq!(
             decide(Some(&sample(9.0, STALE_MS)), &p, Outcome::Hold),
             Outcome::Advance,
-            "age == stale 不过期，d=9 > 2.2 → Advance"
+            "age == stale 不过期，d=9 > 2.4 → Advance"
         );
         assert_eq!(
             decide(Some(&sample(9.0, STALE_MS + 1)), &p, Outcome::Advance),
             Outcome::Hold,
             "age == stale+1 → Hold（即使上拍在走）"
         );
-        // d_far 边界：> 2.2 才走；== 2.2 落在带内 → 沿用上拍
+        // d_far 边界：> 2.4 才走；== 2.4 落在带内 → 沿用上拍
         assert_eq!(
             decide(Some(&sample(D_FAR_M, 0)), &p, Outcome::Hold),
             Outcome::Hold,
@@ -470,7 +474,7 @@ mod tests {
             Outcome::Advance,
             "d > d_far → Advance（与上拍无关）"
         );
-        // d_near 边界：<= 1.2 停（与上拍无关）
+        // d_near 边界：<= 1.4 停（与上拍无关）
         assert_eq!(
             decide(Some(&sample(D_NEAR_M, 0)), &p, Outcome::Advance),
             Outcome::Hold,
@@ -482,7 +486,7 @@ mod tests {
             "d < d_near（人已贴脸）→ Hold"
         );
         // 带内两向都验（迟滞是真的沿用，不是写死）；值由 `D_FAR_M`/`D_NEAR_M` 推导，
-        // 车 1.7 m、机 3.1 m，四份用例与各自常量自洽（task_46 §一 #10）
+        // 车 1.9 m、机 3.1 m，四份用例与各自常量自洽（task_46 §一 #10）
         assert_eq!(decide(Some(&sample(MID_BAND, 0)), &p, Outcome::Hold), Outcome::Hold);
         assert_eq!(decide(Some(&sample(MID_BAND, 0)), &p, Outcome::Advance), Outcome::Advance);
     }
@@ -547,7 +551,7 @@ mod tests {
         let mut r = rig(FakeFeed::new(vec![target(0.25, 9.25, 1)]), (0.25, 0.25)).await;
         let mut out = MotionOut::default();
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "跟随不得终值");
-        assert_eq!(out.target_point, Some((0.25, 9.25)), "d=9 > 2.2 → 直接给人的世界坐标");
+        assert_eq!(out.target_point, Some((0.25, 9.25)), "d=9 > 2.4 → 直接给人的世界坐标");
         assert_eq!(out.next_cell, None, "给点时不得同时给格");
         // 第二拍：位姿与人没变 → 同一个点（不抖）
         assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running);
@@ -658,5 +662,51 @@ mod tests {
         assert_eq!(out.face_point, None, "过期不得给朝向");
         assert_eq!(out.target_point, None);
         assert_eq!(out.next_cell, None);
+    }
+
+    /// task_48 §五 Step 3（口径 #19/#20）：**三组距离分家** —— Follow 放宽到 2.4 / 1.4，
+    /// Containment 收紧到 2.0 / 1.0（Guard 固定 2.2 / 1.2，走它自己的 `GUARD_D_*`，不在本文件）。
+    /// 两组迟滞带都仍是 1.0 m；`Default` 只代表 Follow 那一组，另外两处建树都**显式传参**。
+    #[test]
+    fn test_distance_constants_split_follow_vs_containment() {
+        assert_eq!((D_FAR_M, D_NEAR_M), (2.4, 1.4), "Follow 放宽 0.2：2.4 / 1.4（口径 #19）");
+        assert_eq!(
+            (CONTAINMENT_D_FAR_M, CONTAINMENT_D_NEAR_M),
+            (2.0, 1.0),
+            "Containment 收紧 0.2：2.0 / 1.0（口径 #19）"
+        );
+        // 迟滞带仍 1.0 m。f32 减法有舍入（2.4 - 1.4 不是精确的 1.0）→ 用 epsilon 比，别写 `== 1.0`
+        assert!((D_FAR_M - D_NEAR_M - 1.0).abs() < 1e-6, "Follow 带 = {:?}", D_FAR_M - D_NEAR_M);
+        assert!(
+            (CONTAINMENT_D_FAR_M - CONTAINMENT_D_NEAR_M - 1.0).abs() < 1e-6,
+            "Containment 带 = {:?}",
+            CONTAINMENT_D_FAR_M - CONTAINMENT_D_NEAR_M
+        );
+        // `Default` 必须就是 Follow 那组（Containment / Guard 都不许走它）
+        assert_eq!(
+            FollowParams::default(),
+            FollowParams { d_far: D_FAR_M, d_near: D_NEAR_M, stale_ms: STALE_MS },
+            "`Default` = Follow 的显式那组"
+        );
+        let p_follow = FollowParams::default();
+        let p_contain = FollowParams {
+            d_far: CONTAINMENT_D_FAR_M,
+            d_near: CONTAINMENT_D_NEAR_M,
+            stale_ms: STALE_MS,
+        };
+        // 同一距离 2.1 m：Follow 落在 1.4~2.4 带内（沿用上拍 Hold）↔ Containment 已超 2.0（前进）
+        assert_eq!(
+            decide(Some(&sample(2.1, 0)), &p_follow, Outcome::Hold),
+            Outcome::Hold,
+            "Follow：2.1 m 在带内"
+        );
+        assert_eq!(
+            decide(Some(&sample(2.1, 0)), &p_contain, Outcome::Hold),
+            Outcome::Advance,
+            "Containment：2.1 m > 2.0 → 前进（围控车贴得更近）"
+        );
+        // 同一距离 1.3 m：Follow 已到停距 ↔ Containment 还没到
+        assert!(too_close(Some(&sample(1.3, 0)), &p_follow), "Follow：1.3 m <= 1.4 → 停");
+        assert!(!too_close(Some(&sample(1.3, 0)), &p_contain), "Containment：1.3 m > 1.0 → 继续");
     }
 }

@@ -11,6 +11,10 @@
 //! 无 detector 两者都退化为原地 Hold（`Running`，绝不一拍 `Success`）。
 //!
 //! task_48 §二 Step 2：`Face` / `Guard` 都建真树（`face.rs` / `guard.rs`，与真车逐字同源）。
+//!
+//! task_48 §五 Step 3（口径 #19/#20）：三处建树**各自显式传** `FollowParams` —— `Mission::Follow` 用
+//! `D_FAR_M` / `D_NEAR_M`（2.4 / 1.4）、`Containment` 用 `CONTAINMENT_*`（2.0 / 1.0）、`Guard` 用
+//! `GUARD_D_*`（2.2 / 1.2）；任一处漏传就退回 `default()`（= Follow 那组，围控 / 守卫的停距就错了）。
 
 use std::sync::Arc;
 
@@ -50,7 +54,13 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
             Some(dev) => Ok(follow::build(
                 deps.robot_state.clone(),
                 Arc::new(follow::TargetSource::new(Some(dev.clone()))),
-                follow::FollowParams::default(),
+                // task_48 §五 Step 3（口径 #19/#20）：Follow 用**自己那组**（2.4 / 1.4），显式传参；
+                // **不依赖** `default()`（Containment 2.0/1.0、Guard 2.2/1.2 各自传各自的）。
+                follow::FollowParams {
+                    d_far: follow::D_FAR_M,
+                    d_near: follow::D_NEAR_M,
+                    stale_ms: follow::STALE_MS,
+                },
             )),
             None => {
                 tracing::warn!(

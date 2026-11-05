@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-31
-//Modified Date ： 2026-11-03
+//Modified Date ： 2026-11-05
 
 //! 封控树 v2（task_43 §七）：sim **车栈**版——与 `uav_sim/mission/containment.rs` 同形（逐字照抄，仅 `uav_sim`→`ugv_sim` 与文件头），真机与机端各持一份、不跨栈 `use`（口径 #1）。
 //!
@@ -111,7 +111,14 @@ pub fn build<P: NavPort + 'static>(
     half: f32,
     publisher: Option<Arc<dyn AssistPublisher>>,
 ) -> Box<dyn Node> {
-    let params = follow::FollowParams::default(); // stale_ms = follow::STALE_MS
+    // task_48 §五 Step 3（口径 #19/#20）：围控**收紧**到 2.0 / 1.0 —— 显式传 `CONTAINMENT_*`，
+    // **不许**退回 `default()`（那是 Follow 的 2.4 / 1.4，围控车就贴不近了）。
+    // `stale_ms` 与 `InsideSquare` 判「未过期」共用同一份（带内仍 `stale_ms`）。
+    let params = follow::FollowParams {
+        d_far: follow::CONTAINMENT_D_FAR_M,
+        d_near: follow::CONTAINMENT_D_NEAR_M,
+        stale_ms: follow::STALE_MS,
+    };
     // 与 `InsideSquare` 共用 `source`（同一份 age 追踪，两处快照不矛盾）
     let follow_tree = follow::build(robot_state.clone(), source.clone(), params);
     let inside = Box::new(InsideSquare {
@@ -678,6 +685,37 @@ mod tests {
             r.nav.lock().await.set_goal_calls.load(Ordering::SeqCst),
             1,
             "切回跟随不得再调 set_goal（只有第 ② 拍角 1 那一次）"
+        );
+    }
+
+    /// task_48 §五 Step 3（口径 #19/#20）：封控的跟随分支用 `CONTAINMENT_*`（2.0 / 1.0），
+    /// **不是** `FollowParams::default()`（= Follow 的 2.4 / 1.4）。
+    ///
+    /// 鉴别力来自「同一距离、两种口径结论相反」：人在正方形界内、离车 `d = √5 ≈ 2.236 m` ——
+    /// `CONTAINMENT_*` ⇒ 2.236 > 2.0，这一拍就**前进**（给点）；若误用默认值 ⇒ 落在 1.4~2.4 带内、
+    /// 首拍按 `Hold` 起算 ⇒ 只给朝向、不给点。所以本断言能抓出「忘了显式传参」。
+    #[tokio::test]
+    async fn test_containment_uses_containment_distance() {
+        assert_eq!(
+            (follow::CONTAINMENT_D_FAR_M, follow::CONTAINMENT_D_NEAR_M),
+            (2.0, 1.0),
+            "围控收紧 0.2（口径 #19）"
+        );
+        // 车在 (56,56)，人在 (58,57)：|dx| = 2、|dy| = 1 ⇒ d = √5 ≈ 2.236；正方形界内（|dx|,|dy| ≤ 8）
+        let mut r = rig(FakeFeed::new(vec![target(58.0, 57.0, 1)]), (56.0, 56.0), false, None).await;
+        let mut out = MotionOut::default();
+        assert_eq!(r.tree.tick(&mut frame(&mut out)).await, Status::Running, "封控不得终值");
+        assert_eq!(
+            out.target_point,
+            Some((58.0, 57.0)),
+            "Containment 用 2.0/1.0：2.236 m 已超 d_far → 前进（用默认 2.4 会落带内只给朝向）"
+        );
+        assert_eq!(out.face_point, None, "前进那拍不得给朝向（face > point）");
+        assert_eq!(out.next_cell, None, "给点那拍不得给格");
+        assert_eq!(
+            r.nav.lock().await.set_goal_calls.load(Ordering::SeqCst),
+            0,
+            "跟随分支不进 D*"
         );
     }
 }
