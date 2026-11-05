@@ -1,6 +1,6 @@
 <!-- Presented by KeJi -->
 <!-- Created Date ： 2026-11-04 -->
-<!-- Modified Date ： 2026-11-04 -->
+<!-- Modified Date ： 2026-11-05 -->
 <!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -29,6 +29,10 @@
 <script>
 const socks = {};
 let nextId = 1;
+
+// 只画 person 的框：服务端仍推全部类别（协议不变），这里只过滤**显示**。
+// 想看全部类别把这一行改成 false 即可。
+const ONLY_PERSON = true;
 
 function connect() {
   const ip = document.getElementById("ip").value.trim();
@@ -76,14 +80,36 @@ function connect() {
       cv.width = img.width;
       cv.height = img.height;
       ctx.drawImage(img, 0, 0);
-      // 画框（坐标为原图像素坐标）
-      ctx.strokeStyle = "#4ade80";
-      ctx.lineWidth = 2;
-      ctx.fillStyle = "#4ade80";
-      ctx.font = "14px sans-serif";
+      // 画框（坐标为原图像素坐标）：只画 person，其余类别跳过
+      // 线宽/字号按画面宽度缩放：640 宽 → 5 px 线宽、18 px 字，缩放到面板宽后依然醒目
+      const lw = Math.max(3, Math.round(cv.width / 128));
       for (const d of header.dets) {
-        ctx.strokeRect(d.xmin, d.ymin, d.xmax - d.xmin, d.ymax - d.ymin);
-        ctx.fillText(d.class_name, d.xmin, Math.max(14, d.ymin - 4));
+        if (ONLY_PERSON && d.class_name !== "person") continue;
+        const w = d.xmax - d.xmin;
+        const h = d.ymax - d.ymin;
+        // ① 深色外描边：亮背景上也糊不掉
+        ctx.lineWidth = lw + 4;
+        ctx.strokeStyle = "rgba(0,0,0,0.80)";
+        ctx.strokeRect(d.xmin, d.ymin, w, h);
+        // ② 亮绿主线 + 发光
+        ctx.lineWidth = lw;
+        ctx.strokeStyle = "#22ff88";
+        ctx.shadowColor = "rgba(34,255,136,0.95)";
+        ctx.shadowBlur = 10;
+        ctx.strokeRect(d.xmin, d.ymin, w, h);
+        ctx.shadowBlur = 0;
+        // ③ 标签：深底亮字，贴在框上方；框贴到画面顶时改贴框内
+        const fs = Math.max(13, Math.round(cv.width / 36));
+        ctx.font = "bold " + fs + "px sans-serif";
+        const text = d.class_name;
+        const pad = Math.round(fs * 0.35);
+        const th = fs + pad * 2;
+        const tx = d.xmin;
+        const ty = d.ymin - th >= 0 ? d.ymin - th : d.ymin;
+        ctx.fillStyle = "rgba(0,0,0,0.75)";
+        ctx.fillRect(tx, ty, ctx.measureText(text).width + pad * 2, th);
+        ctx.fillStyle = "#22ff88";
+        ctx.fillText(text, tx + pad, ty + th - pad);
       }
     };
     img.src = url;
