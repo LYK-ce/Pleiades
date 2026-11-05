@@ -44,3 +44,11 @@
 - 结果：PASS
 - 提交：ok de35082
 - 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（824 行，源码零改动）。10 个文件：4 份 `face.rs` 整文件 `cp`（连 `use` 都相同）、2 份 `guard.rs` 用 `sed` 只差 `crate::` 路径、4 份 `mod.rs` 锚到行号（如 `ugv/mod.rs:26-28`、`88-104`）。关键设计：扇形朝向取 station→gaze 的世界系方位角（非车头 yaw）；Guard 显式传 `FollowParams{2.2,1.2}`；`HomeLeaf` 自实现不碰 `goto`；无 detector 走 `TargetSource::new(None)` 只值守。四处校正：uav 执行器死区是 5° 非 8°（故本地定义 `FACE_DEADBAND_DEG`）、「偏 5° Running」在 8° 下不成立（改 10°）、NaN 判据不能用 `!(a>b)`（改正向 `<=`）、60 拍收尾非 61。验收 5/8/5/10/8 passed，总数 201→214 / 175→180 / 475→493，范围自查 10 路径。
+
+## Step 3 — 车栈距离参数分家（Containment 收紧 / Follow 放宽 / Guard 不变）（task_48 首轮）
+- 起止：2026-11-05 11:40:05Z → 2026-11-05 11:53:08Z
+- 范围：两份 follow.rs 的常量 + 两份 containment.rs 与两份 mission/mod.rs 的传参
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 5615feb
+- 规划要点：计划已写完（`tmp/task48/plan.md`，460 行，源码零改动，`git status` 仍只有 workbook 与既有未跟踪目录）。 **摘要（≤200 字）**：6 个文件：两份 `follow.rs` 把 `D_FAR/D_NEAR` 改 2.4/1.4、新增 `CONTAINMENT_D_*` 2.0/1.0，同步 6 处注释（含 `1.7→1.9`）；两份 `containment.rs` 的 `params` 显式传 `CONTAINMENT_*`；两份 `mod.rs` 的 `Mission::Follow` 显式传 `D_*`（不依赖 `default()`）。`guard.rs` 2.2/1.2、机端 3.6/2.6、base、`tests/`、Task/、根 Cargo.toml 一行不动。两份副本用同一脚本套改，改后逐字一致（diff hunk 数 follow 2 / containment 4）；各加 1 条鉴别力单测（同一距离 2.1/1.3 m 两种口径结论相反，迟滞带用 epsilon 防 f32 假红）。验收：`check --lib` + 两个设备 crate `--all-targets`；`--bins` 测试 13→14 / 17→18 / 31→32 / 33→34；`grep` 常量 8 行对拍；V6 卡死 `FollowParams::default()` 生产残留；不 fmt、不 git add/commit。
