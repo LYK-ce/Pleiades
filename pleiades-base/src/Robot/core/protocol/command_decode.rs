@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-07-21
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-05
 
 //! ORION 命令帧 → 内部 Command 解码
 //!
@@ -12,8 +12,8 @@ use super::frame::Frame;
 use super::{MSGID_MANUAL_CONTROL, MSGID_MODE, MSGID_TASK_SET};
 use super::messages::{
     decode_manual_control, decode_mode, decode_task_set, ACTION_BEEP, ACTION_LAND,
-    ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF, MISSION_CONTAINMENT, MISSION_FOLLOW,
-    MISSION_GOTO, MODE_AUTO, MODE_MANUAL, ManualPayload,
+    ACTION_START_LIDAR, ACTION_STOP_LIDAR, ACTION_TAKEOFF, MISSION_CONTAINMENT, MISSION_FACE,
+    MISSION_FOLLOW, MISSION_GOTO, MISSION_GUARD, MODE_AUTO, MODE_MANUAL, ManualPayload,
 };
 
 /// 解析 ORION 帧 → 内部命令（入站：终端/地面站 → 车）
@@ -56,6 +56,10 @@ pub fn parse_orion_frame(frame: &Frame) -> Option<Command> {
                         y: m.y,
                         half_side: m.half_side,
                     }),
+                    // task_48 §2.2 / §2.8：type=4 = Face（x/y = 要朝向的世界点）、
+                    // type=5 = Guard（x/y = 值守点，fx/fy = 注视点）
+                    MISSION_FACE => Some(Mission::Face { x: m.x, y: m.y }),
+                    MISSION_GUARD => Some(Mission::Guard { x: m.x, y: m.y, fx: m.fx, fy: m.fy }),
                     other => {
                         // `decode_task_set` 已对未知 type 整帧拒 → 此处理论不可达
                         tracing::warn!(
@@ -103,7 +107,7 @@ mod tests {
     use crate::robot::core::protocol::frame::Frame;
     use crate::robot::core::protocol::messages::{
         encode_manual_event, encode_manual_motion, encode_task_set, MissionItem, MISSION_CONTAINMENT,
-        MISSION_FOLLOW, MISSION_GOTO, TaskSetPayload,
+        MISSION_FACE, MISSION_FOLLOW, MISSION_GOTO, MISSION_GUARD, TaskSetPayload,
     };
     use crate::robot::core::protocol::{MSGID_MANUAL_CONTROL, MSGID_MODE, MSGID_TASK_SET};
 
@@ -168,8 +172,8 @@ mod tests {
         // 逐条入队（不再"群发只取第一条"）
         let f = task_set_frame(&TaskSetPayload {
             missions: vec![
-                MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0, half_side: 0.0 },
-                MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0, half_side: 0.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 66.0, y: 64.0, ..Default::default() },
+                MissionItem { mission_type: MISSION_GOTO, x: 70.5, y: 60.0, ..Default::default() },
             ],
         });
         assert_set(
@@ -206,7 +210,7 @@ mod tests {
     fn test_task_set_follow_decoded() {
         // Task 37 §五.2：type=2 → Mission::Follow（x/y 预留，原样透传）
         let f = task_set_frame(&TaskSetPayload {
-            missions: vec![MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, half_side: 0.0 }],
+            missions: vec![MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, ..Default::default() }],
         });
         assert_set(parse_orion_frame(&f), vec![Mission::Follow { x: 0.0, y: 0.0 }]);
     }
@@ -220,6 +224,7 @@ mod tests {
                 x: 64.0,
                 y: 64.0,
                 half_side: 8.0,
+                ..Default::default()
             }],
         });
         assert_set(
@@ -233,14 +238,15 @@ mod tests {
         // 三种 type 同帧：顺序与值都不变（9/13/9 → 总长 33）
         let f = task_set_frame(&TaskSetPayload {
             missions: vec![
-                MissionItem { mission_type: MISSION_GOTO, x: 10.0, y: 11.0, half_side: 0.0 },
+                MissionItem { mission_type: MISSION_GOTO, x: 10.0, y: 11.0, ..Default::default() },
                 MissionItem {
                     mission_type: MISSION_CONTAINMENT,
                     x: 64.0,
                     y: 64.0,
                     half_side: 8.0,
+                    ..Default::default()
                 },
-                MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, half_side: 0.0 },
+                MissionItem { mission_type: MISSION_FOLLOW, x: 0.0, y: 0.0, ..Default::default() },
             ],
         });
         assert_eq!(f.payload.len(), 1 + 9 + 13 + 9);
@@ -252,6 +258,40 @@ mod tests {
                 Mission::Follow { x: 0.0, y: 0.0 },
             ],
         );
+    }
+
+    #[test]
+    fn test_task_set_face_guard_decoded() {
+        // task_48 §2.2 / §2.8：type=4 → Mission::Face、type=5 → Mission::Guard（**不得**被
+        // `filter_map` 的兜底 arm 静默丢弃 —— 单发 Face 会让 `list.is_empty()` 整帧不生效）
+        let f = task_set_frame(&TaskSetPayload {
+            missions: vec![
+                MissionItem { mission_type: MISSION_FACE, x: 64.0, y: 64.0, ..Default::default() },
+                MissionItem {
+                    mission_type: MISSION_GUARD,
+                    x: 64.0,
+                    y: 64.0,
+                    fx: 64.0,
+                    fy: 128.0,
+                    ..Default::default()
+                },
+            ],
+        });
+        assert_eq!(f.payload.len(), 1 + 9 + 17, "9 B + 17 B");
+        assert_set(
+            parse_orion_frame(&f),
+            vec![
+                Mission::Face { x: 64.0, y: 64.0 },
+                Mission::Guard { x: 64.0, y: 64.0, fx: 64.0, fy: 128.0 },
+            ],
+        );
+        // 单发 Face（无 Goto 垫背）也必须生效
+        let alone = task_set_frame(&TaskSetPayload {
+            missions: vec![
+                MissionItem { mission_type: MISSION_FACE, x: 1.0, y: 2.0, ..Default::default() },
+            ],
+        });
+        assert_set(parse_orion_frame(&alone), vec![Mission::Face { x: 1.0, y: 2.0 }]);
     }
 
     #[test]
@@ -302,7 +342,7 @@ mod tests {
     fn test_task_set_max_count() {
         // 255 条上限：编解码一致、不 panic
         let missions = vec![
-            MissionItem { mission_type: MISSION_GOTO, x: 1.0, y: 2.0, half_side: 0.0 };
+            MissionItem { mission_type: MISSION_GOTO, x: 1.0, y: 2.0, ..Default::default() };
             255
         ];
         let f = task_set_frame(&TaskSetPayload { missions });

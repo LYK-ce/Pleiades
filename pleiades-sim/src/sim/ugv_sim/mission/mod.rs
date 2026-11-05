@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-27
-//Modified Date ： 2026-11-03
+//Modified Date ： 2026-11-05
 
 //! 任务层（Task 36 §12.4.4）：任务 → 树的**编译期穷尽**分派 + 树依赖包
 //!
@@ -83,6 +83,23 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 })))
             }
         },
+        // task_48 §二 Step 1：Face / Guard 先建**平凡树**（一拍 `Success` + warn），让编译全绿；
+        // 真叶子（`face.rs`）/ 真树（`guard.rs`）在 Step 2。**不得**返回 `Err`（= 清队列 + 停车），
+        // 也**不得**返回 `Running`（会永久占住队首）。
+        Mission::Face { .. } => {
+            tracing::warn!("[Sim/ugv] Face 未实现，跳过（平凡树：一拍 Success）");
+            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
+                f.out.next_cell = None;
+                Status::Success
+            })))
+        }
+        Mission::Guard { .. } => {
+            tracing::warn!("[Sim/ugv] Guard 未实现，跳过（平凡树：一拍 Success）");
+            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
+                f.out.next_cell = None;
+                Status::Success
+            })))
+        }
     }
 }
 
