@@ -9,6 +9,8 @@
 //! task_43 §五：车栈 `Follow` 与机栈**同构**（`follow.rs`，叶子不经 D\*，照抄 `uav_sim` 那份）；
 //! task_43 §七：车栈 `Containment` 也是真树（`containment.rs`，照抄机栈那份，叶子不经 D\*）；
 //! 无 detector 两者都退化为原地 Hold（`Running`，绝不一拍 `Success`）。
+//!
+//! task_48 §二 Step 2：`Face` / `Guard` 都建真树（`face.rs` / `guard.rs`，与真车逐字同源）。
 
 use std::sync::Arc;
 
@@ -21,8 +23,10 @@ use pleiades_base::robot::core::state::RobotState;
 use crate::sim::ugv_sim::nav::Navigator;
 
 pub mod containment;
+pub mod face;
 pub mod follow;
 pub mod goto;
+pub mod guard;
 
 /// 树叶子的依赖（导航端口 + 位姿快照 + 目标来源 + 协助请求）；加新任务类型时在此按需加字段
 pub struct TaskDeps {
@@ -83,22 +87,29 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 })))
             }
         },
-        // task_48 §二 Step 1：Face / Guard 先建**平凡树**（一拍 `Success` + warn），让编译全绿；
-        // 真叶子（`face.rs`）/ 真树（`guard.rs`）在 Step 2。**不得**返回 `Err`（= 清队列 + 停车），
-        // 也**不得**返回 `Running`（会永久占住队首）。
-        Mission::Face { .. } => {
-            tracing::warn!("[Sim/ugv] Face 未实现，跳过（平凡树：一拍 Success）");
-            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
-                f.out.next_cell = None;
-                Status::Success
-            })))
-        }
-        Mission::Guard { .. } => {
-            tracing::warn!("[Sim/ugv] Guard 未实现，跳过（平凡树：一拍 Success）");
-            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
-                f.out.next_cell = None;
-                Status::Success
-            })))
+        // task_48 §二 Step 2：Face 真叶子（四个栈都真做，口径 #3）+ Guard 真树（只车端，口径 #9）。
+        // Face 只依赖自身位姿，四端同一份 `face.rs`（逐字）；Guard 的 detector=None 走
+        // `TargetSource::new(None)`（`sample` 恒 None ⇒ 门恒失败 ⇒ 只值守不追，口径 #16），
+        // 故它**不是一个 naive 分支**，而是同一棵树：`Success` 会让队列把守卫弹走，绝不这么写。
+        Mission::Face { x, y } => Ok(face::build(deps.robot_state.clone(), (*x, *y))),
+        Mission::Guard { x, y, fx, fy } => {
+            let source = match deps.detector.as_ref() {
+                // 与 Follow / Containment 同款：握 `DetectorDevice`，`sample` 走它（`follow.rs:152-156`）
+                Some(dev) => Arc::new(follow::TargetSource::new(Some(dev.clone()))),
+                None => {
+                    tracing::warn!(
+                        "[Sim/ugv] Guard：未启用 detector（[detector].enabled=false 或无相机）→ 只值守不追"
+                    );
+                    Arc::new(follow::TargetSource::new(None))
+                }
+            };
+            Ok(guard::build(
+                deps.nav.clone(),
+                deps.robot_state.clone(),
+                source,
+                (*x, *y),
+                (*fx, *fy),
+            ))
         }
     }
 }

@@ -20,6 +20,7 @@ use pleiades_base::robot::core::state::RobotState;
 
 use crate::uav::nav::Navigator;
 
+pub mod face;
 pub mod follow;
 pub mod goto;
 
@@ -65,16 +66,11 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
                 Status::Success
             })))
         }
-        // task_48 §二 Step 1：Face / Guard 先建**平凡树**（一拍 `Success` + warn），让编译全绿；
-        // 真叶子（`face.rs`）/ 真树（`guard.rs`）在 Step 2。**不得**返回 `Err`（= 清队列 + 停车），
-        // 也**不得**返回 `Running`（会永久占住队首）。
-        Mission::Face { .. } => {
-            tracing::warn!("[Uav] Face 未实现，跳过（平凡树：一拍 Success）");
-            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
-                f.out.next_cell = None;
-                Status::Success
-            })))
-        }
+        // task_48 §二 Step 2：Face 在机端也是**真叶子**（口径 #3：Face 只依赖自身位姿，与底盘无关；
+        // 机栈执行器 task_46 已支持 `MotionTarget::Face`，见 `uav/executor.rs:89-95`）。
+        Mission::Face { x, y } => Ok(face::build(deps.robot_state.clone(), (*x, *y))),
+        // 口径 #9：Guard 在机端保持 **naive**（一拍 `Success` + warn），与当初 Containment 同规（`:61-67`）。
+        // **不得**返回 `Err`（= 清队列 + 停车），也**不得**返回 `Running`（会永久占住队首）。
         Mission::Guard { .. } => {
             tracing::warn!("[Uav] Guard 未实现，跳过（平凡树：一拍 Success）");
             Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
