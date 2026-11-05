@@ -76,3 +76,30 @@
 - 结果：PASS
 - 提交：ok f1bf780
 - 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（832 行，`git status` 仍只有既有 `M Workbook/…` 与 `?? Tool/investigation/`，源码零改动）。 **摘要（≤200 字）**：4 个文件、全部锚 `文件:行号`：`pictor_ws_ctl.py`（常量+长度表 4:9/5:17+归一化+金标+**payload 复刻加 17 B 分支**+`cmd_guard` 走 `{cmd:"guard",targets}`+argparse+pose_hz）、副本 `cp` 保持逐字、`robot_arch.md`（头版本/§1.2 五变体/§8.12 type4-5 与金标/§8.15 车端 2.4-1.4 + 三组距离注/新增 §8.16 全文/常量速查）、`orion_protocol.md §3.5`（补 3/4/5、变长、Σlen、整帧拒）。四处校正：§8.15 写真实 Follow `2.4/1.4`（`2.0/1.0` 是 Containment，口径 #19 优先）；§3.5 现缺 type 3 须一并修；Guard 参数是 `targets` 数组；step.md 那条 grep 实测只命中 Rust，判据改为 A1/A6/A7 数值复算 + 三条按文件 grep。不加 `face` 子命令（`follow --type 4` 覆盖）。验收 12 条 V 判据 + `tmp/task48/verify_step6.py`（A1~A10）。
+
+## Step 7 — 仿真验证：Face / Guard / Containment×Face（三 agent 自动跑）（task_48 首轮）
+- 起止：2026-11-05 12:38:27Z → 2026-11-05 12:52:31Z
+- 范围：只写 tmp/task48/s7/ 的日志与结论；**不改任何源码**
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok d65f4ae
+- 规划要点：计划已写完并落在 `tmp/task48/plan.md`（307 行，源码零改动，`git status` 仍只有既有 workbook 与 `Tool/investigation/`）。 **摘要（≤200 字，可直接写进 workbook）** > Step 7 计划已写 `tmp/task48/plan.md`（307 行，源码零改动）。只加 `tmp/task48/s7/`：根 `cargo build --release` + CUDA 三层证据；夹具全落 `s7/env/`（世界与 Pictor 镜像副本、`TMPDIR` 迁移，`/` 仅剩 110 MB）；驱动照 task46 `step4_driver.py` 精简移植；10 案坐标全在无障碍矩形内。三处校正落为偏差：控制口 `missions` 只支持 Goto（F1/F4 两段式）、源码无「进区/出区」日志（用行为证据、不伪造）、世界须 xvfb。配 D1~D5 / R1~R12 / V1~V20。⚠️需裁决：`step.md:52` 允许起进程 vs 约束「禁止起 sim」，默认硬跑，保留禁令则按 ABORT 全记 FAIL。 计划关键点（供 review 一眼看）： | 项 | 结论 | |---|---| | 环境实测 | godot 4.7.2 / xvfb / nvcc 均在；`target/release/pleiades-sim` 已链接 `libcudart`；5 端口全空 | | 冲突 | 约束里那句「禁止起 sim」出自 `step.md:39`（自带「Step 1~6」限定），与 `step.md:52`「本 step 允许起长驻进程」矛盾；task_46 Step 4 就是引擎在本机真跑的 | | 不允许的改动 | 无源码、无 Task/、无根 Cargo.toml、无 fmt、无 git 操作；夹具也不写 `RobotSim_TestEnv/` | | 三处必须记录的偏差 | D1 控制口只支持 Goto、D2 无「进区/出区」日志、D3 headless 无相机帧 |
+
+## 引擎结束
+- 结束：2026-11-05 12:52:34Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_48_operation.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
+
+## Step 7 重跑说明（主 agent，2026-11-05）
+- 第一轮 Step 7 **ABORT**：实现提示词里的「禁止起 sim」与 step.md「本 step 允许起长驻进程」冲突，子 agent 选了更严的一边；10 个 case 全部 `FAIL — 未跑`，**源码零改动**。
+- 已修：提示词改为「是否允许起长驻进程以 step.md 为准」；engine `from_step = 7` 只重跑本步。
+- 上一次审计到的环境缺口（本轮必须处理）：release 二进制早于新代码、uav 配置端口 9099/cuda:1、Pictor 根配置缺 subscribe_topics、世界需 xvfb。
+
+## 执行引擎启动（task_48 首轮·step7 重跑）
+- 开始：2026-11-05 12:53:19Z
+- 计划：S7
