@@ -68,3 +68,11 @@
 - 结果：PASS
 - 提交：ok 18f90de
 - 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（共 466 行）。 plan.md 共 466 行，本步只改 `sim/control.rs` 的 14 处：`ControlCmd` 加 `Face`、`Guard`；`Parse_Control` 加两个分支（复用 `Param_F32`，先做校验再判 `dx==dy==0` 是否重合）；`Handle_Cmd` 加两个 arm；`help` 从 11 条增至 13 条，三处顺序一致。测试新增 4 条、追加断言 1 处：`--bins control` 46→50、全量 495→499。一处校正：单测注视点用 120 而非金标 128（越界）。
+
+## Step 6 — Python 工具 + 文档（task_48 首轮）
+- 起止：2026-11-05 12:22:41Z → 2026-11-05 12:38:27Z
+- 范围：第三处长度表（Pictor/tool/pictor_ws_ctl.py）+ 架构文档 + 协议文档
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok f1bf780
+- 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（832 行，`git status` 仍只有既有 `M Workbook/…` 与 `?? Tool/investigation/`，源码零改动）。 **摘要（≤200 字）**：4 个文件、全部锚 `文件:行号`：`pictor_ws_ctl.py`（常量+长度表 4:9/5:17+归一化+金标+**payload 复刻加 17 B 分支**+`cmd_guard` 走 `{cmd:"guard",targets}`+argparse+pose_hz）、副本 `cp` 保持逐字、`robot_arch.md`（头版本/§1.2 五变体/§8.12 type4-5 与金标/§8.15 车端 2.4-1.4 + 三组距离注/新增 §8.16 全文/常量速查）、`orion_protocol.md §3.5`（补 3/4/5、变长、Σlen、整帧拒）。四处校正：§8.15 写真实 Follow `2.4/1.4`（`2.0/1.0` 是 Containment，口径 #19 优先）；§3.5 现缺 type 3 须一并修；Guard 参数是 `targets` 数组；step.md 那条 grep 实测只命中 Rust，判据改为 A1/A6/A7 数值复算 + 三条按文件 grep。不加 `face` 子命令（`follow --type 4` 覆盖）。验收 12 条 V 判据 + `tmp/task48/verify_step6.py`（A1~A10）。
