@@ -1,7 +1,8 @@
 # Robot 架构说明（robot_arch）
 
 > 创建日期：2026-08-17
-> 更新日期：2026-11-04（task_47：detector 画面流 —— `[detector]` 加 `stream` / `stream_port` / `stream_bind`（默认 `false` / `9010` / `"127.0.0.1"`）；detector `spawn` 成功后才起 base 的 WS 服务（进程内单例，`stream=false` 零 bind），每帧推理结果（含 0 框）按 `[4B header_len LE][JSON][JPEG]` 推给 `Tool/yolo_viewer.html`；TUI `webui` 命令整体移除；查看器去掉全部 FPS、改显示连接状态；新增 §8.7「画面流」小节，§8.5 展示行、常量速查同步。
+> 更新日期：2026-11-05（task_48：`Mission` 加 `Face { x, y }`（`type=4`，9 B）/ `Guard { x, y, fx, fy }`（`type=5`，17 B）两条**与 `Goto` 平级**的任务 —— Face 是四端真叶子（原地转到面向一个世界点，8° 死区，60 拍没对准也 `Success`、**不得** `Failure`）；Guard 只有车端真树（值守点前 3.0/3.5 m ±30° 扇形迟滞 → 复用 Follow 子树出动 → 无 `Timeout` 的 `HomeLeaf` 归位），机端仍 naive；`TASK_SET` 变长表扩到 `0|2|4 → 9` / `3 → 13` / `5 → 17`；车栈距离拆三组（Follow `2.4/1.4`、Containment `2.0/1.0`、Guard `2.2/1.2`，机栈 `3.6/2.6` 不动）；§8.12 / §8.15 同步、**新增 §8.16**）
+> 上一版：2026-11-04（task_47：detector 画面流 —— `[detector]` 加 `stream` / `stream_port` / `stream_bind`（默认 `false` / `9010` / `"127.0.0.1"`）；detector `spawn` 成功后才起 base 的 WS 服务（进程内单例，`stream=false` 零 bind），每帧推理结果（含 0 框）按 `[4B header_len LE][JSON][JPEG]` 推给 `Tool/yolo_viewer.html`；TUI `webui` 命令整体移除；查看器去掉全部 FPS、改显示连接状态；新增 §8.7「画面流」小节，§8.5 展示行、常量速查同步。
 > 上一版：2026-11-03（task_45：`Follow` 改成**直接跟人** —— 叶子写 `MotionOut.target_point`（世界坐标），
 > `step_cell` / `guard_cell` / `person_cells` 删除、Follow 不再持 nav；执行器加 `MotionTarget` 按点决策（五档不变）；
 > 真机补上真 `Follow` 树；机栈 `D_FAR_M/D_NEAR_M` 独立为 `3.6/2.6`（车栈仍 `2.2/1.2`）；**新增 §8.15**，
@@ -211,7 +212,7 @@ flowchart TB
 | `Robot` | `base/robot/core/robot.rs` | 中枢：共享状态/广播通道/模式/队列/集群表句柄；`new()` 建共享态，`run(device)` 跑主循环骨架 |
 | `DeviceHandler` trait | `base/robot/core/robot.rs` | **设备处理器接口**：`start`/`handle_manual_cmd`/`reset`/`build_task`（建树，幂等）/`on_tick`（返回 `TickOutcome`）/`stop`/`shutdown`（设备端各自实现，底座不依赖具体设备类型） |
 | `TickOutcome` | `base/robot/core/robot.rs` | 设备 tick 的结果：`Running` / `Terminated(Option<FailCode>)`；`Terminated` 才由 `main_loop` 出队 |
-| `Mission` | `base/robot/core/mission_queue/element.rs` | **三变体**：`Goto { x, y }`（`type=0`）、`Follow { x, y }`（`type=2`，Task 37 §五，`x/y` 预留）、`Containment { x, y, half_side }`（`type=3`，task_41 §3.2：`x/y` = 正方形中心、`half_side` = 半边长 m、轴对齐）；`Follow` / `Containment` 在 **sim 机栈、sim 车栈、真车**（task_44 Step 7）都建**真树**，真机建平凡树（一拍 `Success` + `warn`）；无 detector 的真车/sim 车栈为原地 Hold（`Running` + `next_cell=None`，见 §8.14 ④）。`TASK_SET` 记录**按 type 变长**（`0/2` = 9 B、`3` = 13 B，总长 `1 + Σlen`），解码严格：未知 type（含退役的 `1`）/ 长度不符 / `half_side` 非法 → **整帧拒**（队列不动）。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
+| `Mission` | `base/robot/core/mission_queue/element.rs` | **五变体**：`Goto { x, y }`（`type=0`）、`Follow { x, y }`（`type=2`，Task 37 §五，`x/y` 预留）、`Containment { x, y, half_side }`（`type=3`，task_41 §3.2：`x/y` = 正方形中心、`half_side` = 半边长 m、轴对齐）、`Face { x, y }`（`type=4`，task_48 §2.2：`x/y` = 要朝向的世界点）、`Guard { x, y, fx, fy }`（`type=5`，task_48 §2.8：值守点 + 注视点）；`Follow` / `Containment` 在 **sim 机栈、sim 车栈、真车**（task_44 Step 7）都建**真树**，真机建平凡树（一拍 `Success` + `warn`）；`Face` **四端真叶子**；`Guard` 只有车端（真车 / sim 车）真树、机端 naive（§8.16）；无 detector 的真车/sim 车栈为原地 Hold（`Running` + `next_cell=None`，见 §8.14 ④），`Guard` 退化为「只值守不追」（§8.16）。`TASK_SET` 记录**按 type 变长**（`0/2/4` = 9 B、`3` = 13 B、`5` = 17 B，总长 `1 + Σlen`），解码严格：未知 type（含退役的 `1`）/ 长度不符 / `half_side` 非法 → **整帧拒**（队列不动）。Task 36 已删 `Circle` 与 `members`；同文件还有 `TaskId(u64)` / `QueuedTask { id, mission }` |
 | `OpMode` | `base/robot/core/mode.rs` | `Manual` / `Auto`，**默认 Auto** |
 | `ClusterInfoTable` | `base/robot/core/cluster/cluster_info.rs` | `HashMap<peer_id, ClusterInfo>`，他车位姿（x/y/yaw/vx/vy/sub_target） |
 | `OccupancyGrid` | `base/robot/core/grid.rs` | 地图表示（own/merged 双表 + log-odds），CRDT 合并前提 |
@@ -909,17 +910,24 @@ payload = mission_count u8 | mission[0] | … | mission[count-1]     总长 = 1 
 type 0 Goto        : type u8 | x  f32 BE | y f32 BE                 = 9 B
 type 2 Follow      : type u8 | x  f32 BE | y f32 BE                 = 9 B
 type 3 Containment : type u8 | cx f32 BE | cy f32 BE | half f32 BE  = 13 B
+type 4 Face        : type u8 | fx f32 BE | fy f32 BE                 = 9 B
+type 5 Guard       : type u8 | x  f32 BE | y f32 BE | fx f32 BE | fy f32 BE = 17 B
 ```
 
 - 长度表：`mission_wire_len(t) -> Option<usize>`（Rust）/ `_Mission_Wire_Len(mt)`（GDScript）/
-  `mission_wire_len(t)`（Python 工具）三处同口径：`0|2 → 9`、`3 → 13`、其余 `None/0`。
+  `mission_wire_len(t)`（Python 工具）三处同口径（task_48 §三）：`0|2|4 → 9`、`3 → 13`、`5 → 17`、其余 `None/0`。
 - **未知 type（含退役的 `1` = Circle）→ 整帧拒**：不知道长度就不能跳过该条，否则偏移会串。
 - 解码循环结束后要求「偏移 == `payload.len()`」（多 1 B / `count` 与条数不符 → 拒）。
 - `type=3` 的 `half_side` 必须 `is_finite()` 且 `> 0.0`，否则整帧拒。
+- `type=5` 的 `fx` / `fy`（`off+9..13` / `off+13..17`）**不做**有限性校验 —— 与 `x/y` 同纪律（Goto 的 `x/y` 也不校验）；
+  有限性是 **Pictor 入口门控**（`ws_command_server._Handle_Task_Set` 的 `bad guard fx/fy`），不是编解码规则。
 - `mission_count == 0` 仍是**唯一取消入口**（payload 为 1 字节 `00`）。
 - 字节契约：单条 Goto = 10 B（`01004280000042800000`）、单条 Follow = 10 B（`01020000000000000000`）、
   单条 Containment = 14 B（`0103428000004280000041000000`）、`[Goto, Containment]` = 23 B
   （`0200428000004280000003428000004280000041000000`）—— 三方单测硬编码同一串。
+- task_48 追加：单条 Face(64,64) = 10 B（`01044280000042800000`）、单条 Guard(值守 64,64 → 注视 64,128) = 18 B
+  （`010542800000428000004280000043000000`）、`[Goto(64,64), Face(64,64)]` = 19 B
+  （`02004280000042800000044280000042800000`）—— Rust `messages.rs` / `test_orion_protocol.gd` / `pictor_ws_ctl.py` 同一串。
 - **同批升级**：记录变长，旧接收端按 `1 + 9n` 校验 → 含 13 B 记录的帧必然整帧拒；车 / 机 / Pictor 同批上线。
 
 #### Pictor 侧（独立仓）
@@ -1112,13 +1120,113 @@ robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Requ
 
 | 栈 | `D_FAR_M` | `D_NEAR_M` | 依据 |
 |---|---|---|---|
-| 车（真车 / sim 车） | 2.2 | 1.2 | 小场地实测 |
+| 车（真车 / sim 车） | 2.4 | 1.4 | 小场地实测；task_48 Step 3 再放宽 0.2 m（跟人的车别贴太近，口径 #19） |
 | 机（真机 / sim 机） | 3.6 | 2.6 | UAV 2.5 m 巡航高度 + 相机下压 15° + 垂直 70° ⇒ 画面下边缘只够到地面 `2.5/tan(50°) ≈ 2.10 m`，人再近就整体出画；`2.6 = 2.10 + 0.5 余量`，`3.6` 保持同宽 1.0 m 迟滞带 |
+
+> **三组距离分开（task_48 口径 #19/#20）**：本表是 **Follow** 的组（车 `2.4 / 1.4`、机 `3.6 / 2.6`）；
+> `Containment` 用 `CONTAINMENT_D_FAR_M / CONTAINMENT_D_NEAR_M = 2.0 / 1.0`（围控车靠得更近），
+> `Guard` 固定 `GUARD_D_FAR_M / GUARD_D_NEAR_M = 2.2 / 1.2`。**别把 Follow 当 2.0/1.0** —— 三处 `build` 各自显式传参，
+> 任一处理漏传就退回 `FollowParams::default()`（= Follow 那组），围控「不够近」、守卫「太近」。详见 §8.16。
 
 **不变的部分**：`Goto` / 巡逻照旧走格 + D\*；`nav/` 一行未改；协议、急停、`apply_velocity`、`0x12`、Pictor 全不碰。
 **已知副作用**：走点时 `ExecuteState.sub_target` 为 `None`（地面站「子目标」空着，属于接受的行为）。
 **已知限制**：Follow 期间**不看地图、不绕障**（`mark_obstacle` 对 Follow 无效，因为 Follow 不查 D\*），
 唯一保护是急停（±45°、0.3 m）—— 前面有墙就停在墙前，不会绕；人绕到车正后方 → 出框 → 丢目标 → 停车。
+
+---
+
+### 8.16 Face（到点朝向）与 Guard（值守警戒）（task_48）
+
+**口径来源**：`Task/task_48_operation.md` §二（24 条，人类 2026-11-05 已定）+ §三（线格式）。两条任务与
+`Goto` / `Follow` / `Containment` **平级**（都是 `Mission` 的兄弟变体），不是谁的字段、也不是谁的变体。
+
+#### 线格式（`TASK_SET` 变长记录，三处长度表见 §8.12）
+
+```text
+type 4 Face  : type u8 | fx f32 BE | fy f32 BE                        = 9 B    (fx, fy) = 要朝向的世界点
+type 5 Guard : type u8 | x f32 BE | y f32 BE | fx f32 BE | fy f32 BE  = 17 B   (x, y) = 值守点、(fx, fy) = 注视点
+```
+
+金标（Rust / GDScript / Python 三方单测硬编码同一串）：单条 Face(64,64) = `01044280000042800000`（10 B payload）、
+单条 Guard(值守 64,64 → 注视 64,128) = `010542800000428000004280000043000000`（18 B）、
+`[Goto(64,64), Face(64,64)]` = `02004280000042800000044280000042800000`（19 B）。
+
+#### Face：四端真叶子（`mission/face.rs`，四份逐字）
+
+```text
+① 读 (x, y, yaw)   ② Δ = normalize(atan2(fy−y, fx−x) − yaw)
+③ |Δ| ≤ 8° → Success   ④ 已 Running 60 拍（3 s @50 ms）→ 也 Success（**不得** Failure）
+⑤ 写 face_point，清 next_cell / target_point   ⑥ 其余 Running
+```
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `FACE_DEADBAND_DEG` | 8.0° | 对准死区（= 车栈 `executor::DEADBAND_DEG`）。**在本文件定义、不从执行器 import**：机栈执行器死区是 5°，import 会让四份行为不一致 |
+| `FACE_GIVE_UP_TICKS` | 60 | 放弃拍数（50 ms/tick × 60 = 3 s）；到点没对准也只 `Success`（口径 #6） |
+
+- **只写 `face_point`**：`MotionOut::target()` 的优先级是 **face > point > cell**（`base/.../behavior_tree/frame.rs`），
+  所以同一拍必须把 `next_cell` / `target_point` 清掉，否则上一拍的残留会顶掉朝向。
+- 执行器的「只转不走」早已存在：`MotionTarget::Face` → `rotate_only`（`v = 0`，`|Δθ| ≤ 死区` 发 `(0,0)`，其余原地转 ±`cruise_yaw_rate`）。
+- **四端**：`pleiades-ugv` / `pleiades-uav` / `sim/ugv_sim` / `sim/uav_sim` 都是真叶子（口径 #3：Face 只依赖自身位姿，与底盘无关）。
+- 不碰 `nav`、不走 D\*、不做避障检查（原地转不位移，口径 #7）。
+- 真实用法：地面站派车时**同一帧两条** `[Goto(环点), Face(人)]`（口径 #4：`TASK_SET` 是整队替换语义，必须成对下发；
+  只发 Goto 就「走而不朝」）。
+
+#### Guard：车端真树（`mission/guard.rs`，`pleiades-ugv` / `sim/ugv_sim` 两份逐字）
+
+```text
+ReactiveFallback                          ← 不是记忆式 Fallback：人要能出区再进区
+├─ ReactiveSequence
+│  ├─ ZoneGate           人在扇形警戒区内 → 写本拍快照（进 3.0 / 出 3.5 / ±30°，带迟滞）
+│  └─ follow::build(…)   复用 Follow 子树：d > 2.2 前进 / d ≤ 1.2 停住并朝人
+└─ RepeatForever
+   └─ Sequence [ HomeLeaf, face::build(…, 注视点) ]   ← 归位后转回注视方向
+```
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `GUARD_R_IN_M` | 3.0 m | 进警戒区半径（口径 #11） |
+| `GUARD_R_OUT_M` | 3.5 m | 出警戒区半径（迟滞，口径 #13） |
+| `GUARD_HALF_ANGLE_DEG` | 30.0° | 扇形半角（固定，不随车头转） |
+| `GUARD_D_FAR_M` / `GUARD_D_NEAR_M` | 2.2 / 1.2 m | 出动时的 Follow 距离带（口径 #12：固定值，**显式**传给 `follow::FollowParams`，不用 `default()`） |
+| `GUARD_HOME_NEAR_M` | 0.3 m | 「已在值守点」判据（`< 0.3` 直接 `Success`，免得每拍重算 D\*） |
+
+- **警戒区绑值守点、世界系固定**（口径 #11）：圆心 = 值守点 `(x, y)`，朝向 = **值守点 → 注视点**的方位角
+  （`build` 里算一次 `fan_yaw`），**不是**车头 yaw —— 车追人时车头朝人，扇形仍在原处。
+- **迟滞**（口径 #13）：`in_zone()` 按 `last_in` 选半径（进 3.0 / 出 3.5）；**角度不迟滞**（恒 ±30°）、**无时间迟滞**。
+  判据写成**正向** `<=`（NaN 恒 `false`；写成 `!(a > b)` 会把 NaN 判成「在区内」）。
+- **`ZoneGate` 与 Follow 子树共用同一个 `Arc<TargetSource>`**（`containment.rs` 的先例）：各建一份会有两套 `age`
+  （条件说新鲜、叶子说丢了）。`follow::build` 内部自建快照槽位，所以「共用」的形态是**共用同一个来源**；
+  `ZoneGate` 的 `slot` 只是它本拍的快照（唯一写点，`halt` 清空）。
+- **`HomeLeaf` 绝不 `Failure`**（口径 #15）：归位叶子**不复用 `goto::build`** —— 它自带 `Timeout(60 s)`，
+  超时即 `Failure(Timeout)`，整个守卫任务会被队列弹走。被堵只 `warn` 一次（`warned_blocked` 防 10 Hz 刷屏）+ `Running`
+  原地等；到点 `Success` → `face::build(注视点)` → 转回注视方向。
+- **无 detector**（`[detector].enabled = false`）→ `TargetSource::new(None)`，`sample` 恒 `None` ⇒ `ZoneGate` 恒失败
+  ⇒ **只值守不追**（`mod.rs` 打一条 warn），**不得**一拍 `Success`（那会让守卫任务被弹走，口径 #16）。
+- **持续任务**（口径 #17）：永不 `Success`；只有新的 `TASK_SET`（整队替换）或 `mission_count = 0` 能结束它。
+- **机端 naive**（口径 #9）：`pleiades-uav` / `sim/uav_sim` 收到 `Guard` 只 `warn` + 一拍 `Success`
+  （与当初 `Containment` 同规；**不得** `Err`、**不得** `Running`）。
+
+#### 四端矩阵
+
+| 栈 | `Face`（`type=4`） | `Guard`（`type=5`） |
+|---|---|---|
+| `pleiades-ugv`（真车） | 真叶子 `face.rs` | 真树 `guard.rs`（无 detector → 只值守不追） |
+| `pleiades-uav`（真机） | 真叶子（同一份，逐字） | naive（一拍 `Success` + `warn`） |
+| `sim/ugv_sim` | 真叶子（同一份，逐字） | 真树（与真车逐字相同） |
+| `sim/uav_sim` | 真叶子（同一份，逐字） | naive（一拍 `Success` + `warn`） |
+
+#### 入口（下发 / 注入）
+
+- **地面站（Pictor）**：派车点改成 `[Goto(环点), Face(人)]` 两条（`coop_controller.gd` / `auto_handler.gd`）；
+  `X` 键 = Follow 开关（`input_handler.gd:_Toggle_Follow`）：**先判 GUI 焦点**（聊天框打字不触发）→ 对**选中第一台**
+  先发 `msgid 8`（auto，否则车端 Auto 分支不生效）再发 `TASK_SET [{type:2, x:0, y:0}]`；再按一次发**空 missions**
+  （`mission_count = 0` 是唯一取消入口；`Follow` 是持续任务，不取消不会自己结束）。
+- **不开地面站**：sim 控制口 `{"cmd":"face"…}` / `{"cmd":"guard"…}`（`pleiades-sim/src/sim/control.rs`，`help` 11→13 条）；
+  脚本侧走 Pictor WS：`pictor_ws_ctl.py guard --target … --x --y --fx --fy`（`TASK_SET` type=5 的 18 B payload）。
+
+**已知限制**（记录，本任务不修）：8° 死区就是朝向精度上界（3 m 距离约 0.42 m 横向偏差）；「边走边朝」做不到
+（`0x12` 的 `vy` 硬编码 0，世界是差速模型）；车头 0.33 m 内是盲区（Guard 的 3 m 警戒区完全落在可视范围 0.33~7.7 m 内，不受影响）。
 
 ---
 
@@ -1141,7 +1249,7 @@ robot_frame → MessageParser.parse_orion_frame（msgid 7 → Decode_Assist_Requ
 | `VZ_MAX` | 3.2 | `vz` 单轴上限（= `motion_limits().2`，≈120 °/s 原地）；**待上车标定**（`stm32/mod.rs:217`） |
 | 对角步长 | √2 格 ≈ 0.707 m（SQRT_2 × CELL_RESOLUTION） | 8 连通对角边代价（Task 39 §三；禁切角） |
 | `ASSIST_MOVE_M` | 1.0 m | 协助请求重发阈值（目标相对上次发送点；`containment.rs`，task_41 §二.9） |
-| `D_FAR_M` / `D_NEAR_M`（车栈） | 2.2 / 1.2 m | Follow 距离带：`d > D_FAR` 前进、`d <= D_NEAR` 停、带内沿用上拍（真车 / sim 车，§8.15） |
+| `D_FAR_M` / `D_NEAR_M`（车栈） | 2.4 / 1.4 m | Follow 距离带：`d > D_FAR` 前进、`d <= D_NEAR` 停、带内沿用上拍（真车 / sim 车，§8.15）。**Containment 用 `CONTAINMENT_D_FAR_M / CONTAINMENT_D_NEAR_M` = 2.0 / 1.0、Guard 用 `GUARD_D_FAR_M / GUARD_D_NEAR_M` = 2.2 / 1.2**（task_48 口径 #19/#20，§8.16） |
 | `D_FAR_M` / `D_NEAR_M`（机栈） | 3.6 / 2.6 m | 同上，但按 UAV 视场几何抬高（2.10 m 是画面下边缘的地面极限，§8.15） |
 | `RING_RADIUS_M` | 3.0 m | Pictor 协同包围环半径（`coop_controller.gd`，task_41 §二.10） |
 | `auto_tick` | 50 ms | 决策主 tick |

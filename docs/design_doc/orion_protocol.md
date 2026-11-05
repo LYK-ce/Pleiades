@@ -1,7 +1,7 @@
 # Orion 统一通信协议（Orion Communication Protocol）
 
 > 创建日期：2026-08-07
-> 修改日期：2026-11-01
+> 修改日期：2026-11-05
 > 状态：设计中（消息字段以本文件为准，后续讨论补充其余章节）
 
 ---
@@ -324,37 +324,46 @@ v=0,    omega=-0.5   -> 00000000bf000000
 | 偏移 | 字段 | 类型 | 说明 |
 |---|---|---|---|
 | 0 | `mission_count` | uint8 | 任务数；**协议上限 255 任务/帧** |
-| 1 | `missions[mission_count]` | 结构数组 | 每项 9 字节（见下） |
+| 1 | `missions[mission_count]` | 结构数组 | 每项**变长** 9 / 13 / 17 字节（见下） |
 
-`missions[i]` 布局（9 字节）：`type` u8 [0..1) + `x` f32 [1..5) + `y` f32 [5..9)
+`missions[i]` 布局（变长，公共头 9 字节）：`type` u8 [0..1) + `x` f32 [1..5) + `y` f32 [5..9)；
+`type = 3` 再追加 `half_side` f32 [9..13)；`type = 5` 再追加 `fx` f32 [9..13) + `fy` f32 [13..17)
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `type` | uint8 | 任务类型：0 = `Goto`，2 = `Follow`（其余值预留，收到即 warn 丢弃） |
-| `x` | float | 目标点 X（全局世界坐标，米）；`Follow` 下**预留**，填 0 |
-| `y` | float | 目标点 Y（全局世界坐标，米）；`Follow` 下**预留**，填 0 |
+| `type` | uint8 | 任务类型：0 = `Goto`、2 = `Follow`、3 = `Containment`、4 = `Face`、5 = `Guard`（其余值 → **整帧拒**） |
+| `x` | float | `Goto` / `Follow` / `Guard`：目标点 / 值守点 X；`Containment`：正方形中心 X；`Face`：**要朝向的世界点** X（全局世界坐标，米） |
+| `y` | float | 同上（Y） |
+| `half_side` | float | 仅 `type = 3`：半边长（米）；必须有限且 `> 0`，否则整帧拒 |
+| `fx` / `fy` | float | 仅 `type = 5`：注视点（朝向 = `atan2(fy − y, fx − x)`）；**不做**有限性校验（有限性门控在 Pictor 入口） |
 
-> `Follow`（Task 37 §五.2）：`type = 2`。`x/y` 预留（现在恒 0），后续可用于「跟随偏移」等语义。
+**记录长度（含 `type` 字节）**：`0 / 2 / 4 → 9 B`、`3 → 13 B`、`5 → 17 B`；
+**总大小 = 1 + Σlen 字节**（`1 + 9×mission_count` 只对「全是 9 B 记录」的帧成立）。
+
+> `Follow`（Task 37 §五.2）：`type = 2`，`x/y` 预留（现在恒 0），后续可用于「跟随偏移」等语义。
+> `Face`（task_48 §2.2）：`type = 4`，`x/y` = 到点后要**朝向**的世界点（原地转、不移动；60 拍没对准也 `Success`）。
+> `Guard`（task_48 §2.8）：`type = 5`，`x/y` = 值守点、`fx/fy` = 注视点（持续任务，永不 `Success`）。
 > ⚠️ **`1` 号是 Task 36 已删的旧 `Circle`，不复用**——地面站/旧工具链里可能仍有该值，
-> 复用会让旧 Circle 帧被误认成 `Follow`；旧 type 一律按未知丢弃。
-
-**总大小 = 1 + 9×mission_count 字节**
+> 复用会让旧 Circle 帧被误认成 `Follow`；旧 type 长度未知 ⇒ **整帧拒**（队列不动）。
 
 **单分支语义**（Task 36 定稿；取代 Task 14 的 `member_count` 三分支）：
 
 | 条件 | 语义 | 处理 |
 |---|---|---|
 | `mission_count == 0` | **取消全部任务**（唯一取消入口） | 空队列替换，车停车待命 |
-| `mission_count > 0`，`type == 0` | **逐条入队** | 每条 `Mission::Goto { x, y }` 依序替换本地队列 |
-| `mission_count > 0`，`type == 2` | **逐条入队**（`Follow`） | 每条 `Mission::Follow { x, y }`（仅 sim 机栈真跟，其余建平凡树） |
-| `mission_count > 0`，`type != 0/2` | 该条 `warn` + 丢弃 | 若**全部**被丢 → **整帧不生效（队列不动）** |
-| 长度 ≠ `1 + 9×mission_count` | 非法帧 | `decode_task_set` 返回 `None`（旧帧在此被拒） |
+| `mission_count > 0`，`type ∈ {0, 2, 3, 4, 5}` | **逐条入队** | `Goto { x, y }` / `Follow { x, y }` / `Containment { x, y, half_side }` / `Face { x, y }` / `Guard { x, y, fx, fy }` 依序替换本地队列 |
+| `mission_count > 0`，`type ∉ {0, 2, 3, 4, 5}`（含退役的 `1`） | 未知 type | 长度未知 → `decode_task_set` 返回 `None`（**整帧拒**，队列不动） |
+| 长度 ≠ `1 + Σlen`（多 1 B / 与条数不符） | 非法帧 | `decode_task_set` 返回 `None` |
+| `type = 3` 的 `half_side` 非有限或 `<= 0` | 非法帧 | **整帧拒** |
 
 行为约束：
 - **替换**：新队列到达即替换旧队列，不合并、不追加
 - **立即中断**：正在执行的任务立即终止（`executor.reset()` + `stm32.stop()`），从新队列第一个任务开始
 - **协同上移指挥层**（Task 36 §十一 #27）：地面站逐车算点、**逐车单独发帧**，`missions[0]` 即该车自己的目标点；
   车端不再持有名单、不做分配（`planning/assignment.rs` 三份已删）
+- `Face` 是**一次性**任务（进 8° 死区即 `Success`；60 拍没对准也 `Success`，**不得** `Failure`）；`Guard` 是**持续**任务
+  （永不 `Success`，只有新的 `TASK_SET` 或 `mission_count = 0` 能结束它）
+- 「到点后朝人」= **同一帧两条** `[Goto(点), Face(人)]`（替换语义，缺一条就少一段行为；口径 #4）
 - ⚠️ **同批升级无过渡期**：车端与 Pictor 必须同批上线；旧帧（含 `member_count`/`members` 段）因长度校验必然被拒
 
 ### 3.6 ORION_MODE（msgid 8）— 模式切换

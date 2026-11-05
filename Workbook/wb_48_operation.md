@@ -60,3 +60,11 @@
 - 结果：PASS
 - 提交：ok ff532f7
 - 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（451 行，源码零改动，Pictor 仓仍干净）。 **计划摘要（≤200 字）** 10 个文件、全部锚到 `文件:行号`：`protocol_def.gd`(常量+归一化+修过期注释)、`orion_messages.gd`(长度表/encode 17B 分支/decode fx,fy)、`message_builder.gd`(两个新 builder)、`coop_controller.gd:218` 与 `auto_handler.gd:179-180` 改成对 `[Goto,Face]`、`event_bus.gd` 加 `follow_requested`、`ws_command_server.gd`(门控加 4/5 判据 + `_Handle_Guard`)、`input_handler.gd`(焦点门控 + X 随访状态机)、两份单测(4 条金标同 Rust 串 + fx/fy 透传 + 长度拒)。 两处校正：①`build_task_set` 必须透传 `fx/fy`（step.md 未点名，漏了 type=5 注视点恒 0）；②`protocol_def.gd` 里「Containment 只有 sim 机栈真实现」已过期，随本条注释一并纠正。 禁起 Godot → 验收改为 `tmp/task48/verify_step4.py` 独立复算 4 条金标 + TAB/偏移/口径 grep 对拍 + `git -C Pictor status` 范围自查，并把 `godot --headless …` 原命令留 Step 7 人类补跑。
+
+## Step 5 — sim 控制口：face / guard 命令（含 help 11→13）（task_48 首轮）
+- 起止：2026-11-05 12:10:13Z → 2026-11-05 12:22:41Z
+- 范围：pleiades-sim 的控制口（control.rs）
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 18f90de
+- 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（共 466 行）。 plan.md 共 466 行，本步只改 `sim/control.rs` 的 14 处：`ControlCmd` 加 `Face`、`Guard`；`Parse_Control` 加两个分支（复用 `Param_F32`，先做校验再判 `dx==dy==0` 是否重合）；`Handle_Cmd` 加两个 arm；`help` 从 11 条增至 13 条，三处顺序一致。测试新增 4 条、追加断言 1 处：`--bins control` 46→50、全量 495→499。一处校正：单测注视点用 120 而非金标 128（越界）。
