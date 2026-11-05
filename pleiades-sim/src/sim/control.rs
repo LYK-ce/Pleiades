@@ -1,6 +1,6 @@
 //Presented by KeJi
 //Created Date ： 2026-10-21
-//Modified Date ： 2026-11-01
+//Modified Date ： 2026-11-05
 
 #![allow(non_snake_case)]
 
@@ -77,6 +77,13 @@ const MANUAL_OMEGA_ABS_MAX: f32 = 0.5;
 pub enum ControlCmd {
     Goto { x: f32, y: f32 },
     Circle { x: f32, y: f32 },
+    /// 原地朝向世界点（task_48 Step 5）：`Mission::Face { x, y }` 进 `robot_cmd_tx`
+    Face { x: f32, y: f32 },
+    /// 值守（task_48 Step 5）：`Mission::Guard { x, y, fx, fy }` 进 `robot_cmd_tx`
+    ///
+    /// `(x, y)` 值守点、`(fx, fy)` 注视点；持续任务（永不 `Success`），
+    /// 只有新的 `TASK_SET` / `mission_count = 0` 能结束它（口径 #17）。
+    Guard { x: f32, y: f32, fx: f32, fy: f32 },
     /// 跟随（task_37 Step 4 测试夹具）：`Mission::Follow { x: 0, y: 0 }` 进 `robot_cmd_tx`
     Follow,
     /// 整体替换队列（= `AutoCmd::Set`）：空数组 = 取消（与 `stop` 等价）
@@ -261,6 +268,29 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
             let y = Param_F32(obj, "y")?;
             Ok(if cmd == "goto" { ControlCmd::Goto { x, y } } else { ControlCmd::Circle { x, y } })
         }
+        // task_48 Step 5：Face / Guard 与 goto 平级（§二 #24）。四个坐标全部复用 Param_F32，
+        // 故「缺失 / 非数字 / 非有限 / 越界」四条错误文本与 goto 同口径（不另立规矩）。
+        "face" => {
+            let x = Param_F32(obj, "x")?;
+            let y = Param_F32(obj, "y")?;
+            Ok(ControlCmd::Face { x, y })
+        }
+        "guard" => {
+            let x = Param_F32(obj, "x")?;
+            let y = Param_F32(obj, "y")?;
+            let fx = Param_F32(obj, "fx")?;
+            let fy = Param_F32(obj, "fy")?;
+            // 注视点与值守点重合 → atan2(fy−y, fx−x) = atan2(±0, ±0) 无定义 → 直接拒，
+            // 不做「随便给个朝向」的兜底（夹具要能一眼看出参数写错）。
+            // 判据就是 atan2 两个实参（精确 ==；`-0.0 == 0.0` 为真，故 ±0 也一并拒）。
+            let (dx, dy) = (fx - x, fy - y);
+            if dx == 0.0 && dy == 0.0 {
+                return Err(format!(
+                    "guard 的注视点与值守点重合（x={x}, y={y}）：atan2(0,0) 无定义，无法确定朝向"
+                ));
+            }
+            Ok(ControlCmd::Guard { x, y, fx, fy })
+        }
         // task_37 Step 4：跟随是**测试夹具**，无参数（`x/y` 预留，恒 0）
         "follow" => Ok(ControlCmd::Follow),
         "stop" => Ok(ControlCmd::Stop),
@@ -279,7 +309,7 @@ pub fn Parse_Control(text: &str) -> Result<ControlCmd, String> {
         "status" => Ok(ControlCmd::Status),
         "help" => Ok(ControlCmd::Help),
         other => Err(format!(
-            "未知 cmd '{other}'（支持 goto/circle/follow/queue/append/preempt/stop/mode/manual/status/help）"
+            "未知 cmd '{other}'（支持 goto/circle/face/guard/follow/queue/append/preempt/stop/mode/manual/status/help）"
         )),
     }
 }
@@ -396,6 +426,22 @@ fn Follow_Command() -> Command {
     Command::Auto(AutoCmd::Set(vec![Mission::Follow { x: 0.0, y: 0.0 }]))
 }
 
+/// `face` → `Command::Auto(AutoCmd::Set(vec![Mission::Face { x, y }]))`
+///
+/// 与 `goto` **同一条注入路径**（`robot_cmd_tx`）；`op_mode` 门闩由 `main_loop` 判。
+/// `(x, y)` 是**要朝向的世界点**，不是目标点（Face 原地转、不位移，task_48 §2.2 口径 #3/#7）。
+fn Face_Command(x: f32, y: f32) -> Command {
+    Command::Auto(AutoCmd::Set(vec![Mission::Face { x, y }]))
+}
+
+/// `guard` → `Command::Auto(AutoCmd::Set(vec![Mission::Guard { x, y, fx, fy }]))`
+///
+/// `(x, y)` 值守点、`(fx, fy)` 注视点；Guard 是**持续任务**（永不 `Success`），
+/// 只有新的 `TASK_SET`（整队替换）或 `mission_count = 0` 能结束它（task_48 口径 #17）。
+fn Guard_Command(x: f32, y: f32, fx: f32, fy: f32) -> Command {
+    Command::Auto(AutoCmd::Set(vec![Mission::Guard { x, y, fx, fy }]))
+}
+
 /// 纯函数（可单测）：§七.4 的 9 个键 + §12.8.2 第 4 条的 4 个观测键（共 13 个）
 #[allow(clippy::too_many_arguments)]
 fn Status_Data(
@@ -432,6 +478,8 @@ fn Help_Data() -> Value {
     json!({ "commands": [
         {"cmd":"goto",    "args":["x","y"],    "note":"单车前往目标点（米，[0,128)）"},
         {"cmd":"circle",  "args":["x","y"],    "note":"单车围圈（x/y 为圆心，米）"},
+        {"cmd":"face",    "args":["x","y"],    "note":"原地转向世界点 (x,y)（不位移；|Δθ|≤8° 或 60 拍收尾，均 Success）"},
+        {"cmd":"guard",   "args":["x","y","fx","fy"], "note":"值守：(x,y) 站岗朝 (fx,fy)；人进 3 m 扇形上前、出区归位（持续任务）"},
         {"cmd":"follow",  "args":[],           "note":"跟随（车/机通用；x/y 预留）"},
         {"cmd":"queue",   "args":["missions"], "note":"整体替换队列（missions=[] = 取消）"},
         {"cmd":"append",  "args":["missions"], "note":"追加队尾（当前任务不受影响）"},
@@ -629,6 +677,26 @@ async fn Handle_Cmd(
             let c = Command::Auto(AutoCmd::Set(vec![Mission::Goto { x, y }]));
             Dispatch(robot, c, "circle").await
         }
+        ControlCmd::Face { x, y } => {
+            if mode != OpMode::Auto {
+                warn!(
+                    "[control] 当前为 Manual 模式，face 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）"
+                );
+            }
+            info!("[control] face ({x:.1}, {y:.1}) → cmd_tx（Mission::Face：原地转向该世界点，不位移）");
+            Dispatch(robot, Face_Command(x, y), "face").await
+        }
+        ControlCmd::Guard { x, y, fx, fy } => {
+            if mode != OpMode::Auto {
+                warn!(
+                    "[control] 当前为 Manual 模式，guard 会被 main_loop 忽略（先发 {{\"cmd\":\"mode\",\"value\":\"auto\"}}）"
+                );
+            }
+            info!(
+                "[control] guard 值守点 ({x:.1}, {y:.1}) 注视点 ({fx:.1}, {fy:.1}) → cmd_tx（Mission::Guard：持续任务，永不 Success）"
+            );
+            Dispatch(robot, Guard_Command(x, y, fx, fy), "guard").await
+        }
         ControlCmd::Follow => {
             if mode != OpMode::Auto {
                 warn!(
@@ -773,6 +841,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_valid_face() {
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"face","x":64,"y":64}"#),
+            Ok(ControlCmd::Face { x: 64.0, y: 64.0 })
+        );
+        // 世界点边界：x=0 合法、127.999 合法（右开区间只拒 128.0）
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"face","x":0,"y":127.999}"#),
+            Ok(ControlCmd::Face { x: 0.0, y: 127.999 })
+        );
+        // 校验口径与 goto 同源（复用 Param_F32）：非有限 / 越界 / 缺字段各一条
+        assert_eq!(Parse_Control(r#"{"cmd":"face","x":1e39,"y":1}"#).unwrap_err(), "x 必须是有限数");
+        assert_eq!(Parse_Control(r#"{"cmd":"face","x":128,"y":1}"#).unwrap_err(), "x 超范围 [0,128)");
+        assert_eq!(Parse_Control(r#"{"cmd":"face","x":1}"#).unwrap_err(), "缺少 y 字段");
+    }
+
+    #[test]
+    fn test_parse_valid_guard() {
+        // 注视点 (64,120)：控制口有世界范围 [0,128)，不能用 §三 协议金标的 128（那是 messages.rs 的事）
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"guard","x":64,"y":64,"fx":64,"fy":120}"#),
+            Ok(ControlCmd::Guard { x: 64.0, y: 64.0, fx: 64.0, fy: 120.0 })
+        );
+        // 四个坐标同一套校验：fx 越界 / fy 非有限 / 缺 fx
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"guard","x":1,"y":2,"fx":128,"fy":3}"#).unwrap_err(),
+            "fx 超范围 [0,128)"
+        );
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"guard","x":1,"y":2,"fx":3,"fy":-1e39}"#).unwrap_err(),
+            "fy 必须是有限数"
+        );
+        assert_eq!(
+            Parse_Control(r#"{"cmd":"guard","x":1,"y":2,"fy":3}"#).unwrap_err(),
+            "缺少 fx 字段"
+        );
+    }
+
+    #[test]
     fn test_follow_command_maps_to_mission_follow() {
         // 必须真断言到 `Mission::Follow`（只判 `is_ok` 会漏掉「映射成 Goto」这类错）
         match Follow_Command() {
@@ -780,6 +887,27 @@ mod tests {
                 assert_eq!(list, vec![Mission::Follow { x: 0.0, y: 0.0 }], "必须是 Follow 且 x/y = 0");
             }
             other => panic!("follow 必须注入 AutoCmd::Set，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_face_guard_command_maps_to_mission() {
+        // 必须真断言到 Mission 变体（只判 is_ok 会漏掉「映射成 Goto」这类错）
+        match Face_Command(64.0, 64.0) {
+            Command::Auto(AutoCmd::Set(list)) => assert_eq!(
+                list,
+                vec![Mission::Face { x: 64.0, y: 64.0 }],
+                "face 必须注入 Mission::Face（不是 Goto、不是 Follow）"
+            ),
+            other => panic!("face 必须注入 AutoCmd::Set，实际 {other:?}"),
+        }
+        match Guard_Command(64.0, 64.0, 64.0, 120.0) {
+            Command::Auto(AutoCmd::Set(list)) => assert_eq!(
+                list,
+                vec![Mission::Guard { x: 64.0, y: 64.0, fx: 64.0, fy: 120.0 }],
+                "guard 必须注入 Mission::Guard 且四个坐标都要带上"
+            ),
+            other => panic!("guard 必须注入 AutoCmd::Set，实际 {other:?}"),
         }
     }
 
@@ -862,7 +990,7 @@ mod tests {
         let e = Parse_Control(r#"{"cmd":"fly"}"#).expect_err("未知 cmd 必须报错");
         assert!(e.contains("未知 cmd 'fly'"), "错误文本：{e}");
         assert!(
-            e.contains("goto/circle/follow/queue/append/preempt/stop/mode/manual/status/help"),
+            e.contains("goto/circle/face/guard/follow/queue/append/preempt/stop/mode/manual/status/help"),
             "应列出支持的命令：{e}"
         );
     }
@@ -914,6 +1042,18 @@ mod tests {
         assert_eq!(e, "x 必须是有限数");
         let e = Parse_Control(r#"{"cmd":"goto","x":36,"y":-1e39}"#).expect_err("非有限必须报错");
         assert_eq!(e, "y 必须是有限数");
+    }
+
+    #[test]
+    fn test_guard_rejects_coincident_gaze() {
+        // 重合 → atan2(0,0) 无定义 → 直接拒（不做「随便给个朝向」的兜底）
+        let e = Parse_Control(r#"{"cmd":"guard","x":64,"y":64,"fx":64,"fy":64}"#)
+            .expect_err("注视点与值守点重合必须拒");
+        assert!(e.contains("重合"), "错误文本要指出重合：{e}");
+        assert!(e.contains("atan2"), "错误文本要指出原因（atan2(0,0) 无定义）：{e}");
+        // 只差一个轴不算重合（1 m 外朝向确定）
+        assert!(Parse_Control(r#"{"cmd":"guard","x":64,"y":64,"fx":65,"fy":64}"#).is_ok());
+        assert!(Parse_Control(r#"{"cmd":"guard","x":64,"y":64,"fx":64,"fy":63}"#).is_ok());
     }
 
     #[test]
@@ -1195,12 +1335,12 @@ mod tests {
     fn test_help_data_has_all_commands() {
         let v = Help_Data();
         let arr = v["commands"].as_array().expect("help.data.commands 必须是数组");
-        assert_eq!(arr.len(), 11, "help 必须列 11 条命令");
+        assert_eq!(arr.len(), 13, "help 必须列 13 条命令");
         let names: Vec<&str> = arr.iter().filter_map(|c| c["cmd"].as_str()).collect();
         assert_eq!(
             names,
             vec![
-                "goto", "circle", "follow", "queue", "append", "preempt",
+                "goto", "circle", "face", "guard", "follow", "queue", "append", "preempt",
                 "stop", "mode", "manual", "status", "help"
             ]
         );
@@ -1214,6 +1354,15 @@ mod tests {
             .find(|c| c["cmd"] == json!("manual"))
             .expect("help 必须列 manual");
         assert_eq!(manual["args"], json!(["v", "omega"]), "manual 必须两轴：{manual:?}");
+        // task_48 Step 5：两条新命令的 args 形状（顺序 = parse 参数顺序）
+        let face = arr.iter().find(|c| c["cmd"] == json!("face")).expect("help 必须列 face");
+        assert_eq!(face["args"], json!(["x", "y"]), "face 参数是目标世界点：{face:?}");
+        let guard = arr.iter().find(|c| c["cmd"] == json!("guard")).expect("help 必须列 guard");
+        assert_eq!(
+            guard["args"],
+            json!(["x", "y", "fx", "fy"]),
+            "guard 参数是值守点 + 注视点：{guard:?}"
+        );
     }
 
     #[test]

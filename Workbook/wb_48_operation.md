@@ -52,3 +52,11 @@
 - 结果：PASS
 - 提交：ok 5615feb
 - 规划要点：计划已写完（`tmp/task48/plan.md`，460 行，源码零改动，`git status` 仍只有 workbook 与既有未跟踪目录）。 **摘要（≤200 字）**：6 个文件：两份 `follow.rs` 把 `D_FAR/D_NEAR` 改 2.4/1.4、新增 `CONTAINMENT_D_*` 2.0/1.0，同步 6 处注释（含 `1.7→1.9`）；两份 `containment.rs` 的 `params` 显式传 `CONTAINMENT_*`；两份 `mod.rs` 的 `Mission::Follow` 显式传 `D_*`（不依赖 `default()`）。`guard.rs` 2.2/1.2、机端 3.6/2.6、base、`tests/`、Task/、根 Cargo.toml 一行不动。两份副本用同一脚本套改，改后逐字一致（diff hunk 数 follow 2 / containment 4）；各加 1 条鉴别力单测（同一距离 2.1/1.3 m 两种口径结论相反，迟滞带用 epsilon 防 f32 假红）。验收：`check --lib` + 两个设备 crate `--all-targets`；`--bins` 测试 13→14 / 17→18 / 31→32 / 33→34；`grep` 常量 8 行对拍；V6 卡死 `FollowParams::default()` 生产残留；不 fmt、不 git add/commit。
+
+## Step 4 — Pictor：类型 / 长度表 / 编解码 / 下发 / X→Follow（task_48 首轮）
+- 起止：2026-11-05 11:53:08Z → 2026-11-05 12:10:13Z
+- 范围：Pictor 的协议层、两个下发点、ws 命令门控、X 键入口
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok ff532f7
+- 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（451 行，源码零改动，Pictor 仓仍干净）。 **计划摘要（≤200 字）** 10 个文件、全部锚到 `文件:行号`：`protocol_def.gd`(常量+归一化+修过期注释)、`orion_messages.gd`(长度表/encode 17B 分支/decode fx,fy)、`message_builder.gd`(两个新 builder)、`coop_controller.gd:218` 与 `auto_handler.gd:179-180` 改成对 `[Goto,Face]`、`event_bus.gd` 加 `follow_requested`、`ws_command_server.gd`(门控加 4/5 判据 + `_Handle_Guard`)、`input_handler.gd`(焦点门控 + X 随访状态机)、两份单测(4 条金标同 Rust 串 + fx/fy 透传 + 长度拒)。 两处校正：①`build_task_set` 必须透传 `fx/fy`（step.md 未点名，漏了 type=5 注视点恒 0）；②`protocol_def.gd` 里「Containment 只有 sim 机栈真实现」已过期，随本条注释一并纠正。 禁起 Godot → 验收改为 `tmp/task48/verify_step4.py` 独立复算 4 条金标 + TAB/偏移/口径 grep 对拍 + `git -C Pictor status` 范围自查，并把 `godot --headless …` 原命令留 Step 7 人类补跑。
