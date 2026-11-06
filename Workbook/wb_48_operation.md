@@ -133,3 +133,25 @@ M Workbook/wb_48_operation.md
 - 结果：PASS
 - 提交：ok 8920892
 - 规划要点：计划 tmp/task48/plan.md + 快照 step8_face_rs_final.rs，源码零改。四份 face.rs 删 :38-39 常量、:51-52 ticks、:69-80 计数分支，halt 改空，加退化保护；用例删 2 加 3。验收 cp→md5 同→face 6/6/12→--all-targets。自重合用例须 yaw=90°。6 处「60 拍」白名单外未动。
+
+## Step 9 — 重跑仿真验证（F3 / C1 / C2，验证 180° 能否转过去）（task_48 首轮·step8-9）
+- 起止：2026-11-06 00:49:50Z → 2026-11-06 01:28:40Z
+- 范围：只写 tmp/task48/s9/；可改 RobotSim_TestEnv/ 与 Pictor/.config/ 的测试配置；不改源码
+- 轮次：2 / 3
+- 结果：PASS
+- 提交：ok 7e85933
+- 规划要点：计划已写入 [tmp/task48/plan.md](tmp/task48/plan.md)（345 行）。我核对过改动范围，确认没有越界：`git status` 与进场基线逐行一致，源码中的 `diff --stat` 为空。 **计划摘要（≤200 字，可写入 workbook）** > 计划已写入 tmp/task48/plan.md（345 行，源码零改动）。对 r1 唯一的 FAIL（C2 10.7°）做了定量归因：派车侧的朝向点被冻结（containment.rs:60 的 ASSIST_MOVE_M=1.0，coop_controller.gd:222 的 Face 目标取 assist 时刻的人位）；横向偏差 0.44 m、距离 2.95 m，折合 8.5°，再加上 Face 残差 0.36°，可见并非 Face 缺陷。本轮让 C2 中的人沿视线径向朝车走 1.65 m（横向偏差≈0），再重跑 F3/C1/C2；将 r1 归档到 s9/r1/ 并写入对照；V14 拆成「环点≥0.95 + 人位移>1.0」，新增 V23~V25；补写此前被悬空引用的 impl.md。约 30 min，0 残留。 三个要点（供评审快速扫一眼）： | 项 | 结论 | |---|---| | 本轮改动 | 只动 `tmp/task48/`：归档 r1（24 个文件）→ 改 `s9_driver.py` 9 处（`C2_RADIAL_M=1.65`、`freeze1` 基准、nums 加 6 键）→ 改 `s9_report.py` 11 处（V14 口径 + V23~V25）→ 新建 `impl.md` | | 为什么不改源码 | 10.7° 分解后只剩 0.36° 属于 Face（落在 8° 死区内）；差额来自 assist 冻结策略，属 `task_41/43` 的 `ASSIST_MOVE_M`/`RING_OFFSET_RAD`，改它就是越界 | | 防「为过判据改测试」 | 两种几何都入档：r1 对角几何的 10.7° 与分解表写进 `result.md §4.1
+
+## 引擎结束（task_48 首轮·step8-9）
+- 结束：2026-11-06 01:28:42Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_48_operation.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
+
+## 执行引擎启动（task_48 首轮·step9 重跑）
+- 开始：2026-11-06 01:29:35Z
+- 计划：S9
