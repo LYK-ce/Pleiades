@@ -125,3 +125,11 @@ M Workbook/wb_48_operation.md
 ## 执行引擎启动（task_48 首轮·step8-9）
 - 开始：2026-11-06 00:38:34Z
 - 计划：S8 → S9
+
+## Step 8 — 去掉 Face 的 60 拍时限（四份 face.rs）（task_48 首轮·step8-9）
+- 起止：2026-11-06 00:38:34Z → 2026-11-06 00:49:50Z
+- 范围：四份 face.rs（ugv / uav / sim_ugv / sim_uav）
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 8920892
+- 规划要点：计划 tmp/task48/plan.md + 快照 step8_face_rs_final.rs，源码零改。四份 face.rs 删 :38-39 常量、:51-52 ticks、:69-80 计数分支，halt 改空，加退化保护；用例删 2 加 3。验收 cp→md5 同→face 6/6/12→--all-targets。自重合用例须 yaw=90°。6 处「60 拍」白名单外未动。
