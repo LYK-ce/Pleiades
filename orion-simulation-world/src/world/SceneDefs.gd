@@ -52,20 +52,33 @@ const SCENES := {
 		"ceiling": false,
 		"ceiling_z_m": 0.0,
 	},
-	# 室内走廊（task_49 §3.3）：**本步 obstacles 留空**（Step 2 才填 8 条 AABB）。
-	# 下面注释里的 8 条就是 §3.3 的定稿数据，Step 2 只需去掉注释符号、搬进 "obstacles": [ ... ]。
-	# 01 corridor_south  origin (50.0, 61.5, 0.0)  size (24.0, 0.5, 3.0)   # 内表面 y=62，墙厚 0.5
-	# 02 corridor_north  origin (50.0, 66.0, 0.0)  size (24.0, 0.5, 3.0)   # 内表面 y=66
-	# 03 corridor_west   origin (49.5, 61.5, 0.0)  size ( 0.5, 5.0, 3.0)   # 西端 x=50 封死
-	# 04 east_wall_low   origin (74.0, 61.5, 0.0)  size ( 0.5, 2.0, 3.0)   # y 61.5~63.5
-	# 05 east_wall_high  origin (74.0, 64.5, 0.0)  size ( 0.5, 2.0, 3.0)   # y 64.5~66.5
-	# 06 room_east       origin (79.0, 61.5, 0.0)  size ( 0.5, 5.0, 3.0)   # 房间内表面 x=79
-	# 07 room_north      origin (74.5, 66.0, 0.0)  size ( 5.0, 0.5, 3.0)
-	# 08 room_south      origin (74.5, 61.5, 0.0)  size ( 5.0, 0.5, 3.0)
-	# 门洞 = y∈[63.5, 64.5] = 1.0 m = 2 格（≥1.0 且 0.5 整数倍，§3.2-3）；墙高 3 m = 6 层。
+	# 室内走廊（task_49 §3.3 定稿 / §五 Step 2）：8 条 AABB，坐标与 §3.3 **一字不改**。
+	#   对齐铁律（§3.2）：分量全为 0.5 整数倍 / 墙厚一律 0.5（=1 格）/ 墙高 3 m = 6 层格 /
+	#   门洞宽 1.0 m = 2 格（63.5→cell 127、64.5→cell 129，127/128 两格空）。
+	#   走廊内表面 x∈[50,74]（cell 100~147）、y∈[62,66]（cell 124~131，净宽 4 m）；西端 x=50 封死；
+	#   小房间内表面 x∈[74.5,79]（cell 149~158）、y∈[62,66]；东墙 x=74 只占 cell 148。
+	# 手算（cell = (floor(2x), floor(2z), floor(2y))）：8 条毛格数 864，房间南北墙与东墙在角上
+	#   重叠 12 格（(158,*,123) 与 (158,*,132) 各 6），`_set_voxel` 去重后 **净 852 格**（预期日志值）。
 	"corridor_indoor": {
 		"name": "corridor_indoor",
-		"obstacles": [],
+		"obstacles": [
+			# 01 走廊南墙：内表面 y=62（厚 0.5 = 1 格）
+			{"name": "corridor_south", "origin": Vector3(50.0, 61.5, 0.0), "size": Vector3(24.0, 0.5, 3.0)},
+			# 02 走廊北墙：内表面 y=66
+			{"name": "corridor_north", "origin": Vector3(50.0, 66.0, 0.0), "size": Vector3(24.0, 0.5, 3.0)},
+			# 03 西端封死：内表面 x=50
+			{"name": "corridor_west", "origin": Vector3(49.5, 61.5, 0.0), "size": Vector3(0.5, 5.0, 3.0)},
+			# 04 东墙下段：y 61.5~63.5（门洞下边界 63.5）
+			{"name": "east_wall_low", "origin": Vector3(74.0, 61.5, 0.0), "size": Vector3(0.5, 2.0, 3.0)},
+			# 05 东墙上段：y 64.5~66.5（门洞上边界 64.5）；04/05 之间 = 1.0 m 门洞
+			{"name": "east_wall_high", "origin": Vector3(74.0, 64.5, 0.0), "size": Vector3(0.5, 2.0, 3.0)},
+			# 06 房间东墙：内表面 x=79
+			{"name": "room_east", "origin": Vector3(79.0, 61.5, 0.0), "size": Vector3(0.5, 5.0, 3.0)},
+			# 07 房间北墙：内表面 y=66
+			{"name": "room_north", "origin": Vector3(74.5, 66.0, 0.0), "size": Vector3(5.0, 0.5, 3.0)},
+			# 08 房间南墙：内表面 y=62
+			{"name": "room_south", "origin": Vector3(74.5, 61.5, 0.0), "size": Vector3(5.0, 0.5, 3.0)},
+		],
 		"spawn": Vector3(64.0, 64.0, 0.0),
 		"spawn_clear_radius_m": 1.5,
 		"spawn_clear_height_m": 2.5,
