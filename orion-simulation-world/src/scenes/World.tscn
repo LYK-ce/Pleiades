@@ -1,10 +1,11 @@
 ; Presented by KeJi
 ; Created Date ： 2026-10-21
-; Modified Date ： 2026-10-22
+; Modified Date ： 2026-11-06
 ;
 ; 世界组件主场景（Step 3 完成态）。节点树与属性见 COMPONENTS.md §2 / §4.1。
 ; Step 3：Step 2 的临时 DebugCamera 已删除，改由 ObserverCamera.tscn 实例（current=true）承担观察。
 ; Step 6：Systems 下挂 WebSocketManager 实例，并绑定 vehicle_scene / vehicles_root 两个 @export。
+; task_49 Step 1：显式写 scene_name = "city"（不写也默认 city，写出来便于阅读）；室内入口见 WorldIndoor.tscn。
 ; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
 ; 尺度不经本文件固化：VoxelWorld.cell_size 只是可读声明，运行时由 World.gd 按 [sim_world] 覆盖。
 ; 节点引用必须靠 node_paths=PackedStringArray(...)，且 NodePath **相对该节点自身**（COMPONENTS.md §9.1 E20）。
@@ -45,6 +46,7 @@ size = Vector3(128, 1, 128)
 
 [node name="World" type="Node3D"]
 script = ExtResource("1_world")
+scene_name = "city"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_world")

@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-11-03
+# Modified Date ： 2026-11-06
 #
 # 世界根脚本（COMPONENTS.md §4.1）：启动世界时钟、按 [sim_world] 程序化生成体素世界、
 # 提供尺度/坐标/容器访问。D4 程序化生成，布局确定性、无 RNG。
@@ -12,6 +12,11 @@
 # 例外（task_32 §三.2 明令"写死，不得自行发挥"）：不可见空气墙 / 顶盖的 5 个 box 用字面量几何表
 # AIR_WALL_BOXES，与现有设置数值一致（256×0.5=128 m、64×0.5=32 m）；改世界尺度必须同步改该表 + E24（两处一起）。
 # 坐标换轴只经 WorldTransform（task_30 §7.3）：WorldToCell 内部即 PosToGodot，本文件无换轴字面量。
+#
+# task_49 Step 1（§五 Step 1）：世界几何 / 出生点 / 观感档的唯一数据来源改为 SceneDefs.SCENES，
+# 本文件只留"按名字取数据"；场景名解析顺序 = 导出属性 scene_name → 项目设置 sim_world/world/scene → "city"。
+# SPAWN_WORLD / OBSTACLES 两个 const **保留**为 city 兜底（Facade.gd 经 get_script_constant_map() 读 OBSTACLES，
+# 而 Facade 只在 city 档跑），数值与数据表逐条相等。
 
 extends Node3D
 
@@ -22,11 +27,16 @@ const WorldLook := preload("res://src/world/WorldLook.gd")
 ## 街道几何 / 建筑立面的唯一入口（task_38 §三.4 / COMPONENTS.md §4.1.2）；运行期建、不进 .tscn。
 const StreetLayout := preload("res://src/world/StreetLayout.gd")
 const Facade := preload("res://src/world/Facade.gd")
+## 场景数据表（task_49 §三）：世界几何 / 出生点 / 观感档的唯一数据来源。
+const SceneDefs := preload("res://src/world/SceneDefs.gd")
 
 const SETTING_VOXEL_SIZE := "sim_world/world/voxel_size"
 const SETTING_CELLS_X := "sim_world/world/cells_x"
 const SETTING_CELLS_Y := "sim_world/world/cells_y"
 const SETTING_LAYERS := "sim_world/world/layers"
+## 场景名（task_49 §五 Step 1-2）：导出属性未填时的第二来源；两面都不填 = DEFAULT_SCENE。
+const SETTING_SCENE := "sim_world/world/scene"
+const DEFAULT_SCENE := "city"
 
 const VOXEL_ITEM := 0
 const VOXEL_COLOR := Color(0.55, 0.58, 0.62, 1.0)
@@ -36,13 +46,17 @@ const VOXEL_COLOR := Color(0.55, 0.58, 0.62, 1.0)
 const LOOK_ENABLED := true
 
 ## 出生点（世界坐标，米），与 pleiades-sim 的 DEFAULT_ORIGIN (64, 64, 0) 一致。
+## **保留**：city 档的兜底来源（_def 未就绪时用）；实际取值走 _Spawn()（task_49 Step 1）。
 const SPAWN_WORLD := Vector3(64.0, 64.0, 0.0)
 ## 出生点净空半径（米，水平）与净空高度（米）——Step 6 直接把 avatar 放在这里。
+## **保留**：同上，实际取值走 _Spawn_Clear_Radius_M() / _Spawn_Clear_Height_M()。
 const SPAWN_CLEAR_RADIUS_M := 3.0
 const SPAWN_CLEAR_HEIGHT_M := 4.0
 
 ## 静态障碍布局：origin / size 均为**世界坐标（Z-up，米）**。
 ## 只做边界墙 + 稀疏块（≈1.2 万格），绝不填满 256×256×64（419 万格）。
+## **保留**：city 档的兜底来源，且 Facade.gd 经 get_script_constant_map() 读它（E31-⑤：不能 preload 本文件）；
+## 数值与 SceneDefs.SCENES["city"].obstacles 逐条相等（task_49 Step 1，改一处必须同步另一处）。
 const OBSTACLES := [
 	# 边界墙 ×4：标出 128×128 m 世界范围，高 2 m
 	{"name": "wall_south", "origin": Vector3(0.0, 0.0, 0.0), "size": Vector3(128.0, 0.5, 2.0)},
@@ -99,6 +113,12 @@ const PEDESTRIANS_NODE := "Pedestrians"
 const STREET_NODE := "Street"
 const FACADE_NODE := "Facade"
 
+## 场景名（task_49 Step 1）：空 = 走项目设置 SETTING_SCENE，再空 = "city"。
+## `.tscn` 里显式写一行即可（不需要 node_paths：E16 只约束节点引用）。
+@export var scene_name: String = ""
+
+var _scene: String = ""
+var _def: Dictionary = {}
 var _voxel_size: float = 0.5
 var _cells_x: int = 256
 var _cells_y: int = 256
@@ -110,6 +130,7 @@ var _built_cells: int = 0
 
 
 func _ready() -> void:
+	_Resolve_Scene()
 	WorldClock.EnsureStarted()
 	_read_scale_settings()
 	_log_scale()
@@ -118,8 +139,11 @@ func _ready() -> void:
 		Apply_World_Look()
 	_Build_Bounds()
 	# 街道几何 / 立面（task_38 §三.4 的末尾两行）：只建渲染 mesh、零碰撞、可幂等重建。
-	StreetLayout.Build_All(self)
-	Facade.Build_All(self)
+	# task_49 §二 #17：只在 city 档跑，由场景数据的 props_street / props_facade 门控。
+	if _Props_Street():
+		StreetLayout.Build_All(self)
+	if _Props_Facade():
+		Facade.Build_All(self)
 
 
 ## 应用观感（地面材质 + 天空 + 太阳方向）：幂等；缺资产只 warn。
@@ -144,7 +168,7 @@ func BuildVoxelWorld() -> void:
 	_voxel_world.cell_size = size
 	_voxel_world.mesh_library = _make_mesh_library()
 
-	for obstacle: Dictionary in OBSTACLES:
+	for obstacle: Dictionary in _Obstacles():
 		_fill_block_world(obstacle["origin"], obstacle["size"])
 
 	var elapsed_ms := float(Time.get_ticks_usec() - started_usec) / 1000.0
@@ -167,6 +191,12 @@ func _Build_Bounds() -> void:
 	body.name = "Bounds"
 	body.collision_layer = AIR_WALL_LAYER
 	body.collision_mask = 0
+	# 几何按 AIR_WALL_BOXES 的写死字面量表建（E24：内侧面必须正好贴世界边界平面、顺序固定）；
+	# air_wall_height_m 只用于日志 + "数据与几何表是否一致"的告警，**不按数据重建几何**。
+	var height: float = _Air_Wall_Height()
+	if not is_equal_approx(height, AIR_WALL_HEIGHT_M):
+		push_warning("[world] air_wall_height_m=%.2f 与 AIR_WALL_BOXES 的 %.2f 不一致：几何仍按写死表建"
+			% [height, AIR_WALL_HEIGHT_M])
 	for box: Array in AIR_WALL_BOXES:
 		var center: Vector3 = box[0]
 		var extent: Vector3 = box[1]
@@ -178,7 +208,7 @@ func _Build_Bounds() -> void:
 		body.add_child(node)
 	add_child(body)
 	print("[world] bounds built: ", AIR_WALL_BOXES.size(), " shapes, layer=", AIR_WALL_LAYER,
-		", mask=0, height=", AIR_WALL_HEIGHT_M, " m, thickness=", AIR_WALL_THICKNESS_M, " m")
+		", mask=0, height=", height, " m, thickness=", AIR_WALL_THICKNESS_M, " m")
 
 
 ## 街道容器（后续任务用；每次调用重新解析，不缓存）。
@@ -204,6 +234,24 @@ func GetVehiclesRoot() -> Node3D:
 	return _vehicles_root
 
 
+# ---------------------------------------------------------------- 场景数据（task_49 Step 1）
+
+## 当前场景名（"city" / "corridor_indoor"）；_ready 之前返回 "city"（= 2026-11-06 的既有行为）。
+func Get_Scene_Name() -> String:
+	return _scene if _scene != "" else DEFAULT_SCENE
+
+
+## 当前场景的障碍表（**只读**；元素 {name, origin: Vector3, size: Vector3}，世界坐标 Z-up / 米）。
+## 它是 SceneDefs.Get() 的深拷贝：就地改它不会落盘、只会骗自己 —— 要改数据去改 SceneDefs。
+func Get_Obstacles() -> Array:
+	return _Obstacles()
+
+
+## 当前场景的出生点（世界坐标 / 米）。
+func Get_Spawn() -> Vector3:
+	return _Spawn()
+
+
 # ---------------------------------------------------------------- 私有
 
 ## 从 [sim_world] 读尺度；缺键时保留默认值并告警（唯一来源原则）。
@@ -223,9 +271,10 @@ func _read_scale_settings() -> void:
 
 
 func _log_scale() -> void:
+	var spawn := _Spawn()
 	print("[world] voxel=", _voxel_size, " m, cells=", _cells_x, "x", _cells_y, "x", _layers,
 		" -> ", _cells_x * _voxel_size, " x ", _cells_y * _voxel_size, " x ", _layers * _voxel_size,
-		" m, spawn=(", SPAWN_WORLD.x, ", ", SPAWN_WORLD.y, ", ", SPAWN_WORLD.z, ")")
+		" m, spawn=(", spawn.x, ", ", spawn.y, ", ", spawn.z, ")")
 
 
 ## 立方体 mesh + 立方体碰撞形状：渲染与物理共用同一边长（= voxel_size）。
@@ -269,12 +318,80 @@ func _set_voxel(cell: Vector3i) -> void:
 
 ## 出生点净空自证（Step 6 直接落 (64,64,0) 不会卡在墙里）。
 func _warn_if_spawn_blocked() -> void:
-	var start := WorldToCell(SPAWN_WORLD - Vector3(SPAWN_CLEAR_RADIUS_M, SPAWN_CLEAR_RADIUS_M, 0.0))
-	var end := WorldToCell(SPAWN_WORLD
-		+ Vector3(SPAWN_CLEAR_RADIUS_M, SPAWN_CLEAR_RADIUS_M, SPAWN_CLEAR_HEIGHT_M))
+	var spawn := _Spawn()
+	var clear_radius := _Spawn_Clear_Radius_M()
+	var clear_height := _Spawn_Clear_Height_M()
+	var start := WorldToCell(spawn - Vector3(clear_radius, clear_radius, 0.0))
+	var end := WorldToCell(spawn + Vector3(clear_radius, clear_radius, clear_height))
 	for cx in range(start.x, end.x + 1):
 		for cz in range(start.z, end.z + 1):
 			for cy in range(maxi(start.y, 0), end.y + 1):
 				if _voxel_world.get_cell_item(Vector3i(cx, cy, cz)) != GridMap.INVALID_CELL_ITEM:
 					push_warning("[world] 出生点净空被体素占用：cell=(%d, %d, %d)" % [cx, cy, cz])
 					return
+
+
+# ---------------------------------------------------------------- 场景数据私有区（task_49 Step 1）
+
+## 场景名解析（step.md:18）：导出属性 → ProjectSettings(SETTING_SCENE) → DEFAULT_SCENE。
+## 未知名字 push_warning 后回退 city；**绝不报 ERROR 级**（--quit 的 0 ERROR 验收靠这条，E4）。
+## 子节点（Systems/WebSocketManager）的 _ready 早于本节点 ⇒ 访问器必须容忍 _def 为空。
+func _Resolve_Scene() -> void:
+	var raw := scene_name
+	var source := "export"
+	if raw.strip_edges() == "":
+		var setting: Variant = ProjectSettings.get_setting(SETTING_SCENE, "")
+		raw = String(setting) if setting is String else ""
+		source = "project_setting"
+	if raw.strip_edges() == "":
+		raw = DEFAULT_SCENE
+		source = "default"
+	_scene = raw.strip_edges()
+	if not SceneDefs.Has(_scene):
+		push_warning("[world] 未知场景 '%s'（来源 %s），回退 '%s'；已知场景：%s"
+			% [_scene, source, DEFAULT_SCENE, str(SceneDefs.Names())])
+		_scene = DEFAULT_SCENE
+	_def = SceneDefs.Get(_scene)
+	print("[world] scene=", _scene, " (source=", source, ", obstacles=", _Obstacles().size(), ")")
+
+
+## 障碍表：_def 未就绪（子节点 _ready 早于本节点 _ready）时回退 city 常量。
+func _Obstacles() -> Array:
+	var table: Variant = _def.get("obstacles", null)
+	if table is Array:
+		return table
+	return OBSTACLES
+
+
+func _Spawn() -> Vector3:
+	var p: Variant = _def.get("spawn", null)
+	if p is Vector3:
+		return p
+	return SPAWN_WORLD
+
+
+func _Spawn_Clear_Radius_M() -> float:
+	var v: Variant = _def.get("spawn_clear_radius_m", null)
+	return float(v) if v is float or v is int else SPAWN_CLEAR_RADIUS_M
+
+
+func _Spawn_Clear_Height_M() -> float:
+	var v: Variant = _def.get("spawn_clear_height_m", null)
+	return float(v) if v is float or v is int else SPAWN_CLEAR_HEIGHT_M
+
+
+func _Air_Wall_Height() -> float:
+	var v: Variant = _def.get("air_wall_height_m", null)
+	return float(v) if v is float or v is int else AIR_WALL_HEIGHT_M
+
+
+func _Props_Street() -> bool:
+	if _def.is_empty():
+		return true                      # 兜底 = city 行为
+	return bool(_def.get("props_street", true))
+
+
+func _Props_Facade() -> bool:
+	if _def.is_empty():
+		return true
+	return bool(_def.get("props_facade", true))

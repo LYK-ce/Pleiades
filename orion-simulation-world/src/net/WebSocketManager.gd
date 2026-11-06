@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-11-03
+# Modified Date ： 2026-11-06
 #
 # WebSocketManager 组件（task_30 §5.1 / COMPONENTS.md §4.5）：世界侧 WS 服务端的唯一实例。
 #   监听一个端口 -> accept N 条连接 -> 每条连接记住「我是谁的、我是什么组件」
@@ -56,6 +56,8 @@ const WireProtocol := preload("res://src/net/WireProtocol.gd")
 const WorldClock := preload("res://src/common/WorldClock.gd")
 const WorldTransform := preload("res://src/common/WorldTransform.gd")
 ## 出生原点唯一来源（P8：preload 后可直接读其 const，禁止复制字面量）。
+## task_49 Step 1：本常量降级为**兜底**（解析不到 World 节点 / 其 _def 未就绪时用）；
+## 常态走 `_Scene_Obstacles()` / `_Scene_Spawn()`（= 当前场景的数据，city 档逐值相同）。
 const World := preload("res://src/world/World.gd")
 
 const VEHICLE_SCENE_PATH := "res://src/scenes/Vehicle.tscn"
@@ -92,10 +94,11 @@ const POSE_BROADCAST_INTERVAL_S := 0.1
 const PEDESTRIAN_CHASSIS := "pedestrian"
 ## 行人容器名：与 Vehicles 平级、同父（World 根）。**World.tscn 不绑**，首个行人到达时惰性建。
 const PEDESTRIANS_NODE := "Pedestrians"
-## 默认出生点偏移（世界坐标米）：spawn 缺失/非法时的回退点 = World.SPAWN_WORLD + 该偏移。
+## 默认出生点偏移（世界坐标米）：spawn 缺失/非法时的回退点 = **当前场景** spawn + 该偏移。
 ## 为什么是正南 8 m：车 avatar 的环是「8 方位 × 半径 2·ring」，270° 半径 8 处的点是 (64,56)
-##   —— 那要第 31 台车才会出现；且它已在 SPAWN_CLEAR_RADIUS_M(3 m) 之外、与 15 个
-##   World.OBSTACLES 全无交、离静态人物与旧 WALKERS 环路都很远（静态人物已于 2026-10-28 移除）。
+##   —— 那要第 31 台车才会出现；且它已在 SPAWN_CLEAR_RADIUS_M(3 m) 之外、与**当前场景**的障碍表
+##   全无交（city 档 = 原 `(64, 56, 0)`，数值与 2026-11-06 逐字相同）、离静态人物与旧 WALKERS 环路都很远
+##   （静态人物已于 2026-10-28 移除）。task_49 Step 1：室内场景不要依赖本默认点（走廊在 y∈[62,66]）。
 const PEDESTRIAN_SPAWN_OFFSET_M := Vector3(0.0, -8.0, 0.0)
 ## spawn 校验：与已占 avatar 的最小水平中心距（米）。
 const PEDESTRIAN_SPAWN_MIN_GAP_M := 1.0
@@ -1119,7 +1122,8 @@ func _TakeNextSensorId() -> int:
 	return id
 
 
-## 确定性出生点（无 RNG）：第 1 台 = World.SPAWN_WORLD；之后按 ring 错开（§7.2 ring）。
+## 确定性出生点（无 RNG）：第 1 台 = 当前场景 spawn（city = World.SPAWN_WORLD = (64,64,0)）；
+## 之后按 ring 错开（§7.2 ring）。
 ## UAV 抬高到 2.5 m（§7.1 巡航高度，task_32 Step 3 由 2 m 提高以越过 2 m 可见矮墙），UGV = 0。
 func _PickSpawn(chassis_name: String) -> Dictionary:
 	var idx := _next_avatar_id - 1
@@ -1129,7 +1133,7 @@ func _PickSpawn(chassis_name: String) -> Dictionary:
 		var ring_slot := posmod(idx - 1, SPAWN_RING_SLOTS)
 		var angle := TAU * float(ring_slot) / float(SPAWN_RING_SLOTS)
 		offset = Vector3(cos(angle), sin(angle), 0.0) * SPAWN_RING_STEP_M * float(ring)
-	var origin: Vector3 = World.SPAWN_WORLD
+	var origin: Vector3 = _Scene_Spawn()
 	var z := UAV_ALTITUDE_M if chassis_name == UAV_CHASSIS else 0.0
 	return {
 		"x": origin.x + offset.x,
@@ -1180,9 +1184,42 @@ func _All_Avatars() -> Array:
 	return out
 
 
-## 默认出生点：World.SPAWN_WORLD + PEDESTRIAN_SPAWN_OFFSET_M = (64, 56, 0)，yaw 0。
+## 当前世界节点（task_49 Step 1）：能解析到 World 根（有 Get_Obstacles）就用它的访问器，
+## 否则返回 null → 调用方回退 World.gd 的 const（city 口径，P8：不复制字面量）。
+func _Scene_World() -> Node:
+	if vehicles_root == null or not is_instance_valid(vehicles_root):
+		_EnsureRefs()
+	if vehicles_root == null or not is_instance_valid(vehicles_root):
+		return null
+	var parent: Node = vehicles_root.get_parent()
+	if parent != null and parent.has_method("Get_Obstacles"):
+		return parent
+	return null
+
+
+## 当前场景的障碍表（世界坐标 / 米）；解析不到 World 时回退 city 表。
+func _Scene_Obstacles() -> Array:
+	var world := _Scene_World()
+	if world != null:
+		var table: Variant = world.call("Get_Obstacles")
+		if table is Array:
+			return table
+	return World.OBSTACLES
+
+
+## 当前场景的出生原点（世界坐标 / 米）；解析不到 World 时回退 city 常量。
+func _Scene_Spawn() -> Vector3:
+	var world := _Scene_World()
+	if world != null:
+		var p: Variant = world.call("Get_Spawn")
+		if p is Vector3:
+			return p
+	return World.SPAWN_WORLD
+
+
+## 默认出生点：**当前场景** spawn + PEDESTRIAN_SPAWN_OFFSET_M（city 仍是 (64, 56, 0)），yaw 0。
 func _Pedestrian_Default_Spawn() -> Dictionary:
-	var origin: Vector3 = World.SPAWN_WORLD
+	var origin: Vector3 = _Scene_Spawn()
 	return {
 		"x": origin.x + PEDESTRIAN_SPAWN_OFFSET_M.x,
 		"y": origin.y + PEDESTRIAN_SPAWN_OFFSET_M.y,
@@ -1228,11 +1265,11 @@ func _Pick_Pedestrian_Spawn(msg: Dictionary, peer_id: String) -> Dictionary:
 	return {"x": x, "y": y, "z": z, "yaw": wrapf(yaw, -PI, PI) if is_finite(yaw) else 0.0}
 
 
-## 点是否落在 World.OBSTACLES 的某个 box 内（外扩 PEDESTRIAN_SPAWN_MARGIN_M）。
-## 障碍表是**世界坐标**（origin = 最小角，size = 尺寸），与 World.gd 逐字同源（P8：不复制字面量）。
+## 点是否落在**当前场景**障碍表的某个 box 内（外扩 PEDESTRIAN_SPAWN_MARGIN_M；city 档 = World.OBSTACLES）。
+## 障碍表是**世界坐标**（origin = 最小角，size = 尺寸），与 World.gd / SceneDefs.gd 逐字同源（P8：不复制字面量）。
 func _Spawn_In_Obstacle(p: Vector3) -> bool:
 	var margin := PEDESTRIAN_SPAWN_MARGIN_M
-	for item: Variant in World.OBSTACLES:
+	for item: Variant in _Scene_Obstacles():
 		var box: Dictionary = item
 		var origin: Vector3 = box.get("origin", Vector3.ZERO)
 		var size: Vector3 = box.get("size", Vector3.ZERO)
