@@ -42,3 +42,11 @@
 - 结果：PASS
 - 提交：ok 1c7bee9
 - 规划要点：计划已写入 [tmp/task49/plan.md](tmp/task49/plan.md)（911 行，逐文件:行号，含可直接照抄的 `Interior.gd` 全文与探针代码）。 **摘要（写 workbook）**：计划见 [plan.md](tmp/task49/plan.md)（逐文件:行号）。`Interior.gd` 建 12 四边形/3 mesh（地板 z=0.01、踢脚 0.15、门框宽 0.5；全 0.5 整数倍、与墙面共面、零碰撞、幂等）；`WorldLook` 拆 Apply_City/Indoor（BG_COLOR+环境色+3 盏不投影灯）+4 工厂+2 纯色键；`World.gd` 6 处按档分派，tscn 零改动。坑：先改 WorldLook 再建 Interior；渲染须 xvfb+opengl3；降级须连 `.import` 一起移；城市按截图 sha256 判。 规划期已用一次性探针实测确认（证据在 `tmp/task49/shots_before/` 与 `tmp/task49/tools/`）：city 渲染 sha256 三次重跑逐位相同（可作零回归硬判据）、渲染跑退出必现 2 行 leaked ERROR 属既有基线（0-ERROR 门禁只能用 headless `--quit`）、只移贴图源文件不会触发降级、`ObserverCamera` 的 `_physics_process` 会抹掉探针机位。
+
+## Step 5 — 天花板开关 + 观察相机（可选，默认关）（task_49 首轮）
+- 起止：2026-11-06 12:59:05Z → 2026-11-06 13:17:11Z
+- 范围：Interior 的 Ceiling + WorldIndoor.tscn 的观察相机机位
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 9a0a7a3
+- 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（946 行，逐文件:行号）。规划期额外用真渲染器做了一次面朝向实测（证据 [winding 图](tmp/task49/shots/winding/) / [日志](tmp/task49/logs/s5_probe_winding.log)），`git status` 与基线一致、未改任何源码。 **摘要（≤200 字，可入 workbook）** 计划见 [plan.md](tmp/task49/plan.md)。只改 2 文件 4 处：`WorldLook` 加 `CEILING_TINT 0.85`＋材质工厂；`Interior` 加常量、`Build_All` 门控建 `Ceiling`、`_Collect_Ceiling_Quads`／`_Ceiling_Z`、`_Quad_Down`。天花板＝3 块净空矩形×上下两面＝6 quad，下表面 3.0 与墙顶共面，纯 mesh 零碰撞、不进 `OBSTACLES`、`cast_shadow` 仍 OFF。相机选 A（tscn 零改动，B 补丁进 impl.md）。面朝向／可见性已规划期实测。两种取值各起一次：默认态 4 图 sha256 须与 Step 4 基线逐张相同；开态靠 `ceiling_flip.sh`（trap＋sha256 还原）。判据 J1~J16，风险 R1~R9。 **三个要点（供引擎判断）** - 硬约束全部对齐：只动 `src/world/`，`WorldIndoor.tscn`/`SceneDefs`/`Task`/Rust 零改动；体素对齐四条逐条给了核对方式（§4）。 - 面朝向已实测而非推理：绕序反向的 quad 法线实测 `(0,-1,0)`、走廊内可见、俯视是实心屋顶——**双面 6 quad** 因此定稿（单面＋`cull_disabled` 会污染材质缓存，已否决）。 - 起进程纪律：仅一次性 `--import`/`--quit`/`--check-only` ＋ 自终止渲染探针（`timeout` 
