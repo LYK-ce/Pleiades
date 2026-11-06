@@ -58,3 +58,21 @@
 - 结果：PASS
 - 提交：ok 71f5b1e
 - 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（515 行，逐文件:行号）。规划期用一次性探针在本场地**真跑了一遍四案**（`tmp/task49/plan_probe/`），已收尾干净、端口全空、`git status` 未变。 **摘要（≤200 字，可入 workbook）** > 计划见 tmp/task49/plan.md（515 行，逐文件:行号）。规划期探针已真跑四案：pitch=0 时 detector 12 m 仍采纳（-2 的窗仅 7.16 m，故两处 pitch 同改 0）；G1 真半径 3.80 位移 0.000；G2 前进 1.47 m、d_true 1.03、朝人 3.5°；G3 回站 0.33 m、yaw −2.7°；G4 带内不动、2.70 出动、回带内不归位、5.00 才归位；Guard 全程无「任务完成」。探针收尾端口全清、git 未变；零源码改动，只写 s6/ 与 s6_env/。 三个需要引擎知道的判读前提：① 源码**没有**「进区/出区」日志（`guard.rs:174-211` 无 tracing，唯一 `[Guard]` 行在 `:247`），G1/G2 用「位移 + `[Sim]` v + 非值守点 `[Nav]` 计数」取证，已写成 D1；② 相机 `mount_pitch_deg` 必须从 c1 的 −2.0 改 0.0（否则 G1 的 7.7 m 被几何卡掉），两处同步；③ `HomeLeaf` 每拍重发 `[Nav] 新目标 (58.00,64.00)` 是既有口径差（实测窗内 142 条、车不动），判据只数**非**值守点目标。
+
+## Step 7 — 阶梯规模验证（5 → 10 → 20 → 30 台）（task_49 首轮）
+- 起止：2026-11-06 14:04:16Z → 2026-11-06 16:20:26Z
+- 范围：三行诊断日志 + 四档压测；只写 tmp/task49/s7/ 与 RobotSim_TestEnv/
+- 轮次：2 / 3
+- 结果：PASS
+- 提交：ok 2ff03a0
+- 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（385 行，逐文件:行号，零源码改动）。 **摘要（≤200 字，可入 workbook）** 计划见 tmp/task49/plan.md。上轮三条失分逐条闭环：①现象退化的真因是"未处置渲染 → 1 fps → 物理时间压缩 13% → 4 m goto 超 60 s 被弹 + 径向 4 m 顶到同射线前车"；改为先补 R0 档（5 台原配置）证 fps 先破，再按 §4 处置（tmp 副本关 PBR/阴影 + 640×480）跑四档，注入改 1.2 m 短腿 ×12 段队列、每 45 s 重注入，判据只认 Task:423 四条（车在动/任务进队/图在长/没掉线），逐节点出数。②"地图在长"物理上没长：雷达建图上限 5 m，出生点 5 m 内无体素；加 2 台见证车开到 pillar_e 旁 1 m 方阵，统计 `[D*] mark_obstacle` unique 格。③`[scale]` 由 1 Hz Heartbeat 驱动被拖到 9.4 s；调用点搬到 `_process` 墙钟自门控，win 判据 5.0~6.5 s。改动仅 WebSocketManager.gd 6 行 print；J1~J22 逐条判据、R1~R12 固定处置、teardown 端口取证齐。
+
+## 引擎结束
+- 结束：2026-11-06 16:20:27Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_49_world.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
