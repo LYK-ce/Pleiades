@@ -13,6 +13,8 @@
 # indoor 档（task_49 Step 4，走 Apply_Indoor）：**不换天空、不动太阳**，把背景切 BG_COLOR、环境光切
 #   AMBIENT_SOURCE_COLOR，并建 1 个 IndoorLights 容器挂 3 盏不投影的 OmniLight3D（llvmpipe 基线 ~11 fps，
 #   灯多 / 开阴影会直接压垮帧率）。Env / Sky 一律 duplicate 再回写（E30-②）。
+# task_49 Step 5：加 `Make_Indoor_Ceiling_Material()`（墙面贴图 × 0.85），只在 `def.ceiling == true` 时被 Interior 调用；
+#   city 档与 indoor 默认档都不会走到 ⇒ 渲染逐像素不变。
 # 时间只由 WorldClock 提供，本文件不取时间。
 
 extends RefCounted
@@ -40,10 +42,13 @@ const INDOOR_FLOOR_PREFIX := "floor_indoor"
 ## 一循环多少米：墙 2 m / 地 4 m（Step 4-2 写死；薄片无 UV ⇒ 靠 _Make_Pbr 的 uv1_world_triplanar）。
 const INDOOR_WALL_TILE_M := 2.0
 const INDOOR_FLOOR_TILE_M := 4.0
-## 踢脚线 / 门框 = 墙面贴图的压暗变体：有贴图走 tint（albedo 乘子），无贴图走 FALLBACK_COLORS × tint
-## ⇒ 两条路径下"踢脚深一档、门框更深"都成立（口径 #22）。
+## 踢脚线 / 门框 / 天花板 = 墙面贴图的压暗变体：有贴图走 tint（albedo 乘子），无贴图走 FALLBACK_COLORS × tint
+## ⇒ 两条路径下"踢脚深一档、门框更深、天花板略暗"都成立（口径 #22）。
 const INDOOR_SKIRTING_TINT := 0.70
 const INDOOR_FRAME_TINT := 0.45
+## 天花板（task_49 Step 5）：比墙面暗一档 ⇒ 俯视看到"屋顶"、仰视一眼分出"这是顶不是墙"；
+## 同时也是**独立缓存 key**（0.85 ≠ 1.0 / 0.70 / 0.45）⇒ 天花板材质不会被墙/踢脚/门框共享。
+const INDOOR_CEILING_TINT := 0.85
 ## 背景 / 环境光（口径 #7：亮度是**功能参数**）。中性偏亮，保证人在 3~8 m 处能被 YOLO 检出；
 ## 过亮会丢纹理与明暗层次（验收 ② 的"一片死灰"是另一个极端）。调参记录见 tmp/task49/impl.md。
 const INDOOR_BG_COLOR := Color(0.10, 0.10, 0.11, 1.0)
@@ -159,6 +164,12 @@ static func Make_Indoor_Skirting_Material() -> StandardMaterial3D:
 
 static func Make_Indoor_Frame_Material() -> StandardMaterial3D:
 	return Make_Pbr_Material(INDOOR_WALL_PREFIX, INDOOR_WALL_TILE_M, INDOOR_FRAME_TINT)
+
+
+## 天花板（task_49 Step 5）：与墙同一套抹灰贴图、同一 2 m 循环，只压暗一档。
+## 缺贴图 ⇒ FALLBACK_COLORS["wall_indoor"] × 0.85（纯色降级路径，口径 #22），绝不 push_error。
+static func Make_Indoor_Ceiling_Material() -> StandardMaterial3D:
+	return Make_Pbr_Material(INDOOR_WALL_PREFIX, INDOOR_WALL_TILE_M, INDOOR_CEILING_TINT)
 
 
 static func Make_Sky_Material() -> PanoramaSkyMaterial:

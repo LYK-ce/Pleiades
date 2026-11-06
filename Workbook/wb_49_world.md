@@ -34,3 +34,11 @@
 - 结果：PASS
 - 提交：ok bf252a2
 - 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（514 行，逐文件 : 行号）。`src/`、`assets/` 均零改动，`git status` 与基线一致。 **摘要（写入 workbook，≤200 字）** > Step 3 走「找到」路径：白名单第 1 站 polyhaven.com 一次命中，两套 CC0 贴图的三通道 URL 已用 HEAD 实测得到 200 状态码，字节数也已固定，分别是 `white_plaster_02`（墙面，527219/652310/191017）与 `terrazzo_tiles`（地面，1166107/77954/477964）。规划期只用 HEAD 探测，没有下载任何内容。执行期不调用任何 API：先把 6 个 1K 文件下载到 tmp/dl，再按字节硬门校验，对 4 个 color、nor 文件做字节级 `cp`，把 2 个 `arm` 文件无损转成 `_orm.png`（须为 .png，因为 WorldLook.gd:184 硬编码），最后让接缝比 ≤3.0，使 `--import` 0 ERROR 且 `ls` 显示 12 行成对。README 改 6 处，从大行号往小行号改，并让 sha、字节逐行对齐；台账另记体积。放弃路径已固定为「删 6 图+6 import、git checkout README」。四条体素规则逐条声明不触碰。首轮，无 issues。
+
+## Step 4 — 室内视觉件 + 材质与光照接线（task_49 首轮）
+- 起止：2026-11-06 12:39:38Z → 2026-11-06 12:59:05Z
+- 范围：Interior.gd（新增）+ WorldLook 的 indoor 档 + World.gd 分派
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 1c7bee9
+- 规划要点：计划已写入 [tmp/task49/plan.md](tmp/task49/plan.md)（911 行，逐文件:行号，含可直接照抄的 `Interior.gd` 全文与探针代码）。 **摘要（写 workbook）**：计划见 [plan.md](tmp/task49/plan.md)（逐文件:行号）。`Interior.gd` 建 12 四边形/3 mesh（地板 z=0.01、踢脚 0.15、门框宽 0.5；全 0.5 整数倍、与墙面共面、零碰撞、幂等）；`WorldLook` 拆 Apply_City/Indoor（BG_COLOR+环境色+3 盏不投影灯）+4 工厂+2 纯色键；`World.gd` 6 处按档分派，tscn 零改动。坑：先改 WorldLook 再建 Interior；渲染须 xvfb+opengl3；降级须连 `.import` 一起移；城市按截图 sha256 判。 规划期已用一次性探针实测确认（证据在 `tmp/task49/shots_before/` 与 `tmp/task49/tools/`）：city 渲染 sha256 三次重跑逐位相同（可作零回归硬判据）、渲染跑退出必现 2 行 leaked ERROR 属既有基线（0-ERROR 门禁只能用 headless `--quit`）、只移贴图源文件不会触发降级、`ObserverCamera` 的 `_physics_process` 会抹掉探针机位。

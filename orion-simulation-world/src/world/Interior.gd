@@ -4,11 +4,12 @@
 #
 # 室内视觉件（task_49 §五 Step 4）：地板 overlay / 踢脚线 / 门框，**纯视觉、零碰撞**，
 # 与 StreetLayout / Facade 同构（运行时建、不进 .tscn、不写 shader）。
-# 节点结构（**恰好 3 个 MeshInstance3D**，`Interior` 子树里没有任何 CollisionObject3D）：
+# 节点结构（**3 个 MeshInstance3D；`def.ceiling == true` 时第 4 个**；`Interior` 子树里没有任何 CollisionObject3D）：
 #   Interior (Node3D)
 #   ├── Floor     (MeshInstance3D)  3 个四边形：走廊 96 m² + 门槛 0.5 m² + 房间 18 m²，顶面 z = 0.01
 #   ├── Skirting  (MeshInstance3D)  5 个四边形：走廊四面墙脚（东墙被门洞断成两段），z ∈ [0, 0.15]
-#   └── DoorFrame (MeshInstance3D)  4 个四边形：门洞两侧各 0.5 m 竖框（走廊面 + 房间面），z ∈ [0, 3.0]
+#   ├── DoorFrame (MeshInstance3D)  4 个四边形：门洞两侧各 0.5 m 竖框（走廊面 + 房间面），z ∈ [0, 3.0]
+#   └── Ceiling   (MeshInstance3D)  6 个四边形（仅 ceiling 开）：3 块净空矩形 × 上下两面，z = 3.0
 # 坐标：常量一律**世界坐标（Z-up，米）**；顶点直接烘成 Godot 坐标（PosToGodot），节点 transform 恒等。
 # 换轴只在 WorldTransform 里发生（task_30 §7.3），本文件无换轴字面量。
 #
@@ -22,7 +23,10 @@
 #      三者都 ≤ 0.03（Step 4 坑 5 的凸出上限；口径 #6「凸出物不进体素就不做」在此由 ≤3 cm 装饰性误差放行）。
 # 薄片没有 UV ⇒ 材质一律经 WorldLook 工厂（内部世界空间 triplanar），否则整面只采一个 texel（E31）。
 # 幂等：Build_All 先摘同名旧容器（remove_child 后再 queue_free）→ 连调两次节点数与 mesh 数不变。
-# 天花板见 Step 5（`def.ceiling` 门控），**本步不建** Ceiling 节点。
+# 天花板（task_49 §五 Step 5）：`def.ceiling == true` 才建，`false` 时一个节点都不建；
+# 下表面 z = def.ceiling_z_m = 3.0（= 墙顶 = 体素外表面，共面）；上下两面都建 ⇒ 走廊里看得见顶、
+# 俯视观察相机看到"屋顶"（验收 Step 5-3）；**纯 mesh、零碰撞、不进 OBSTACLES**（进体素会挡 UAV 上升与雷达上层）；
+# cast_shadow 沿用 _Add_Mesh_Node 的 OFF ⇒ 天花板不挡太阳/环境光，室内亮度不因开顶掉档（口径 #7）。
 
 extends RefCounted
 
@@ -33,6 +37,7 @@ const ROOT_NAME := "Interior"
 const FLOOR_NODE := "Floor"
 const SKIRTING_NODE := "Skirting"
 const DOOR_FRAME_NODE := "DoorFrame"
+const CEILING_NODE := "Ceiling"
 
 ## 走廊 / 房间 / 门洞的内表面边界（世界 Z-up，米）——与 SceneDefs.SCENES["corridor_indoor"] 的
 ## 8 条 AABB 逐值对应（§3.3），改一处必须同步另一处。
@@ -44,6 +49,9 @@ const WALL_T_M := 0.5
 const ROOM_X0 := 74.5
 const DOOR_Y0 := 63.5
 const DOOR_Y1 := 64.5
+
+## 天花板下表面高度（米）的兜底值：正常一律读数据的 `ceiling_z_m`（§3.1 = 3.0 = 6 格，正对墙顶）。
+const CEILING_Z_M := 3.0
 
 ## 地板 3 块矩形（右开区间），顶点全为 0.5 整数倍。
 const FLOOR_RECTS := [
@@ -68,8 +76,9 @@ const EPS := 1e-6
 
 # ================================================================ 对外入口
 
-## 建室内视觉件（幂等）：先摘同名旧容器，再建 Floor / Skirting / DoorFrame 三个合并 mesh。返回 `Interior` 根节点。
-## `def` = SceneDefs.Get(scene_name) 的深拷贝（本步只读 `ceiling` 打日志，Step 5 才建 Ceiling）。
+## 建室内视觉件（幂等）：先摘同名旧容器，再建 Floor / Skirting / DoorFrame 三个合并 mesh，
+## `def.ceiling == true` 时再加 Ceiling 一个。返回 `Interior` 根节点。
+## `def` = SceneDefs.Get(scene_name) 的深拷贝，只读 `ceiling` / `ceiling_z_m` 两个键（task_49 §3.1）。
 static func Build_All(world: Node3D, def: Dictionary) -> Node3D:
 	if world == null:
 		return null
@@ -87,12 +96,18 @@ static func Build_All(world: Node3D, def: Dictionary) -> Node3D:
 	_Add_Mesh_Node(root, SKIRTING_NODE, skirting_quads, WorldLook.Make_Indoor_Skirting_Material())
 	_Add_Mesh_Node(root, DOOR_FRAME_NODE, frame_quads, WorldLook.Make_Indoor_Frame_Material())
 
-	# Step 5 在此按 ceiling_on 建 Ceiling（本步不做，见 task_49 §五 Step 5）。
+	# 天花板（task_49 §五 Step 5）：**只在 def.ceiling == true 时建**（false ⇒ 一个节点都不建）。
+	# 纯 mesh、零碰撞、不进 OBSTACLES（进体素会挡 UAV 上升与雷达上层，step.md:16）。
 	var ceiling_on: bool = bool(def.get("ceiling", false))
+	var ceiling_quads: Array = []
+	if ceiling_on:
+		ceiling_quads = _Collect_Ceiling_Quads(_Ceiling_Z(def))
+		_Add_Mesh_Node(root, CEILING_NODE, ceiling_quads, WorldLook.Make_Indoor_Ceiling_Material())
+
 	# missing_textures=[] = 贴图路径；非空 = 纯色降级路径（口径 #22，两条都算 PASS）
-	print("[interior] built: floor=%d skirting=%d frame=%d nodes=%d missing_textures=%s ceiling=%s" % [
-		floor_quads.size(), skirting_quads.size(), frame_quads.size(), root.get_child_count(),
-		str(WorldLook.Get_Missing_Assets()), str(ceiling_on)])
+	print("[interior] built: floor=%d skirting=%d frame=%d ceiling_quads=%d nodes=%d missing_textures=%s ceiling=%s" % [
+		floor_quads.size(), skirting_quads.size(), frame_quads.size(), ceiling_quads.size(),
+		root.get_child_count(), str(WorldLook.Get_Missing_Assets()), str(ceiling_on)])
 	return root
 
 
@@ -112,6 +127,34 @@ static func _Collect_Floor_Quads() -> Array:
 	for spec: Dictionary in FLOOR_RECTS:
 		quads.append(_Quad_Up(spec["rect"], FLOOR_TOP_Z))
 	return quads
+
+
+## 天花板 6 个四边形 = 3 块净空矩形（复用 FLOOR_RECTS：天花板的覆盖范围**就是**地板覆盖范围）
+## × 上下两面。下表面 z = `_Ceiling_Z(def)` = 3.0：
+##   ① 切向坐标沿用 FLOOR_RECTS ⇒ x ∈ {50, 74, 74.5, 79}、y ∈ {62, 63.5, 64.5, 66}，全为 0.5 整数倍；
+##   ② 下表面 z = 3.0 = 体素墙顶（6 层 = 3 m）⇒ 与体素外表面**共面**（§3.2 规则 4）；
+##   ③ 覆盖范围 = 净空并集，**不与墙体重叠** ⇒ 和墙顶面没有共面重叠，不需要 0.01 抗闪偏移；
+##   ④ 上下两面**同 z、绕序相反**：背面剔除各管一侧，从走廊里看到下表面（朝下），
+##      从俯视观察相机看到上表面（"屋顶"）。两片不共面重叠 ⇒ 不会 z-fighting。
+static func _Collect_Ceiling_Quads(z: float) -> Array:
+	var quads: Array = []
+	for spec: Dictionary in FLOOR_RECTS:
+		quads.append(_Quad_Down(spec["rect"], z))
+	for spec: Dictionary in FLOOR_RECTS:
+		quads.append(_Quad_Up(spec["rect"], z))
+	return quads
+
+
+## 天花板下表面高度（米）：取 def 的 `ceiling_z_m`（§3.1 规定 3.0），缺键 / 非法值回退 CEILING_Z_M。
+## 不是 0.5 整数倍时**只 push_warning**（§3.2 规则 1/4 的现场提醒）——绝不 push_error（0 ERROR 验收靠这条）。
+static func _Ceiling_Z(def: Dictionary) -> float:
+	var v: Variant = def.get("ceiling_z_m", CEILING_Z_M)
+	var z: float = float(v) if v is float or v is int else CEILING_Z_M
+	if z <= 0.0:
+		z = CEILING_Z_M
+	if absf(z * 2.0 - roundf(z * 2.0)) > 1e-6:
+		push_warning("[interior] ceiling_z_m=%.3f 不是 0.5 的整数倍（task_49 §3.2 规则 1/4）" % z)
+	return z
 
 
 ## 踢脚线 5 个四边形：南 / 北 / 西端 / 东墙下段 / 东墙上段（东墙被 1.0 m 门洞断开）。
@@ -155,6 +198,17 @@ static func _Quad_Up(rect: Rect2, z: float) -> Array:
 	var x1: float = rect.position.x + rect.size.x
 	var y1: float = rect.position.y + rect.size.y
 	return [Vector3(x0, y0, z), Vector3(x1, y0, z), Vector3(x1, y1, z), Vector3(x0, y1, z)]
+
+
+## 水平四边形（**下表面朝下**，世界 -z）：与 `_Quad_Up` 同参、只把四角顺序反过来 ⇒
+## 绕序反向 ⇒ `_Add_Quad` 用 (c-a)×(b-a) 算出的法线随之反号 = (0, -1, 0)（Godot），从下方可见。
+## 规划期实测（tmp/task49/logs/s5_probe_winding.log）：法线 (0.0, -1.0, -0.000015)，走廊内可见。
+static func _Quad_Down(rect: Rect2, z: float) -> Array:
+	var x0: float = rect.position.x
+	var y0: float = rect.position.y
+	var x1: float = rect.position.x + rect.size.x
+	var y1: float = rect.position.y + rect.size.y
+	return [Vector3(x0, y0, z), Vector3(x0, y1, z), Vector3(x1, y1, z), Vector3(x1, y0, z)]
 
 
 ## 竖面四边形：平面 y = plane，沿 x ∈ [u0, u1]，世界 z ∈ [z0, z1]；sign = 外法线朝向（-1 = -y）。
