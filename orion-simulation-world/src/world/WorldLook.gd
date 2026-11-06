@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-28
-# Modified Date ： 2026-11-03
+# Modified Date ： 2026-11-06
 #
 # 世界观感（材质 + 天空 + 太阳）唯一入口（COMPONENTS.md §4.1.1 / task_38 §二.3）。
 #   - 地面 = 混凝土铺装（三贴图 PBR，世界空间 triplanar，6 m 一循环）
@@ -9,12 +9,17 @@
 #   - Sun  = 与 HDRI 太阳方向对齐、energy 0.7、shadow_enabled 不动
 # 缺资产：只 push_warning、绝不 push_error（--quit 的 0 ERROR 验收靠这条），整体降级为
 #   「地面/天空保持 .tscn 原样 + 体素回到单色」，几何 / 碰撞 / OBSTACLES 一律不碰。
-# 只碰 3 个 Material + 1 个 Sky + Sun 的 transform/energy，不建节点、不改 .tscn。
+# city 档：只碰 3 个 Material + 1 个 Sky + Sun 的 transform/energy，不建节点、不改 .tscn。
+# indoor 档（task_49 Step 4，走 Apply_Indoor）：**不换天空、不动太阳**，把背景切 BG_COLOR、环境光切
+#   AMBIENT_SOURCE_COLOR，并建 1 个 IndoorLights 容器挂 3 盏不投影的 OmniLight3D（llvmpipe 基线 ~11 fps，
+#   灯多 / 开阴影会直接压垮帧率）。Env / Sky 一律 duplicate 再回写（E30-②）。
 # 时间只由 WorldClock 提供，本文件不取时间。
 
 extends RefCounted
 
 const TAG := "[world-look]"
+## 坐标换轴唯一入口（task_30 §7.3）：室内 3 盏灯的位置常量是世界坐标，换轴只经它。
+const WorldTransform := preload("res://src/common/WorldTransform.gd")
 
 const TEXTURE_DIR := "res://assets/textures/"
 const HDR_PATH := "res://assets/hdri/sky_midday_2k.hdr"
@@ -29,11 +34,41 @@ const VOXEL_TILE_M := 2.0
 ## 只接线、不新增资产（assets/ 字节零增量）。
 const ASPHALT_TILE_M := 4.0
 const CURB_TILE_M := 1.5
+## ---- 室内档（task_49 Step 4 / 贴图来自 Step 3：wall_indoor = white_plaster_02、floor_indoor = terrazzo_tiles）
+const INDOOR_WALL_PREFIX := "wall_indoor"
+const INDOOR_FLOOR_PREFIX := "floor_indoor"
+## 一循环多少米：墙 2 m / 地 4 m（Step 4-2 写死；薄片无 UV ⇒ 靠 _Make_Pbr 的 uv1_world_triplanar）。
+const INDOOR_WALL_TILE_M := 2.0
+const INDOOR_FLOOR_TILE_M := 4.0
+## 踢脚线 / 门框 = 墙面贴图的压暗变体：有贴图走 tint（albedo 乘子），无贴图走 FALLBACK_COLORS × tint
+## ⇒ 两条路径下"踢脚深一档、门框更深"都成立（口径 #22）。
+const INDOOR_SKIRTING_TINT := 0.70
+const INDOOR_FRAME_TINT := 0.45
+## 背景 / 环境光（口径 #7：亮度是**功能参数**）。中性偏亮，保证人在 3~8 m 处能被 YOLO 检出；
+## 过亮会丢纹理与明暗层次（验收 ② 的"一片死灰"是另一个极端）。调参记录见 tmp/task49/impl.md。
+const INDOOR_BG_COLOR := Color(0.10, 0.10, 0.11, 1.0)
+const INDOOR_AMBIENT_COLOR := Color(0.72, 0.72, 0.70, 1.0)
+const INDOOR_AMBIENT_ENERGY := 0.80
+## 3 盏灯：世界坐标（Z-up / 米），全在走廊中轴、z = 2.5 m（墙高 3 m 之下）；第 3 盏靠门洞，光溢进房间。
+const INDOOR_LIGHTS_NAME := "IndoorLights"
+const INDOOR_LIGHT_POSITIONS := [
+	Vector3(55.0, 64.0, 2.5),
+	Vector3(63.0, 64.0, 2.5),
+	Vector3(71.0, 64.0, 2.5),
+]
+const INDOOR_LIGHT_ENERGY := 1.5
+const INDOOR_LIGHT_RANGE_M := 10.0
+const INDOOR_LIGHT_COLOR := Color(1.0, 0.96, 0.90, 1.0)
+const INDOOR_LIGHT_SPECULAR := 0.25
 ## 缺资产时的降级底色（按 prefix 取；tint 见 Make_Pbr_Material）。只 warn、绝不 push_error。
 const FALLBACK_COLORS := {
 	"asphalt": Color(0.16, 0.16, 0.17),
 	"curb": Color(0.55, 0.54, 0.51),
 	"concrete": Color(0.55, 0.58, 0.62),
+	# task_49 Step 4（口径 #22）：室内无贴图时的纯色底色 —— 墙浅灰 / 地面深灰；
+	# 踢脚（× 0.70）与门框（× 0.45）由 Make_Pbr_Material 的 tint 再压深一档。
+	"wall_indoor": Color(0.78, 0.77, 0.74),
+	"floor_indoor": Color(0.42, 0.41, 0.40),
 }
 ## Sun 能量（task_38 §二.1「约 0.7」）。
 const SUN_ENERGY := 0.7
@@ -106,6 +141,26 @@ static func Make_Pbr_Material(prefix: String, tile_m: float, tint: float = 1.0) 
 	return mat
 
 
+## ---- 室内档材质工厂（task_49 Step 4-2）
+## 一律走 Make_Pbr_Material：有贴图 ⇒ 三贴图 PBR + 世界空间 triplanar；**缺任一张 ⇒ 纯色降级**
+## （FALLBACK_COLORS[prefix] × tint、roughness 0.85），**绝不 push_error、绝不返回 null**
+## ⇒ 视觉件在两条路径下都会建出来（口径 #22，验收 ② 因此两条都算 PASS）。
+static func Make_Indoor_Wall_Material() -> StandardMaterial3D:
+	return Make_Pbr_Material(INDOOR_WALL_PREFIX, INDOOR_WALL_TILE_M)
+
+
+static func Make_Indoor_Floor_Material() -> StandardMaterial3D:
+	return Make_Pbr_Material(INDOOR_FLOOR_PREFIX, INDOOR_FLOOR_TILE_M)
+
+
+static func Make_Indoor_Skirting_Material() -> StandardMaterial3D:
+	return Make_Pbr_Material(INDOOR_WALL_PREFIX, INDOOR_WALL_TILE_M, INDOOR_SKIRTING_TINT)
+
+
+static func Make_Indoor_Frame_Material() -> StandardMaterial3D:
+	return Make_Pbr_Material(INDOOR_WALL_PREFIX, INDOOR_WALL_TILE_M, INDOOR_FRAME_TINT)
+
+
 static func Make_Sky_Material() -> PanoramaSkyMaterial:
 	if _cache.has("sky"):
 		return _cache["sky"] as PanoramaSkyMaterial
@@ -119,7 +174,7 @@ static func Make_Sky_Material() -> PanoramaSkyMaterial:
 	return mat
 
 
-static func Apply_All(world: Node3D) -> bool:
+static func Apply_City(world: Node3D) -> bool:
 	if world == null:
 		return false
 	var ok := true
@@ -163,6 +218,74 @@ static func Apply_All(world: Node3D) -> bool:
 
 	_Warn_Missing_Once()
 	return ok
+
+
+## 按观感档分派（task_49 Step 4-2）：`look` 取 SceneDef 的 `look` 字段（"city" / "indoor"）。
+## 默认 "city" ⇒ 老的 `Apply_All(world)` 调用点行为不变（口径 #3 的 city 零变化）。
+static func Apply_All(world: Node3D, look: String = "city") -> bool:
+	if look == "indoor":
+		return Apply_Indoor(world)
+	return Apply_City(world)
+
+
+## 室内档：**不换天空、不动太阳、不动地面**。
+##   ① 背景切 BG_COLOR（深灰）+ 环境光切 AMBIENT_SOURCE_COLOR（中性偏亮）⇒ 走廊里看不到天空；
+##   ② `ambient_light_sky_contribution = 0` ⇒ 即使 env 上还挂着 Sky，也不让它再贡献环境光（E30-③ 的反面）；
+##   ③ 3 盏不投影 OmniLight3D ⇒ 近处亮、远处暗，视觉件有明暗层次；
+##   ④ Env / Sky 一律 **duplicate 再回写**，绝不改 .tscn 的共享 SubResource（E30-②，step.md:51 硬判据）。
+## 返回 false = 环境节点缺失或灯没建全（贴图缺失**不算** false：那是合法的降级路径，见 Interior 的打印）。
+static func Apply_Indoor(world: Node3D) -> bool:
+	if world == null:
+		return false
+	var env_ok := false
+
+	var env_node := world.get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if env_node == null or env_node.environment == null:
+		push_warning("%s 室内档找不到 WorldEnvironment/Environment，背景与环境光保持 .tscn 原样" % TAG)
+	else:
+		var env_copy: Environment = env_node.environment.duplicate() as Environment
+		var sky: Sky = env_copy.sky
+		if sky != null:
+			env_copy.sky = sky.duplicate() as Sky       # 复制一份，绝不改共享 SubResource
+		env_copy.background_mode = Environment.BG_COLOR
+		env_copy.background_color = INDOOR_BG_COLOR
+		env_copy.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env_copy.ambient_light_color = INDOOR_AMBIENT_COLOR
+		env_copy.ambient_light_energy = INDOOR_AMBIENT_ENERGY
+		env_copy.ambient_light_sky_contribution = 0.0
+		env_node.environment = env_copy
+		env_ok = true
+
+	var lights: int = _Build_Indoor_Lights(world)
+	_Warn_Missing_Once()
+	print("%s indoor: background=BG_COLOR ambient=COLOR(%.2f,%.2f,%.2f)x%.2f lights=%d" % [
+		TAG, INDOOR_AMBIENT_COLOR.r, INDOOR_AMBIENT_COLOR.g, INDOOR_AMBIENT_COLOR.b,
+		INDOOR_AMBIENT_ENERGY, lights])
+	return env_ok and lights == INDOOR_LIGHT_POSITIONS.size()
+
+
+## 3 盏 OmniLight3D（**不投影、小能量**，step.md:14 + 坑 1）：llvmpipe 只有 ~11 fps 基线，投影会直接压垮帧率。
+## 幂等：先摘同名旧容器再建；位置常量是世界坐标，换轴只经 WorldTransform。
+static func _Build_Indoor_Lights(world: Node3D) -> int:
+	var old: Node = world.get_node_or_null(INDOOR_LIGHTS_NAME)
+	if old != null:
+		world.remove_child(old)
+		old.queue_free()
+	var root := Node3D.new()
+	root.name = INDOOR_LIGHTS_NAME
+	world.add_child(root)
+	for i: int in range(INDOOR_LIGHT_POSITIONS.size()):
+		var lamp := OmniLight3D.new()
+		lamp.name = "IndoorLight_%d" % (i + 1)
+		lamp.position = WorldTransform.PosToGodot(INDOOR_LIGHT_POSITIONS[i])
+		lamp.light_color = INDOOR_LIGHT_COLOR
+		lamp.light_energy = INDOOR_LIGHT_ENERGY
+		lamp.omni_range = INDOOR_LIGHT_RANGE_M
+		lamp.omni_attenuation = 1.0
+		lamp.light_specular = INDOOR_LIGHT_SPECULAR
+		lamp.shadow_enabled = false
+		root.add_child(lamp)
+	return root.get_child_count()
 
 
 static func Get_Missing_Assets() -> PackedStringArray:

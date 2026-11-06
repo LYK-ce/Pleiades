@@ -26,3 +26,11 @@
 - 结果：PASS
 - 提交：ok 72c2eaf
 - 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（222 行，逐文件、逐行号、可直接照做）。 **摘要（≤200 字）** 计划见 [plan.md](tmp/task49/plan.md)。只改 [SceneDefs.gd](orion-simulation-world/src/world/SceneDefs.gd) 两处：55–65 行注释和 68 行 `"obstacles"`，写入 8 条 AABB，坐标一字不动。关键：8 条原始共计 864 格，房间南北墙与东墙在角部重叠 12 格，按 `_set_voxel` 去重后为 **852 格**（同一算法在 city 上得出 12664→12104，与引擎实测一致），不是文档估算的 ≈550；只有当实际值不等于 852 时才逐条排查，禁止改坐标凑数。门洞为 cell 127、128，恰好 2 格空；西端 cell 99 处封死。验收标准：city 仍为 12104 格且四行日志不变，indoor 出现 `obstacles=8` 和 `852 cells`，没有出生点净空告警，import 和 quit 零 ERROR，改动前后 diff 仅涉及 1 个文件且不含 Mesh 或 Collision。②–⑤ 的车和雷达现象按 step.md:42 禁止启动长驻进程，延后到 Step 6 复验，计划里附了手算证明与放行时的命令。
+
+## Step 3 — 贴图资产：选型与入库（只入库，找不到就放弃）（task_49 首轮）
+- 起止：2026-11-06 12:27:56Z → 2026-11-06 12:39:38Z
+- 范围：assets/textures/ + assets/README.md 台账 + tmp/task49/assets/ 证据；不写接线代码
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok bf252a2
+- 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（514 行，逐文件 : 行号）。`src/`、`assets/` 均零改动，`git status` 与基线一致。 **摘要（写入 workbook，≤200 字）** > Step 3 走「找到」路径：白名单第 1 站 polyhaven.com 一次命中，两套 CC0 贴图的三通道 URL 已用 HEAD 实测得到 200 状态码，字节数也已固定，分别是 `white_plaster_02`（墙面，527219/652310/191017）与 `terrazzo_tiles`（地面，1166107/77954/477964）。规划期只用 HEAD 探测，没有下载任何内容。执行期不调用任何 API：先把 6 个 1K 文件下载到 tmp/dl，再按字节硬门校验，对 4 个 color、nor 文件做字节级 `cp`，把 2 个 `arm` 文件无损转成 `_orm.png`（须为 .png，因为 WorldLook.gd:184 硬编码），最后让接缝比 ≤3.0，使 `--import` 0 ERROR 且 `ls` 显示 12 行成对。README 改 6 处，从大行号往小行号改，并让 sha、字节逐行对齐；台账另记体积。放弃路径已固定为「删 6 图+6 import、git checkout README」。四条体素规则逐条声明不触碰。首轮，无 issues。

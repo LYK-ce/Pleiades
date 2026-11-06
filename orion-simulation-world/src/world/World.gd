@@ -17,6 +17,9 @@
 # 本文件只留"按名字取数据"；场景名解析顺序 = 导出属性 scene_name → 项目设置 sim_world/world/scene → "city"。
 # SPAWN_WORLD / OBSTACLES 两个 const **保留**为 city 兜底（Facade.gd 经 get_script_constant_map() 读 OBSTACLES，
 # 而 Facade 只在 city 档跑），数值与数据表逐条相等。
+#
+# task_49 Step 4：`_Look() == "indoor"` 时补建 Interior（地板 / 踢脚线 / 门框，纯视觉零碰撞）并把体素材质
+# 换成室内抹灰贴图；city 档 `_Look()` 恒为 "city" ⇒ 走原分支，渲染结果逐像素不变（sha256 对照）。
 
 extends Node3D
 
@@ -27,6 +30,8 @@ const WorldLook := preload("res://src/world/WorldLook.gd")
 ## 街道几何 / 建筑立面的唯一入口（task_38 §三.4 / COMPONENTS.md §4.1.2）；运行期建、不进 .tscn。
 const StreetLayout := preload("res://src/world/StreetLayout.gd")
 const Facade := preload("res://src/world/Facade.gd")
+## 室内视觉件（task_49 Step 4）：纯视觉零碰撞，只在 look=="indoor" 档建（city 档不建）。
+const Interior := preload("res://src/world/Interior.gd")
 ## 场景数据表（task_49 §三）：世界几何 / 出生点 / 观感档的唯一数据来源。
 const SceneDefs := preload("res://src/world/SceneDefs.gd")
 
@@ -138,6 +143,9 @@ func _ready() -> void:
 	if LOOK_ENABLED:
 		Apply_World_Look()
 	_Build_Bounds()
+	# 室内视觉件（task_49 Step 4）：地板 overlay / 踢脚线 / 门框；纯 mesh、零碰撞、幂等。
+	if _Look() == "indoor":
+		Interior.Build_All(self, _def)
 	# 街道几何 / 立面（task_38 §三.4 的末尾两行）：只建渲染 mesh、零碰撞、可幂等重建。
 	# task_49 §二 #17：只在 city 档跑，由场景数据的 props_street / props_facade 门控。
 	if _Props_Street():
@@ -146,12 +154,13 @@ func _ready() -> void:
 		Facade.Build_All(self)
 
 
-## 应用观感（地面材质 + 天空 + 太阳方向）：幂等；缺资产只 warn。
-## 返回 false = 至少一样降级（缺失清单见 WorldLook.Get_Missing_Assets()）。
+## 应用观感（task_49 Step 4：按档分派）——city = 地面材质 + HDRI 天空 + 太阳；indoor = 背景色 + 环境色 + 室内灯。
+## 幂等；缺资产只 warn，不中断世界构建。
 func Apply_World_Look() -> bool:
-	var ok: bool = WorldLook.Apply_All(self)
+	var ok: bool = WorldLook.Apply_All(self, _Look())
 	if not ok:
-		print("[world] look degraded（缺资产，保持原单色观感）：", str(WorldLook.Get_Missing_Assets()))
+		print("[world] look degraded（city 档：缺资产保持原单色观感 / indoor 档：环境或灯没建全）：",
+			str(WorldLook.Get_Missing_Assets()))
 	return ok
 
 
@@ -284,9 +293,14 @@ func _make_mesh_library() -> MeshLibrary:
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	# 材质由 WorldLook 工厂给（task_38 §二.3）：LOOK_ENABLED=false 时取原单色材质。
-	var mat: StandardMaterial3D = WorldLook.Make_Voxel_Material(VOXEL_COLOR)
+	# task_49 Step 4：indoor 档的体素墙换成室内抹灰贴图（2 m 循环）；city 档走原分支，逐字等价。
+	var mat: StandardMaterial3D
 	if not LOOK_ENABLED:
 		mat = WorldLook.Make_Fallback_Voxel_Material(VOXEL_COLOR)
+	elif _Look() == "indoor":
+		mat = WorldLook.Make_Indoor_Wall_Material()
+	else:
+		mat = WorldLook.Make_Voxel_Material(VOXEL_COLOR)
 	mesh.material = mat
 
 	var shape := BoxShape3D.new()
@@ -395,3 +409,10 @@ func _Props_Facade() -> bool:
 	if _def.is_empty():
 		return true
 	return bool(_def.get("props_facade", true))
+
+
+## 观感档（task_49 Step 4）：取 SceneDef 的 `look` 字段；数据未就绪（子节点 _ready 早于本节点）时回退 "city"。
+func _Look() -> String:
+	var v: Variant = _def.get("look", null)
+	var s := String(v) if v is String or v is StringName else ""
+	return s if s != "" else "city"
