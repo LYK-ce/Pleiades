@@ -58,7 +58,7 @@
 | 3 | 车端语义：**原地转，不移动**（`v = 0`）；到点后的机头朝向由这一条任务负责，不修改 Goto。**四个栈都建真叶子**（`pleiades-ugv` / `pleiades-uav` / `sim/ugv_sim` / `sim/uav_sim`）—— Face 只依赖自身位姿，与底盘类型无关，且四个执行器**都已支持** `MotionTarget::Face`（task_46 加的） |
 | 4 | 地面站派车时**同一帧发两条** `[Goto(环点), Face(人)]`；TASK_SET 是整队替换语义，**两条必须成对下发** |
 | 5 | 对准判据：`\|Δθ\| <= DEADBAND_DEG`（8°，复用执行器同一阈值）→ `Success` |
-| 6 | **转不到位按 `Success` 收尾**（叶子内部限时 3 s = 60 拍），**不得**抛 `Failure` |
+| 6 | **不设时限**：一直转到 `\|Δθ\| ≤ 8°`；目标点与自身重合（无方位可言）视为到位 → `Success`。**不得**抛 `Failure`，也**不得**用固定拍数兜底（2026-11-05 修正：原「60 拍 = 3 s」没有依据，实测 3 s 只够转 86°，180° 转不过去 —— Step 7 的 F3/C1/C2 就是因此 FAIL） |
 | 7 | `Face` 不碰 `nav`、不走 D\*、不做避障检查（原地转不位移） |
 
 ### Guard（2.8 ~ 2.17）
@@ -128,7 +128,7 @@ type 5 Guard       : type u8 | x  f32 BE | y  f32 BE | fx f32 BE | fy f32 BE = 1
 | `pleiades-base/src/Robot/core/mission_queue/element.rs` | `Mission` 加 `Face { x, y }`、`Guard { x, y, fx, fy }` |
 | `pleiades-base/src/Robot/core/protocol/messages.rs` | `MISSION_FACE = 4`、`MISSION_GUARD = 5`、长度表、encode 两分支（9 B / 17 B）、decode 分派 + 金标单测 |
 | `pleiades-base/src/Robot/core/protocol/mod.rs` | re-export `MISSION_FACE` / `MISSION_GUARD`（`MISSION_CONTAINMENT` 现在也没导出，顺手补） |
-| `pleiades-ugv/src/ugv/mission/face.rs`（新） | `FaceLeaf`：写 `face_point`、`|Δθ| ≤ 8°` → `Success`、60 拍限时 → `Success` |
+| `pleiades-ugv/src/ugv/mission/face.rs`（新） | `FaceLeaf`：写 `face_point`、`\|Δθ\| ≤ 8°` → `Success`、**无时限**（目标与自身重合 → `Success`） |
 | `pleiades-ugv/src/ugv/mission/guard.rs`（新） | Step 2：`in_zone` 纯函数 + `ZoneGate`（带迟滞）+ 复用 `follow::build` + `HomeLeaf`（无 Timeout）+ 复用 `face` |
 | `pleiades-ugv/src/ugv/mission/mod.rs` | 两个新变体的分派（Guard → `guard::build`） |
 | `pleiades-sim/src/sim/ugv_sim/mission/{face.rs,guard.rs,mod.rs}` | 与上逐字相同（只差 `use` 与文件头） |
@@ -227,14 +227,14 @@ cargo test  -p pleiades-base --lib protocol
 - 结构：
   ```rust
   pub struct FaceLeaf { target: (f32, f32), robot_state: Arc<RwLock<RobotState>>, ticks: u32 }
-  pub const FACE_GIVE_UP_TICKS: u32 = 60;   // 3 s @ 50 ms（口径 #6）
+  // 无时限：口径 #6 已改为「一直转到进死区」
   pub fn build(robot_state: Arc<RwLock<RobotState>>, target: (f32, f32)) -> Box<dyn Node>
   ```
 - `tick` 六步：
   1. 读 `rs.attitude.yaw` / `rs.x` / `rs.y`；
   2. `let delta = normalize_angle((fy - y).atan2(fx - x) - yaw)`；
   3. `|delta| <= DEADBAND_DEG`（8°）→ `return Status::Success`；
-  4. `self.ticks += 1`；`>= FACE_GIVE_UP_TICKS` → `return Status::Success`（**转不到位也 Success**）；
+  4. **无时限**：不进死区就继续 `Running`（不计数、不兜底）；目标点与自身重合（`dx²+dy² < 1e-4`）→ `Success`（无方位可言）；
   5. `f.out.face_point = Some(self.target)`；`f.out.next_cell = None`；`f.out.target_point = None`（**三个字段必须都写**，见坑）；
   6. `Status::Running`。
 - `halt`：`self.ticks = 0`（幂等）。
@@ -463,6 +463,37 @@ grep -n 'MISSION_FACE\|MISSION_GUARD\|4 => 9\|5 => 17\|4: 9\|5: 17' \
 5. 起 `ped_console`（9101）→ 跑 **G1 / G2 / G3 / G4**（车 + 行人）→ 6. 起 Pictor（9100）+ 让机接 `containment` → 跑 **C1 / C2**。
 每个 case 之间用控制口 `stop`（或 `mode` 切手动再切回）把车停稳，避免上一个 case 的余速干扰下一个现象。
 
+
+### Step 8 — 去掉 Face 的 60 拍时限（四份）
+
+**依赖**：Step 7 的验证结果（F3/C1/C2 FAIL，根因就是它）。
+
+**依据（可复算，不是拍的）**：车端 `cruise_yaw_rate = 0.5 rad/s = 28.6°/s` ⇒ 转 180° 需要 **6.3 s**；原 `FACE_GIVE_UP_TICKS = 60`（3 s）最多只转 **86°**。人类口径（2026-11-05）：**不设时限，转得久一点无所谓，只要能看到它能不能转过去**。
+
+1. **四份 `face.rs`**（`ugv` / `uav` / `sim/ugv_sim` / `sim/uav_sim`，逐字一致）：
+   - 删除 `FACE_GIVE_UP_TICKS` 常量与 `FaceLeaf::ticks` 字段；
+   - `new()` 去掉 `ticks: 0`；`halt()` 改为空实现（无状态、幂等、仍不发 Stop）；
+   - `tick()` 删掉「计数 + 到点 Success」分支；保留「`|Δθ| ≤ 8°` → `Success`」与「只转不走 + 清另两字段」；
+   - 新增退化保护：`let (dx, dy) = (fx - x, fy - y); if dx*dx + dy*dy < 1e-4 { return Status::Success }`（目标点与自身重合时 `atan2(0,0)` 无意义，否则会无限原地转）；
+   - 文件头注释里的「④ ticks ≥ 60 也 Success」同步改掉。
+2. **单测**：删 `test_face_gives_up_after_60_ticks_success` 与 `test_face_halt_resets_ticks`；新增
+   - `test_face_keeps_running_without_alignment`（偏 90°、位姿不变 → 连 300 拍都 `Running`，不 Success、不 Failure）；
+   - `test_face_point_at_self_is_success`（目标 = 自身位置 → 一拍 `Success`）；
+   - `test_face_halt_is_idempotent`（`halt` 两次不 panic，之后仍 `Running`）。
+3. 验收：`cargo test -p pleiades-ugv --bins face`、`-p pleiades-uav --bins face`、`-p pleiades-sim --bins face`。
+
+### Step 9 — 重跑仿真验证（F3 / C1 / C2）
+
+**依赖**：Step 8 绿。
+
+**目标**：只回答一个问题 —— **现在到底转不转得动 180°**。复用 Step 7 的驱动（`tmp/task48_tools/s7_evidence/s7_driver.py` 与 `tmp/task48/s7/env/`），至少重跑 **F3 / C1 / C2**；其余 7 条上一轮已 PASS，可复跑但不作判据。
+
+- 判据（只判现象，不设时限）：F3 末态对准身后点（误差 ≤ 8°）；C1/C2 到位后车头朝人（误差 ≤ 8°）。
+- 必须记录：F3 实际转过的角度与耗时（秒）——用来说明「转 180° 用了多久」。
+- 证据落 `tmp/task48/s9/`；引擎结束会把它复制到 `tmp/task48_tools/s9_evidence/`。
+- 收尾同 Step 7：kill 全部进程 + `ss -ltnp` 确认端口清空。
+
+---
 
 ## 六、边界（本任务明确不做）
 

@@ -103,3 +103,25 @@ M Workbook/wb_48_operation.md
 ## 执行引擎启动（task_48 首轮·step7 重跑）
 - 开始：2026-11-05 12:53:19Z
 - 计划：S7
+
+## Step 7 — 仿真验证：Face / Guard / Containment×Face（三 agent 自动跑）（task_48 首轮·step7 重跑）
+- 起止：2026-11-05 12:53:19Z → 2026-11-05 14:08:50Z
+- 范围：只写 tmp/task48/s7/ 的日志与结论；**不改任何源码**
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok c397e4f
+- 规划要点：计划已经写入 [plan.md](tmp/task48/plan.md)（共 523 行；本次仅写入这一个文件，`git status` 仍只显示进场基线。） **摘要（200 字内，可直接写进 workbook）** > 计划写入 tmp/task48/plan.md，源码零改动。先做全工作区 cargo build --release（无 -p），再启动世界、两个 sim 实例、行人和 Pictor，依次运行 F1~F4、G1~G4、C1、C2，按 V1~V22 判断。唯一不在 tmp 下的改动：在 Pictor/.config 中增加 subscribe_topics。已登记三处偏差：F1/F4 改为两段注入，因为控制口只能装 Goto，单帧成对下发由 C1/C2 覆盖；进区/出区日志不存在，改用行为证据；机端 assist 无成功日志。/ 仅剩 110MB，TMPDIR 移到 s7/env。 要点（供 review 快速查看）： | 项 | 结论 | |---|---| | 进场实测 | HEAD d65f4ae；release 二进制陈旧（11-04 02:02，源码 11-05 11:36）；现有二进制已是 CUDA（cudart）；`cargo tree … \| grep -c cuda` = 1；5 端口全空 | | 落盘边界 | 源码零改动；只新建 `tmp/task48/s7/`；唯一非 tmp 改动是 `Pictor/.config/config.toml:19` 一行（两处 `.gitignore` 已覆盖，git 不可见） | | 关键源码锚点 | `control.rs:273/278/681/689`、`robot.rs:463/486`、`sim_handler.rs:831/858`、`detector/mod.rs:606`、`guard.rs:53-63/111/175/225/247`、`face.rs:37-39/63-90`、`coop_controller.gd:209/216/218-221`、`message_buil
+
+## 引擎结束（task_48 首轮·step7 重跑）
+- 结束：2026-11-05 14:08:52Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_48_operation.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
+
+## 执行引擎启动（task_48 首轮·step8-9）
+- 开始：2026-11-06 00:38:34Z
+- 计划：S8 → S9
