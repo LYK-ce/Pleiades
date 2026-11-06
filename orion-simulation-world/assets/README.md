@@ -2,7 +2,7 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-22
-> Modified Date ： 2026-10-31
+> Modified Date ： 2026-11-06
 
 本目录**只放真正的资源文件**：位图/纹理（`.png` `.jpg` `.webp`）、
 3D 模型（`.glb` `.gltf` `.obj` `.fbx`）、材质与环境（`.material` `.tres` `.env`）、
@@ -18,14 +18,14 @@
 | `.gitkeep` | 占位（保留） |
 | `humans/` | 人形资产，见 `humans/README.md`（Renderpeople 免费页，非 CC0） |
 | `sensors/` `chassis/` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用）；`chassis/uav_quadrotor.glb` = **task_40 Step 5 换的四旋翼外观**，见 §5 与 `ATTRIBUTION.md`；`chassis/ugv_m1.glb` = **task_42 Step 3 换的 UGV 外观（自有资产）**，见 §6 |
-| `textures/` | **task_38 Step 1a 新增**：4 套 PBR 贴图（12 个文件），CC0，见 §2 |
+| `textures/` | **task_38 Step 1a**：4 套 PBR（12 文件）+ **task_49 Step 3**：室内 2 套（6 文件，`wall_indoor_*` / `floor_indoor_*`），共 6 套 18 文件，全部 CC0，见 §2 |
 | `hdri/` | **task_38 Step 1a 新增**：1 张 2K 晴天正午 HDRI，CC0，见 §3 |
 
 > 除 `humans/`（Renderpeople 免费页条款）与 `chassis/uav_quadrotor.glb`（**CC BY 3.0**，须署名，见 `ATTRIBUTION.md`）外，`textures/` 与 `hdri/` 全部为 **CC0 1.0**（Poly Haven / ambientCG 的公共领域授权），可商用、可修改、无归属义务；本仓库仍逐条记账来源以便复核。
 > `chassis/ugv_m1.glb` 是本仓库 **Blender 自建的自有资产**（无第三方素材/贴图），不适用 CC0 / CC-BY，也不需要署名。
 > **贴图与 `.import` 必须一起提交**：干净检出先跑 `godot --headless --path orion-simulation-world --import`，否则 `load()` 返回 `null`（`COMPONENTS.md` §9.1 **E28**）。
 
-## 2. `textures/` — 4 套 PBR（CC0，task_38 Step 1a）
+## 2. `textures/` — 6 套 PBR（CC0；task_38 Step 1a 4 套 + task_49 Step 3 室内 2 套）
 
 通道口径（写死）：`*_color.jpg` → `albedo_texture`；`*_nor.jpg` → `normal_texture`（**OpenGL 约定，`nor_gl`，禁止 `nor_dx`**）；`*_orm.png` → `orm_texture`（**R=AO / G=Roughness / B=Metallic**）。
 
@@ -43,12 +43,22 @@
 | `curb_color.jpg` | 路缘 albedo | Poly Haven `concrete_wall_005` `diff` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_wall_005/concrete_wall_005_diff_1k.jpg | CC0 | 1024² | 1K 源直出，JPG q85 | 101 125 | 6b8f6aaf8291d4cd |
 | `curb_nor.jpg` | 路缘 normal | 同上 `nor_gl` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_wall_005/concrete_wall_005_nor_gl_1k.jpg | CC0 | 1024² | JPG q88 / 4:4:4 | 265 063 | 3fcce21b9da4a3ff |
 | `curb_orm.png` | 路缘 ORM | 同上 `arm` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_wall_005/concrete_wall_005_arm_1k.jpg | CC0 | 512² | `arm` 原样搬；PNG 无损 | 234 303 | b7cdbc937deed462 |
+| `wall_indoor_color.jpg` | 室内墙面 albedo | Poly Haven `white_plaster_02` `diff` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/white_plaster_02/white_plaster_02_diff_1k.jpg | CC0 | 1024² | 1K 源**字节级搬运**（未重编码） | 527 219 | a1ebbe091bd1ae93 |
+| `wall_indoor_nor.jpg` | 室内墙面 normal | 同上 `nor_gl` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/white_plaster_02/white_plaster_02_nor_gl_1k.jpg | CC0 | 1024² | 同上，`nor_gl`（**未取 `nor_dx`**） | 652 310 | eb572ca3630d5bfd |
+| `wall_indoor_orm.png` | 室内墙面 ORM | 同上 `arm` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/white_plaster_02/white_plaster_02_arm_1k.jpg | CC0 | 1024² | **`arm`→PNG 无损**（R=AO/G=Rough/B=Metal），源 191 017 B | 1 485 831 | 88a6b4c9eac89dc3 |
+| `floor_indoor_color.jpg` | 室内地面 albedo | Poly Haven `terrazzo_tiles` `diff` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/terrazzo_tiles/terrazzo_tiles_diff_1k.jpg | CC0 | 1024² | 1K 源**字节级搬运**（未重编码） | 1 166 107 | 462e3e719cda0472 |
+| `floor_indoor_nor.jpg` | 室内地面 normal | 同上 `nor_gl` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/terrazzo_tiles/terrazzo_tiles_nor_gl_1k.jpg | CC0 | 1024² | 同上，`nor_gl`（**未取 `nor_dx`**） | 77 954 | 56bbe2d960b47ddb |
+| `floor_indoor_orm.png` | 室内地面 ORM | 同上 `arm` | https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/terrazzo_tiles/terrazzo_tiles_arm_1k.jpg | CC0 | 1024² | **`arm`→PNG 无损**（R=AO/G=Rough/B=Metal），源 477 964 B | 1 080 444 | 2e660006dc70648e |
 
 处理说明：
-- **降采样**：只有 ORM 降到 512²（AO/粗糙度是低频数据；`*_nor/_color` 不动分辨率）；albedo/normal 与源同尺寸，**没有做 2K→1K 降采样**。
+- **降采样**：只有 ORM 降到 512²（task_38 Step 1a 那 4 套；task_49 Step 3 的 2 张 ORM 未超 1.5 MB，故保持 1024²。AO/粗糙度是低频数据；`*_nor/_color` 不动分辨率）；albedo/normal 与源同尺寸，**没有做 2K→1K 降采样**。
 - **重编码**：全部用 `PIL` 重编码以压进 10 MB 预算（源 1K jpg 合计 6.7 MB、2K 源合计 30 MB+）；normal 一律 4:4:4、ORM 一律 PNG 无损。
 - **不重采样色彩空间**、不做色彩校正；`nor_dx` / `NormalDX` 全程未下载、未落地。
 - `.import` 由 `godot --headless --path orion-simulation-world --import` 生成（`compress/mode=0` 无损 + `mipmaps/generate=true`）；**不要手改**。
+- **task_49 Step 3 两套室内贴图**（`wall_indoor_*` / `floor_indoor_*`）：`_color` 与 `_nor` 为 1K 源**字节级搬运**
+  （未重编码、未降采样，`sha256` 与源一致，可直接复核）；`_orm` 由 Poly Haven `arm` 1K JPG **无损转 PNG**
+  （`arm` 的 R/G/B 本身就是 AO/Roughness/Metallic，**零像素改动**）；两张 PNG 均未超 1.5 MB，故都保持源尺寸 1024²
+  （既有 4 套 ORM 当年是 512²，是本批之后的唯一尺寸差异）。两套均**未取 `nor_dx` / `NormalDX`**。
 
 ## 3. `hdri/` — 1 张 2K 晴天正午 HDRI（CC0）
 
@@ -67,9 +77,10 @@
 | 本步新增 13 个 `.import` | 12 431 |
 | **task_40 Step 5 增量**（新 glb 299 376 + 2 个 `.import` 2 231 + 抽出贴图 2 882 + 许可 19 467 + 署名 5 289 − 删旧件 20 460 − 删旧 `.import` 1 185 = 资产净 **+307 600**；本文件台账 +3 001） | **+310 601** |
 | **task_42 Step 3 增量**（新 glb 67 752 + `.glb.import` 1 148 − 删旧 `ugv_chassis.glb` 21 888 − 旧 `.import` 1 163 = **+45 849**；本文件台账自身增长另计） | **+45 849** |
-| `assets/` 总体积（`du -sb`，2026-10-31 实测 ≈ **24.67 MB**；本文件自身字节也算在内，故精确值随文档微调而变） | ≈ 24 665 490 |
+| **task_49 Step 3 增量**（室内 2 套 6 张贴图 4 989 865 + 6 个 `.import` 5 808 = **+4 995 673**；2K 源未取、`nor_dx` 未下载） | **+4 995 673** |
+| `assets/` 总体积（`du -sb`，2026-11-06 实测 ≈ **28.29 MB**；本文件自身字节也算在内，故精确值随文档微调而变） | ≈ 29 663 711 |
 
-判据：贴图单张 ≤ 1.5 MB（最大 `ground_paving_nor.jpg` 975 127）、HDRI ≤ 6 MB、`assets/` 增量 **9 524 411** ≤ 10 MB —— 全部通过。
+判据：贴图单张 ≤ 1.5 MB（最大 `wall_indoor_orm.png` 1 485 831）、HDRI ≤ 6 MB、`assets/` 增量 **9 524 411** ≤ 10 MB —— 全部通过。
 task_40 Step 5 另核：模型 glb **299 376 B ≤ 1 MB**、贴图 128×128 ≤ 2K、tris **4 564 ≤ 50k**。
 
 ## 5. `chassis/` — 四旋翼外观 1 件（**CC BY 3.0**，task_40 Step 5）
