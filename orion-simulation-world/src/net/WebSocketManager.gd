@@ -89,6 +89,14 @@ const MAX_WIRE_ID := 65535
 ## 位姿下行周期（秒）：对齐真机 state_notifier 的 100 ms（base robot.rs:213）。
 const POSE_BROADCAST_INTERVAL_S := 0.1
 
+## Step 7（task_49 口径 #26）：`[scale]` 阶梯诊断日志的窗口长度与开关。
+## 只打日志、不改任何行为；与现成的 `stats_log` 一起做门控。
+## 为什么还要一个 `--scale-log`：`World.tscn` / `project.godot` **不在本 step 允许改动的路径**，
+##   没法把 `stats_log` 置 true；带该参数时只多三行 print，不带时与改动前同行为。
+## 调用点在 _process()（不是 Heartbeat）：低帧率下 1 Hz 定时器会被拖到 7~10 s。
+const SCALE_LOG_WINDOW_S := 5.0
+const SCALE_LOG_USER_ARG := "--scale-log"
+
 # ---------------------------------------------------------------- 行人（task_35 Step 2）
 ## 行人（task_35 Step 2）：chassis_hello.kind == "pedestrian" 的 avatar 走这条支路。
 const PEDESTRIAN_CHASSIS := "pedestrian"
@@ -175,12 +183,19 @@ var _warned_missing_sensor_catalog := false
 var _warned_no_root := false
 ## 位姿下行累加器（秒）；与物理帧解耦，见 _BroadcastPoses()。
 var _pose_acc: float = 0.0
+## Step 7：`[scale]` 窗口累加（墙钟，不受帧率影响；`_pose_acc` 仍按帧 delta，一字不动）。
+var _scale_log_on: bool = false
+var _scale_win_start_usec: int = 0
+var _scale_pose_ticks: int = 0
+var _scale_pose_msgs: int = 0
 
 
 # ================================================================ 生命周期
 
 func _ready() -> void:
 	_EnsureRefs()
+	_scale_log_on = OS.get_cmdline_user_args().has(SCALE_LOG_USER_ARG)
+	_scale_win_start_usec = Time.get_ticks_usec()
 	var heartbeat: Timer = get_node_or_null("Heartbeat") as Timer
 	if heartbeat != null and not heartbeat.timeout.is_connected(_OnHeartbeatTimeout):
 		heartbeat.timeout.connect(_OnHeartbeatTimeout)
@@ -202,6 +217,8 @@ func _process(delta: float) -> void:
 	_SweepClosed()
 	_Tick_Pedestrian_Timeouts()          # task_35 Step 2：只对行人生效，车没有超时
 	_BroadcastPoses(delta)
+	if _scale_log_on:
+		_Scale_Log()                     # Step 7：5 s 墙钟自门控（与 1 Hz Heartbeat 解耦，见函数头注释）
 
 
 # ================================================================ 监听 / 停止
@@ -484,6 +501,7 @@ func _BroadcastPoses(delta: float) -> void:
 	if _pose_acc + 1e-6 < POSE_BROADCAST_INTERVAL_S:   # 与 Lidar2D 同款容差，防 60 fps 漏帧
 		return
 	_pose_acc = 0.0 if _pose_acc > POSE_BROADCAST_INTERVAL_S * 2.0 else _pose_acc - POSE_BROADCAST_INTERVAL_S
+	_scale_pose_ticks += 1                      # Step 7：本窗口真正下发了几次位姿（不是每帧）
 	var t: float = WorldClock.Now()
 	for link: Variant in _links.duplicate():
 		if link.role != ROLE_CHASSIS or not link.handshaken or bool(link.closed):
@@ -494,6 +512,30 @@ func _BroadcastPoses(delta: float) -> void:
 		var pose: Dictionary = vehicle.call("GetPose")
 		var vel: Vector3 = WorldTransform.VelToWorld(vehicle.velocity)
 		link.SendJson(WireProtocol.BuildPose(t, pose, vel))  # 非 OPEN 返回 ERR_UNCONFIGURED，属正常，不刷日志
+		_scale_pose_msgs += 1                    # Step 7：本窗口 SendJson 次数 = ticks × 有底盘的连接数
+
+
+## Step 7（task_49 §五 Step 7 §1）：三行 `[scale]` 诊断日志，5 s 一次（口径 #26）。
+##   fps      = Engine.get_frames_per_second()（世界自己的渲染帧率）
+##   pose_hz  = 窗口内 _BroadcastPoses 真正下行的次数 / 窗口秒数（**软渲染下最先退化的一项**）
+##   links / vehicles / pedestrians = 现成 GetStats()
+## 纯读数：不改任何行为，不写任何状态机字段。
+## 门控 = 墙钟（Time.get_ticks_usec），每帧调用一次；win= 是实测窗口，不会大于 5 s + 一帧。
+func _Scale_Log() -> void:
+	var now_us: int = Time.get_ticks_usec()
+	var win_s: float = float(now_us - _scale_win_start_usec) / 1000000.0
+	if win_s + 1e-6 < SCALE_LOG_WINDOW_S:
+		return
+	var stats: Dictionary = GetStats()
+	print("[scale] fps=%.1f" % float(Engine.get_frames_per_second()))
+	print("[scale] pose_hz=%.2f ticks=%d msgs=%d win=%.2fs"
+		% [float(_scale_pose_ticks) / win_s, _scale_pose_ticks, _scale_pose_msgs, win_s])
+	print("[scale] links=%d vehicles=%d pedestrians=%d assembled=%d pending=%d"
+		% [int(stats["links"]), int(stats["vehicles"]), int(stats["pedestrians"]),
+			int(stats["assembled"]), int(stats["pending"])])
+	_scale_win_start_usec = now_us
+	_scale_pose_ticks = 0
+	_scale_pose_msgs = 0
 
 
 # ================================================================ 装配：底盘

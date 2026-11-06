@@ -50,3 +50,11 @@
 - 结果：PASS
 - 提交：ok 9a0a7a3
 - 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（946 行，逐文件:行号）。规划期额外用真渲染器做了一次面朝向实测（证据 [winding 图](tmp/task49/shots/winding/) / [日志](tmp/task49/logs/s5_probe_winding.log)），`git status` 与基线一致、未改任何源码。 **摘要（≤200 字，可入 workbook）** 计划见 [plan.md](tmp/task49/plan.md)。只改 2 文件 4 处：`WorldLook` 加 `CEILING_TINT 0.85`＋材质工厂；`Interior` 加常量、`Build_All` 门控建 `Ceiling`、`_Collect_Ceiling_Quads`／`_Ceiling_Z`、`_Quad_Down`。天花板＝3 块净空矩形×上下两面＝6 quad，下表面 3.0 与墙顶共面，纯 mesh 零碰撞、不进 `OBSTACLES`、`cast_shadow` 仍 OFF。相机选 A（tscn 零改动，B 补丁进 impl.md）。面朝向／可见性已规划期实测。两种取值各起一次：默认态 4 图 sha256 须与 Step 4 基线逐张相同；开态靠 `ceiling_flip.sh`（trap＋sha256 还原）。判据 J1~J16，风险 R1~R9。 **三个要点（供引擎判断）** - 硬约束全部对齐：只动 `src/world/`，`WorldIndoor.tscn`/`SceneDefs`/`Task`/Rust 零改动；体素对齐四条逐条给了核对方式（§4）。 - 面朝向已实测而非推理：绕序反向的 quad 法线实测 `(0,-1,0)`、走廊内可见、俯视是实心屋顶——**双面 6 quad** 因此定稿（单面＋`cull_disabled` 会污染材质缓存，已否决）。 - 起进程纪律：仅一次性 `--import`/`--quit`/`--check-only` ＋ 自终止渲染探针（`timeout` 
+
+## Step 6 — 室内演示跑通（Guard 四条现象）（task_49 首轮）
+- 起止：2026-11-06 13:17:11Z → 2026-11-06 14:04:16Z
+- 范围：只写 tmp/task49/s6/；可改 RobotSim_TestEnv/ 的测试配置；不改源码
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 71f5b1e
+- 规划要点：计划已写入 [plan.md](tmp/task49/plan.md)（515 行，逐文件:行号）。规划期用一次性探针在本场地**真跑了一遍四案**（`tmp/task49/plan_probe/`），已收尾干净、端口全空、`git status` 未变。 **摘要（≤200 字，可入 workbook）** > 计划见 tmp/task49/plan.md（515 行，逐文件:行号）。规划期探针已真跑四案：pitch=0 时 detector 12 m 仍采纳（-2 的窗仅 7.16 m，故两处 pitch 同改 0）；G1 真半径 3.80 位移 0.000；G2 前进 1.47 m、d_true 1.03、朝人 3.5°；G3 回站 0.33 m、yaw −2.7°；G4 带内不动、2.70 出动、回带内不归位、5.00 才归位；Guard 全程无「任务完成」。探针收尾端口全清、git 未变；零源码改动，只写 s6/ 与 s6_env/。 三个需要引擎知道的判读前提：① 源码**没有**「进区/出区」日志（`guard.rs:174-211` 无 tracing，唯一 `[Guard]` 行在 `:247`），G1/G2 用「位移 + `[Sim]` v + 非值守点 `[Nav]` 计数」取证，已写成 D1；② 相机 `mount_pitch_deg` 必须从 c1 的 −2.0 改 0.0（否则 G1 的 7.7 m 被几何卡掉），两处同步；③ `HomeLeaf` 每拍重发 `[Nav] 新目标 (58.00,64.00)` 是既有口径差（实测窗内 142 条、车不动），判据只数**非**值守点目标。
