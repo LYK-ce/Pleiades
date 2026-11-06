@@ -139,8 +139,14 @@ func Step(_current_velocity: Vector3, delta: float) -> Dictionary:
 
 
 ## 走路动画：播**第一条** clip（不硬编码名字）、loop、步频 = v / CLIP_MPS。
-## v = 0 时 speed_scale = 0（人物定格，不闪不跳，但仍 is_playing）。
+## v = 0 时**不冻结在跨步中**（task_35 遗留的观感问题）：跳到走路循环的「并腿相位」
+## （默认 1/4 周期，`STOP_PHASE_RATIO`），再把 speed_scale 归零 —— 看起来是立住而不是定格。
 ## 找不到 AnimationPlayer / 无 clip：**只 push_warning（每类一次），绝不 push_error**。
+const STOP_PHASE_RATIO := 0.95
+
+var _was_moving := false
+var _stopped := false
+
 func Play_Walk() -> void:
 	var ap := _Ensure_Anim()
 	if ap == null:
@@ -150,12 +156,24 @@ func Play_Walk() -> void:
 		_Warn_Once("no-clip", "[pedestrian] AnimationPlayer 里没有任何动画")
 		return
 	var clip_name := String(list[0])
-	if ap.current_animation != clip_name or not ap.is_playing():
-		var anim: Animation = ap.get_animation(clip_name)
-		if anim != null and anim.loop_mode == Animation.LOOP_NONE:
-			anim.loop_mode = Animation.LOOP_LINEAR
-		ap.play(clip_name)
-	ap.speed_scale = 0.0 if _speed_now <= 0.0 else _speed_now / CLIP_MPS
+	if _speed_now > 0.0:
+		if _stopped or ap.current_animation != clip_name or not ap.is_playing():
+			ap.play(clip_name)
+		ap.speed_scale = _speed_now / CLIP_MPS
+		_stopped = false
+		_was_moving = true
+	else:
+		if not _stopped:
+			# 停下：播同一条 clip → seek 到并腿相位 → **pause()**。
+			# 注意不能用 `speed_scale=0`：旧写法下一帧的 `not is_playing()` 会再 play() 一次，
+			# 把姿态打回第 0 帧（跨步中）—— 这就是之前「停住还是跨步」的原因。
+			var anim: Animation = ap.get_animation(clip_name)
+			ap.play(clip_name)
+			if anim != null and anim.length > 0.0:
+				ap.seek(anim.length * STOP_PHASE_RATIO, true)
+			ap.pause()
+			_stopped = true
+			_was_moving = false
 
 
 # ================================================================ 自宿主推进（唯一位置更新点）
