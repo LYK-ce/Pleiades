@@ -155,3 +155,21 @@ M Workbook/wb_48_operation.md
 ## 执行引擎启动（task_48 首轮·step9 重跑）
 - 开始：2026-11-06 01:29:35Z
 - 计划：S9
+
+## Step 9 — 重验 F3（180° 能不能转过去）+ C1（到位后朝人）（task_48 首轮·step9 重跑）
+- 起止：2026-11-06 01:29:35Z → 2026-11-06 01:53:10Z
+- 范围：只写 tmp/task48/s9/；可改 RobotSim_TestEnv/ 与 Pictor/.config/ 的测试配置；不改源码
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok b2b085a
+- 规划要点：范围自查通过（`git status` 仍为基线 3 行，只有 `tmp/task48/plan.md` 新增，且 `tmp/` 被忽略）。 **计划摘要（≤200 字，可直接写进 workbook）** > 计划已写 `tmp/task48/plan.md`（286 行，源码零改动，`git status` 仍只有基线 3 行）。本步是**证据重生成**：`s9/`、`s9_evidence/` 均已不存在，必须从零重跑。做法 = 从 `s7_evidence/s7_driver.py` 派生 `s9/s9_driver.py`（E01~E18 逐处锚行号），路径/实例名 `s7→s9`、删 `Diag_Face_180`、`Write_Result` 重写成 F3 专章，夹具坐标与 8° 判据**逐字不动**（V16 用 `diff` 反作弊）。实测三个坑：`cargo tree -i` **带 `-p` 只得 0 行 cuda**（必不带 `-p`）；HEAD `7e85933`@01:28 晚于二进制 00:56，陈旧判据须比 `-- '*.rs'` 提交（00:49:50）；`/` 仅剩 106 MB，TMPDIR 全导 `s9/env`。跑 F3/C1/C2 + 非判据对照 C2CTL（几何解耦冻结滞后），V1~V18、约 45–60 min、5 端口收尾。
+
+## 引擎结束（task_48 首轮·step9 重跑）
+- 结束：2026-11-06 01:53:12Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_48_operation.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
