@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-10-23
+# Modified Date ： 2026-11-07
 #
 # Vehicle 组件（task_30 §4.1 D11 / COMPONENTS.md §4.3）：avatar 的"身体"。
 #   本身是 CharacterBody3D（不是 Node3D 容器）；位置更新在世界侧（D8），
@@ -37,6 +37,12 @@ const MODEL_BY_CHASSIS := {
 	"diff_drive_ugv": "model_ugv",
 	"quadrotor_uav": "model_uav",
 }
+
+## 自带外观的底盘（task_50 Step 3）：外观由底盘自己在 chassis_root 里建（`sedan` 的 Body 按
+##   params.model 装 assets/props/cars/ 的两款之一），不进 ModelUGV/ModelUAV 两张表。
+## 这些底盘在 Vehicle 的占位外观里**不显示 Body**：否则那个 4.5×1.5×1.8 的橙色占位盒
+##   会把真车整个包住（`_Mount_Model` 对"两张表都查不到"的底盘会把 placeholder 打开）。
+const SELF_VISUAL_CHASSIS := ["sedan"]
 
 const GROUP_VEHICLE := &"vehicle"
 ## 车身尺寸下限（米）：避免零尺寸 mesh / shape 让物理与渲染退化。
@@ -319,8 +325,11 @@ func _Mount_Model(chassis_name: String) -> void:
 		shown.visible = true
 	# 3) 占位外观与模型互斥：有模型 -> 关占位；没模型 -> 全恢复
 	var placeholder := shown == null
+	# task_50 Step 3：自带外观的底盘（sedan）不显示占位 BoxMesh（会包住真车）；
+	#   底盘自己的 mesh 仍按 placeholder 显示 —— 下一行不动。
+	var self_visual := SELF_VISUAL_CHASSIS.has(chassis_name.strip_edges())
 	if body != null and is_instance_valid(body):
-		body.visible = placeholder          # Nose 是 Body 的子节点，跟着一起隐藏/显示
+		body.visible = placeholder and not self_visual
 	if chassis_root != null:
 		_set_meshes_visible(chassis_root, placeholder)
 

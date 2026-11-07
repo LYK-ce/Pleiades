@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-25
-# Modified Date ： 2026-11-03
+# Modified Date ： 2026-11-07
 #
 # 行人底盘 pedestrian（task_35 Step 1 / COMPONENTS.md §4.11）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED + "线速度 + 世界朝向角" 的平面运动学。
@@ -33,11 +33,28 @@
 #   用 rotation.y 算误差的前提 = 父节点变换为恒等（Step 3 的 World/Pedestrians 是新建 Node3D，
 #   恒等），与 Vehicle 的假设完全一致。
 #
+# task_50 Step 3（可选模型）：`chassis_hello.params.model ∈ {nathan, sophia, manuel}`，缺省 nathan
+#   （不传 model 时行为逐字不变）。换的是 `Body` **实例**（同名不重建）；换完**必须**重新
+#   _Find_Anim_Player()（旧引用指向刚被 free 的节点）。未知名字 push_warning + 回落 nathan，
+#   **不拒 spawn**。行人仍播第 0 条 clip（Step 1 已保证三人 clip[0] 都是 walk）。
+#
 # 不声明全局类名（COMPONENTS.md §9.1 E5）。
 
 extends "res://src/chassis/ChassisModel.gd"
 
 const WorldTransform := preload("res://src/common/WorldTransform.gd")
+
+## 可选外观（task_50 Step 3）：chassis_hello.params.model -> 三个行走 glb。
+## 键 = 演示用的短名，与 assets/humans/<name>/ 目录一一对应。
+## 三者 clip 顺序由 Step 1 钉死（导入器按**名字**排序，所以 `0_` 前缀就是顺序）：
+##   nathan = ["Armature|Take 001|BaseLayer"]（只有 1 条，是 walk）
+##   sophia = ["0_walk", "1_idle"] / manuel = ["0_walk", "1_dancing"] ⇒ clip[0] 都是 walk。
+const DEFAULT_MODEL := "nathan"
+const MODEL_SCENES := {
+	"nathan": preload("res://assets/humans/rp_nathan_animated_003_walk/model.glb"),
+	"sophia": preload("res://assets/humans/rp_sophia_animated_003_walk/model.glb"),
+	"manuel": preload("res://assets/humans/rp_manuel_animated_001_walk/model.glb"),
+}
 
 ## 目录名（ChassisCatalog.SCENES / DEFAULTS 的键）。
 const CHASSIS_NAME := "pedestrian"
@@ -61,6 +78,9 @@ var _legacy_turn := 0.0     # 老协议 action=left/right 的转向意图（+1/-
 var _anim: AnimationPlayer = null
 var _warned: Dictionary = {}
 
+# ---------------------------------------------------------------- 外观（task_50 Step 3）
+var _model_key := DEFAULT_MODEL   # 当前已装外观；场景自带的 Body 就是 nathan，故初值即真值
+
 
 # ================================================================ 契约
 
@@ -83,6 +103,9 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 	_legacy_turn = 0.0
 	_yaw_target = rotation.y
 	ApplyMotionMode(CharacterBody3D.MOTION_MODE_GROUNDED)
+	# task_50 Step 3：按 params.model 换 Body 实例（缺省 nathan = 场景里那个，不重建）。
+	# 必须在摆位之后（Configure 由 manager 在 add_child/摆位之后调用），这里只碰子树。
+	_Apply_Model(str(params.get("model", DEFAULT_MODEL)))
 
 
 ## 指令 -> 目标（只存最新，不排队）。v / dir 各路独立解析，缺省回退 action/speed。
@@ -243,6 +266,42 @@ func _Parse_Angle(value: Variant) -> float:
 		_:
 			parsed = NAN
 	return parsed if is_finite(parsed) else NAN
+
+
+## 换外观（幂等：同名不重建）。未知名字 -> push_warning + 回落 nathan（**不拒 spawn**：
+##   演示中途掉线的代价远大于"少一种长相"）。
+## 换完**必须**重新找 AnimationPlayer（评审判据：沿用旧引用即 FAIL —— 旧引用指向刚被 free 的节点）：
+##   清缓存 -> _Find_Anim_Player(self) -> 复位播放状态，让 Play_Walk 从新 clip 的第 0 帧重新起播。
+func _Apply_Model(raw_name: String) -> void:
+	var key := raw_name.strip_edges().to_lower()
+	if not MODEL_SCENES.has(key):
+		_Warn_Once("model", "[pedestrian] 未知 model '%s'（合法：%s），回落 %s"
+			% [raw_name, str(MODEL_SCENES.keys()), DEFAULT_MODEL])
+		key = DEFAULT_MODEL
+	if key == _model_key:
+		return                                   # 幂等：同名不重建（重复 hello 不抖画面）
+	var body: Node3D = get_node_or_null("Body") as Node3D
+	if body != null:
+		remove_child(body)                       # 先摘再 free：名字 "Body" 立刻可复用
+		body.queue_free()
+	var model: Node = (MODEL_SCENES[key] as PackedScene).instantiate()
+	var holder: Node3D = model as Node3D
+	if holder == null:
+		_Warn_Once("model-scene", "[pedestrian] 外观场景 '%s' 实例化失败（不是 Node3D）" % key)
+		return
+	holder.name = "Body"
+	add_child(holder)
+	_model_key = key
+	# 旧 AnimationPlayer 随旧 Body 一起 free —— 重新找（不重新找 = 沿用死引用）。
+	_anim = null
+	_anim = _Find_Anim_Player(self)
+	if _anim == null:
+		# 缺动画不是致命错误（人照样能走，只是腿不动）：只 warning，绝不 push_error。
+		_Warn_Once("no-anim", "[pedestrian] 子树里找不到 AnimationPlayer（走路 glb 是否已导入？）")
+	_stopped = false
+	_was_moving = false
+	print("[pedestrian] model=%s clips=%s" % [key,
+		"[]" if _anim == null else str(_anim.get_animation_list())])
 
 
 ## 找 AnimationPlayer：优先按 step.md 的字面调用（owned=false 才看得见 glb 实例**内部**的节点），

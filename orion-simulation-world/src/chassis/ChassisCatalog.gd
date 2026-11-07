@@ -14,6 +14,11 @@
 #   `Pedestrians` 容器（**不进** `Vehicles`、不占 `_PickSpawn` 的 avatar 排位）。Step 1 只登记，
 #   不改变任何既有语义（既有自检没有任何路径会装配 pedestrian）。
 #
+# `sedan`（task_50 Step 3 / 口径 #14）：社会车辆底盘，**只平移**（不转向、不倒车、不掉头、不差速）。
+#   朝向在 spawn 时由 `chassis_hello.params.heading_deg` 定死；`SetCommand` 只认 `v`。
+#   参数表 5 键与 `Sedan.GetDefaultParams()` 逐键一致；`model` / `heading_deg` 是可选外观/spawn 参数，
+#   不进参数表（缺省值写在 Sedan.gd 的常量里）。
+#
 # 不声明全局类名（§9.1 E5）：调用方 load("res://src/chassis/ChassisCatalog.gd") 后 call()。
 
 extends RefCounted
@@ -24,6 +29,7 @@ const SCENES := {
 	"diff_drive_ugv": "res://src/scenes/chassis/DiffDrive.tscn",
 	"quadrotor_uav": "res://src/scenes/chassis/Quadrotor.tscn",
 	"pedestrian": "res://src/scenes/props/Pedestrian.tscn",       # task_35 Step 1
+	"sedan": "res://src/scenes/chassis/Sedan.tscn",               # task_50 Step 3
 }
 
 ## chassis 名 -> 默认参数（与各底盘 GetDefaultParams() 逐键一致）。
@@ -49,6 +55,16 @@ const DEFAULTS := {
 	"pedestrian": {
 		"max_speed": 1.26,       # m/s = 走路动画自带步速（脚不滑）
 		"max_turn_rate": 180.0,  # 度/秒（与 diff_drive_ugv 同口径）
+	},
+	## 轿车（task_50 Step 3 / 口径 #14：只平移）。三个尺寸就是 §2.0 目标尺寸表里的真实乘用车，
+	##   也是 `Sedan.Configure -> ApplyBodySize` 的入参与 `Sedan._Install_Model` 逐轴缩放的分子。
+	## `max_turn_rate = 0` 是口径 #14 的书面值；Sedan 根本不读它（它没有转向这条代码路径）。
+	"sedan": {
+		"max_speed": 2.2,          # m/s（口径 #12：车比跑者 1.8 快）
+		"max_turn_rate": 0.0,      # 度/秒（口径 #14：不转向 ⇒ 0）
+		"body_length": 4.50,       # m（真实乘用车全长 = 碰撞盒 X 边长）
+		"track_width": 1.80,       # m（车身全宽 = 碰撞盒 Z 边长，与 UGV 同口径）
+		"height": 1.50,            # m（车身全高 = 碰撞盒 Y 边长）
 	},
 }
 

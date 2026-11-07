@@ -1,0 +1,22 @@
+; Presented by KeJi
+; Created Date ： 2026-11-07
+; Modified Date ： 2026-11-07
+;
+; 轿车底盘组件 sedan（task_50 Step 3 / 口径 #14：只平移）。节点树与接口见 COMPONENTS.md §4.4 / §7.6。
+; 根节点 Node3D + Sedan.gd（extends ChassisModel）；Body 是**空容器**，外观在 Configure 里按
+;   chassis_hello.params.model 装 assets/props/cars/ 的两款之一（Step 1 入库的 kenney_sedan / kenney_suv），
+;   并把"目标尺寸 / 原始 AABB"的缩放写在这个空容器上（Sedan._Install_Model）。
+; 为什么 Body 留空而不在场景里实例化：外观二选一由 params 决定，场景只能钉死一款；
+;   留空 + 运行时装才做到"一个 sedan 底盘、两款车"。
+; 没有轮子/转向视觉件（口径 #14 不做轮子转动/转向动力学），**绝不**加 CollisionShape3D：
+;   碰撞盒只有 Vehicle/CollisionShape3D 一个，尺寸由 Sedan.Configure -> ApplyBodySize 定。
+; 手写维护：不要用编辑器另存（会丢头注释，COMPONENTS.md §9.1 E8）。
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/chassis/Sedan.gd" id="1_sedan"]
+
+[node name="Sedan" type="Node3D"]
+script = ExtResource("1_sedan")
+
+[node name="Body" type="Node3D" parent="."]
