@@ -26,3 +26,11 @@
 - 结果：PASS
 - 提交：ok f2f254f
 - 规划要点：计划已写入 `tmp/task50/plan.md`（632 行）。工作树未被改动；`git status` 仍只有进场时的那三项基线，没有改动任何源码。 计划摘要（约 190 字，可直接写入 workbook）： 计划见 tmp/task50/plan.md。`Vehicle.tscn` 不在允许路径，所以更换外观的唯一入口是重写 `assets/chassis/ugv_m1.glb`：改动 glTF JSON 的 scale，把巡逻车归一为 0.80×0.50×0.55，并保持不变 bin。由于模型就是碰撞盒（D11），碰撞盒必须等于外观，因此新增 `body_length 0.80`，并保留 `wheel_base 0.50`、`track_width 0.55`、`height 0.50`。雷达按口径 #9 装到车顶 `(0.02,0,0.50)`（0.30~0.35 会埋进 0.50 高的车体）。速度 2.2、180、cruise 2.0，以及跟踪机 3.0 通过 chassis_params 配置，车端 detector 关闭。xvfb 探针验证 2.2、π、贴墙和扫两侧墙，并记录 Rust `SpeedBinding` 把实速二次限制到 1.5、π/2 的已知缺口。 两个必须先看的硬发现： 1. **外观入口受限**：`Vehicle.tscn:18` 把 ModelUGV 固定指向 `ugv_m1.glb`，而 `src/scenes/`、`src/vehicle/` 都不在允许路径，因此只能重写该 glb 的字节；文件名沿用会在新增的 `assets/chassis/README.md` 中说明。 2. **Rust 侧速度上限**：`pleiades-sim/.../action_map.rs` 的 `MAX_CRUISE_SPEED=1.5`、`MAX_CRUISE_YAW_RATE=π/2` 会把 `cruise_speed 2.0` 限制成 1.5。因此脚本或行为树驱动的车实测达不到 2.2 和 π；世界侧 clamp 可以用直发 `motio
+
+## Step 3 — 模拟世界：行人可选模型 + 轿车底盘（只平移）（task_50 首轮）
+- 起止：2026-11-07 14:18:44Z → 2026-11-07 14:50:51Z
+- 范围：orion-simulation-world/src/（chassis、scenes、net）加新增 Sedan 组件；不改 Rust
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok 72ee3be
+- 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（710 行，共 10 节），未改动任何源码（`git status` 仍与进场基线相同）。 计划摘要（约 190 字，可直接写进 workbook）： 计划见 tmp/task50/plan.md。改 3 文件：Catalog 加 sedan；Pedestrian 按 model 换 Body 并重找动画器（未知 warn 回落）；Vehicle 加 SELF_VISUAL_CHASSIS 防占位盒包车。新增 Sedan.gd/tscn：只认 v、yaw 恒 0 只平移；朝向 spawn 写宿主 rotation.y，位置仍由 Vehicle 推进；碰撞=外观 4.5×1.5×1.8。验收 import/quit/check-only + headless 探针 + xvfb 图。硬发现：Rust 镜像只认 2 chassis，sedan 需独立 ws 客户端驱动。

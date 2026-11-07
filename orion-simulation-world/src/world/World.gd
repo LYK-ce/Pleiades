@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-11-06
+# Modified Date ： 2026-11-07
 #
 # 世界根脚本（COMPONENTS.md §4.1）：启动世界时钟、按 [sim_world] 程序化生成体素世界、
 # 提供尺度/坐标/容器访问。D4 程序化生成，布局确定性、无 RNG。
@@ -20,6 +20,9 @@
 #
 # task_49 Step 4：`_Look() == "indoor"` 时补建 Interior（地板 / 踢脚线 / 门框，纯视觉零碰撞）并把体素材质
 # 换成室内抹灰贴图；city 档 `_Look()` 恒为 "city" ⇒ 走原分支，渲染结果逐像素不变（sha256 对照）。
+#
+# task_50 Step 4：`_Look() == "venue"` 时补建 Plaza（路面 / 斑马线 / 人行道 / 场馆 / 背景楼，纯视觉零碰撞）；
+# city 与 corridor 两条分支一字不改 ⇒ 渲染与格数都不变（验收按 sha256 + 日志计数双对照）。
 
 extends Node3D
 
@@ -34,6 +37,8 @@ const Facade := preload("res://src/world/Facade.gd")
 const Interior := preload("res://src/world/Interior.gd")
 ## 场景数据表（task_49 §三）：世界几何 / 出生点 / 观感档的唯一数据来源。
 const SceneDefs := preload("res://src/world/SceneDefs.gd")
+## venue 场地视觉件（task_50 Step 4）：纯视觉零碰撞，只在 look=="venue" 档建（其它档不建）。
+const Plaza := preload("res://src/world/Plaza.gd")
 
 const SETTING_VOXEL_SIZE := "sim_world/world/voxel_size"
 const SETTING_CELLS_X := "sim_world/world/cells_x"
@@ -146,6 +151,11 @@ func _ready() -> void:
 	# 室内视觉件（task_49 Step 4）：地板 overlay / 踢脚线 / 门框；纯 mesh、零碰撞、幂等。
 	if _Look() == "indoor":
 		Interior.Build_All(self, _def)
+	# 场地视觉件（task_50 Step 4 / 口径 #15）：路面 / 斑马线 / 人行道 / 场馆 / 背景楼；
+	# 纯 mesh、零碰撞、不进障碍表；幂等（先摘同名旧容器）。venue 档 props_street/props_facade 均为 false
+	# ⇒ 下面两个 city 档分支都不会跑。
+	if _Look() == "venue":
+		Plaza.Build_All(self, _def)
 	# 街道几何 / 立面（task_38 §三.4 的末尾两行）：只建渲染 mesh、零碰撞、可幂等重建。
 	# task_49 §二 #17：只在 city 档跑，由场景数据的 props_street / props_facade 门控。
 	if _Props_Street():

@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-11-06
-# Modified Date ： 2026-11-06
+# Modified Date ： 2026-11-07
 #
 # 场景数据表（task_49 §三）：一个场景 = 一条数据。
 #   - 纯常量表 + 两个只读访问器（Has / Get）；**不声明 class_name**（COMPONENTS.md §9.1 E5）。
@@ -88,6 +88,39 @@ const SCENES := {
 		"look": "indoor",
 		"ceiling": false,
 		"ceiling_z_m": 3.0,
+	},
+	# 演示场地（task_50 §五 Step 4 / 口径 #15）：**全视觉、零碰撞** ⇒ 障碍表恒为空数组。
+	# 场地平面（世界 Z-up / 米，全部 0.5 整数倍）：道路 x∈[56,64]（8 m）南北贯通；斑马线 y∈[58,66]；
+	#   车墙位 北排 y≈54 / 南排 y≈70（x = 57/59/61/63，本步不摆车）；场馆 x∈[70,100]、y∈[70,100]、
+	#   西墙门洞 y∈[80,84]；出生点 (68,82) 在门洞外 2 m ⇒ **人不从楼里走出来**。
+	# `buildings` 是本场景独有的**新增键**（背景楼，纯视觉）：每项
+	#   {model: String, pos: Vector3(世界坐标), rot_y_deg: float, scale: float}。
+	#   缺键 / 非数组 ⇒ 按空数组处理；**city 与 corridor_indoor 不带该键，读方一律 def.get("buildings", [])**。
+	# 视觉件的实际几何在 src/world/Plaza.gd（本表只给"谁在哪、几栋"）；观感档 = WorldLook.Apply_Venue。
+	"venue": {
+		"name": "venue",
+		"obstacles": [],
+		"spawn": Vector3(68.0, 82.0, 0.0),
+		"spawn_clear_radius_m": 1.5,
+		"spawn_clear_height_m": 2.5,
+		"air_wall_height_m": 32.0,
+		"props_street": false,
+		"props_facade": false,
+		"look": "venue",
+		"ceiling": false,
+		"ceiling_z_m": 0.0,
+		# 背景楼 4 栋（3~5 区间内取 4，全部落在"外围"：x<50 或 x>100），scale 统一 5.0
+		# ⇒ 实测高度 12.40 / 8.46 / 20.40 / 20.40 m（原始 AABB 见 assets/props/buildings/README.md）。
+		"buildings": [
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(30.0, 44.0, 0.0), "rot_y_deg": 0.0, "scale": 5.0},
+			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
+				"pos": Vector3(26.0, 22.0, 0.0), "rot_y_deg": 90.0, "scale": 5.0},
+			{"model": "res://assets/props/buildings/kenney_building-skyscraper-c/model.glb",
+				"pos": Vector3(112.0, 44.0, 0.0), "rot_y_deg": 0.0, "scale": 5.0},
+			{"model": "res://assets/props/buildings/kenney_building-skyscraper-e/model.glb",
+				"pos": Vector3(116.0, 24.0, 0.0), "rot_y_deg": 90.0, "scale": 5.0},
+		],
 	},
 }
 

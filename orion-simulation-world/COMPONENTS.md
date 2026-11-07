@@ -2,10 +2,10 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-21
-> Modified Date ： 2026-11-03
+> Modified Date ： 2026-11-07
 >
 > 对应任务：`Task/task_30_sim_world.md`（sim 接入 Godot 模拟世界）；`Task/task_33_camera_simulation.md`（相机仿真 + 传感器 / 底盘建模，2026-10-23 起）；`Task/task_34_camera.md`（camera 传感器全链路，2026-10-24 起）
-> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。**支线 `human_model` Step 4（静态人物道具 `Person`）亦已落地**：§3 增第 9 个 `.tscn`（`src/scenes/props/Person.tscn`），`World.gd` 在 `World/Persons` 下**运行时**静态摆 2 人（纯视觉、**零碰撞**、不进装配线，§4.9）。**支线 `walking_person` Step 2（走路人物道具 `PersonWalking`）亦已落地**：§3 增第 10 个 `.tscn`（`src/scenes/props/PersonWalking.tscn`），`World.gd` 在 `World/Walkers` 下**运行时**放 1 个沿 44 m 闭合路径走动的人（自带骨骼 + 走路动画、`speed_scale` 跟速度、**零碰撞**、不进装配线，§4.10）。**`walking_person` Step 3（走动收口）亦已落地**：走动能力**并入 `Person.gd`**（新增 `walk_speed` / `path` / `loop` 三个字段，**默认静态 = 向后兼容**，`Person.tscn` 一个字节不动）、`PersonWalking.tscn` 与静态人物**共用同一个 `Person.gd`**（`PersonWalking.gd` 已删除）、资产目录改名 `assets/humans/rp_nathan_animated_003_walk/`。**`walking_person` Step 4（三帧真渲染证明"人在走"）亦已落地**：另加三帧真渲染用例（**14 项**：结构 4 + 渲染 10），在环路第一段**侧前方**架固定机位、以 `--fixed-fps 60` **真推进 0/40/80 物理帧**（**帧间绝不瞬移**）拍 `walk_t{0,1,2}.jpg`，把「物理帧数 / 弧长增量 / 每帧步长 == v/60」与「框位移 / 框内外差分 / 64×64 对齐裁剪差」一起断言（§4.10-⑦）。**task_35 Step 3（世界布局：用外部驱动的行人替换自动绕圈的 walkers）亦已落地**：`World.gd` 的 `WALKERS` /
+> 状态：**Step 1 产出；Step 2（世界）/ Step 3（观察者相机）/ Step 4（Vehicle）/ Step 5（差速底盘 `DiffDrive`）/ Step 6（`WebSocketManager`）已按本文落地**。**task_33 Step 1（建模）/ Step 2（相机组件 `CameraSensor`，§4.8）亦已落地**。**task_34 Step 3（`camera` 成为可装配零件 + `type=2` 帧下发，§4.8.3 / §8.2）亦已落地**。**支线 `human_model` Step 4（静态人物道具 `Person`）亦已落地**：§3 增第 9 个 `.tscn`（`src/scenes/props/Person.tscn`），`World.gd` 在 `World/Persons` 下**运行时**静态摆 2 人（纯视觉、**零碰撞**、不进装配线，§4.9）。**支线 `walking_person` Step 2（走路人物道具 `PersonWalking`）亦已落地**：§3 增第 10 个 `.tscn`（`src/scenes/props/PersonWalking.tscn`），`World.gd` 在 `World/Walkers` 下**运行时**放 1 个沿 44 m 闭合路径走动的人（自带骨骼 + 走路动画、`speed_scale` 跟速度、**零碰撞**、不进装配线，§4.10）。**`walking_person` Step 3（走动收口）亦已落地**：走动能力**并入 `Person.gd`**（新增 `walk_speed` / `path` / `loop` 三个字段，**默认静态 = 向后兼容**，`Person.tscn` 一个字节不动）、`PersonWalking.tscn` 与静态人物**共用同一个 `Person.gd`**（`PersonWalking.gd` 已删除）、资产目录改名 `assets/humans/rp_nathan_animated_003_walk/`。**`walking_person` Step 4（三帧真渲染证明"人在走"）亦已落地**：另加三帧真渲染用例（**14 项**：结构 4 + 渲染 10），在环路第一段**侧前方**架固定机位、以 `--fixed-fps 60` **真推进 0/40/80 物理帧**（**帧间绝不瞬移**）拍 `walk_t{0,1,2}.jpg`，把「物理帧数 / 弧长增量 / 每帧步长 == v/60」与「框位移 / 框内外差分 / 64×64 对齐裁剪差」一起断言（§4.10-⑦）。**task_35 Step 3（世界布局：用外部驱动的行人替换自动绕圈的 walkers）亦已落地**：`World.gd` 的 `WALKERS` / **task_50 Step 4（venue 场景）亦已落地**：`SceneDefs` 增第 3 条场景 `venue`（障碍表为空数组）、`src/world/Plaza.gd`（纯视觉零碰撞场地件：路面 / 6 条斑马线 / 人行道 / 场馆外墙 + 门洞 / 4 栋背景楼）、`WorldLook.Apply_Venue`（保留天空与太阳，只调环境色与曝光）、入口 `src/scenes/WorldVenue.tscn`，见 §4.1.3。
 
 > **2026-10-28：静态装饰人已全部移除。** `World.gd` 不再有 `PERSONS` / `BuildPersons()` / `World/Persons` 容器；
 > `Person.tscn` / `PersonWalking.tscn` / `Person.gd` 与四个配套自检一并删除。
@@ -63,6 +63,7 @@ orion-simulation-world/
 ├── src/                          # 代码与场景的唯一根（task_32 Step 1 起）
 │   ├── scenes/                   # 全部 .tscn（组件场景，§3 的 10 个）
 │   │   ├── World.tscn            # 主场景（Step 2 完成态；Step 3/6 加挂点实例）
+│   │   ├── WorldVenue.tscn       # [task_50 Step 4] ✅ venue 入口（scene_name="venue"）
 │   │   ├── ObserverCamera.tscn   # [Step 3] ✅ 已落地
 │   │   ├── Vehicle.tscn          # [Step 4] ✅ 已落地
 │   │   ├── WebSocketManager.tscn # [Step 6] ✅ 已落地
@@ -75,7 +76,7 @@ orion-simulation-world/
 │   │   └── props/
 │   │       └── Person.tscn       # [已移除 2026-10-28] 静态人物道具（历史）
 │   ├── common/                   # WorldTransform.gd / WorldClock.gd            [Step 2]
-│   ├── world/                    # World.gd                                      [Step 2]
+│   ├── world/                    # World.gd / SceneDefs.gd / WorldLook.gd / StreetLayout.gd / Facade.gd / Interior.gd / Plaza.gd
 │   ├── camera/                   # ObserverCamera.gd                             [Step 3] ✅
 │   ├── vehicle/                  # Vehicle.gd                                    [Step 4] ✅
 │   ├── chassis/                  # ChassisModel.gd / DiffDrive.gd / ChassisCatalog.gd  [Step 5] ✅
@@ -203,6 +204,11 @@ godot --headless --path orion-simulation-world --quit 2>&1 | grep -n "\[world\] 
 #       必须写成 `--check-only --script res://src/<模块>/<文件>.gd`（逐文件循环即覆盖全部脚本）
 godot --headless --path orion-simulation-world --check-only --script res://src/world/World.gd
 
+# 第三场景 venue（task_50 Step 4）：入口是独立 .tscn，不改 main_scene
+timeout 180 godot --headless --path orion-simulation-world res://src/scenes/WorldVenue.tscn --quit
+# 期望：`[world] scene=venue (source=export, obstacles=0)` + `voxel world built: 0 cells` + 0 ERROR
+godot --headless --path orion-simulation-world --check-only --script res://src/world/Plaza.gd
+
 # 可视化运行（本地 / 远程桌面开窗）
 godot --path orion-simulation-world
 ```
@@ -269,6 +275,16 @@ World (Node3D)                              script: res://src/world/World.gd    
 │   └── Caps (MeshInstance3D)                屋顶压顶 15 个四边形（外扩 0.05，路缘贴图 × 0.6）
 │                                            ※ 按 `World.OBSTACLES` **只读**生成（确定性、无 RNG）；
 │                                              由 `Facade.Build_All(self)` 建，**不在 World.tscn 里**（§4.1.2）
+├── Plaza (Node3D)                           **运行时** venue 场地容器（纯渲染、**零碰撞**）  [task_50 Step 4]
+│   ├── Floor (MeshInstance3D)               路面 1 个四边形：x∈[56,64] × y∈[0,128]，顶面 z=0.01
+│   ├── Markings (MeshInstance3D)            斑马线 6 个四边形（白条 0.5 + 空 1.0，y∈[58,66]），z=0.03
+│   ├── Sidewalk (MeshInstance3D)            人行道 4 个四边形：两侧 2 m 顶面（z=0.06）+ 2 条临路立面
+│   ├── Venue (MeshInstance3D)               场馆 7 个四边形：南/北/东墙 + 西墙 2 段 + 门洞过梁 + 屋顶（z=8.0）
+│   ├── VenueDoor (MeshInstance3D)           门洞暗面板 1 个四边形（x=70.02，法线 -x，concrete × 0.25）
+│   └── Buildings (Node3D)                   背景楼 4 栋（每栋 1 个 glb 实例、**零碰撞**）
+│                                            ※ `plaza` 子树里 `CollisionObject3D` = `CollisionShape3D` = `GridMap` = **0**；
+│                                              由 `World.gd::_ready()` 在 `Interior` 之后按 `_Look() == "venue"` 调
+│                                              `Plaza.Build_All(self, _def)` 建，**不在 World.tscn 里**；entry = `WorldVenue.tscn`（§4.1.3）
 ├── Systems (Node3D)                                                                          [Step 6]
 │   └── WebSocketManager (instance: res://src/scenes/WebSocketManager.tscn)             [Step 6] ✅
 │                                            @export vehicle_scene → res://src/scenes/Vehicle.tscn
@@ -330,6 +346,7 @@ World (Node3D)                              script: res://src/world/World.gd    
 | task_35-3 | **不改 `World.tscn`**：`World.gd` 的 `WALKERS` / `BuildWalkers()` / `GetWalkersRoot()` **整节删除**，换成 `PEDESTRIANS` / `BuildPedestrians()` / `GetPedestriansRoot()` —— 容器改名 `Walkers` → `Pedestrians`（`pedestrian_01` / `pedestrian_02`），**世界不再实例化 `PersonWalking.tscn`、不再内置任何路径 / 巡逻 / 计时**；人在无外部驱动时**站着不动**（idle = 预期，§4.11） |
 
 | task_38-2 | **不改 `World.tscn`**：`World.gd::_ready()` 在 `BuildPedestrians()` 之后追加 `StreetLayout.Build_All(self)` / `Facade.Build_All(self)`，把 `Street`（3 个 `MeshInstance3D`）与 `Facade`（3 个）挂到 `World` 下；新增 `Get_Street_Root()` / `Get_Facade_Root()` 与常量 `STREET_NODE` / `FACADE_NODE`；`OBSTACLES` / `PEDESTRIANS` / 世界尺度 / 四个 layer **一字不动**（§4.1.2） |
+| task_50-4 | **不改 `World.tscn`**：`World.gd::_ready()` 在 `Interior` 分派之后追加 `if _Look() == "venue": Plaza.Build_All(self, _def)`，把 `Plaza`（6 个子节点）挂到 `World` 下；入口另给 `src/scenes/WorldVenue.tscn`（= `World.tscn` 同构，只差 `scene_name="venue"`）；`OBSTACLES` / 世界尺度 / 4 个 layer 一字不动（§4.1.3） |
 
 ### 2.3 世界坐标 ↔ Godot 坐标（写死，勿改）
 
@@ -354,11 +371,13 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 
 ## 3 组件 `.tscn` 清单
 
-固定 **11 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补、task_34 Step 3 起进入
+固定 **12 个**（前 7 个与 task_30 §八 完全一致；第 8 个由 task_33 Step 2 增补、task_34 Step 3 起进入
 `sensor_hello` 装配线，见 §4.8 / §4.8.3；第 9 个由支线 `human_model` Step 4 增补，**不进装配线**，见 §4.9；
 第 10 个由支线 `walking_person` Step 2 增补，**不进装配线、零碰撞、自带走路动画**，见 §4.10；
 第 11 个由 task_35 Step 1 增补：**行人底盘**——登记在 `ChassisCatalog` 里、有胶囊碰撞、由外部脚本经
-`motion_cmd{v,dir}` 驱动，但它**不是车**（不进 `Vehicles`、不占 avatar 排位），见 §4.11）：
+`motion_cmd{v,dir}` 驱动，但它**不是车**（不进 `Vehicles`、不占 avatar 排位），见 §4.11；
+第 12 个由 task_50 Step 4 增补：`src/scenes/WorldVenue.tscn` 是 `World.tscn` 的**同构入口**，只差 `scene_name`
+（与 task_49 的 `WorldIndoor.tscn` 同一做法），见 §4.1.3）：
 
 | # | 文件（`res://`，相对工程根） | 根节点类型 | 脚本 | 职责 | Step | 静态挂载位置 | 运行时实例化者 |
 |---|---|---|---|---|---|---|---|
@@ -373,6 +392,7 @@ cell = Vector3i(floor(wx / v), floor(wz / v), floor(wy / v))   # v = voxel_size
 | 9 | `src/scenes/props/Person.tscn` | `Node3D` | `src/props/Person.gd` | 静态人物道具：纯视觉、**零碰撞**、无行为、不进装配线 | human_model-4 ✅ | `World/Persons/person_0x`（**运行时**） | — （不由 manager 实例化） |
 | 10 | `src/scenes/props/PersonWalking.tscn` | `Node3D` | `src/props/Person.gd` | 走路人物道具：纯视觉、**零碰撞**、**带骨骼 + 走路动画**，自带闭合路径走动能力（`walk_speed` / `path` / `loop`）、不进装配线（**与第 9 个共用同一个脚本**，只换 `Body`） | walking_person-3 ✅ | **无**（task_35 Step 3 起世界**不再**实例化它：自动绕圈已移除；资产与走动能力保留（原 §4.10 的人形自检已随 task_46 Step 3 删除），`Body` 与第 11 个共用同一 glb） | — （不由 manager 实例化） |
 | 11 | `src/scenes/props/Pedestrian.tscn` | `CharacterBody3D` | `src/chassis/Pedestrian.gd` | 行人底盘（**特殊底盘**，`GROUNDED`）：`CapsuleShape3D` r0.25 / h1.75 / 中心 y0.875，`layer 2` / `mask 1\|4`，`Body` = 走路 glb（含 `AnimationPlayer`）；**自宿主**推进（`_physics_process` → `move_and_slide()`），`speed_scale = v / 1.26`；外部脚本经 `motion_cmd{v,dir}` 驱动 | task_35-1 / task_35-3 | `WebSocketManager` → `World/Pedestrians/<peer_id>`（动态、同一容器；**世界不预置任何人** = task_46 Step 3，§4.11.1） | `WebSocketManager`（Step 2 起，`kind="pedestrian"` 直接实例化，**不经** `Vehicle.ApplyChassis`） |
+| 12 | `src/scenes/WorldVenue.tscn` | `Node3D` | `src/world/World.gd` | venue 场景入口（= `World.tscn` 同构，**只差 `scene_name`**；场地视觉件由 `src/world/Plaza.gd` 运行时建） | task_50-4 ✅ | 独立入口（**不改** `run/main_scene`） | 引擎 |
 
 非组件脚本（无 `.tscn`）：
 
@@ -668,6 +688,139 @@ Facade (Node3D，运行时建，identity)                                     [t
 - `window-clean`：99 个采样点里「偏离本窗均值 > 0.12」的占 **0.0000** ⇒ 窗/墙交界没有互穿斑驳。
 - `crosswalk-contrast`：白条均值 **0.9379** − 间隔均值 **0.4727** = **0.4652**（判据 ≥ 0.10，4.7 倍余量）
   ⇒ 斑马线真的画出来且与沥青分得开。
+
+#### 4.1.3 运行时视觉件：venue 场地（task_50 Step 4 ✅）
+
+**一句话**：第三个场景 `venue` = 一条 8 m 路 + 6 条斑马线 + 两侧人行道 + 一个 30×30×8 m 场馆（西门洞）
++ 4 栋背景高楼，**全部纯 mesh、零碰撞、不进体素**（口径 #15：`obstacles = []`）；人出生在场馆门口外面。
+场地视觉件由 `src/world/Plaza.gd`（新，静态工厂，与 `Interior` / `StreetLayout` / `Facade` 同构）在
+`World.gd::_ready()` 里按 `_Look() == "venue"` 建出来；**`World.tscn` 一个字节不动**，入口另给
+`src/scenes/WorldVenue.tscn`（= `World.tscn` 同构，只差 `scene_name = "venue"`）。
+
+**① 三个场景对照**
+
+| 场景 | `look` | 障碍表条数 | `props_street` / `props_facade` | `ceiling` | 入口 `.tscn` | 可见体素格数 |
+|---|---|---|---|---|---|---|
+| `city` | `city` | **15** | `true` / `true` | `false` | `src/scenes/World.tscn`（主场景） | **12 104** |
+| `corridor_indoor` | `indoor` | **8** | `false` / `false` | `false`（`ceiling_z_m=3.0`） | `src/scenes/WorldIndoor.tscn` | **852** |
+| `venue` | `venue` | **0** | `false` / `false` | `false`（`ceiling_z_m=0.0`） | `src/scenes/WorldVenue.tscn` | **0** |
+
+**② `SceneDefs.SCENES["venue"]` 数据**（新增键 `buildings` 只有本场景带；其余两条一字未改）
+
+| 字段 | 值 |
+|---|---|
+| `spawn` | `Vector3(68, 82, 0)` —— 门洞（`x=70`）外 **2 m**，人出生即在门口（口径 #15） |
+| `spawn_clear_radius_m` / `spawn_clear_height_m` | `1.5` / `2.5`（0 体素 ⇒ 净空必然成立） |
+| `air_wall_height_m` | `32.0`（`AIR_WALL_BOXES` 仍按写死几何建，5 个 shape✅） |
+| `obstacles` | **`[]`**（口径 #15：全视觉零碰撞） |
+| `buildings` | 4 项，见下表（`{model, pos, rot_y_deg, scale}`） |
+
+**③ 场地平面（已落地的实值，世界坐标 Z-up / 米）**
+
+```text
+世界 0..128（x 东 / y 南 / z 上）
+
+           y=128
+   ┌─────────────────────────────┐
+   │  B4(116,24)        B3(112,44)│   背景楼 ×4：x<50 或 x>100（演示区外围）
+   │        ┌──────────────┐      │
+   │        │ 场馆 30×30×8 │      │   x∈[70,100] y∈[70,100] 屋顶 z=8.0
+   │        │  门洞在西门   │      │   门洞 x=70, y∈[80,84], 净高 4 m
+   │        └───────┬──────┘      │
+   │            出生点 (68, 82)    │
+   │  ═══════════════╪══════════   │   道路 x∈[56,64]（8 m 宽），南北贯通 y∈[0,128]
+   │   ▲ 车墙北排 y≈54（本步不摆车） │
+   │   ▓ 斑马线 y∈[58,66]          │   6 条白条，横跨 x∈[56,64]
+   │   ▼ 车墙南排 y≈70（本步不摆车） │
+   │  B2(26,22)         B1(30,44)  │
+   └─────────────────────────────┘
+           y=0
+```
+
+**④ `Plaza` 节点树 + 四边形数 + 深度分层 + 材质**（实测日志
+`[plaza] built: road=1 zebra=6 sidewalk=4 venue=7 door=1 buildings=4 quads=19 nodes=6 missing_textures=[]`）
+
+```
+Plaza (Node3D，运行时建，identity)                                      [task_50 Step 4]
+├── Floor     (MeshInstance3D)  1 surface / 1  个四边形
+├── Markings  (MeshInstance3D)  1 surface / 6  个四边形
+├── Sidewalk  (MeshInstance3D)  1 surface / 4  个四边形
+├── Venue     (MeshInstance3D)  1 surface / 7  个四边形
+├── VenueDoor (MeshInstance3D)  1 surface / 1  个四边形
+└── Buildings (Node3D)          4 个 glb 实例（Building_01..04，每个 1 个 MeshInstance3D、0 碰撞）
+```
+
+| 节点 | 四边形 | 几何 | 顶面 z | 材质（`WorldLook` 工厂） |
+|---|---|---|---|---|
+| `Floor` | **1** | 道路 `x∈[56,64]` × `y∈[0,128]`（8 m 宽） | **0.01** | `Make_Pbr_Material("asphalt", 4 m)` |
+| `Markings` | **6** | 斑马线：白条 `0.5` + 空 `1.0`（6×0.5 + 5×1.0 = 8.0），`y` 从 58.0 递推 | **0.03** | 纯参数白 `Color(0.85,0.85,0.83)` / roughness 0.55 |
+| `Sidewalk` | **4** | 两侧各 2 m 顶面（`x∈[54,56]` / `x∈[64,66]`）+ 2 条临路立面（5 cm 台阶，法线朝路） | **0.06** | `Make_Pbr_Material("curb", 1.5 m)` |
+| `Venue` | **7** | 南墙 `y=70` / 北墙 `y=100` / 东墙 `x=100` / 西墙 `x=70` 两段（`y 70~80`、`84~100`）/ 门洞过梁（`y 80~84`、`z 4~8`）/ 屋顶 | 屋顶 **8.00** | `Make_Pbr_Material("concrete", 2 m)` |
+| `VenueDoor` | **1** | 门洞暗面板 `x=70.02`（墙面内侧 2 cm），法线 −x | — | `Make_Pbr_Material("concrete", 2 m, 0.25)` |
+
+深度分层（防 z-fighting，与 `StreetLayout` 逐值同源）：地面 `z=0`（`Ground` 顶面）→ 路面 **0.01** →
+标线 **0.03** → 人行道 **0.06** → 屋顶 **8.00**；墙底 `z=0` 与地面只**共边不共面**（竖面 vs 水平面），
+门洞暗面板沿法线内缩 2 cm（≤ 3 cm 装饰性偏移，与 `Interior` 的 `FRAME_INSET_M` 同一手法）。
+所有薄片**没有 UV** ⇒ 材质一律经 `WorldLook.Make_Pbr_Material`（内部世界空间 triplanar，§9.1 E31）。
+
+**背景楼 4 栋**（`buildings` 的唯一消费者是 `Plaza._Build_Buildings()`；实测世界 AABB，±0.01 容差）
+
+| # | 模型 | `pos` | `rot_y_deg` | `scale` | 世界占位 x | 世界占位 y | 高 |
+|---|---|---|---|---|---|---|---|
+| 1 | `kenney_building-n` | `(30, 44)` | 0 | 5.0 | `[24.20, 35.80]` | `[39.45, 48.55]` | 12.40 |
+| 2 | `kenney_building-j` | `(26, 22)` | 90 | 5.0 | `[22.65, 29.35]` | `[16.79, 27.21]` | 8.47 |
+| 3 | `kenney_building-skyscraper-c` | `(112, 44)` | 0 | 5.0 | `[108.80, 115.20]` | `[40.53, 47.47]` | 20.40 |
+| 4 | `kenney_building-skyscraper-e` | `(116, 24)` | 90 | 5.0 | `[112.89, 119.11]` | `[20.76, 27.23]` | 20.40 |
+
+四栋全部满足"外围"判据（`x < 50` 或 `x > 100`）、离活动区最近 8.8 m（对场馆东墙）、楼顶最高 20.40 m
+**低于相机 26 m** ⇒ 不挡俯视镜头；`rot_y_deg` 有 2 栋非 0（90°）⇒ 旋转字段确实被验证过。
+背景楼一律 `cast_shadow = OFF`（与街道 / 立面 / 室内件一致，软渲染帧率）。
+
+**⑤ 零碰撞声明（口径 #15）**
+
+- `Plaza` 子树：`CollisionObject3D` = **0**、`CollisionShape3D` = **0**、`GridMap` = **0**（4 栋楼各自也是 0）；
+- `SceneDefs.SCENES["venue"].obstacles = []` ⇒ `VoxelWorld.get_used_cells().size() == 0`（日志 `0 cells`）；
+- 因此场馆 / 楼 / 路面 / 白条可以被车和人**穿过**（属预期，§5.7 V1）；雷达（只扫 layer `1|2|4`）
+  在空场景里只扫得到人和车这些动态体，不产生静态地图（口径 #16：不展示地图，空图无所谓）。
+
+**⑥ `buildings` 字段契约**（向后兼容）
+
+- 读法固定 `def.get("buildings", [])` + `is Array` 判定；**缺键 / 非数组 ⇒ 空数组 ⇒ 一栋都不建**，
+  且**只 `push_warning`、绝不 `push_error`**（0 ERROR 验收靠这条）；
+- `city` 与 `corridor_indoor` **不带**这个键 —— `Plaza` 只在 `_Look() == "venue"` 时被调用，两条老场景
+  连读都不会读它，实测 `--quit` 0 ERROR、格数 `12 104` / `852` 不变；
+- 每项 `{model: String, pos: Vector3(世界坐标 Z-up), rot_y_deg: float, scale: float}`，缺项按
+  `rot 0` / `scale 1`；任一项不合法（模型缺失 / `pos` 不是 `Vector3` / `load()` 返回 `null`）只 warn 跳过**该项**，
+  其余照建。`pos` 只给世界坐标，换轴与 `rotation.y = -yaw` 全走 `WorldTransform`（本文件无换轴字面量）。
+
+**⑦ `WorldLook.Apply_Venue`（venue 观感档）**
+
+`Apply_Venue` = 先**原封不动**走一遍 `Apply_City`（地面铺装 + HDRI 天空 + 太阳对齐 ⇒ "保留天空与太阳"），
+再把 `Environment` **再 `duplicate()` 一份**回写（§9.1 E30-②：绝不改 `.tscn` 的共享 `SubResource`），
+只调 4 个旋钮：
+
+| 旋钮 | 值 | 说明 |
+|---|---|---|
+| `ambient_light_color` | `Color(1.00, 0.97, 0.90)` | 微暖：白天广场 |
+| `ambient_light_energy` | `1.15` | |
+| `ambient_light_sky_contribution` | `0.65` | 35% 环境光来自上面的暖色（**SKY 源下唯一有效旋钮**） |
+| `tonemap_exposure` | `1.10` | |
+
+`ambient_light_source` 保持 `3`（`AMBIENT_SOURCE_SKY`），§9.1 E30-③ 的"禁止改成 COLOR"未被触发。
+实测日志：`[world-look] venue: ambient=COLOR(1.00,0.97,0.90)x1.15 sky_contrib=0.65 exposure=1.10`。
+
+**⑧ 验收命令（§1.4 的三条）+ 实测判据**
+
+| 判据 | 期望 | 实测（2026-11-07） |
+|---|---|---|
+| `--check-only --script res://src/world/Plaza.gd` | 无 Parse Error | 0 命中 |
+| 起 `res://src/scenes/WorldVenue.tscn --quit` | `obstacles=0` + `voxel world built: 0 cells` + 0 ERROR | `scene=venue (source=export, obstacles=0)` / `0 cells` / 四类错误 **零命中** |
+| 画面里有 8 m 路 + 6 条白条 + 两侧人行道 + 场馆 + 4 栋楼 | 逐项亮度/入框判据 | 8 个地标**全部入框**；6 条白条逐条亮（条 vs 间隔差 `0.27~0.38` ≥ 0.10）；场馆墙 vs 天空 `0.9875 vs 0.2495`（差 0.738 ≥ 0.08）；人行道 vs 路面 `0.6858 vs 0.8453`（差 0.1595 ≥ 0.05）；4 栋楼 vs 天空差 `0.45~0.75`（≥ 0.05） |
+| `city` / `corridor_indoor` 零回归 | 格数 + 观感 | `12 104` / `852` 逐值相同；`[street] built` / `[facade] built` / `[interior] built` 逐值相同；city 像素 sha256 `4cb29b0e…` **改动前后完全相同**（PNG sha256 `d991434c…` 亦相同） |
+| `ObserverCamera` 机位不动 | `(64, 26, 108)` / `(-30, 0, 0)` / `fov 70` | 实测逐值相同，`ObserverCamera.tscn` / `.gd` 零改动 |
+
+出图走 `xvfb-run -a -s 1600x900x24 godot --display-driver x11 --rendering-driver opengl3 --audio-driver Dummy`
+（`--headless` 是 dummy 渲染，出不了帧，§9.1 E26）；证据图 `tmp/task50/evidence/s4_venue.png`。
 
 ### 4.2 `src/scenes/ObserverCamera.tscn`（Step 3 ✅）
 

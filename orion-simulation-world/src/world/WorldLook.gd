@@ -1,6 +1,6 @@
 # Presented by KeJi
 # Created Date ： 2026-10-28
-# Modified Date ： 2026-11-06
+# Modified Date ： 2026-11-07
 #
 # 世界观感（材质 + 天空 + 太阳）唯一入口（COMPONENTS.md §4.1.1 / task_38 §二.3）。
 #   - 地面 = 混凝土铺装（三贴图 PBR，世界空间 triplanar，6 m 一循环）
@@ -15,6 +15,8 @@
 #   灯多 / 开阴影会直接压垮帧率）。Env / Sky 一律 duplicate 再回写（E30-②）。
 # task_49 Step 5：加 `Make_Indoor_Ceiling_Material()`（墙面贴图 × 0.85），只在 `def.ceiling == true` 时被 Interior 调用；
 #   city 档与 indoor 默认档都不会走到 ⇒ 渲染逐像素不变。
+# task_50 Step 4：加 `venue` 档（`Apply_Venue`）：**保留天空与太阳**（地面铺装 / HDRI 天空 / 太阳对齐
+#   全部沿用 Apply_City，逐字同源），只把「环境色 + 曝光」推一档；city 与 indoor 两条路径一字不改。
 # 时间只由 WorldClock 提供，本文件不取时间。
 
 extends RefCounted
@@ -90,6 +92,14 @@ const SKY_ENERGY := 0.5
 ##   按 +azim 落成 (0.4313, 0.6817, 0.5910) 时，Xvfb 探针对准它的 mean=0.3083、
 ##   对准反方向的 mean=0.8642（太阳在反方向）⇒ 翻 x 得下面的向量（|v| = 1.000008）。
 const SUN_DIR := Vector3(-0.4313, 0.6817, 0.5910)
+
+## ---- venue 档（task_50 Step 4）：室外白天，**天空与太阳照 city 的做法保留**，只调环境色与曝光。
+## 环境色：source 必须仍是 AMBIENT_SOURCE_SKY（E30-③ 禁止改成 COLOR）；SKY 档下 ambient_light_color
+##   只有在 `ambient_light_sky_contribution < 1` 时才按 (1 - contribution) 掺进来 ⇒ 这才是有效旋钮。
+const VENUE_AMBIENT_COLOR := Color(1.0, 0.97, 0.90, 1.0)   # 微暖：白天广场，别偏冷
+const VENUE_AMBIENT_ENERGY := 1.15
+const VENUE_SKY_CONTRIBUTION := 0.65                        # 35% 环境光来自上面的暖色
+const VENUE_TONEMAP_EXPOSURE := 1.10
 
 ## 材质 / 贴图 / Sky 缓存（幂等：重复 Apply_All 拿到同一批实例）。
 static var _cache: Dictionary = {}
@@ -231,12 +241,39 @@ static func Apply_City(world: Node3D) -> bool:
 	return ok
 
 
-## 按观感档分派（task_49 Step 4-2）：`look` 取 SceneDef 的 `look` 字段（"city" / "indoor"）。
+## 按观感档分派（task_49 Step 4-2）：`look` 取 SceneDef 的 `look` 字段（"city" / "indoor" / "venue"）。
 ## 默认 "city" ⇒ 老的 `Apply_All(world)` 调用点行为不变（口径 #3 的 city 零变化）。
 static func Apply_All(world: Node3D, look: String = "city") -> bool:
 	if look == "indoor":
 		return Apply_Indoor(world)
+	if look == "venue":
+		return Apply_Venue(world)
 	return Apply_City(world)
+
+
+## venue 档（task_50 Step 4）：先原封不动地走一遍 Apply_City（地面铺装 + HDRI 天空 + 太阳对齐 =
+## "保留天空与太阳"），再把 Environment **再 duplicate 一份**（E30-②：绝不改共享 SubResource）只调 4 个键
+## ⇒ 与 city 的差别只在"冷暖与曝光"上，不重写整套。返回 false 只表示资产/节点缺失（缺贴图是合法降级，不算 false）。
+static func Apply_Venue(world: Node3D) -> bool:
+	if world == null:
+		return false
+	var ok: bool = Apply_City(world)
+	var env_node := world.get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if env_node == null or env_node.environment == null:
+		push_warning("%s venue 档找不到 WorldEnvironment/Environment，只做了 Apply_City" % TAG)
+		_Warn_Missing_Once()
+		return false
+	var env_copy: Environment = env_node.environment.duplicate() as Environment
+	env_copy.ambient_light_color = VENUE_AMBIENT_COLOR
+	env_copy.ambient_light_energy = VENUE_AMBIENT_ENERGY
+	env_copy.ambient_light_sky_contribution = VENUE_SKY_CONTRIBUTION
+	env_copy.tonemap_exposure = VENUE_TONEMAP_EXPOSURE
+	env_node.environment = env_copy
+	_Warn_Missing_Once()
+	print("%s venue: ambient=COLOR(%.2f,%.2f,%.2f)x%.2f sky_contrib=%.2f exposure=%.2f"
+		% [TAG, VENUE_AMBIENT_COLOR.r, VENUE_AMBIENT_COLOR.g, VENUE_AMBIENT_COLOR.b,
+			VENUE_AMBIENT_ENERGY, VENUE_SKY_CONTRIBUTION, VENUE_TONEMAP_EXPOSURE])
+	return ok
 
 
 ## 室内档：**不换天空、不动太阳、不动地面**。
