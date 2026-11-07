@@ -2,7 +2,7 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-24
-> Modified Date ： 2026-10-25
+> Modified Date ： 2026-11-07
 >
 > 只放**最终选用 + 1 个备选**两件人形，来源、许可、处理方式、摆位与使用边界全部写在本文件。
 > 组件口径见 `COMPONENTS.md` §3 第 9 个 `.tscn` / §4.9；导入坑见 §9.1 **E28**。
@@ -22,6 +22,8 @@
 | `rp_eric_rigged_001/…`（同样 6 个文件） | **备选**人形（**在库但没摆进世界**） |
 | `LICENSE_renderpeople.txt` | Renderpeople 免费页条款原文摘录（883 B，与 `tmp/human_model/normalized/` 里的原件逐字节相同） |
 | `rp_nathan_animated_003_walk/…`（**6 个文件**） | **第三件（走路的人，支线 walking_person）**：`model.glb` + `.glb.import` + 抽出的 basecolor/normal 各 1 张 + 各 1 个 `.import`；**带 88 骨蒙皮 + 1 条走路动画**，见 §9（Step 3 只把目录名加了 `_walk` 后缀，`glb` 字节与 `sha256` 不变） |
+| `rp_sophia_animated_003_walk/…`（**6 个文件**） | **第四件（女，走路版）**：`model.glb` + `.glb.import` + 抽出的 basecolor/normal 各 1 张 + 各 1 个 `.import`；**88 骨蒙皮 + 2 条 clip**（`0_walk` 复用 nathan + `1_idle` 原生），见 §10 |
+| `rp_manuel_animated_001_walk/…`（**6 个文件**） | **第五件（男，走路版）**：同结构；**88 骨蒙皮 + 2 条 clip**（`0_walk` 复用 nathan + `1_dancing` 原生），见 §11 |
 
 > **贴图与 `.import` 不是可选文件**：Godot 4 的 glTF 导入默认 `gltf/embedded_image_handling=1`（Extract），
 > 会把 glb 内嵌的图**落成 `.glb` 旁独立文件**。只提交 `model.glb` + `.import` 时，任何人重导都会
@@ -269,3 +271,133 @@ python3 $W/tools/w_glb_info.py $W/normalized/rp_nathan_animated_003/model.glb --
   `PersonWalking.tscn` 保留给 §9 的人形自检，运行时改由 `Pedestrian.tscn` 的 `Body` 使用
   （资产自带步速 1.2694 m/s，`Pedestrian` 的 `CLIP_MPS = 1.26` → 滑步残差 0.74%）。
 - 条款同 §3：覆盖"可视化 / 商用展示"，**不覆盖**训练与再分发网格。
+
+---
+
+## 10. 第四件资产：sophia（女，走路版，task_50 Step 1）
+
+> 与 §9 的 nathan 是**同一条链路**：同一外层免费包、同一套 88 骨骨架、**直接把 nathan 的 walk clip 套到 sophia 骨架上**，
+> 再保留 sophia 原生的 `idle`。目的：人群里出现**第二种长相 / 第二种身高 / 第二套衣服**，而且**三个人都能走**。
+
+### 10.1 目录内容（**6 个文件**；许可摘录在上一级目录）
+
+| 路径 | 是什么 |
+|---|---|
+| `rp_sophia_animated_003_walk/model.glb` | 走路女形（`3 618 784 B`，`sha256 4fd006a094517387…`） |
+| `rp_sophia_animated_003_walk/model.glb.import` | Godot 场景导入描述（`importer="scene"`） |
+| `rp_sophia_animated_003_walk/model_rp_sophia_animated_003_dif.jpg` | **basecolor** `2048²` JPEG（`678 570 B`，导入时从 glb 内嵌图抽出） |
+| `rp_sophia_animated_003_walk/model_rp_sophia_animated_003_dif.jpg.import` | 贴图导入描述 |
+| `rp_sophia_animated_003_walk/model_rp_sophia_animated_003_norm.png` | **normal** `1024²` PNG（`1 538 771 B`，同抽出） |
+| `rp_sophia_animated_003_walk/model_rp_sophia_animated_003_norm.png.import` | 贴图导入描述 |
+
+> 许可摘录不重复放（`LICENSE_renderpeople.txt` 在上一级，三件同一套条款，见 §3）；因此目录里是 **6 个文件**。
+
+### 10.2 来源（逐条可复制，全部实测过）
+
+| 项 | 值 |
+|---|---|
+| 页面 | `https://renderpeople.com/free-3d-people/`（同一页，**3D ANIMATED PEOPLE** 区块） |
+| 下载直链 | `https://renderpeople.com/sample/free/renderpeople_free_animated_people_FBX.zip`（`280 263 443 B`，sha256 `21071e853c68733a…`，与 §9.2 逐位相同） |
+| 外层成员 | `renderpeople_free_animated_people_FBX.zip!rp_sophia_animated_003_idling_FBX.zip`（`40 321 042 B`，sha256 `10323ad2fad1e09fa2af62a222371eb76e19b49b0cc35807092f2ce6e825ec18`） |
+| 内层成员 | `…_idling_FBX.zip!rp_sophia_animated_003_idling.fbx`（`10 346 448 B`，sha256 `b282ee68d9c9d3ff70709e97bf5cc26b821bcb0f9cb28aae672298557eb124ca`）+ `tex/` 下 5 张 8192² jpg + 预览图 `…_idling_A.jpg` |
+| 抓取日期 | `2026-11-07`（外层包本步从 `tmp/task50/assets/` 缓存复用，未重复下载） |
+| 站点 | renderpeople.com（官方；无网盘 / 无聚合站 / 无转载站） |
+| 许可 | Renderpeople 免费页条款（同 §3：覆盖**可视化 / 商用展示**，**不覆盖**训练与再分发网格） |
+
+> 反斜杠坑同 §9.2：内层成员名是 `tex\rp_sophia_…_dif.jpg`，解包必须先 `\`→`/`（本步未重解，缓存已是正确结构）。
+
+### 10.3 处理方式（数字取自 `tmp/task50/evidence/convert.log`、`glb_info.log`、`probe_humans.log`）
+
+| 项 | 值 |
+|---|---|
+| 骨架比对 | **88 骨**，命名 `rp_<name>_animated_00X_<部件>`，只差前缀 ⇒ 与 nathan 同构，walk 可直接套 |
+| 套 clip | 65 条轨道逐条换前缀（`rp_nathan_animated_003_walking` → `rp_sophia_animated_003_idling`）；只有 `_hip` 的 `position` 轨道按「相对 rest 的增量 × `ratio`」重算（`ratio = 1.721619/1.848953 = 0.9313`）；**root 无位移轨** ⇒ 天然原地 |
+| 裁首帧 | 原生 clip 第 0 帧是**零位 T-pose**（实测 `hand_l y=1.411` → 之后 `0.852`）⇒ 删第 0 帧 + 其余键整体前移 `1/30 s`，`20.400000 → 20.366667 s`（与 nathan「2.266667 → 2.233333」同口径） |
+| clip 命名 | `0_walk` / `1_idle`：**Godot 的 `get_animation_list()` 按名字排序**，只有带数字前缀才能保证 **clip[0] = walk**（Step 3 的行人只播第 0 条） |
+| 身高 | rest 自然身高 `1.721619 m`，夹进 1.84 ±5% 带 ⇒ 目标 `1.748000 m`，`k = 1.0153234`（−5.03%，落在带内） |
+| 脚底 | rest `min.y = -0.026864` ⇒ 根节点 `origin.y = 0.0272756`，落地后 `y_min = 0.000` |
+| 转身 | 原生朝 **+Z**（左眼在 +X ⇒ left=+X ⇒ forward=+Z）⇒ 根节点绕 Y **+90°**，转完朝 **+X**（与 nathan 同构） |
+| 根节点变换 | `R_y(+90°) × s(1.0153234)`，`origin = (0, 0.0272756, 0)`（**方向 / 单位 / 脚底都用根节点变换表达**，不改任何 `.tscn` 的 `scale`） |
+| 贴图降采样 | 8192² → dif **2048² JPEG q90**（`6 829 656 → 678 894 B`，进 glb 后 `678 570 B`）、norm **1024² PNG**（`14 802 922 → 1 332 904 B`）；`gloss / mask01 / mask02` 不进 glb（与 nathan 一致） |
+| 三角数 | **16 475**（未 decimate，远低于 50k） |
+| 动画 | `["0_walk", "1_idle"]`，时长 `[2.233333, 20.366667] s`（**walk 与 nathan 是同一条 clip**） |
+| AABB（Godot 轴序，回读实测） | `P(-0.177, 0.000, -0.815) S(0.317, 1.748, 1.682)` → 脚底贴 `y=0`、x 跨度 < z 跨度 |
+| 播 walk 的脚骨世界高度 | `foot_l [0.1075, 0.2683]`、`foot_r [0.0976, 0.2663]`；nathan 基线 `[0.1081, 0.2830] / [0.1083, 0.2896]` ⇒ 最大偏差 **0.0233 m ≤ 0.03**（clip 复用成立） |
+| 朝向复核 | `ball_l - foot_l = (+0.043, -0.144, -0.012)`，与 nathan `(+0.053, -0.147, -0.015)` 同向 ⇒ 脚尖朝 **+X** |
+
+复现链路（离线，全部在 `tmp/task50/`，不入库）：
+
+```bash
+cd /vepfs-mlp2/c20250205/240804016/Workspace/Orion
+python3 tmp/task50/tools/ds_tex.py --tex tmp/task50/proj/tex --out tmp/task50/proj/tex_ds --name rp_sophia_animated_003
+godot --headless --path tmp/task50/proj --import
+godot --headless --path tmp/task50/proj --script res://convert_human.gd          # 套 walk + 裁帧 + 材质 + 根变换
+python3 tmp/task50/tools/fix_glb.py tmp/task50/proj/proto/sophia_walk.glb tmp/task50/proj/proto/sophia_final.glb
+#   → [fix] rp_sophia_animated_003_dif png=3767922 -> jpeg=678570 (2048x2048)
+#   → [fix] anim order = ['0_walk', '1_idle']
+cp tmp/task50/proj/proto/sophia_final.glb orion-simulation-world/assets/humans/rp_sophia_animated_003_walk/model.glb
+godot --headless --path orion-simulation-world --import        # 0 ERROR，自动抽出 6 文件
+```
+
+### 10.4 使用边界
+
+- **不加碰撞体**：`probe_humans.log` 的 `collisions=0/0`（`CollisionObject3D` / `CollisionShape3D` 各 0）；本步**不建 `.tscn`、不进 `SceneDefs`、不接线**。
+- **只播第 0 条**（= `0_walk`）；`1_idle` 是"路边站着等人"的备选，不改 `Pedestrian.tscn` 就还用不上 —— 留着的成本只有几十 KB，删掉就再也拿不回来。
+- 条款同 §3 / §9.4：覆盖"可视化 / 商用展示"，**不覆盖**训练与再分发网格。
+
+---
+
+## 11. 第五件资产：manuel（男，走路版，task_50 Step 1）
+
+> 与 §10 完全同一条链路（同外层包、88 骨同构、套 nathan 的 walk、裁 T-pose 首帧、贴图降采样），
+> 差别只有：原生 clip 是 **dancing**、自然身高更高（`1.888338 m`，**不缩放**，`k = 1.0`）。
+
+### 11.1 目录内容（**6 个文件**；许可摘录在上一级目录）
+
+| 路径 | 是什么 |
+|---|---|
+| `rp_manuel_animated_001_walk/model.glb` | 走路男形（`5 685 128 B`，`sha256 ab4521b9da57c04c…`） |
+| `rp_manuel_animated_001_walk/model.glb.import` | Godot 场景导入描述（`importer="scene"`） |
+| `rp_manuel_animated_001_walk/model_rp_manuel_animated_001_dif.jpg` | **basecolor** `2048²` JPEG（`1 084 513 B`，导入时抽出） |
+| `rp_manuel_animated_001_walk/model_rp_manuel_animated_001_dif.jpg.import` | 贴图导入描述 |
+| `rp_manuel_animated_001_walk/model_rp_manuel_animated_001_norm.png` | **normal** `1024²` PNG（`1 792 873 B`，同抽出） |
+| `rp_manuel_animated_001_walk/model_rp_manuel_animated_001_norm.png.import` | 贴图导入描述 |
+
+### 11.2 来源（逐条可复制，全部实测过）
+
+| 项 | 值 |
+|---|---|
+| 页面 / 直链 | 同 §10.2（`https://renderpeople.com/free-3d-people/` → `renderpeople_free_animated_people_FBX.zip`，`280 263 443 B`，sha256 `21071e853c68733a…`） |
+| 外层成员 | `…!rp_manuel_animated_001_dancing_FBX.zip`（`115 231 371 B`，sha256 `127dbf9200af32b29848c7954b1db42259b96460d5b70bf53aeaaf7e68b51157`） |
+| 内层成员 | `…_dancing_FBX.zip!rp_manuel_animated_001_dancing.fbx`（`45 053 376 B`，sha256 `0b309bf050b08b0d0c7d1d7f55a27762b7821b714d5394133dc555712d841ba2`）+ `tex/` 下 5 张 8192² jpg（其中 norm **35.1 MB**）+ 预览图 `…_dancing_A.jpg` |
+| 抓取日期 | `2026-11-07`（同 §10.2，复用 `tmp/task50/assets/` 缓存） |
+| 许可 | Renderpeople 免费页条款（同 §3） |
+
+### 11.3 处理方式（数字取自 `tmp/task50/evidence/convert.log`、`glb_info.log`、`probe_humans.log`）
+
+| 项 | 值 |
+|---|---|
+| 骨架比对 | **88 骨**，`rp_manuel_animated_001_<部件>` ⇒ 与 nathan 同构 |
+| 套 clip | 70 条轨道换前缀；`_hip` 的 `position` 按增量重算（`ratio = 1.888338/1.848953 = 1.0213`） |
+| 裁首帧 | 原生 clip 第 0 帧是**零位 T-pose**（`hand_l y=1.486` → 之后 `0.906`）⇒ 删第 0 帧 + 前移 `1/30 s`，`44.700000 → 44.666667 s` |
+| clip 命名 | `0_walk` / `1_dancing` ⇒ 回读 `get_animation_list()` 第 0 条是 walk |
+| 身高 | rest `1.888338 m` 已落在 1.84 ±5%（+2.63%）⇒ **`k = 1.0`，不缩放** |
+| 脚底 | rest `min.y = +0.004807` ⇒ 根节点 `origin.y = -0.004807`，落地后 `y_min = 0.000` |
+| 转身 | 原生朝 **+Z**（`eye_l` 相对 `head` 的 z 偏移 `+0.0743`）⇒ 根节点绕 Y **+90°** ⇒ 朝 **+X** |
+| 根节点变换 | `R_y(+90°)`，`origin = (0, -0.004807, 0)`（无缩放成分） |
+| 贴图降采样 | dif `12 871 090 → 1 085 179 B`（8192²→**2048² JPEG q90**，进 glb 后 `1 084 513 B`）、norm `35 099 027 → 1 504 426 B`（8192²→**1024² PNG**） |
+| 三角数 | **23 406**（未 decimate，低于 50k） |
+| 动画 | `["0_walk", "1_dancing"]`，时长 `[2.233333, 44.666667] s` |
+| AABB（Godot 轴序，回读实测） | `P(-0.153, 0.000, -0.867) S(0.362, 1.888, 1.912)` → 脚底贴 `y=0` |
+| 播 walk 的脚骨世界高度 | `foot_l [0.1201, 0.3013]`、`foot_r [0.1126, 0.3024]`；与 nathan 基线最大偏差 **0.0128 m ≤ 0.03**（clip 复用成立） |
+| 朝向复核 | `ball_l - foot_l = (+0.043, -0.163, -0.013)`，与 nathan 同向 ⇒ 脚尖朝 **+X** |
+
+复现链路：把 §10.3 里的 `--name` / `job["id"]` 换成 `rp_manuel_animated_001` / `manuel` 即可（同一个 `convert_human.gd` 一次跑完两件）。
+本步 `fix_glb.py` 输出：`[fix] rp_manuel_animated_001_dif png=5032669 -> jpeg=1084513 (2048x2048)`、`[fix] anim order = ['0_walk', '1_dancing']`。
+
+### 11.4 使用边界
+
+- **不加碰撞体**（`collisions=0/0`）；本步**不建 `.tscn`、不进 `SceneDefs`、不接线**。
+- 只播第 0 条（= `0_walk`）；`1_dancing` 留作"活动散场时的街头表演"备选。
+- 身高 `1.888 m` 是三人里最高（sophia `1.748` / nathan `1.840`）—— 这是**故意保留的人群身高差**，不是没归一。
+- 条款同 §3 / §9.4。

@@ -2,7 +2,7 @@
 
 > Presented by KeJi
 > Created Date ： 2026-10-22
-> Modified Date ： 2026-11-06
+> Modified Date ： 2026-11-07
 
 本目录**只放真正的资源文件**：位图/纹理（`.png` `.jpg` `.webp`）、
 3D 模型（`.glb` `.gltf` `.obj` `.fbx`）、材质与环境（`.material` `.tres` `.env`）、
@@ -17,6 +17,9 @@
 |---|---|
 | `.gitkeep` | 占位（保留） |
 | `humans/` | 人形资产，见 `humans/README.md`（Renderpeople 免费页，非 CC0） |
+| `chassis/patrol_car/` | **task_50 Step 1**：巡逻车外观（Kenney `police`，CC0）×4 文件，**只入库未接线**，见 §7 |
+| `props/cars/` | **task_50 Step 1**：社会车辆 2 款（`kenney_sedan` / `kenney_suv`，CC0），按口径 #7 归一（朝 +X、轮底 y=0、单文件 glb），见 `props/cars/README.md` |
+| `props/buildings/` | **task_50 Step 1**：背景楼 4 栋（Kenney City Kit Commercial，CC0），**零碰撞只作背景**，见 `props/buildings/README.md` |
 | `sensors/` `chassis/` `ugv_x3plus_lowpoly.glb` | 车辆/传感器外观模型（程序化装配用）；`chassis/uav_quadrotor.glb` = **task_40 Step 5 换的四旋翼外观**，见 §5 与 `ATTRIBUTION.md`；`chassis/ugv_m1.glb` = **task_42 Step 3 换的 UGV 外观（自有资产）**，见 §6 |
 | `textures/` | **task_38 Step 1a**：4 套 PBR（12 文件）+ **task_49 Step 3**：室内 2 套（6 文件，`wall_indoor_*` / `floor_indoor_*`），共 6 套 18 文件，全部 CC0，见 §2 |
 | `hdri/` | **task_38 Step 1a 新增**：1 张 2K 晴天正午 HDRI，CC0，见 §3 |
@@ -108,3 +111,26 @@ task_40 Step 5 另核：模型 glb **299 376 B ≤ 1 MB**、贴图 128×128 ≤ 
 - **碰撞盒未随外观变更**：AABB 与 `0.30 × 0.25 × 0.25` 逐轴相等 ⇒ `DiffDrive` 常量 / `UGV_HULL` / `CollisionShape3D` / `check_models` 的 M5/M6 **一行未改**（物理零改动）。
 - **旧件已删**：`chassis/ugv_chassis.glb`（21 888 B）+ `ugv_chassis.glb.import`（1 163 B）在本步验收全绿后 `git rm`（git 可回溯）。旧 `ugv` 构建键与 `Tool/blender/models/ugv_chassis.blend` **保留**：不带 `ORION_BUILD_LEGACY=0` 重跑 `export_all.sh` 会重新生成该旧 glb，属**预期**（可复现性），需要时 `git status` 会看到它重新变成未跟踪文件。
 - **贴图与 `.import` 必须一起提交**（老规矩：干净检出先 `--import`，否则 `load()` 返回 `null`）。
+
+---
+
+## 7. `chassis/patrol_car/` — 巡逻车外观（**CC0**，task_50 Step 1）
+
+> 用途：**替换现在 0.3 m 宽的玩具比例自建低模**（8 台车墙 / 4 台围控车的外观）。
+> **本步只入库，不接线**：`ChassisCatalog.DEFAULTS`（`track_width` / `height` 是碰撞尺寸）、`Vehicle.tscn` 的 `ApplyChassis`、
+> 任何 `scale` **一行未改**（口径 #3：视觉与碰撞同步放大是 Step 2 的事）。
+
+| 文件 | 是什么 | 来源 | 许可 | 处理 | 规格 | 字节 | sha256 |
+|---|---|---|---|---|---|---|---|
+| `chassis/patrol_car/model.glb` | 巡逻车外观（白/黑车身 + 车顶警灯 + 格栅，**四轮**） | `https://kenney.nl/assets/car-kit` → 包内 `Models/GLB format/police.glb`（`195 336 B`） | **CC0**（包内 `License.txt`：`Car Kit (3.1)` / `License: (Creative Commons Zero, CC0)`） | Kenney 出厂贴图是外部相对路径 `Textures/colormap.png` ⇒ 用 `GLTFDocument.generate_buffer()` 重导出成**单文件 glb**（图集 `colormap2` 内嵌 512² PNG / 7 825 B）；同时 **`R_y(+90°)`** 把车头从 `+Z` 转到 **`+X`**、`min.y → 0`、水平居中。旋转/平移表达在**场景根节点变换**上（顶点未动） | AABB **`3.1000 × 1.3000 × 1.5000`**（X 长 × Y 高 × Z 宽）/ 原车头 `+Z` → 归一后 **`+X`** / **2 304 tri** / 6 网格 / 1 材质 / 0 骨骼动画（`clips=[]`、`skins=0`）/ 轮底 `y = 0.000` | **140 585** | `0df154cc7af055fe…` |
+| `chassis/patrol_car/model.glb.import` | 场景导入描述（`importer="scene"`） | — | — | `godot --headless --path orion-simulation-world --import` 生成，**不要手改** | — | 1 168 | — |
+| `chassis/patrol_car/model_colormap2.png` | **Godot 抽出的 basecolor 图集**（512×512，同 `humans/*_dif.jpg` / `chassis/uav_quadrotor_ColorPalette.png` 的先例） | 同上 | CC0 | 导入时自动落地（`gltf/embedded_image_handling=1` Extract），像素未改 | 512² PNG | 7 825 | — |
+| `chassis/patrol_car/model_colormap2.png.import` | 贴图导入描述 | — | — | 同上，**必须与 png 一起提交**（`COMPONENTS.md` §9.1 **E28**） | — | — | — |
+
+- **抓取日期**：2026-11-07；包 `kenney_car-kit.zip` = `4 814 237 B`（许可证全文在包内 `License.txt`，本仓库不另存）。
+- **AABB 与地面高度**：`3.1000 × 1.3000 × 1.5000`，轮底 `y = 0.000`。目标尺寸表（§2.0 目标尺寸表）里 **UGV 是"长 0.8 m / 宽 ~0.55 / 高 ~0.5"**，本车 **3.1 m 长** ⇒ **本步不缩放**（口径 #2 / R12：视觉与碰撞一起改是 Step 2 的事），台账只登记原尺寸。
+- **车辆口径复核**（虽然是 UGV 外观，同样按 #7 检查）：米制、朝 **`+X`**、轮底 **`y = 0`**、单文件 glb、**无骨骼动画依赖**。
+- **零碰撞**：资产里没有任何 `CollisionObject3D` / `CollisionShape3D`（回读 `collisions=0/0`）；本步不改 `src/` 一行。
+- **找不到的退路没用上**：Kenney 第 1 站即命中合规件（四轮 + 警用观感 + CC0），因此**不需要**把 `chassis/ugv_m1.glb` 非等比放大到 0.8 m（口径 #4 的退路保留未用；`ugv_m1.glb` 原文件未动）。
+- **风格**：卡通低模（R9）⇒ 摆位时放中远景、别给近景特写；"封路能看懂"优先于写实。
+- 条款：Kenney CC0，可商用、无需署名（本仓库仍在此记账）。
