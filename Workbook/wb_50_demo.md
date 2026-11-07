@@ -34,3 +34,11 @@
 - 结果：PASS
 - 提交：ok 72ee3be
 - 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（710 行，共 10 节），未改动任何源码（`git status` 仍与进场基线相同）。 计划摘要（约 190 字，可直接写进 workbook）： 计划见 tmp/task50/plan.md。改 3 文件：Catalog 加 sedan；Pedestrian 按 model 换 Body 并重找动画器（未知 warn 回落）；Vehicle 加 SELF_VISUAL_CHASSIS 防占位盒包车。新增 Sedan.gd/tscn：只认 v、yaw 恒 0 只平移；朝向 spawn 写宿主 rotation.y，位置仍由 Vehicle 推进；碰撞=外观 4.5×1.5×1.8。验收 import/quit/check-only + headless 探针 + xvfb 图。硬发现：Rust 镜像只认 2 chassis，sedan 需独立 ws 客户端驱动。
+
+## Step 4 — 世界搭建：第三个场景 venue（task_50 首轮）
+- 起止：2026-11-07 14:50:51Z → 2026-11-07 15:18:14Z
+- 范围：orion-simulation-world/src/world 与 src/scenes 与 COMPONENTS.md；全视觉零碰撞
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok d91bb10
+- 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（804 行，15 节）。规划期只读，未改任何源码（`git status` 与进场基线一致，无残留进程）。 **摘要（约 190 字，可直接写进 workbook）** 计划见 tmp/task50/plan.md。改 6 处：SceneDefs 加 venue（obstacles=[]、spawn(68,82)、look=venue、新增 buildings 4 栋）；新建 Plaza.gd（19 面：路1/白条6/人行道4/场馆7/门洞1，全 mesh 零碰撞）；World.gd 加 3 行分派；WorldLook 加 Apply_Venue（只调环境色与曝光）；新建 WorldVenue.tscn（复制 WorldIndoor 仅改 scene_name）；COMPONENTS 6 处。实测：4 栋楼 scale 5 摆位全入框不挡镜头；city 12104 格 / corridor 852 格为回归基线。验收 import/quit/check-only + xvfb 出图亮度判据 + city 像素 sha256 对照。 **两条硬结论（已实测，非推测）**：4 栋楼 glb 每栋 1 mesh、0 碰撞体、`min.y=0`、水平居中，摆位只需 position+yaw+均匀 scale；`ambient_light_sky_contribution < 1` 是 SKY 源下唯一有效的"环境色"旋钮，不改 `ambient_light_source`（不违 E30-③）。
