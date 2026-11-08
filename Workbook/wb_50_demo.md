@@ -42,3 +42,21 @@
 - 结果：PASS
 - 提交：ok d91bb10
 - 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（804 行，15 节）。规划期只读，未改任何源码（`git status` 与进场基线一致，无残留进程）。 **摘要（约 190 字，可直接写进 workbook）** 计划见 tmp/task50/plan.md。改 6 处：SceneDefs 加 venue（obstacles=[]、spawn(68,82)、look=venue、新增 buildings 4 栋）；新建 Plaza.gd（19 面：路1/白条6/人行道4/场馆7/门洞1，全 mesh 零碰撞）；World.gd 加 3 行分派；WorldLook 加 Apply_Venue（只调环境色与曝光）；新建 WorldVenue.tscn（复制 WorldIndoor 仅改 scene_name）；COMPONENTS 6 处。实测：4 栋楼 scale 5 摆位全入框不挡镜头；city 12104 格 / corridor 852 格为回归基线。验收 import/quit/check-only + xvfb 出图亮度判据 + city 像素 sha256 对照。 **两条硬结论（已实测，非推测）**：4 栋楼 glb 每栋 1 mesh、0 碰撞体、`min.y=0`、水平居中，摆位只需 position+yaw+均匀 scale；`ambient_light_sky_contribution < 1` 是 SKY 源下唯一有效的"环境色"旋钮，不改 `ambient_light_source`（不违 E30-③）。
+
+## Step 5 — 验证：这个场景能不能跑起来（只验能跑）（task_50 首轮）
+- 起止：2026-11-07 15:18:14Z → 2026-11-07 16:11:24Z
+- 范围：tmp/task50/ 证据与 RobotSim_TestEnv/ 实例；零源码改动
+- 轮次：1 / 3
+- 结果：PASS
+- 提交：ok e60dd32
+- 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（693 行；仓库源码零改动，`git status` 与进场基线一致，探针进程与端口已收干净）。 **摘要（约 195 字，可直接写进 workbook）** 计划见 [plan.md](tmp/task50/plan.md)（693 行，零源码改动）：新增 tools/ 六脚本、RobotSim_TestEnv/t50_s5/ 16 套夹具、s5/ 证据。世界一律 venue + xvfb/opengl3/Dummy；L1（5 avatar）过才进 L2（28）。16 台走静态 bootstrap_peers（先空表抓 PeerId 再写表）；端口 9999 / 9091~9106（9090 属 mihomo）/ 40401~40416，行人不监听。实测空 venue 1600×900 = 17 fps，备四档降窗口阶梯。行人先连走 13 s、车后连（实测车把行人当雷达障碍）；车速 1.2 m 短腿 + stop 兜底。omega 世界 180 / 链路 90 两值都测。A5 另跑近机位副本（远端仅 40 px）。收尾 trap + ss 三次快照。
+
+## 引擎结束
+- 结束：2026-11-07 16:11:26Z
+- 状态：ALL_STEPS_DONE
+- git status：
+```
+M Workbook/wb_50_demo.md
+?? Tool/investigation/engine.config.json
+?? Tool/investigation/pose_jump_report.md
+```
