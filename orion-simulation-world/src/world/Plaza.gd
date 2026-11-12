@@ -98,10 +98,13 @@ static func Build_All(world: Node3D, def: Dictionary) -> Node3D:
 	_Add_Mesh_Node(root, ZEBRA_NODE, zebra_quads, _Make_Marking_Material())
 	_Add_Mesh_Node(root, SIDEWALK_NODE, sidewalk_quads,
 		WorldLook.Make_Pbr_Material(SIDEWALK_PREFIX, WorldLook.CURB_TILE_M))
-	_Add_Mesh_Node(root, VENUE_NODE, venue_quads,
-		WorldLook.Make_Pbr_Material(VENUE_PREFIX, WorldLook.VOXEL_TILE_M))
-	_Add_Mesh_Node(root, DOOR_NODE, door_quads,
-		WorldLook.Make_Pbr_Material(VENUE_PREFIX, WorldLook.VOXEL_TILE_M, DOOR_PANEL_TINT))
+	# 2026-11-08：场馆 / 门洞已移除（quad 数组为空）⇒ 不再建空 MeshInstance 节点。
+	if not venue_quads.is_empty():
+		_Add_Mesh_Node(root, VENUE_NODE, venue_quads,
+			WorldLook.Make_Pbr_Material(VENUE_PREFIX, WorldLook.VOXEL_TILE_M))
+	if not door_quads.is_empty():
+		_Add_Mesh_Node(root, DOOR_NODE, door_quads,
+			WorldLook.Make_Pbr_Material(VENUE_PREFIX, WorldLook.VOXEL_TILE_M, DOOR_PANEL_TINT))
 	# 背景楼最后建 ⇒ 子节点顺序与头注释的节点树逐行一致（Floor…Buildings）。
 	var built: int = _Build_Buildings(root, def)
 
@@ -156,23 +159,16 @@ static func _Collect_Sidewalk_Quads() -> Array:
 
 
 ## 场馆 7 个四边形：单面朝外（俯视机位只看得见"屋顶 + 西墙 + 北墙"，正好合成一个封闭体块）。
-## sign 的语义与 StreetLayout 完全一致 = **外法线在世界坐标里的符号**。
+## 2026-11-08 反馈：场馆体块贴路太近、把演示空间挤没了 ⇒ **本场景不再建场馆**（返回空数组，
+## 常量与旧几何保留作历史）；道路两侧改由 `SceneDefs["venue"].buildings` 的街墙承担城市观感。
 static func _Collect_Venue_Quads() -> Array:
-	return [
-		_Face_Y(VENUE_Y0, VENUE_X0, VENUE_X1, 0.0, VENUE_H, -1.0),          # 南墙 y=70，法线 -y
-		_Face_Y(VENUE_Y1, VENUE_X0, VENUE_X1, 0.0, VENUE_H, 1.0),           # 北墙 y=100，法线 +y
-		_Face_X(VENUE_X0, VENUE_Y0, DOOR_Y0, 0.0, VENUE_H, -1.0),           # 西墙南段（y 70~80）
-		_Face_X(VENUE_X0, DOOR_Y1, VENUE_Y1, 0.0, VENUE_H, -1.0),           # 西墙北段（y 84~100）
-		_Face_X(VENUE_X0, DOOR_Y0, DOOR_Y1, DOOR_H, VENUE_H, -1.0),         # 门洞过梁（y 80~84，z 4~8）
-		_Face_X(VENUE_X1, VENUE_Y0, VENUE_Y1, 0.0, VENUE_H, 1.0),           # 东墙 x=100，法线 +x
-		_Quad_Up(Rect2(VENUE_X0, VENUE_Y0, VENUE_X1 - VENUE_X0, VENUE_Y1 - VENUE_Y0),
-			VENUE_H),                                                        # 屋顶 z=8.0（与墙顶共边不共面）
-	]
+	return []
 
 
 ## 门洞暗面板 1 个：x = 70.02（墙面内侧 2 cm），法线 -x（朝街）。
+## 2026-11-08：场馆已移除 ⇒ 门洞面板一并取消（返回空数组）。
 static func _Collect_Door_Quads() -> Array:
-	return [_Face_X(VENUE_X0 + DOOR_PANEL_INSET_M, DOOR_Y0, DOOR_Y1, 0.0, DOOR_H, -1.0)]
+	return []
 
 
 # ================================================================ 背景楼

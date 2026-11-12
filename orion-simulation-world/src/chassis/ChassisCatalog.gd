@@ -33,18 +33,16 @@ const SCENES := {
 }
 
 ## chassis 名 -> 默认参数（与各底盘 GetDefaultParams() 逐键一致）。
-## task_50 Step 2：diff_drive_ugv 按口径 #2 定为 0.80（长）× 0.50（高）× 0.55（宽），
-##   速度为口径 #12（2.2 m/s、180 °/s）。
-##   `body_length` 是**碰撞盒 X 边长（车身全长）**，`wheel_base` 只用于轮子视觉摆位 ——
-##   两者同名不同义，别照抄旧口径把盒长塞进 wheel_base（那会让 0.8 m 的车鼻/尾各嵌墙 0.15 m）。
+## diff_drive_ugv = 旧车型（assets/chassis/ugv_m1.glb，task_42 版）：
+##   外观 AABB 0.30（长）× 0.25（高）× 0.25（宽）⇒ 碰撞盒 X 边长用 wheel_base（D11：模型 = 碰撞盒）。
+##   2026-11-10 截图用：临时切回旧车模（新车 0.80×0.50×0.55 / 2.2/180 在 commit f2f254f）。
 const DEFAULTS := {
 	"diff_drive_ugv": {
-		"max_speed": 2.2,          # m/s（口径 #12：车比跑者 1.8 快）
-		"max_turn_rate": 180.0,    # 度/秒（= π rad/s，口径 #12）
-		"wheel_base": 0.50,        # m（轴距；只用于轮子摆位）
-		"track_width": 0.55,       # m（横向 = 外观 AABB z，碰撞盒 Z 边长）
-		"height": 0.50,            # m = 外观 AABB y（碰撞盒 Y 边长）
-		"body_length": 0.80,       # m（纵向 = 外观 AABB x，碰撞盒 X 边长；task_50 口径 #2）
+		"max_speed": 1.5,          # m/s（**只是 clamp 上限**）
+		"max_turn_rate": 90.0,     # 度/秒（= π/2 rad/s，**只是 clamp 上限**）
+		"wheel_base": 0.30,        # m（纵向 X，同时是碰撞盒 X 边长）
+		"track_width": 0.25,       # m（横向 = 外观 AABB z，碰撞盒 Z 边长）
+		"height": 0.25,            # m = 外观 AABB y（碰撞盒 Y 边长）
 	},
 	"quadrotor_uav": {
 		"max_speed": 2.0,

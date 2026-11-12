@@ -658,3 +658,151 @@
 | V4 | **行人 spawn 卡在场馆里** | 出生点 (68,82) 在门洞外；若世界把 spawn 点判成"在障碍里"会 push，注意日志告警 |
 | V5 | **轿车 4.5 m 长挡路** | L2 时轿车会占掉半条 8 m 路，正好是"被拦停"的观感；但要注意别把车墙位堵死 |
 | V6 | **零碰撞 ⇒ 车/人穿场馆** | 属预期（口径 #15）；只要剧本路线不经过场馆，镜头就看不到 |
+
+---
+
+## 七、Step 6 — Pictor 编队（formation）：assist 只发给围控编队
+
+> 状态：**已实现（2026-11-08，review PASS；Pictor 工作树未提交）**
+> 范围：**只改 Pictor（Godot 地面站）**。不改 ORION 协议、不改车端 / kernel / orion Rust。
+
+### 7.0 背景：现状会把车墙一起拉走
+
+task_41 落地的 `CoopController`（`Pictor/src/cooperation/coop_controller.gd:181-222`）收到 UAV 的
+assist request 后：
+
+1. 取 **VehicleRegistry 里所有在线 car**（`node_type == "car"` 且位姿非 `(0,0)`，`_online_cars()` `:162-178`）；
+2. 排除请求者（`:191`）；
+3. `N = 剩余车数` → 3 m 环上 N 个等角点 → 最近一对一 → **逐车一帧 `TASK_SET`**。
+
+task_50 的场上在线车是 **12 台**（8 车墙 + 4 围控）。assist 一来，`N = 12`，**8 台车墙车也会收到
+`TASK_SET`**；而 `TASK_SET` 是**整队替换**语义（车端 `apply_auto_cmd` → `Set` → reset），
+车墙的 `Goto(车位) + Face(路)` 会被整个顶掉 ⇒ **车墙当场散架，全往人那边开**。
+
+结论：编队是**地面站侧**概念，车端无感；不引入新协议字段，也不让车知道自己是哪个编队。
+
+### 7.1 目标（可机判）
+
+1. 所有 device 注册时**默认无编队**（`formation == ""`）。
+2. `VehicleRegistry` 成为编队的**唯一数据源**：join / leave / query / members。
+3. `WsCommandServer` 新增 `formation` 命令（join / leave / list），可用
+   `Pictor/tool/pictor_ws_ctl.py` 从外部 WS 驱动。
+4. `CoopController` 只对 `containment` 编队内的在线 car 派发；**零成员 → warn + 一帧不发**；
+   **不回退全员**。
+5. 除 `containment` 之外，其他编队 id 只是被记录，不改变任何行为（留给后续车墙/巡逻编队用）。
+6. **零协议改动**：`msgid 7` 仍是 `x f32 | y f32`；`TASK_SET` 仍是 1 + Σlen；车端一行不改。
+
+### 7.2 数据模型（Pictor / `VehicleRegistry`）
+
+`Pictor/src/vehicle_registry/vehicle_registry.gd` 现有 `vehicles: Dictionary`
+（`{vid → {name,x,y,yaw,node_type}}`，`:11`）。本步加：
+
+```gdscript
+## vid → formation_id（"" 不存在 = 无编队）。**独立于 vehicles**，
+## 这样 _on_vehicle_unregistered 擦掉 vehicles 条目后，重连仍能恢复编队。
+var formations: Dictionary = {}
+
+func Join_Formation(vehicle_id: String, formation_id: String) -> bool
+func Leave_Formation(vehicle_id: String) -> bool
+func Get_Formation(vehicle_id: String) -> String
+func Get_Formation_Members(formation_id: String) -> Array[String]   // 排序，确定性
+```
+
+- `formation_id`：`strip_edges()` 后必须非空；建议限定 `[a-z0-9_-]{1,32}`（非法 → 调用方拒绝）。
+- `join` 幂等（已在该编队 → `true`，不重复写）；`leave` 幂等（不在任何编队 → `true`）。
+- **断线重连保留**：`_on_vehicle_unregistered` 只擦 `vehicles`，**不擦** `formations`；
+  `_on_vehicle_registered` 时按 `formations` 恢复（无需额外广播）。
+- `vehicles` 列表输出（`ws_command_server.gd:_Vehicle_List()` `:675-690`）增加
+  `"formation": Get_Formation(vid)`，供脚本/UI 读。
+- 不做 UI 徽标（可选，不列入验收）。
+
+### 7.3 WS 契约（`WsCommandServer`）
+
+`_Handle_Command()`（`ws_command_server.gd:256-275`）新增一个分支；报文沿用现有 `cmd` 风格：
+
+```json
+{"id":7,"cmd":"formation","action":"join","targets":["<vid 或车名>"],"formation":"containment"}
+{"id":8,"cmd":"formation","action":"leave","targets":["<vid 或车名>"]}
+{"id":9,"cmd":"formation","action":"list","formation":"containment"}
+```
+
+- `targets` 复用 `_String_Array` + `_Resolve_Target()`（`:638-650`），**先全部解析成功再改**（原子）。
+- 应答：
+
+```json
+{"ack":7,"ok":true,"action":"join","formation":"containment","members":["vid1","vid2","vid3","vid4"]}
+```
+
+- 错误（`ok:false`，**注册表不变**）：`action` 未知 / `formation` 空或非法（仅 `join` 必填）/
+  `targets` 空 / 任一 target 解析不到。
+- `action` 大小写不敏感（`JOIN` 也接受）；`formation` id **不折大小写**（`Containment` 非法）。
+- `leave` 带一个没有成员的合法 `formation` → `ok:true, members: []`（不当错误；与实现一致）。
+- `list` 的 `formation` 可省略 = `members` 返回全编队成员并集，另带 `formations` 全表
+  `{formation_id: [vid...]}`。
+- `pictor_ws_ctl.py` 增加 `formation` 子命令：
+  `formation --target <vid|name> --join containment` / `--leave` / `--list containment`
+  （`tool/pictor_ws_ctl.py:1018-1094` 的 subparser 区）。
+
+### 7.4 CoopController 修改
+
+- 新增常量 `const COOP_FORMATION := "containment"`（唯一来源）。
+- `_online_cars()` 的候选集增加过滤：`registry.Get_Formation(id) == COOP_FORMATION`；
+  或在 `_online_cars()` 之后新增 `_formation_cars()`，**不改 `_online_cars()` 的语义**（单测兼容）。
+- 其余不变：排除请求者（`:191`）→ N = 成员数 → `ring_points` → `assign_one_to_one` →
+  逐车一帧 `[Goto, Face]`。
+- 日志追加 `编队=containment 成员=N`，便于追溯。
+- **零成员**（无人在编队 / 都在离线 / 都在 `(0,0)`）→ `print("[Coop] … 编队 containment 无在线成员 → 忽略")`
+  + **一帧不发**；**不得**回退到全部在线车。
+
+### 7.5 测试与验收
+
+**测试（全部 headless，真跑）**
+
+| 文件 | 新增覆盖 |
+|---|---|
+| `Pictor/src/test/test_coop_controller.gd` | ① 12 车中 4 台在 `containment` → 恰好 4 帧、每帧 `[Goto, Face]`、8 台非成员 0 帧；② 0 成员 → 0 帧；③ 4 台编队中 1 台无位姿 → N=3；④ 请求者是编队内 car → 排除后 N=3；⑤ 非编队成员不受影响 |
+| `Pictor/tool/check_ws_command_server.gd` | 新增 A15 join / A16 leave / A17 list + `vehicles` 带 formation / A18 错误路径（未知 vid、空 formation、未知 action）且注册表不变 |
+| `Pictor/src/test/test_formation.gd`（新增） | 数据层 F1~F10：默认空 / join-leave 幂等 / 非法 id / 断线重连保留 / members 排序 / 全表 |
+| `Pictor/tool/pictor_ws_ctl.py` | `formation` 子命令 dry-run / 参数解析（不要求真连 Pictor） |
+
+> 基线修正：`check_ws_command_server.gd` 的 A9 断言仍是 task_44 之前的 `msgid 4 + action 9`，
+> 基线实测 `total=14 failed=1`；本步按 task_44 的 `msgid 8 + mode 1` 修正（只改断言，不改被测代码），
+> 修正后 `total=18 failed=0`。
+
+命令（PowerShell）：
+
+```powershell
+& "C:\workspace\Tool\Steam\steamapps\common\Godot Engine\godot.windows.opt.tools.64.exe" `
+  --headless --path C:\workspace\Workspace\Workspace\Pleiades_orion\Pictor -s res://src/test/test_coop_controller.gd
+& "C:\workspace\Tool\Steam\steamapps\common\Godot Engine\godot.windows.opt.tools.64.exe" `
+  --headless --fixed-fps 60 --path C:\workspace\Workspace\Workspace\Pleiades_orion\Pictor -s res://tool/check_ws_command_server.gd
+```
+
+**判据（全过才 PASS）**
+
+1. 12 车 + 4 台 `containment`：assist → **恰好 4 条 `cmd_send`**，targets 各 1 台且都是成员；
+   8 台非成员 **0 条**。
+2. 0 成员：assist → **0 条** + 一行忽略日志。
+3. 默认无编队：新 `vehicle_registered` 后 `Get_Formation(vid) == ""`。
+4. WS `join/leave/list` ack 正确；非法请求 `ok:false` 且注册表不变（原子）。
+5. `vehicles` 事件每条带 `formation` 字段。
+6. 现有 `test_coop_controller.gd` 全部 PASS、`check_ws_command_server.gd` A1~A14 不回归
+   （`=== ALL PASS: true ===` / `SELF-CHECK OK` / exit 0）。
+7. `git -C Pictor diff --stat` 只含本步允许文件；**orion 仓库除本 Task 文档外零改动**；
+   `src/websocket/protocol/*`、`src/kernel/kernel_bridge.gd`、orion Rust 全部零改动。
+
+### 7.6 边界 / 风险
+
+| # | 风险 | 处置 |
+|---|---|---|
+| F1 | `TASK_SET` 整队替换：编队成员收到 assist 会顶掉自己当前任务 | 既定语义，接受；编队只决定「谁收到」 |
+| F2 | 成员掉线 / 无位姿 → N 变小，环点重算 | 按在线成员算；0 → 不发 |
+| F3 | 两个 UAV 同时请求 → 后到覆盖先到 | 本步不加限流（task_41 §5.7 同口径） |
+| F4 | 重连后编队丢失 | `formations` 独立于 `vehicles`，按 vid 保留 |
+| F5 | `check_ws_command_server.gd` 的 A 组依赖 `-s` 下 EventBus | 沿用现有自检；A1 SKIP 不算 PASS |
+| F6 | `pictor_ws_ctl.py` 有两个副本（`Pictor/tool/` 与 `RobotSim_TestEnv/tools/`） | 本步只改仓库内；夹具副本后续手工同步 |
+
+### 7.7 证据与收尾
+
+- 测试输出、`git diff --stat`、关键日志摘录落 `orion/tmp/task50_s6/`，不入库。
+- 不改 `Task/` 其他内容；不改 `Workbook/` 以外的 orion 文件（Workbook 由执行引擎收口时追加）。

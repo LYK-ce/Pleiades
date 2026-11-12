@@ -51,12 +51,26 @@
 - 提交：ok e60dd32
 - 规划要点：计划已写入 [plan.md](tmp/task50/plan.md)（693 行；仓库源码零改动，`git status` 与进场基线一致，探针进程与端口已收干净）。 **摘要（约 195 字，可直接写进 workbook）** 计划见 [plan.md](tmp/task50/plan.md)（693 行，零源码改动）：新增 tools/ 六脚本、RobotSim_TestEnv/t50_s5/ 16 套夹具、s5/ 证据。世界一律 venue + xvfb/opengl3/Dummy；L1（5 avatar）过才进 L2（28）。16 台走静态 bootstrap_peers（先空表抓 PeerId 再写表）；端口 9999 / 9091~9106（9090 属 mihomo）/ 40401~40416，行人不监听。实测空 venue 1600×900 = 17 fps，备四档降窗口阶梯。行人先连走 13 s、车后连（实测车把行人当雷达障碍）；车速 1.2 m 短腿 + stop 兜底。omega 世界 180 / 链路 90 两值都测。A5 另跑近机位副本（远端仅 40 px）。收尾 trap + ss 三次快照。
 
-## 引擎结束
+## 首轮引擎结束（Step 1~5）
 - 结束：2026-11-07 16:11:26Z
-- 状态：ALL_STEPS_DONE
+- 状态：ALL_STEPS_DONE（Step 1~5）
 - git status：
 ```
 M Workbook/wb_50_demo.md
 ?? Tool/investigation/engine.config.json
 ?? Tool/investigation/pose_jump_report.md
 ```
+
+## Step 6 — Pictor 编队（formation）：assist 只发围控编队（task_50）
+- 起止：2026-11-08T01:19:15.658Z → 2026-11-08T01:32:50.461Z
+- 范围：Pictor（VehicleRegistry / WsCommandServer / CoopController / 两个测试 / pictor_ws_ctl.py）；orion 仅 Task 文档
+- 轮次：1 / 3
+- 结果：PASS
+- 关键决策：编队只存在于地面站；formations 按 vid 独立保存；assist 只发 containment 成员，0 成员不发；不改协议/车端/kernel
+- 证据：C:\workspace\Workspace\Workspace\Pleiades_orion\orion\tmp\task50_s6\review_r1.md；plan/impl 同目录
+- 未提交：Pictor 工作树（等人类确认后提交）
+
+## 引擎结束（Step 6）
+- 结束：2026-11-08T01:32:50Z
+- 状态：STEP_6_PASS
+- 备注：Pictor 6 文件修改 + 新增 `src/test/test_formation.gd`，未提交

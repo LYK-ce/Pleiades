@@ -75,6 +75,25 @@ var _cmd: Dictionary = {}            # 最新一条 motion_cmd（只保留最新
 var _sensors: Dictionary = {}        # slot(String) -> Node3D
 var _nose: MeshInstance3D = null     # Body/Nose（朝向标记，SetBodySize 时跟着摆）
 
+## 警灯灯条（2026-11-08）：只对 `chassis_params.siren == true` 的 diff_drive_ugv 生效。
+## GLB 只有一个材质、红蓝是烘焙在贴图里的，没法直接切；这里在车顶加两个小盒子，
+## 红/蓝交替显隐。`SIREN_EMISSION_ENERGY` 故意取 < 2（"光稍微弱一点"）。
+const SIREN_FLASH_HALF_PERIOD := 0.30
+const SIREN_EMISSION_ENERGY := 1.1
+## 真实光源（OmniLight3D）：一个灯随相位换红/蓝，能量刻意压到 < 1，避免把路面打爆。
+const SIREN_LIGHT_ENERGY := 0.75
+const SIREN_LIGHT_RANGE := 3.2
+const SIREN_RED := Color(0.95, 0.10, 0.10)
+const SIREN_BLUE := Color(0.10, 0.30, 0.95)
+const SIREN_BOX := Vector3(0.10, 0.028, 0.16)
+const SIREN_Z_OFFSET := 0.085
+var _siren: Node3D = null
+var _siren_red: MeshInstance3D = null
+var _siren_blue: MeshInstance3D = null
+var _siren_light: OmniLight3D = null
+var _siren_phase: bool = false
+var _siren_accum: float = 0.0
+
 
 # ================================================================ 生命周期
 
@@ -87,6 +106,7 @@ func _ready() -> void:
 	print("[vehicle] ready: chassis=%s sensors=%d pos=(%.2f, %.2f, %.2f)"
 		% [shown, _sensors.size(), global_position.x, global_position.y, global_position.z])
 	_Mount_Model(_chassis_name)   # 覆盖"先装配（树外 ApplyChassis）后入树"的路径
+	_Update_Siren()
 
 
 ## 物理推进：空车原地不动；有底盘才问控制量、转 yaw 并推进位置（唯一位置更新点，D8）。
@@ -103,6 +123,17 @@ func _physics_process(delta: float) -> void:
 	rotation.y += float(ctl_dict.get("yaw_rate", 0.0)) * delta
 	velocity = ctl_dict.get("velocity", Vector3.ZERO)
 	move_and_slide()
+
+
+## 警灯闪烁：红/蓝每 SIREN_FLASH_HALF_PERIOD 秒切换一次；未启用时每帧早退。
+func _process(delta: float) -> void:
+	if _siren == null or not _siren.visible:
+		return
+	_siren_accum += delta
+	if _siren_accum >= SIREN_FLASH_HALF_PERIOD:
+		_siren_accum = 0.0
+		_siren_phase = not _siren_phase
+		_Apply_Siren_Phase()
 
 
 # ================================================================ 装配接口
@@ -332,6 +363,70 @@ func _Mount_Model(chassis_name: String) -> void:
 		body.visible = placeholder and not self_visual
 	if chassis_root != null:
 		_set_meshes_visible(chassis_root, placeholder)
+	_Update_Siren()
+
+
+## 警灯开关：仅 diff_drive_ugv 且 chassis_params.siren == true；其余情况隐藏（不销毁）。
+func _Update_Siren() -> void:
+	var enabled := _chassis_name.strip_edges() == "diff_drive_ugv" \
+			and bool(_chassis_params.get("siren", false))
+	if not enabled:
+		if _siren != null:
+			_siren.visible = false
+		return
+	if _siren == null:
+		_Build_Siren()
+	if _siren == null:
+		return
+	_siren.visible = true
+	_Apply_Siren_Phase()
+
+
+## 车顶灯条：两个小盒子（红 / 蓝），位置 = 车顶 + 2 cm；尺寸按 0.8 m 车宽取 0.33 m 总宽。
+func _Build_Siren() -> void:
+	var height := float(_chassis_params.get("height", 0.5))
+	_siren = Node3D.new()
+	_siren.name = "Siren"
+	_siren.position = Vector3(0.02, height + 0.018, 0.0)
+	add_child(_siren)
+	_siren_red = _Make_Siren_Lamp(SIREN_RED, Vector3(0.0, 0.0, -SIREN_Z_OFFSET))
+	_siren_blue = _Make_Siren_Lamp(SIREN_BLUE, Vector3(0.0, 0.0, SIREN_Z_OFFSET))
+	# 真实光源：位置略高于灯条，范围 3.2 m、不投影（12 台同场时不至于把帧率吃掉）。
+	_siren_light = OmniLight3D.new()
+	_siren_light.name = "SirenLight"
+	_siren_light.position = Vector3(0.0, 0.06, 0.0)
+	_siren_light.omni_range = SIREN_LIGHT_RANGE
+	_siren_light.light_energy = SIREN_LIGHT_ENERGY
+	_siren_light.shadow_enabled = false
+	_siren.add_child(_siren_light)
+
+
+func _Make_Siren_Lamp(color: Color, offset: Vector3) -> MeshInstance3D:
+	var mesh := BoxMesh.new()
+	mesh.size = SIREN_BOX
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = SIREN_EMISSION_ENERGY
+	mesh.material = mat
+	var lamp := MeshInstance3D.new()
+	lamp.mesh = mesh
+	lamp.position = offset
+	lamp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_siren.add_child(lamp)
+	return lamp
+
+
+func _Apply_Siren_Phase() -> void:
+	if _siren_red != null:
+		_siren_red.visible = _siren_phase
+	if _siren_blue != null:
+		_siren_blue.visible = not _siren_phase
+	if _siren_light != null:
+		_siren_light.light_color = SIREN_RED if _siren_phase else SIREN_BLUE
+		_siren_light.light_energy = SIREN_LIGHT_ENERGY
 
 
 ## 底盘名 -> 模型节点；不在映射里（含空串 / 测试替身名）= null。

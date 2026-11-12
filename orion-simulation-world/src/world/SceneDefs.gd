@@ -89,10 +89,13 @@ const SCENES := {
 		"ceiling": false,
 		"ceiling_z_m": 3.0,
 	},
-	# 演示场地（task_50 §五 Step 4 / 口径 #15）：**全视觉、零碰撞** ⇒ 障碍表恒为空数组。
-	# 场地平面（世界 Z-up / 米，全部 0.5 整数倍）：道路 x∈[56,64]（8 m）南北贯通；斑马线 y∈[58,66]；
-	#   车墙位 北排 y≈54 / 南排 y≈70（x = 57/59/61/63，本步不摆车）；场馆 x∈[70,100]、y∈[70,100]、
-	#   西墙门洞 y∈[80,84]；出生点 (68,82) 在门洞外 2 m ⇒ **人不从楼里走出来**。
+	# 演示场地（task_50 §五 Step 4；2026-11-08 反馈修订）：**全视觉、零碰撞** ⇒ 障碍表恒为空数组。
+	# 场地平面（世界 Z-up / 米）：道路 x∈[56,64]（8 m）南北贯通；斑马线 y∈[58,66]；
+	#   两侧各 2 m 人行道（x∈[54,56] / [64,66]）。
+	# 2026-11-08 修订：**去掉占路/贴路的场馆体块**（原 x∈[70,100]、y∈[70,100]），
+	#   改为「道路两侧成街」：14 栋背景楼分两排（西 x≈44~46 / 东 x≈74~76），沿 y 8~116 排开，
+	#   楼面距人行道 2~4 m，中间留出 17 m 左右的开阔街面给车墙 + 4 车围控。
+	#   出生点改到路中心 (60,82)，不再依赖场馆门洞。
 	# `buildings` 是本场景独有的**新增键**（背景楼，纯视觉）：每项
 	#   {model: String, pos: Vector3(世界坐标), rot_y_deg: float, scale: float}。
 	#   缺键 / 非数组 ⇒ 按空数组处理；**city 与 corridor_indoor 不带该键，读方一律 def.get("buildings", [])**。
@@ -100,7 +103,7 @@ const SCENES := {
 	"venue": {
 		"name": "venue",
 		"obstacles": [],
-		"spawn": Vector3(68.0, 82.0, 0.0),
+		"spawn": Vector3(60.0, 82.0, 0.0),
 		"spawn_clear_radius_m": 1.5,
 		"spawn_clear_height_m": 2.5,
 		"air_wall_height_m": 32.0,
@@ -109,17 +112,42 @@ const SCENES := {
 		"look": "venue",
 		"ceiling": false,
 		"ceiling_z_m": 0.0,
-		# 背景楼 4 栋（3~5 区间内取 4，全部落在"外围"：x<50 或 x>100），scale 统一 5.0
-		# ⇒ 实测高度 12.40 / 8.46 / 20.40 / 20.40 m（原始 AABB 见 assets/props/buildings/README.md）。
+		# 两侧街墙 14 栋（2026-11-08 反馈：像真正的城市；原 4 栋远景楼太远太小）：
+		# 2026-11-08 二次反馈：楼太贴路，往两侧再退 ~10 m —— 西排 x=36~38、东排 x=82~84，
+		# 楼面距人行道约 10~11 m，中间留出 ~34 m 宽的街面（车墙 + 4 车围控 + 镜头空间）。
+		# rot_y_deg=90 让长边沿街（y 方向）；scale 8~9 ⇒ 高度约 13.5 / 19.8 / 36.7 m。
+		# 原始 AABB 见 assets/props/buildings/README.md。
 		"buildings": [
+			# ── 西侧（x≈36~38）──
 			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
-				"pos": Vector3(30.0, 44.0, 0.0), "rot_y_deg": 0.0, "scale": 5.0},
-			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
-				"pos": Vector3(26.0, 22.0, 0.0), "rot_y_deg": 90.0, "scale": 5.0},
+				"pos": Vector3(36.0, 8.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
 			{"model": "res://assets/props/buildings/kenney_building-skyscraper-c/model.glb",
-				"pos": Vector3(112.0, 44.0, 0.0), "rot_y_deg": 0.0, "scale": 5.0},
+				"pos": Vector3(37.0, 26.0, 0.0), "rot_y_deg": 90.0, "scale": 9.0},
+			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
+				"pos": Vector3(38.0, 44.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(36.0, 62.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
 			{"model": "res://assets/props/buildings/kenney_building-skyscraper-e/model.glb",
-				"pos": Vector3(116.0, 24.0, 0.0), "rot_y_deg": 90.0, "scale": 5.0},
+				"pos": Vector3(37.0, 80.0, 0.0), "rot_y_deg": 90.0, "scale": 9.0},
+			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
+				"pos": Vector3(38.0, 98.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(36.0, 116.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			# ── 东侧（x≈82~84）──
+			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
+				"pos": Vector3(82.0, 8.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(84.0, 26.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-skyscraper-e/model.glb",
+				"pos": Vector3(83.0, 44.0, 0.0), "rot_y_deg": 90.0, "scale": 9.0},
+			{"model": "res://assets/props/buildings/kenney_building-skyscraper-c/model.glb",
+				"pos": Vector3(83.0, 62.0, 0.0), "rot_y_deg": 90.0, "scale": 9.0},
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(84.0, 80.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-j/model.glb",
+				"pos": Vector3(82.0, 98.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
+			{"model": "res://assets/props/buildings/kenney_building-n/model.glb",
+				"pos": Vector3(84.0, 116.0, 0.0), "rot_y_deg": 90.0, "scale": 8.0},
 		],
 	},
 }

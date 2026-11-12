@@ -1,16 +1,14 @@
 # Presented by KeJi
 # Created Date ： 2026-10-21
-# Modified Date ： 2026-11-07
+# Modified Date ： 2026-11-01
 #
 # 差速底盘 diff_drive_ugv（Step 5 / COMPONENTS.md §4.4）：
 #   CharacterBody3D + MOTION_MODE_GROUNDED（D3）+ 差速运动学 + 世界侧速度环。
 #
-# 几何默认值（D11：模型 = 碰撞盒，task_50 Step 2）：四轮几何不是拍脑袋，而是外观模型的 AABB
-#   → body_length 0.80（X 长）× height 0.50（Y 高）× track_width 0.55（Z 宽，米），
-#   于是 ApplyBodySize(Vector3(body_length, height, track_width)) 生成的 BoxShape3D 与模型逐轴相等。
-#   注意两套语义：`body_length` = 车身全长（碰撞盒 X 边长）；`wheel_base` = 轴距，
-#   **只**给 `_layout_wheels()` 摆那四个**不可见**的占位轮（有模型即隐藏），不参与碰撞。
-#   车体从 0.30/0.25/0.25 变成 0.80/0.50/0.55 是**有意的行为变更**：贴墙余量/绕行余量会变。
+# 几何默认值（D11：模型 = 碰撞盒，task_33 Step 3）：wheel_base/track_width/height 不是拍脑袋，
+#   而是外观模型 assets/chassis/ugv_chassis.glb 的 AABB → 0.30 × 0.25 × 0.25（米），
+#   于是 ApplyBodySize(Vector3(wheel_base, height, track_width)) 生成的 BoxShape3D 与模型逐轴相等。
+#   车体截面从 0.16/0.24 变成 0.25/0.25 是**有意的行为变更**：贴墙余量/绕行余量会变。
 #
 # 控制接口与真机一致（§6.3-1）：只吃 motion_cmd{action:"velocity", v, omega}（**物理量**，
 #   v 单位 m/s、omega 单位 rad/s），速度环在底盘内部跑 —— sim 侧的控制器组件与真机完全相同。
@@ -23,8 +21,8 @@
 #   velocity -> _speed_target = clampf(v, ±max_speed)      # v 是 m/s，不乘任何百分比
 #               _yaw_target  = clampf(omega, ±max_turn_rate)  # omega 是 rad/s
 #   stop / 未知 / 缺 action -> 0 / 0（归零 = 停车，语义不变）
-#   max_speed / max_turn_rate **只作 clamp 上限**（缺省 2.2 m/s、180 °/s，口径 #12），
-#   不做任何百分比 → 物理量的换算。
+#   max_speed / max_turn_rate **只作 clamp 上限**（缺省 1.5 m/s、90 °/s；定值 0.45 / 0.5 离上限
+#   还有 3 倍余量），不做任何百分比 → 物理量的换算。
 #
 # 坐标：前进 = 局部 +X，局部 +Z = 车体右侧；velocity = global_basis * (v, 0, 0)。
 # yaw_rate 是 **Godot rotation.y** 的角速度（正 = 左转），世界 yaw = -rotation.y。
@@ -38,19 +36,18 @@ extends "res://src/chassis/ChassisModel.gd"
 
 ## 零件名（hello / motion 里用的 chassis 标识）。
 const CHASSIS_NAME := "diff_drive_ugv"
-## 轮子视觉半径（米）：轮底贴 y=0（Vehicle 原点 = 底面中心）；= 模型轮半径 0.30 × 0.3846。
-const WHEEL_RADIUS := 0.115
+## 轮子视觉半径（米）：轮底贴 y=0（Vehicle 原点 = 底面中心）。
+const WHEEL_RADIUS := 0.06
 ## 轮子节点名（与 src/scenes/chassis/DiffDrive.tscn 一一对应；顺序 = 左前/右前/左后/右后）。
 const WHEEL_NAMES := ["WheelFL", "WheelFR", "WheelRL", "WheelRR"]
 
 
 # 生效参数（Configure 从 params 读，带默认回退）
-var _max_speed := 2.2              # m/s（**只是 clamp 上限**，口径 #12）
-var _max_turn_rate := PI           # rad/s（= 180 °/s，**只是 clamp 上限**，口径 #12）
-var _wheel_base := 0.50            # m（轴距；只用于**不可见**占位轮的视觉摆位）
-var _track_width := 0.55           # m（横向，Z）= 外观 AABB z（车身全宽）
-var _height := 0.50                # m = 外观 AABB y（D11）
-var _body_length := 0.80           # m（纵向，X）= 外观 AABB x（车身全长；碰撞盒 X 边长）
+var _max_speed := 1.5              # m/s（**只是 clamp 上限**）
+var _max_turn_rate := PI * 0.5     # rad/s（= 90 °/s，**只是 clamp 上限**）
+var _wheel_base := 0.30            # m（纵向，X）
+var _track_width := 0.25           # m（横向，Z）= 模型 AABB z
+var _height := 0.25                # m = 模型 AABB y（D11）
 
 # 速度环状态（世界侧）：当前值与目标值，按加速度上限斜坡逼近
 var _speed := 0.0                  # 当前线速度（局部 +X 正向，m/s）
@@ -63,28 +60,26 @@ var _warned_wheels := false        # 轮子缺失只告警一次（每帧刷屏�
 
 # ================================================================ 契约
 
-## 默认参数：与 ChassisCatalog.DEFAULTS["diff_drive_ugv"] 逐键一致（6 键，含 body_length）。
+## 默认参数：与 ChassisCatalog.DEFAULTS["diff_drive_ugv"] 逐键一致（自检 A6 比对）。
 ## 入树前也会被 Vehicle._merge_params() 调用 → 只返回常量，不碰场景树。
 func GetDefaultParams() -> Dictionary:
 	return {
-		"max_speed": 2.2,
-		"max_turn_rate": 180.0,
-		"wheel_base": 0.50,
-		"track_width": 0.55,
-		"height": 0.50,
-		"body_length": 0.80,
+		"max_speed": 1.5,
+		"max_turn_rate": 90.0,
+		"wheel_base": 0.30,
+		"track_width": 0.25,
+		"height": 0.25,
 	}
 
 
 ## 装配：参数夹到合法域 -> 速度环清零 -> GROUNDED -> 车身尺寸 -> 轮子摆位。
 func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 	super.Configure(p_vehicle, p_params)
-	_max_speed = maxf(GetParam("max_speed", 2.2), 0.0)
-	_max_turn_rate = maxf(RateToRad(GetParam("max_turn_rate", 180.0)), 0.0)
-	_wheel_base = maxf(GetParam("wheel_base", 0.50), MIN_SIZE)
-	_track_width = maxf(GetParam("track_width", 0.55), MIN_SIZE)
-	_height = maxf(GetParam("height", 0.50), MIN_SIZE)
-	_body_length = maxf(GetParam("body_length", 0.80), MIN_SIZE)
+	_max_speed = maxf(GetParam("max_speed", 1.5), 0.0)
+	_max_turn_rate = maxf(RateToRad(GetParam("max_turn_rate", 90.0)), 0.0)
+	_wheel_base = maxf(GetParam("wheel_base", 0.30), MIN_SIZE)
+	_track_width = maxf(GetParam("track_width", 0.25), MIN_SIZE)
+	_height = maxf(GetParam("height", 0.25), MIN_SIZE)
 	# 换底盘不继承旧速度：状态一律清零
 	_speed = 0.0
 	_yaw_rate = 0.0
@@ -93,8 +88,7 @@ func Configure(p_vehicle: Node3D, p_params: Dictionary) -> void:
 	# 地面运动：motion_mode 是 UGV 的语义（UAV 用 FLOATING），floor_snap_length 用默认
 	ApplyMotionMode(CharacterBody3D.MOTION_MODE_GROUNDED)
 	# 车身/碰撞形状唯一入口：只传尺寸，抬升由 Vehicle 负责（R5：绝不双重抬升）
-	#   顺序 = (车身全长 X, 车身全高 Y, 车身全宽 Z)：模型 = 碰撞盒逐轴相等（D11）
-	ApplyBodySize(Vector3(_body_length, _height, _track_width))
+	ApplyBodySize(Vector3(_wheel_base, _height, _track_width))
 	_layout_wheels()
 
 
@@ -142,9 +136,9 @@ func GetYawRate() -> float:
 	return clampf(_yaw_rate, -_max_turn_rate, _max_turn_rate)
 
 
-## 生效车身尺寸（米，Vector3(body_length, height, track_width)）。
+## 生效车身尺寸（米，Vector3(wheel_base, height, track_width)）。
 func GetBodySize() -> Vector3:
-	return Vector3(_body_length, _height, _track_width)
+	return Vector3(_wheel_base, _height, _track_width)
 
 
 # ================================================================ 私有

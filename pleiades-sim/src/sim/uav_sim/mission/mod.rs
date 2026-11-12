@@ -8,6 +8,9 @@
 //!
 //! task_37 §五：机栈是**唯一真跟**的地方（`Follow` → `follow::build`）；真机与车栈只建平凡树。
 //! task_37 §六：`follow.rs` 的叶子**不经 D\***（不设目标、不取下一步），`next_cell` 由几何算出。
+//!
+//! 2026-11-08（人类确认）：`Guard` 在 **sim 机栈**建真树（`guard.rs`：原地值守 → 人进扇区即 Follow，
+//! 一次触发后锁存、永不 `Success`）；真机 `pleiades-uav` 的 `Guard` 仍是 naive 分支，协议 `type 5` 不变。
 
 use std::sync::Arc;
 
@@ -23,6 +26,7 @@ pub mod containment;
 pub mod face;
 pub mod follow;
 pub mod goto;
+pub mod guard;
 
 /// 树叶子的依赖（导航端口 + 位姿快照）；加新任务类型时在此按需加字段
 pub struct TaskDeps {
@@ -84,15 +88,26 @@ pub fn build(mission: &Mission, deps: &TaskDeps) -> Result<Box<dyn Node>, String
         // task_48 §二 Step 2：Face 在机端也是**真叶子**（口径 #3：Face 只依赖自身位姿，与底盘无关；
         // 机栈执行器 task_46 已支持 `MotionTarget::Face`，见 `uav_sim/executor.rs:89-95`）。
         Mission::Face { x, y } => Ok(face::build(deps.robot_state.clone(), (*x, *y))),
-        // 口径 #9：Guard 在机端保持 **naive**（一拍 `Success` + warn），与当初 Containment 同规（`:61-67`）。
-        // **不得**返回 `Err`（= 清队列 + 停车），也**不得**返回 `Running`（会永久占住队首）。
-        Mission::Guard { .. } => {
-            tracing::warn!("[Sim/uav] Guard 未实现，跳过（平凡树：一拍 Success）");
-            Ok(Box::new(Action::new(|f: &mut Frame<'_>| {
-                f.out.next_cell = None;
-                Status::Success
-            })))
-        }
+        // 2026-11-08（人类确认）：Guard 在 sim 机栈建**真树**（`guard.rs`），不再是「一拍 Success」。
+        // 守卫任务是**持续任务**：`Success` 会让队列把这条弹走（人再也跟不上），`Err` 会清队列 + 停车，
+        // 故整棵树恒 `Running`（`ReactiveFallback` 两支都 `Running`）。
+        // 有 detector → 扇形门（值守点 `(x,y)` 为心、朝 `(fx,fy)`、±15°、≤10 m）+ Follow 子树 + HoldStation；
+        // 无 detector → 只建 HoldStation（每拍只写 `face_point`，不追、不终值）。
+        Mission::Guard { x, y, fx, fy } => match deps.detector.as_ref() {
+            Some(dev) => Ok(guard::build(
+                deps.robot_state.clone(),
+                Arc::new(follow::TargetSource::new(Some(dev.clone()))),
+                (*x, *y),
+                (*fx, *fy),
+                deps.assist.clone(),
+            )),
+            None => {
+                tracing::warn!(
+                    "[Sim/uav] Guard：未启用 detector（[detector].enabled=false 或无相机）→ 只值守不追（HoldStation）"
+                );
+                Ok(guard::hold_station((*fx, *fy)))
+            }
+        },
     }
 }
 
@@ -148,6 +163,25 @@ mod tests {
         }
     }
 
+    /// 无 detector：Guard 建「HoldStation 树」—— 每拍只写 `face_point`（注视点），连 3 拍 `Running`
+    /// （**不得一拍 Success**，也不给点 / 格；口径：值守是持续任务）
+    #[tokio::test]
+    async fn test_guard_without_detector_is_hold_station() {
+        let d = deps();
+        let (fx, fy) = (64.0, 128.0);
+        let mission = Mission::Guard { x: 64.0, y: 64.0, fx, fy };
+        let mut tree = build(&mission, &d).expect("Guard 不得返回 Err");
+        let mut out = MotionOut::default();
+        let mut f = Frame { dt_ms: 50, tick_no: 0, out: &mut out };
+        for i in 0..3 {
+            assert_eq!(tree.tick(&mut f).await, Status::Running, "第 {i} 拍必须 Running（不终值）");
+            assert_eq!(f.out.face_point, Some((fx, fy)), "第 {i} 拍：原地朝注视点");
+            assert_eq!(f.out.target_point, None, "第 {i} 拍：只值守不追");
+            assert_eq!(f.out.next_cell, None, "第 {i} 拍：不巡逻、不走格");
+        }
+    }
+
     // 有 detector 的建树路径需要真 `DetectorDevice`（权重文件），单测不加载模型 → 此处只验无 detector 的
-    // 退化路径；树本身的行为由 `containment::tests`（`FakeFeed` + 假 nav）直接覆盖。
+    // 退化路径；树本身的行为由 `containment::tests`（`FakeFeed` + 假 nav）与 `guard::tests`
+    // （`FakeFeed` + 记录型发布者）直接覆盖。
 }
